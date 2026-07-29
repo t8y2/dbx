@@ -7,6 +7,7 @@ import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import { findActiveSqlStatementSpan, tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticBuildOptions, SqlSemanticSpan } from "@/lib/sql/semantic/types";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
+import { requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -2781,124 +2782,11 @@ function unquoteIdentifier(value: string): string {
 }
 
 export function quoteSqlIdentifier(identifier: string, dialect?: "mysql" | "postgres" | "sqlserver"): string {
-  if (dialect !== "postgres" || !requiresPostgresIdentifierQuote(identifier)) return identifier;
+  if (dialect !== "postgres" || !requiresPostgresIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
-function requiresPostgresIdentifierQuote(identifier: string): boolean {
-  if (!/^[a-z_][a-z0-9_$]*$/.test(identifier)) return true;
-  return POSTGRES_IDENTIFIER_KEYWORDS.has(identifier);
-}
-
-// PostgreSQL reserved_keyword + type_func_name_keyword categories (pg_get_keywords()
-// catcodes R and T) — identifiers matching these cannot appear as a bare column
-// reference and must be quoted. SQL_KEYWORDS alone misses most of them because it is
-// a completion phrase list ("ORDER BY", not "order").
-const POSTGRES_RESERVED_KEYWORDS = [
-  "all",
-  "analyse",
-  "analyze",
-  "and",
-  "any",
-  "array",
-  "as",
-  "asc",
-  "asymmetric",
-  "authorization",
-  "binary",
-  "both",
-  "case",
-  "cast",
-  "check",
-  "collate",
-  "collation",
-  "column",
-  "concurrently",
-  "constraint",
-  "create",
-  "cross",
-  "current_catalog",
-  "current_date",
-  "current_role",
-  "current_schema",
-  "current_time",
-  "current_timestamp",
-  "current_user",
-  "default",
-  "deferrable",
-  "desc",
-  "distinct",
-  "do",
-  "else",
-  "end",
-  "except",
-  "false",
-  "fetch",
-  "for",
-  "foreign",
-  "freeze",
-  "from",
-  "full",
-  "grant",
-  "group",
-  "having",
-  "ilike",
-  "in",
-  "initially",
-  "inner",
-  "intersect",
-  "into",
-  "is",
-  "isnull",
-  "join",
-  "lateral",
-  "leading",
-  "left",
-  "like",
-  "limit",
-  "localtime",
-  "localtimestamp",
-  "natural",
-  "not",
-  "notnull",
-  "null",
-  "offset",
-  "on",
-  "only",
-  "or",
-  "order",
-  "outer",
-  "overlaps",
-  "placing",
-  "primary",
-  "references",
-  "returning",
-  "right",
-  "select",
-  "session_user",
-  "similar",
-  "some",
-  "symmetric",
-  "system_user",
-  "table",
-  "tablesample",
-  "then",
-  "to",
-  "trailing",
-  "true",
-  "union",
-  "unique",
-  "user",
-  "using",
-  "variadic",
-  "verbose",
-  "when",
-  "where",
-  "window",
-  "with",
-];
-
-const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()).concat(POSTGRES_RESERVED_KEYWORDS));
+const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()));
 
 function buildTableItems(
   context: Pick<SqlCompletionContext, "prefix" | "qualifier">,

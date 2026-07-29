@@ -3195,20 +3195,31 @@ mod tests {
 
     #[test]
     fn builds_filter_conditions() {
-        assert_eq!(
-            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
-                database_type: Some(DatabaseType::Gaussdb),
-                identifier_quote: Some(String::new()),
-                column_name: "MixedCase".to_string(),
-                mode: DataGridContextFilterMode::Equals,
-                value: json!(1),
-                values: Vec::new(),
-                end_value: None,
-                column_info: Some(column("MixedCase", "integer", false, None)),
-            })
-            .as_deref(),
-            Some("MixedCase = 1")
-        );
+        for (database_type, identifier_quote, column_name, expected) in [
+            (DatabaseType::Gaussdb, Some("\""), "column_01", "column_01 = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "MixedCase", "\"MixedCase\" = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "order", "\"order\" = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "order detail", "\"order detail\" = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "\"AlreadyQuoted\"", "\"AlreadyQuoted\" = 1"),
+            (DatabaseType::Gaussdb, Some("`"), "MixedCase", "`MixedCase` = 1"),
+            (DatabaseType::Gaussdb, None, "column_01", "\"column_01\" = 1"),
+            (DatabaseType::OpenGauss, None, "column_01", "\"column_01\" = 1"),
+        ] {
+            assert_eq!(
+                build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                    database_type: Some(database_type),
+                    identifier_quote: identifier_quote.map(str::to_string),
+                    column_name: column_name.to_string(),
+                    mode: DataGridContextFilterMode::Equals,
+                    value: json!(1),
+                    values: Vec::new(),
+                    end_value: None,
+                    column_info: Some(column(column_name, "integer", false, None)),
+                })
+                .as_deref(),
+                Some(expected)
+            );
+        }
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
                 database_type: Some(DatabaseType::Kingbase),
@@ -3850,7 +3861,7 @@ mod tests {
         assert_eq!(
             build_data_grid_count_sql(DataGridCountSqlOptions {
                 database_type: Some(DatabaseType::Gaussdb),
-                identifier_quote: Some(String::new()),
+                identifier_quote: Some("\"".to_string()),
                 catalog: None,
                 database: None,
                 schema: Some("schema_01".to_string()),
@@ -4509,10 +4520,10 @@ mod tests {
     }
 
     #[test]
-    fn gaussdb_jdbc_save_uses_unquoted_identifiers() {
+    fn gaussdb_jdbc_save_selectively_quotes_identifiers() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Gaussdb),
-            identifier_quote: Some(String::new()),
+            identifier_quote: Some("\"".to_string()),
             table_meta: DataGridTableMeta {
                 catalog: None,
                 database: None,

@@ -54,9 +54,29 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableDataIdentifier("kingbase", "order detail", "`")).toBe("`order detail`");
   });
 
-  it("allows GaussDB JDBC table-data identifiers to remain unquoted", () => {
-    expect(quoteTableDataIdentifier("gaussdb", "MixedCase", "")).toBe("MixedCase");
+  it("selectively quotes GaussDB JDBC identifiers with the driver-reported quote", () => {
+    expect(quoteTableDataIdentifier("gaussdb", "table_01", '"')).toBe("table_01");
+    expect(quoteTableDataIdentifier("gaussdb", "MixedCase", '"')).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("gaussdb", "order", '"')).toBe('"order"');
+    expect(quoteTableDataIdentifier("gaussdb", "order detail", '"')).toBe('"order detail"');
+    expect(quoteTableDataIdentifier("gaussdb", 'already"quoted', '"')).toBe('"already""quoted"');
+    expect(quoteTableDataIdentifier("gaussdb", '"AlreadyQuoted"', '"')).toBe('"AlreadyQuoted"');
+
+    expect(quoteTableDataIdentifier("gaussdb", "table_01", "`")).toBe("table_01");
+    expect(quoteTableDataIdentifier("gaussdb", "MixedCase", "`")).toBe("`MixedCase`");
+    expect(quoteTableDataIdentifier("gaussdb", "order", "`")).toBe("`order`");
+    expect(quoteTableDataIdentifier("gaussdb", "order detail", "`")).toBe("`order detail`");
+    expect(quoteTableDataIdentifier("gaussdb", "already`quoted", "`")).toBe("`already``quoted`");
+    expect(quoteTableDataIdentifier("gaussdb", "`AlreadyQuoted`", "`")).toBe("`AlreadyQuoted`");
+  });
+
+  it("preserves native GaussDB and openGauss quoting behavior", () => {
+    expect(quoteTableDataIdentifier("gaussdb", "table_01")).toBe('"table_01"');
     expect(quoteTableDataIdentifier("gaussdb", "MixedCase")).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("gaussdb", '"AlreadyQuoted"')).toBe('"AlreadyQuoted"');
+    expect(quoteTableDataIdentifier("opengauss", "table_01")).toBe('"table_01"');
+    expect(quoteTableDataIdentifier("opengauss", "MixedCase")).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("opengauss", '"AlreadyQuoted"')).toBe('"AlreadyQuoted"');
   });
 
   it("escapes Kingbase identifiers without maintaining a reserved-word list", () => {

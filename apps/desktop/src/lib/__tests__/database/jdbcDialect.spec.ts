@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionIdentifierQuoteForConnection, connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionShouldLoadIdentifierQuote, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -65,10 +65,11 @@ describe("jdbc dialect inference", () => {
     expect(connectionUsesDatabaseObjectTreeMode(opengaussConnection)).toBe(false);
   });
 
-  it("disables identifier quoting only for GaussDB JDBC connections", () => {
-    expect(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] }, '"')).toBe("");
-    expect(connectionIdentifierQuoteForConnection({ db_type: "gaussdb" }, undefined)).toBeUndefined();
-    expect(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] }, '"')).toBe('"');
+  it("loads driver-reported identifier quotes for compatible JDBC connections", () => {
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(false);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] })).toBe(false);
   });
 
   it("detects Dameng JDBC connections", () => {

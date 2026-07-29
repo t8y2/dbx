@@ -56,11 +56,8 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
-export function connectionIdentifierQuoteForConnection(connection: JdbcDialectConnection | undefined, identifierQuote: string | undefined): string | undefined {
-  // Some GaussDB JDBC-compatible servers reject quoted relation names even
-  // when DatabaseMetaData reports double quotes as the identifier quote.
-  if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "gaussdb") return "";
-  return identifierQuote;
+export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
+  return connection?.db_type === "kingbase" || (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "gaussdb");
 }
 
 export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {

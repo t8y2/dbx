@@ -2,8 +2,8 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
   codeMirrorSqlDialectForConnection,
-  connectionIdentifierQuoteForConnection,
   connectionShouldDiscoverJdbcSchemas,
+  connectionShouldLoadIdentifierQuote,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
   inferJdbcDialect,
@@ -55,10 +55,11 @@ test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
   assert.equal(connectionUsesDatabaseObjectTreeMode(opengaussConnection), false);
 });
 
-test("disables identifier quoting only for GaussDB JDBC connections", () => {
-  assert.equal(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] }, '"'), "");
-  assert.equal(connectionIdentifierQuoteForConnection({ db_type: "gaussdb" }, undefined), undefined);
-  assert.equal(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] }, '"'), '"');
+test("loads driver-reported identifier quotes for compatible JDBC connections", () => {
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" }), false);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] }), false);
 });
 
 test("infers Dameng JDBC connections", () => {

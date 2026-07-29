@@ -4,7 +4,8 @@ use super::capabilities::{
     firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, TablePaginationStrategy,
 };
 use super::identifiers::{
-    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
+    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_gaussdb_jdbc_identifier,
+    quote_table_identifier,
 };
 use super::types::{
     TableDataSelectSqlOptions, TableSelectSqlOptions, DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN,
@@ -188,6 +189,9 @@ pub(crate) fn quote_table_data_identifier(
     let Some(quote) = identifier_quote else {
         return quote_table_identifier(database_type, name);
     };
+    if database_type == Some(DatabaseType::Gaussdb) {
+        return quote_gaussdb_jdbc_identifier(name, quote);
+    }
     if quote.is_empty() {
         return name.to_string();
     }

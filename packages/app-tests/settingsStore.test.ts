@@ -607,6 +607,16 @@ test("shows persisted UI scales that are not available as presets", () => {
   assert.match(source, /<SelectValue>\{\{ Math\.round\(editUiScale \* 100\) \}\}%<\/SelectValue>/);
 });
 
+test("settings page resets content scroll when switching categories", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+
+  assert.match(source, /const settingsContentScrollRef = ref<HTMLElement \| null>\(null\)/);
+  assert.match(source, /function resetSettingsContentScroll\(\)/);
+  assert.match(source, /if \(scroller\) scroller\.scrollTop = 0/);
+  assert.match(source, /watch\(activeSettingsTab, async \(tab\) => \{\s+void resetSettingsContentScroll\(\);/);
+  assert.match(source, /ref="settingsContentScrollRef" class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden/);
+});
+
 test("defaults SQL formatter settings", () => {
   assert.deepEqual(DEFAULT_EDITOR_SETTINGS.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
   assert.deepEqual(normalizeEditorSettings({}).sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);

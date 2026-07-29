@@ -866,7 +866,7 @@ function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
-async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt" }) {
+async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
   const tab = props.activeTab;
   if (!tab || tab.mode !== "query") return;
   let filePath = `query-result.${payload.format}`;
@@ -877,7 +877,7 @@ async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" 
     if (!picked) return;
     filePath = picked as string;
   }
-  await queryStore.exportQuerySqlDirect(tab.id, payload.sql, payload.format, filePath);
+  await queryStore.exportQuerySqlDirect(tab.id, payload.sql, payload.format, filePath, payload.columnComments);
 }
 
 function pasteClipboardAsSqlInCondition() {

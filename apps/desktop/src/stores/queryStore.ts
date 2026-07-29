@@ -4799,7 +4799,7 @@ export const useQueryStore = defineStore("query", () => {
     };
   }
 
-  async function exportQuerySqlDirect(id: string, sql: string, format: "csv" | "xlsx" | "txt", filePath: string) {
+  async function exportQuerySqlDirect(id: string, sql: string, format: "csv" | "xlsx" | "txt", filePath: string, columnComments?: (string | null)[]) {
     const tab = tabs.value.find((item) => item.id === id);
     if (!tab || tab.mode !== "query" || !sql.trim()) return;
 
@@ -4830,6 +4830,7 @@ export const useQueryStore = defineStore("query", () => {
       clientSessionId: `${tabClientSessionId(tab, "export")}:${exportId}`,
       executionId: uuid(),
       numericColumnRightAlign: settings.numericColumnRightAlign,
+      columnComments,
     };
 
     const tracker = useExportTracker();

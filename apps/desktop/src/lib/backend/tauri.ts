@@ -2866,6 +2866,7 @@ export interface TableExportRequest {
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   columns?: string[];
   columnTypes?: Array<string | null | undefined>;
+  columnComments?: Array<string | null> | null;
   primaryKeys?: string[];
   whereInput?: string;
   orderBy?: string;
@@ -2920,6 +2921,7 @@ export interface QueryResultExportRequest {
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
+  columnComments?: Array<string | null> | null;
 }
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {
@@ -3051,20 +3053,24 @@ export async function exportTableDataCsv(options: TableCsvExportOptions): Promis
   return invoke("export_table_data_csv", { request: options });
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
+export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], columnComments: readonly (string | null)[] | undefined, rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
       filePath,
       sheetName,
       columns,
       columnTypes,
+      columnComments,
       rows,
       numericColumnRightAlign,
     },
   });
 }
 
-export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: readonly string[]; columnTypes?: readonly string[]; rows: readonly (readonly XlsxCellValue[])[]; numericColumnRightAlign?: boolean }[]): Promise<void> {
+export async function exportQueryResultsXlsx(
+  filePath: string,
+  worksheets: readonly { sheetName?: string; columns: readonly string[]; columnTypes?: readonly string[]; columnComments?: readonly (string | null)[]; rows: readonly (readonly XlsxCellValue[])[]; numericColumnRightAlign?: boolean }[],
+): Promise<void> {
   return invoke("export_query_results_xlsx", {
     request: {
       filePath,

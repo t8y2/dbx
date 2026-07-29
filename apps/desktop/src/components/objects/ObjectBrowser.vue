@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
+import { computed, createApp, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -46,12 +46,14 @@ import {
   X,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import i18n from "@/i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
@@ -1778,11 +1780,50 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
   await exportDataLegacy(row, format);
 }
 
-async function exportDataXlsx(row: ObjectBrowserRow) {
-  await exportTableData(row, "xlsx");
+function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<boolean | null> {
+  if (!hasComments) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(XlsxHeaderDialog, {
+      open: true,
+      onConfirm: (useCommentHeader: boolean) => {
+        resolve(useCommentHeader);
+        app.unmount();
+        document.body.removeChild(container);
+      },
+      onCancel: () => {
+        resolve(null);
+        app.unmount();
+        document.body.removeChild(container);
+      },
+    });
+    app.use(i18n);
+    app.mount(container);
+  });
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
+async function exportDataXlsx(row: ObjectBrowserRow) {
+  const schema = row.schema || selectedSchema.value;
+  let useCommentHeader = false;
+  let columnInfos: ColumnInfo[] | undefined;
+
+  try {
+    columnInfos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
+    const hasComments = columnInfos.some((col) => col.comment && col.comment.trim().length > 0);
+    const result = await showObjectBrowserXlsxHeaderDialog(hasComments);
+    if (result === null) return;
+    useCommentHeader = result;
+  } catch {
+    // Column fetch failed, fallback to export without comments
+    columnInfos = undefined;
+  }
+
+  await exportTableData(row, "xlsx", columnInfos, useCommentHeader);
+}
+
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", columnInfos?: ColumnInfo[], useCommentHeader = false) {
   const schema = row.schema || selectedSchema.value;
 
   // Save dialog first
@@ -1810,7 +1851,18 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
 
   let task: ExportTask | null = null;
   try {
-    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog)).map((column) => column.name) : undefined;
+    let columns: string[] | undefined;
+    let columnComments: (string | null)[] | undefined;
+
+    if (columnInfos) {
+      columns = columnInfos.map((c) => c.name);
+      if (format === "xlsx" && useCommentHeader) {
+        columnComments = columnInfos.map((c) => c.comment ?? null);
+      }
+    } else if (props.connection.db_type === "neo4j") {
+      const infos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
+      columns = infos.map((c) => c.name);
+    }
 
     task = addExportTask(row.name, format, filePath);
     const currentTask = task;
@@ -1823,7 +1875,8 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
       tableName: row.name,
       filePath,
       format,
-      columns: queryColumns,
+      columns,
+      columnComments: format === "xlsx" ? columnComments : undefined,
       batchSize: settingsStore.editorSettings.exportBatchSize,
       rowLimit,
     };

@@ -509,6 +509,7 @@ async fn live_sqlserver_bulk_imports_zero_fraction_xlsx_numbers_into_bigint() {
         sheet_name: Some("Numbers".to_string()),
         columns: vec!["id".to_string(), "label".to_string()],
         column_types: Vec::new(),
+        column_comments: Vec::new(),
         rows: vec![vec![serde_json::json!(1.0), serde_json::json!("xlsx")]],
         numeric_column_right_align: false,
     })

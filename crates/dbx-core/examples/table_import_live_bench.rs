@@ -255,6 +255,7 @@ fn write_xlsx(path: &Path, row_count: usize, column_count: usize, text_bytes: us
         sheet_name: Some("Benchmark".to_string()),
         columns: columns(column_count),
         column_types: Vec::new(),
+        column_comments: Vec::new(),
         rows: (0..row_count).map(|row_index| row(row_index, column_count, text_bytes)).collect(),
         numeric_column_right_align: false,
     })?;

@@ -4389,6 +4389,7 @@ export default withEnglishFallback({
     shortcutEditSidebarConnection: "Editar conexão da barra lateral",
     shortcutOpenDataInNewTab: "Abrir dados em nova aba (clique do mouse)",
     shortcutSendSelectionToAi: "Enviar seleção para IA",
+    shortcutToggleFold: "Recolher/expandir código",
     shortcutScopeGlobal: "Global",
     shortcutScopeEditor: "Editor SQL",
     shortcutScopeGrid: "Grade de dados",

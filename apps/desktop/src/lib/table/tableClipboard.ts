@@ -8,6 +8,12 @@ export interface TableClipboardContext {
   schema?: string | null;
 }
 
+export interface TableClipboardTableContext extends TableClipboardContext {
+  tableName: string;
+}
+
+export type TableClipboardMenuState = "copy" | "paste" | "copy-and-paste";
+
 export interface TableDataCopyColumnOptions {
   columns: string[];
   postgresOverridingSystemValue: boolean;
@@ -38,6 +44,15 @@ export function tableClipboardSourceContext(entries: TableClipboardContext[]): T
     database: source.database,
     schema: source.schema,
   };
+}
+
+export function tableClipboardMatchesSingleSource(entries: TableClipboardTableContext[], source: TableClipboardTableContext): boolean {
+  return entries.length === 1 && tableClipboardEntryMatchesTarget(entries[0]!, source) && entries[0]!.tableName === source.tableName;
+}
+
+export function tableClipboardMenuState(entries: TableClipboardTableContext[], source: TableClipboardTableContext): TableClipboardMenuState {
+  if (!tableClipboardMatchesTarget(entries, source)) return "copy";
+  return tableClipboardMatchesSingleSource(entries, source) ? "paste" : "copy-and-paste";
 }
 
 export function supportsWholeRowTableDataCopy(databaseType: DatabaseType | undefined): boolean {

@@ -381,7 +381,10 @@ export function useExportTracker() {
   function updateDatabaseExportTask(exportId: string, progress: api.ExportProgress) {
     const task = taskMap.get(exportId);
     if (!task) return;
-    task.tableName = progress.currentObject || task.tableName;
+    // Keep the database label during metadata prefetch; only follow object names while writing.
+    if (!progress.preparing && progress.currentObject) {
+      task.tableName = progress.currentObject;
+    }
     task.rowsExported = progress.rowsExported;
     task.totalRows = progress.totalRows;
     task.status = normalizeExportStatus(progress.status);

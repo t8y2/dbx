@@ -418,7 +418,7 @@ async function fetchScanPage(requestId = searchRequestId): Promise<RedisScanResu
       return { cursor, keys: [], total_keys: totalKeys };
     }
     const iterations = Math.min(iterationsPerCall, maxIterations - completedIterations);
-    const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, false);
+    const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
     if (totalKeys === 0) totalKeys = result.total_keys;
     if (result.keys.length > 0 || result.cursor === 0) {
       return { ...result, total_keys: totalKeys };

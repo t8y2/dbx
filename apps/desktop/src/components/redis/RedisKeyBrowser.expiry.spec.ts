@@ -560,11 +560,11 @@ describe("RedisKeyBrowser scope changes", () => {
     const browser = mountScopedBrowser();
     await settle();
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledWith("connection", 0, 0, "*", 100, 8, false);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledWith("connection", 0, 0, "*", 100, 8, true);
 
     await browser.setScope("connection", 1);
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledWith("connection", 1, 0, "*", 100, 8, false);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledWith("connection", 1, 0, "*", 100, 8, true);
     previousDatabase.resolve({
       cursor: 0,
       keys: [{ key_display: "db0-key", key_raw: "ZGIwLWtleQ==", key_type: "string", ttl: -1 }],

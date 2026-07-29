@@ -166,6 +166,7 @@ pub struct WebBackend {
     password: String,
     client: reqwest::Client,
     auth: Mutex<WebAuthState>,
+    connected: Mutex<HashMap<String, ConnectionConfig>>,
 }
 
 impl WebBackend {
@@ -178,7 +179,13 @@ impl WebBackend {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
-        Ok(Self { base_url, password, client, auth: Mutex::new(WebAuthState::default()) })
+        Ok(Self {
+            base_url,
+            password,
+            client,
+            auth: Mutex::new(WebAuthState::default()),
+            connected: Mutex::new(HashMap::new()),
+        })
     }
 
     async fn ensure_auth(&self) -> Result<(), String> {
@@ -270,7 +277,12 @@ impl WebBackend {
     }
 
     async fn ensure_connected(&self, connection: &ConnectionConfig) -> Result<(), String> {
+        let mut connected = self.connected.lock().await;
+        if connected.get(&connection.id) == Some(connection) {
+            return Ok(());
+        }
         self.request(reqwest::Method::POST, "/api/connection/connect", Some(json!({ "config": connection }))).await?;
+        connected.insert(connection.id.clone(), connection.clone());
         Ok(())
     }
 }
@@ -771,15 +783,20 @@ impl DbxBackend for WebBackend {
     }
 
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
-        self.request(
-            reqwest::Method::POST,
-            "/api/connection/mcp/remove",
-            Some(json!({ "connectionId": connection_id })),
-        )
-        .await?
-        .json()
-        .await
-        .map_err(|error| format!("Invalid MCP connection response: {error}"))
+        let removed = self
+            .request(
+                reqwest::Method::POST,
+                "/api/connection/mcp/remove",
+                Some(json!({ "connectionId": connection_id })),
+            )
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid MCP connection response: {error}"))?;
+        if removed {
+            self.connected.lock().await.remove(connection_id);
+        }
+        Ok(removed)
     }
 
     async fn list_tables(

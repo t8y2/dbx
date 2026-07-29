@@ -17,7 +17,7 @@ import { buildSelectedTablesPayload } from "@/lib/export/databaseExportSelection
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
 import { Input } from "@/components/ui/input";
-import { Download, Square, CheckSquare, Search, X } from "@lucide/vue";
+import { Download, Square, CheckSquare, Search, X, Loader2 } from "@lucide/vue";
 import { useExportTracker } from "@/composables/useExportTracker";
 
 const { t } = useI18n();
@@ -230,11 +230,6 @@ async function startExport() {
     await startAllDatabasesExport();
     return;
   }
-  isExporting.value = true;
-  exportDone.value = false;
-  exportError.value = null;
-  exportCancelled.value = false;
-  exportProgress.value = null;
 
   exportId.value = generateDatabaseExportId();
 
@@ -248,13 +243,9 @@ async function startExport() {
         defaultPath: `${safeName}.sql`,
         filters: [{ name: "SQL", extensions: ["sql"] }],
       });
-      if (!path) {
-        isExporting.value = false;
-        return;
-      }
+      if (!path) return;
       filePath = path;
     } catch (e: any) {
-      isExporting.value = false;
       toast(e?.message || String(e), 5000);
       return;
     }
@@ -262,6 +253,24 @@ async function startExport() {
     // Web mode: use a temp path; the server will handle the file
     filePath = `__web_export_${exportId.value}.sql`;
   }
+
+  // Switch to the progress view only after the save dialog closes, and seed a
+  // preparing state so the dialog is never a blank panel while metadata loads.
+  isExporting.value = true;
+  exportDone.value = false;
+  exportError.value = null;
+  exportCancelled.value = false;
+  exportProgress.value = {
+    exportId: exportId.value,
+    currentObject: "",
+    objectIndex: 0,
+    totalObjects: 0,
+    rowsExported: 0,
+    totalRows: null,
+    status: "Running",
+    error: null,
+    preparing: true,
+  };
 
   const request: api.DatabaseExportRequest = {
     exportId: exportId.value,
@@ -339,19 +348,40 @@ async function startAllDatabasesExport() {
   exportDone.value = false;
   exportError.value = null;
   exportCancelled.value = false;
-  exportProgress.value = null;
   batchDatabaseIndex.value = 0;
   batchRowsExported.value = 0;
 
   const dbs = [...selectedDatabases.value];
   const batchId = generateDatabaseExportId();
   exportId.value = batchId;
+  exportProgress.value = {
+    exportId: batchId,
+    currentObject: "",
+    objectIndex: 0,
+    totalObjects: 0,
+    rowsExported: 0,
+    totalRows: null,
+    status: "Running",
+    error: null,
+    preparing: true,
+  };
   addDatabaseExportTask(batchId, t("databaseExport.allDatabasesTask", { count: dbs.length }), directoryPath);
   let exportPlan: AllDatabaseExportPlanItem[] = [];
 
   try {
     exportPlan = await buildExportPlanForDatabases(dbs);
     batchDatabaseTotal.value = exportPlan.length;
+    exportProgress.value = {
+      exportId: batchId,
+      currentObject: "",
+      objectIndex: 0,
+      totalObjects: exportPlan.length,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      error: null,
+      preparing: true,
+    };
 
     for (let index = 0; index < exportPlan.length; index += 1) {
       if (exportCancelled.value) break;
@@ -490,12 +520,38 @@ const progressPercent = computed(() => {
   if (exportAllDatabases.value && batchDatabaseTotal.value > 0) {
     if (exportDone.value) return 100;
     const current = exportProgress.value;
-    const currentDatabaseProgress = current && current.totalObjects > 0 ? current.objectIndex / current.totalObjects : 0;
+    const currentDatabaseProgress = current && !current.preparing && current.totalObjects > 0 ? current.objectIndex / current.totalObjects : 0;
     return Math.round(Math.min(1, (Math.max(0, batchDatabaseIndex.value - 1) + currentDatabaseProgress) / batchDatabaseTotal.value) * 100);
   }
   const p = exportProgress.value;
-  if (!p || p.totalObjects === 0) return 0;
+  if (!p || p.preparing || p.totalObjects === 0) return 0;
   return Math.round((p.objectIndex / p.totalObjects) * 100);
+});
+
+/** True while schema metadata is still loading — before objects are written. */
+const isPreparingExport = computed(() => {
+  if (!isExporting.value) return false;
+  if (exportDone.value || exportError.value || exportCancelled.value) return false;
+  const p = exportProgress.value;
+  if (!p) return true;
+  return !!p.preparing || p.totalObjects <= 0;
+});
+
+const progressStatusText = computed(() => {
+  const p = exportProgress.value;
+  if (isPreparingExport.value) {
+    // Keep it as presence feedback only — no second progress counter that later resets.
+    if (p?.currentObject) {
+      return t("databaseExport.preparingObject", { object: p.currentObject });
+    }
+    return t("databaseExport.preparing");
+  }
+  if (!p) return t("databaseExport.exporting");
+  return t("databaseExport.currentTable", {
+    table: p.currentObject,
+    current: p.objectIndex,
+    total: p.totalObjects,
+  });
 });
 
 const skipConnectionWatch = ref(false);
@@ -732,22 +788,18 @@ watch(
           <div v-if="exportAllDatabases && batchDatabaseTotal" class="text-xs text-muted-foreground">
             {{ t("databaseExport.currentDatabase", { current: batchDatabaseIndex, total: batchDatabaseTotal }) }}
           </div>
-          <div v-if="exportProgress" class="space-y-2">
-            <div v-if="!exportAllDatabases || !exportDone" class="text-xs text-muted-foreground">
-              {{
-                t("databaseExport.currentTable", {
-                  table: exportProgress.currentObject,
-                  current: exportProgress.objectIndex,
-                  total: exportProgress.totalObjects,
-                })
-              }}
+          <div class="space-y-2">
+            <div v-if="!exportAllDatabases || !exportDone" class="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 v-if="isExporting && !exportDone && !exportError && !exportCancelled" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+              <span>{{ progressStatusText }}</span>
             </div>
 
             <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
-              <div class="h-full rounded-full transition-[width] duration-300" :class="exportError ? 'bg-destructive' : exportCancelled ? 'bg-yellow-500' : 'bg-primary'" :style="{ width: `${progressPercent}%` }" />
+              <div v-if="isPreparingExport" class="database-export-progress-indeterminate h-full rounded-full bg-primary" />
+              <div v-else class="h-full rounded-full transition-[width] duration-300" :class="exportError ? 'bg-destructive' : exportCancelled ? 'bg-yellow-500' : exportDone ? 'bg-green-500' : 'bg-primary'" :style="{ width: `${exportDone ? 100 : progressPercent}%` }" />
             </div>
 
-            <div class="text-xs text-muted-foreground">
+            <div v-if="exportProgress && !isPreparingExport" class="text-xs text-muted-foreground">
               {{ exportAllDatabases ? t("databaseExport.allRowsExported", { count: exportProgress.rowsExported.toLocaleString() }) : t("databaseExport.rowsExported", { current: exportProgress.objectIndex, total: exportProgress.totalObjects, count: exportProgress.rowsExported.toLocaleString() }) }}
             </div>
           </div>
@@ -793,3 +845,22 @@ watch(
     </DialogContent>
   </Dialog>
 </template>
+
+<style scoped>
+.database-export-progress-indeterminate {
+  width: 42%;
+  animation: database-export-progress-slide 1.15s ease-in-out infinite;
+}
+
+@keyframes database-export-progress-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  50% {
+    transform: translateX(70%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+</style>

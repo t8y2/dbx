@@ -94,6 +94,7 @@ pub async fn start_database_export(
                     total_rows: None,
                     status: ExportStatus::Error,
                     error: Some(e.clone()),
+                    preparing: false,
                 };
                 if let Ok(json) = serde_json::to_string(&progress) {
                     let _ = tx.send(json);

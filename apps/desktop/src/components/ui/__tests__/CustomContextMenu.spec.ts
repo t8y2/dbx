@@ -97,6 +97,74 @@ describe("CustomContextMenu lifecycle", () => {
     app.unmount();
   });
 
+  it("resolves lazy menu items again for every open", async () => {
+    let copied = false;
+    const items = vi.fn(() =>
+      copied
+        ? [
+            {
+              label: "Paste Table",
+              action: () => {
+                copied = false;
+              },
+            },
+          ]
+        : [
+            {
+              label: "Copy Table",
+              action: () => {
+                copied = true;
+              },
+            },
+          ],
+    );
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            CustomContextMenu,
+            { items },
+            {
+              default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "context-target", onContextmenu: onContextMenu }, "Target"),
+            },
+          );
+      },
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    const target = container.querySelector("#context-target");
+    target?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).toContain("Copy Table");
+
+    const copyAction = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("Copy Table"));
+    copyAction?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(copied).toBe(true);
+
+    target?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).toContain("Paste Table");
+    expect(document.body.textContent).not.toContain("Copy Table");
+
+    const pasteAction = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("Paste Table"));
+    pasteAction?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(copied).toBe(false);
+
+    target?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).toContain("Copy Table");
+    expect(document.body.textContent).not.toContain("Paste Table");
+    expect(items).toHaveBeenCalledTimes(3);
+
+    app.unmount();
+  });
+
   it("keeps the menu open when scrolling inside a scrollable submenu", async () => {
     const children = Array.from({ length: 40 }, (_, index) => ({ label: `Copy option ${index}` }));
     const root = defineComponent({

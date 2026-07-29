@@ -46,6 +46,7 @@ import {
   X,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -78,7 +79,7 @@ import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRe
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
@@ -1902,7 +1903,7 @@ function copySelectedTablesToClipboard() {
     tables: selectedRows.map((row) => ({
       connectionId: props.connection.id,
       database: props.database,
-      schema: row.schema || selectedSchema.value,
+      schema: normalizeObjectBrowserTableClipboardSchema(row.schema || selectedSchema.value),
       tableName: row.name,
     })),
   };
@@ -1910,16 +1911,29 @@ function copySelectedTablesToClipboard() {
 }
 
 function canPasteTableClipboard(): boolean {
+  return tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
+}
+
+function normalizedObjectBrowserTableClipboardEntries() {
   const clipboard = connectionStore.treeClipboard;
-  return clipboard?.kind === "table-copy" && tableClipboardMatchesTarget(clipboard.tables, pasteTableTargetContext());
+  if (clipboard?.kind !== "table-copy") return [];
+  return clipboard.tables.map((entry) => ({
+    ...entry,
+    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database),
+  }));
 }
 
 function pasteTableTargetContext(): TableClipboardContext {
   return {
     connectionId: props.connection.id,
     database: props.database,
-    schema: selectedSchema.value,
+    schema: normalizeObjectBrowserTableClipboardSchema(selectedSchema.value),
   };
+}
+
+function normalizeObjectBrowserTableClipboardSchema(schema?: string, database = props.database): string | undefined {
+  if (!isSchemaAware(effectiveDatabaseType.value) && effectiveDatabaseType.value !== "sqlite") return undefined;
+  return connectionObjectTreeNodeSchema(props.connection, database, schema);
 }
 
 function copySingleTableToClipboard(row: ObjectBrowserRow) {
@@ -1929,7 +1943,7 @@ function copySingleTableToClipboard(row: ObjectBrowserRow) {
       {
         connectionId: props.connection.id,
         database: props.database,
-        schema: row.schema || selectedSchema.value,
+        schema: normalizeObjectBrowserTableClipboardSchema(row.schema || selectedSchema.value),
         tableName: row.name,
       },
     ],
@@ -1947,7 +1961,7 @@ function openPasteTableDialog() {
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
     targetName: `${entry.tableName}_copy`,
-    schema: entry.schema,
+    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database),
   }));
   showPasteDialog.value = true;
 }
@@ -1972,11 +1986,14 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
 async function confirmPasteTable() {
   const entries = pasteTableEntries.value.filter((entry) => entry.targetName.trim());
   if (entries.length === 0) return;
+  const clipboardAtPasteStart = connectionStore.treeClipboard;
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
   let successCount = 0;
   let failCount = 0;
+  let pasteCancelled = false;
+  let hasMutatedTable = false;
   for (const entry of entries) {
     const targetName = entry.targetName.trim();
     const schema = entry.schema || selectedSchema.value;
@@ -1986,7 +2003,11 @@ async function confirmPasteTable() {
         const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, sourceColumns);
         sourceColumns = plan.sourceColumns;
         const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
-        if (!executed) return;
+        if (!executed) {
+          pasteCancelled = true;
+          break;
+        }
+        hasMutatedTable = true;
       }
       if (copyData) {
         sourceColumns ??= await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName, props.catalog);
@@ -2002,7 +2023,11 @@ async function confirmPasteTable() {
           ...dataCopyColumnOptions,
         });
         const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema));
-        if (!executed) return;
+        if (!executed) {
+          pasteCancelled = true;
+          break;
+        }
+        hasMutatedTable = true;
       }
       successCount++;
     } catch (e: any) {
@@ -2010,7 +2035,22 @@ async function confirmPasteTable() {
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
   }
+  if (pasteCancelled) {
+    if (hasMutatedTable) {
+      try {
+        await reload();
+        await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+        toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
+      } catch (e: any) {
+        toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+      }
+    }
+    return;
+  }
   if (failCount === 0) {
+    if (connectionStore.treeClipboard === clipboardAtPasteStart) {
+      connectionStore.treeClipboard = null;
+    }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
   } else {
     toast(t("contextMenu.batchPastePartialFail", { success: successCount, failed: failCount }), 5000);
@@ -2425,6 +2465,23 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
   };
 }
 
+function objectBrowserTableClipboardMenuState(item: ObjectBrowserRow) {
+  return tableClipboardMenuState(normalizedObjectBrowserTableClipboardEntries(), {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: normalizeObjectBrowserTableClipboardSchema(item.schema || selectedSchema.value),
+    tableName: item.name,
+  });
+}
+
+function tableClipboardMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy };
+  const state = objectBrowserTableClipboardMenuState(item);
+  if (state === "copy") return [copyItem];
+  const pasteItem: ContextMenuItem = { label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
+  return state === "paste" ? [pasteItem] : [copyItem, pasteItem];
+}
+
 function isSelectedBatchTableContext(item: ObjectBrowserRow): boolean {
   return item.type === "TABLE" && selectedTableCount.value > 1 && selectedTableIds.value.has(item.id);
 }
@@ -2454,7 +2511,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
-    { label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy },
+    ...tableClipboardMenuItems(item),
     { label: "", separator: true },
     ...(supportsTruncateTable.value
       ? [
@@ -2768,7 +2825,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </div>
           <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">
-              <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+              <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
                 <div
                   class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
                   :class="{
@@ -2827,7 +2884,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <RecycleScroller ref="gridScrollerRef" v-if="gridRows.length > 0" class="object-browser-grid-scroller h-full" :items="gridRows" :item-size="objectGridRowHeight" :buffer="600" :skip-hover="true" key-field="key">
             <template #default="{ item: row }">
               <div class="object-browser-grid-row" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, height: `${objectGridRowHeight - OBJECT_GRID_GAP}px` }">
-                <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+                <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
                   <div
                     class="relative flex h-full min-h-0 cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
                     :class="{

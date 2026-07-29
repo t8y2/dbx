@@ -2000,6 +2000,8 @@ export default withEnglishFallback({
     batchPasteTitle: "貼上資料表",
     batchPasteSuccess: "成功貼上 {count} 張資料表",
     batchPastePartialFail: "貼上成功 {success} 張資料表，{failed} 張失敗",
+    pasteTableRefreshFailed: "資料表已貼上，但無法重新整理物件清單：{message}",
+    pasteTableCancelledAfterPartial: "貼上已取消。取消前已建立的資料表已重新整理，剪貼簿狀態已保留。",
     noTableToPaste: "沒有可貼上的資料表",
     pasteTableClipboardUpdated: "資料表已複製到剪貼簿",
     createDatabase: "建立資料庫",

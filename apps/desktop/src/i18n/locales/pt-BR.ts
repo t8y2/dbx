@@ -2001,6 +2001,8 @@ export default withEnglishFallback({
     batchPasteTitle: "Colar tabelas",
     batchPasteSuccess: "{count} tabelas coladas com sucesso",
     batchPastePartialFail: "{success} tabelas coladas, {failed} falharam",
+    pasteTableRefreshFailed: "As tabelas foram coladas, mas não foi possível atualizar a lista de objetos: {message}",
+    pasteTableCancelledAfterPartial: "A colagem foi cancelada. As tabelas criadas antes do cancelamento foram atualizadas e a área de transferência foi mantida.",
     noTableToPaste: "Nenhuma tabela disponível para colar",
     pasteTableClipboardUpdated: "Tabela copiada para a área de transferência",
     createDatabase: "Criar Banco de Dados",

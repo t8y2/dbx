@@ -1999,6 +1999,8 @@ export default withEnglishFallback({
     batchPasteTitle: "Incolla tabelle",
     batchPasteSuccess: "{count} tabelle incollate correttamente",
     batchPastePartialFail: "{success} tabelle incollate, {failed} fallite",
+    pasteTableRefreshFailed: "Le tabelle sono state incollate, ma non è stato possibile aggiornare l'elenco degli oggetti: {message}",
+    pasteTableCancelledAfterPartial: "L'incollaggio è stato annullato. Le tabelle create prima dell'annullamento sono state aggiornate e gli appunti sono stati mantenuti.",
     noTableToPaste: "Nessuna tabella disponibile da incollare",
     pasteTableClipboardUpdated: "Tabella copiata negli appunti",
     createDatabase: "Crea Database",

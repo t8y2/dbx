@@ -2001,6 +2001,8 @@ export default withEnglishFallback({
     batchPasteTitle: "Pegar tablas",
     batchPasteSuccess: "{count} tablas pegadas correctamente",
     batchPastePartialFail: "{success} tablas pegadas, {failed} fallidas",
+    pasteTableRefreshFailed: "Las tablas se pegaron, pero no se pudo actualizar la lista de objetos: {message}",
+    pasteTableCancelledAfterPartial: "Se canceló el pegado. Las tablas creadas antes de cancelarlo se actualizaron y se conservó el portapapeles.",
     noTableToPaste: "No hay tablas disponibles para pegar",
     pasteTableClipboardUpdated: "Tabla copiada al portapapeles",
     createDatabase: "Crear base de datos",

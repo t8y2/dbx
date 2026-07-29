@@ -2066,6 +2066,8 @@ export default withEnglishFallback({
     batchPasteTitle: "粘贴表",
     batchPasteSuccess: "成功粘贴 {count} 张表",
     batchPastePartialFail: "粘贴成功 {success} 张表，{failed} 张失败",
+    pasteTableRefreshFailed: "表已粘贴，但对象列表刷新失败：{message}",
+    pasteTableCancelledAfterPartial: "粘贴已取消。取消前已创建的表已刷新，复制状态已保留。",
     noTableToPaste: "没有可粘贴的表",
     pasteTableClipboardUpdated: "表已复制到剪贴板",
     createDatabase: "新建数据库",

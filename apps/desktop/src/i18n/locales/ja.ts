@@ -1996,6 +1996,8 @@ export default withEnglishFallback({
     batchPasteTitle: "テーブルの貼り付け",
     batchPasteSuccess: "{count}テーブルを貼り付けました",
     batchPastePartialFail: "{success}テーブルを貼り付け、{failed}テーブルに失敗しました",
+    pasteTableRefreshFailed: "テーブルは貼り付けられましたが、オブジェクト一覧を更新できませんでした: {message}",
+    pasteTableCancelledAfterPartial: "貼り付けをキャンセルしました。キャンセル前に作成されたテーブルは更新され、クリップボードは保持されています。",
     noTableToPaste: "貼り付け可能なテーブルがありません",
     pasteTableClipboardUpdated: "テーブルをクリップボードにコピーしました",
     createDatabase: "データベースを作成",

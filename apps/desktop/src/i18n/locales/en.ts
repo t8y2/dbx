@@ -2065,6 +2065,8 @@ export default {
     batchPasteTitle: "Paste Tables",
     batchPasteSuccess: "Successfully pasted {count} tables",
     batchPastePartialFail: "Pasted {success} tables, {failed} failed",
+    pasteTableRefreshFailed: "Tables were pasted, but the object list could not be refreshed: {message}",
+    pasteTableCancelledAfterPartial: "Paste was cancelled. Tables created before cancellation were refreshed; the clipboard was kept.",
     noTableToPaste: "No tables available to paste",
     pasteTableClipboardUpdated: "Table copied to clipboard",
     createDatabase: "Create Database",

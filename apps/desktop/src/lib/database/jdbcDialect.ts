@@ -1,7 +1,11 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 
-type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info">>;
+type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
+
+export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
+
+const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
 
 const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
 
@@ -57,7 +61,38 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
 }
 
 export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
-  return connection?.db_type === "kingbase" || (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "gaussdb");
+  return connection?.db_type === "kingbase" || (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "gaussdb" && gaussdbIdentifierQuoteStyle(connection) === "auto");
+}
+
+export function supportsGaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): boolean {
+  return effectiveDatabaseTypeForConnection(connection) === "gaussdb";
+}
+
+export function gaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): GaussdbIdentifierQuoteStyle {
+  if (!supportsGaussdbIdentifierQuoteStyle(connection)) return "auto";
+  const external = externalConfigRecord(connection?.external_config);
+  const style = external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY];
+  return style === "double" || style === "backtick" ? style : "auto";
+}
+
+export function gaussdbIdentifierQuoteOverride(connection: JdbcDialectConnection | undefined): string | undefined {
+  const style = gaussdbIdentifierQuoteStyle(connection);
+  if (style === "double") return '"';
+  if (style === "backtick") return "`";
+  return undefined;
+}
+
+export function setGaussdbIdentifierQuoteStyle(
+  connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>,
+  style: GaussdbIdentifierQuoteStyle,
+) {
+  const external = externalConfigRecord(connection.external_config);
+  if (style === "auto") {
+    delete external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY];
+  } else {
+    external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY] = style;
+  }
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
 }
 
 export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
@@ -142,4 +177,8 @@ function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {
 
 function isGbase8sProfile(driverProfile?: string): boolean {
   return driverProfile === "gbase8s";
+}
+
+function externalConfigRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
 }

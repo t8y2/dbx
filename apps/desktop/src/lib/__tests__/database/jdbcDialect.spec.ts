@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionShouldLoadIdentifierQuote, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
+import {
+  connectionObjectTreeNodeSchema,
+  connectionQueryExecutionSchema,
+  connectionShouldLoadIdentifierQuote,
+  connectionUsesDatabaseObjectTreeMode,
+  effectiveDatabaseTypeForConnection,
+  gaussdbIdentifierQuoteOverride,
+  gaussdbIdentifierQuoteStyle,
+  inferJdbcDialect,
+  setGaussdbIdentifierQuoteStyle,
+  supportsGaussdbIdentifierQuoteStyle,
+} from "@/lib/database/jdbcDialect";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -70,6 +81,28 @@ describe("jdbc dialect inference", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(false);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] })).toBe(false);
+  });
+
+  it("supports persisted GaussDB identifier quote overrides", () => {
+    const native = { db_type: "gaussdb" as const, external_config: undefined as unknown };
+    const jdbc = { db_type: "jdbc" as const, jdbc_driver_paths: ["/drivers/gaussdb.jar"], external_config: { retained: true } as unknown };
+
+    expect(supportsGaussdbIdentifierQuoteStyle(native)).toBe(true);
+    expect(gaussdbIdentifierQuoteStyle(native)).toBe("auto");
+    expect(gaussdbIdentifierQuoteOverride(native)).toBeUndefined();
+
+    setGaussdbIdentifierQuoteStyle(native, "backtick");
+    expect(gaussdbIdentifierQuoteStyle(native)).toBe("backtick");
+    expect(gaussdbIdentifierQuoteOverride(native)).toBe("`");
+
+    setGaussdbIdentifierQuoteStyle(jdbc, "double");
+    expect(jdbc.external_config).toEqual({ retained: true, gaussdbIdentifierQuoteStyle: "double" });
+    expect(gaussdbIdentifierQuoteOverride(jdbc)).toBe('"');
+    expect(connectionShouldLoadIdentifierQuote(jdbc)).toBe(false);
+
+    setGaussdbIdentifierQuoteStyle(jdbc, "auto");
+    expect(jdbc.external_config).toEqual({ retained: true });
+    expect(connectionShouldLoadIdentifierQuote(jdbc)).toBe(true);
   });
 
   it("detects Dameng JDBC connections", () => {

@@ -6,8 +6,12 @@ import {
   connectionShouldLoadIdentifierQuote,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
+  gaussdbIdentifierQuoteOverride,
+  gaussdbIdentifierQuoteStyle,
   inferJdbcDialect,
+  setGaussdbIdentifierQuoteStyle,
   sqlSnippetDatabaseTypeForConnection,
+  supportsGaussdbIdentifierQuoteStyle,
 } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 test("infers GoldenDB for generic JDBC connections", () => {
@@ -60,6 +64,21 @@ test("loads driver-reported identifier quotes for compatible JDBC connections", 
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" }), true);
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" }), false);
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] }), false);
+});
+
+test("persists and resolves GaussDB identifier quote overrides", () => {
+  const config = {
+    db_type: "jdbc" as const,
+    jdbc_driver_paths: ["/drivers/gaussdb.jar"],
+    external_config: { retained: true } as unknown,
+  };
+
+  assert.equal(supportsGaussdbIdentifierQuoteStyle(config), true);
+  assert.equal(gaussdbIdentifierQuoteStyle(config), "auto");
+  setGaussdbIdentifierQuoteStyle(config, "backtick");
+  assert.deepEqual(config.external_config, { retained: true, gaussdbIdentifierQuoteStyle: "backtick" });
+  assert.equal(gaussdbIdentifierQuoteOverride(config), "`");
+  assert.equal(connectionShouldLoadIdentifierQuote(config), false);
 });
 
 test("infers Dameng JDBC connections", () => {

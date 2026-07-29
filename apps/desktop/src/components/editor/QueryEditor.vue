@@ -65,6 +65,7 @@ import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, 
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
+import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -2490,12 +2491,14 @@ function shouldInsertSqlCompletionSpace(): boolean {
 }
 
 function completionOptionForItem(item: QueryCompletionItem) {
+  const filterText = "filterText" in item && typeof item.filterText === "string" ? item.filterText : undefined;
+  const labelPresentation = completionLabelPresentation(item.label, filterText);
   const record = () => {
     recordCompletionSelection(item.label, item.type);
   };
   if ((item.type === "snippet" || item.type === "function") && item.apply) {
     const completion = codeMirrorSnippetCompletion(item.apply, {
-      label: item.label,
+      ...labelPresentation,
       type: item.type,
       detail: item.detail,
       info: item.info,
@@ -2520,7 +2523,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
     };
   }
   return {
-    label: item.label,
+    ...labelPresentation,
     type: item.type,
     detail: item.detail,
     info: item.info,

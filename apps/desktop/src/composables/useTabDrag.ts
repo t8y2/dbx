@@ -2,6 +2,11 @@ import { reactive, readonly } from "vue";
 
 export type TabDropPosition = "before" | "after";
 
+export interface TabDragOptions {
+  onDetach?: (draggedId: string) => void;
+  shouldDetach?: (event: MouseEvent, draggedId: string) => boolean;
+}
+
 interface TabDragState {
   active: boolean;
   draggedId: string | null;
@@ -31,6 +36,8 @@ let pending: {
   sourceEl: HTMLElement | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => void) | null = null;
+let onDetachCallback: ((draggedId: string) => void) | null = null;
+let shouldDetachCallback: ((event: MouseEvent, draggedId: string) => boolean) | null = null;
 let ghostEl: HTMLElement | null = null;
 
 function createGhost(sourceEl: HTMLElement, x: number, y: number) {
@@ -99,9 +106,13 @@ function onMouseMove(event: MouseEvent) {
   }
 }
 
-function onMouseUp() {
-  if (state.active && state.draggedId && state.targetId && state.dropPosition && onDropCallback) {
-    onDropCallback(state.draggedId, state.targetId, state.dropPosition);
+function onMouseUp(event: MouseEvent) {
+  if (state.active && state.draggedId) {
+    if (onDetachCallback && shouldDetachCallback?.(event, state.draggedId)) {
+      onDetachCallback(state.draggedId);
+    } else if (state.targetId && state.dropPosition && onDropCallback) {
+      onDropCallback(state.draggedId, state.targetId, state.dropPosition);
+    }
   }
   reset();
 }
@@ -128,9 +139,11 @@ function ensureListeners() {
   listenersAttached = true;
 }
 
-export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => void) {
+export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => void, options: TabDragOptions = {}) {
   ensureListeners();
   onDropCallback = onDrop;
+  onDetachCallback = options.onDetach ?? null;
+  shouldDetachCallback = options.shouldDetach ?? null;
 
   function startDrag(event: MouseEvent, tabId: string) {
     if (event.button !== 0) return;

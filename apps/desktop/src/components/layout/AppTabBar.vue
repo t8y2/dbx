@@ -48,9 +48,23 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
-const tabDrag = useTabDrag((draggedId, targetId, position) => {
-  queryStore.reorderTab(draggedId, targetId, position);
-});
+const tabBarRef = ref<HTMLElement | null>(null);
+const tabDrag = useTabDrag(
+  (draggedId, targetId, position) => {
+    queryStore.reorderTab(draggedId, targetId, position);
+  },
+  {
+    onDetach: (tabId) => emit("open-tab-window", tabId),
+    shouldDetach: (event) => {
+      if (!props.detachableTabs) return false;
+      const rect = tabBarRef.value?.getBoundingClientRect();
+      if (!rect) return false;
+      // 保留少量容差，避免鼠标刚好落在标签栏边缘时误触发窗口分离。
+      const margin = 8;
+      return event.clientX < rect.left - margin || event.clientX > rect.right + margin || event.clientY < rect.top - margin || event.clientY > rect.bottom + margin;
+    },
+  },
+);
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -587,7 +601,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </script>
 
 <template>
-  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
+  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" ref="tabBarRef" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
     <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="regularTabRowClass">
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showRegularTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">

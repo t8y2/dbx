@@ -30,6 +30,8 @@ test("SQL file execution summary reserves space for aggregate columns", () => {
   assert.match(dialogSource, /<table class="w-full table-fixed">/);
   assert.match(dialogSource, /<colgroup>[\s\S]*<col \/>[\s\S]*<col class="w-\[4\.5rem\]" \/>[\s\S]*<col class="w-\[5\.5rem\]" \/>[\s\S]*<\/colgroup>/);
   assert.match(dialogSource, /<td class="px-2\.5 py-1\.5 truncate" :title="item\.fileName">/);
+  assert.match(dialogSource, /<tfoot class="sticky bottom-0 z-10 border-t-2 border-primary\/35 bg-primary\/10 font-semibold text-foreground/);
+  assert.match(dialogSource, /<th scope="row" class="px-2\.5 py-2 text-left">\{\{ t\("sqlFile\.totalFiles"/);
 });
 
 test("SQL file execution dialog preserves cancel, close, and retry actions", () => {

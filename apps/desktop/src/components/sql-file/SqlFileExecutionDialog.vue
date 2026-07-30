@@ -721,13 +721,13 @@ watch(
                     <td class="px-2.5 py-1.5 text-right tabular-nums">{{ item.affectedRows.toLocaleString() }}</td>
                   </tr>
                 </tbody>
-                <tfoot class="sticky bottom-0 z-10 border-t bg-muted/30 font-medium">
+                <tfoot class="sticky bottom-0 z-10 border-t-2 border-primary/35 bg-primary/10 font-semibold text-foreground shadow-[0_-2px_6px_rgb(0_0_0_/_0.08)]">
                   <tr>
-                    <td class="px-2.5 py-1.5 text-left">{{ t("sqlFile.totalFiles", { count: perFileResults.length }) }}</td>
-                    <td class="px-2 py-1.5 text-right tabular-nums">{{ progress?.statementIndex ?? 0 }}</td>
-                    <td class="px-2 py-1.5 text-right tabular-nums text-green-600">{{ progress?.successCount ?? 0 }}</td>
-                    <td class="px-2 py-1.5 text-right tabular-nums" :class="{ 'text-destructive': (progress?.failureCount ?? 0) > 0 }">{{ progress?.failureCount ?? 0 }}</td>
-                    <td class="px-2.5 py-1.5 text-right tabular-nums">{{ (progress?.affectedRows ?? 0).toLocaleString() }}</td>
+                    <th scope="row" class="px-2.5 py-2 text-left">{{ t("sqlFile.totalFiles", { count: perFileResults.length }) }}</th>
+                    <td class="px-2 py-2 text-right tabular-nums font-bold">{{ progress?.statementIndex ?? 0 }}</td>
+                    <td class="px-2 py-2 text-right tabular-nums font-bold text-green-600">{{ progress?.successCount ?? 0 }}</td>
+                    <td class="px-2 py-2 text-right tabular-nums font-bold" :class="{ 'text-destructive': (progress?.failureCount ?? 0) > 0 }">{{ progress?.failureCount ?? 0 }}</td>
+                    <td class="px-2.5 py-2 text-right tabular-nums font-bold">{{ (progress?.affectedRows ?? 0).toLocaleString() }}</td>
                   </tr>
                 </tfoot>
               </table>

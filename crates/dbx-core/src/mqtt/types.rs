@@ -35,6 +35,12 @@ pub enum MqttAuth {
     Certificate { ca_cert_path: Option<String>, client_cert_path: Option<String>, client_key_path: Option<String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MqttTlsVerificationMode {
+    VerifyServerCert,
+    SkipServerCertVerification,
+}
+
 impl MqttAuth {
     pub fn kind_str(&self) -> &'static str {
         match self {
@@ -132,6 +138,23 @@ impl MqttConnectionConfig {
                 let path = self.ws_path.as_deref().unwrap_or("/mqtt");
                 format!("{}://{}:{}{}", ws_scheme, self.host, self.port, path)
             }
+        }
+    }
+
+    pub fn broker_addr_for_transport(&self) -> String {
+        match self.transport {
+            MqttTransport::Tcp => self.host.clone(),
+            MqttTransport::WebSocket => self.broker_url(),
+        }
+    }
+
+    pub(crate) fn tls_verification_mode(&self) -> Option<MqttTlsVerificationMode> {
+        if !self.tls {
+            None
+        } else if self.tls_skip_verify {
+            Some(MqttTlsVerificationMode::SkipServerCertVerification)
+        } else {
+            Some(MqttTlsVerificationMode::VerifyServerCert)
         }
     }
 }
@@ -296,6 +319,23 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(tls_config.broker_url(), "mqtts://broker.example.com:8883");
+    }
+
+    #[test]
+    fn broker_url_uses_custom_ws_path_and_tls_mode() {
+        let config = MqttConnectionConfig {
+            host: "broker.example.com".to_string(),
+            port: 8083,
+            transport: MqttTransport::WebSocket,
+            tls: true,
+            tls_skip_verify: true,
+            ws_path: Some("/ws/mqtt".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(config.broker_url(), "wss://broker.example.com:8083/ws/mqtt");
+        assert_eq!(config.broker_addr_for_transport(), "wss://broker.example.com:8083/ws/mqtt");
+        assert_eq!(config.tls_verification_mode(), Some(MqttTlsVerificationMode::SkipServerCertVerification));
     }
 
     #[test]

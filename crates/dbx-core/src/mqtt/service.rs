@@ -20,7 +20,9 @@ pub async fn ensure_mqtt_client(
 /// 测试 MQTT 连接
 pub async fn test_connection(config: &MqttConnectionConfig) -> Result<MqttBrokerInfo, String> {
     let client = MqttClient::connect(config.clone()).await?;
-    Ok(client.broker_info().await)
+    let info = client.broker_info().await;
+    client.disconnect().await;
+    Ok(info)
 }
 
 /// 获取 broker 信息

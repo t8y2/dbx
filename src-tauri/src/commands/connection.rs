@@ -1030,7 +1030,8 @@ async fn test_connection_with_info_inner(
             }
             DatabaseType::Mqtt => {
                 let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
-                let _client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                client.disconnect().await;
                 Ok("Connection successful".to_string())
             }
             db_type if database_capabilities::is_agent_type(&db_type) => {

@@ -396,7 +396,7 @@ mod tests {
         test_connection_with_info, ConnectRequest, DisconnectRequest, McpAddConnectionRequest,
         McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest, SaveConnectionsRequest,
     };
-    use crate::state::{LoginRateLimit, WebState};
+    use crate::state::WebState;
     use axum::extract::State;
     use axum::Json;
     use dbx_core::connection::{AppState, PoolKind};
@@ -405,13 +405,11 @@ mod tests {
         TransportLayerConfig,
     };
     use dbx_core::storage::{McpGlobalPolicy, Storage};
-    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     #[cfg(feature = "mq-admin")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     #[cfg(feature = "mq-admin")]
     use tokio::net::TcpListener;
-    use tokio::sync::{Mutex, RwLock};
 
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         ConnectionConfig {
@@ -430,6 +428,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -454,6 +453,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -486,22 +486,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
-        let state = Arc::new(WebState {
-            app,
-            data_dir: dir.clone(),
-            public_base_path: "/".to_string(),
-            password_disabled: false,
-            password_hash: RwLock::new(None),
-            sessions: RwLock::new(HashSet::new()),
-            sse_channels: RwLock::new(HashMap::new()),
-            transfer_progress_channels: RwLock::new(HashMap::new()),
-            table_import_channels: RwLock::new(HashMap::new()),
-            sql_file_executions: RwLock::new(HashMap::new()),
-            nacos_imports: RwLock::new(HashMap::new()),
-            login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
-            export_files: RwLock::new(HashMap::new()),
-            ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
-        });
+        let state = Arc::new(WebState::for_tests(app, dir.clone()));
         (state, dir)
     }
 

@@ -16,6 +16,15 @@ function connection(id: string, database = ""): ConnectionConfig {
   };
 }
 
+function sqliteConnection(id: string, database = ""): ConnectionConfig {
+  return {
+    ...connection(id, database),
+    db_type: "sqlite",
+    host: "/tmp/real.sqlite",
+    port: 0,
+  };
+}
+
 function queryTab(connectionId: string, database: string, mode: QueryTab["mode"] = "data"): QueryTab {
   return {
     id: `${connectionId}-${database}`,
@@ -118,4 +127,18 @@ test("new query target refreshes default database for connection-only sidebar no
     catalog: undefined,
     shouldRefreshDefaultDatabase: true,
   });
+});
+
+test("new query target repairs stale SQLite file paths without changing attached aliases", () => {
+  const stalePathTarget = resolveNewQueryTarget({
+    activeTab: queryTab("sqlite", "/tmp/stale.sqlite"),
+    connections: [sqliteConnection("sqlite", "/tmp/stale.sqlite")],
+  });
+  const attachedAliasTarget = resolveNewQueryTarget({
+    activeTab: queryTab("sqlite", "analytics"),
+    connections: [sqliteConnection("sqlite")],
+  });
+
+  assert.equal(stalePathTarget?.database, "main");
+  assert.equal(attachedAliasTarget?.database, "analytics");
 });

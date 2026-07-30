@@ -11,6 +11,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { isLoadingStructurePreview, showStructureDocCopyDialog, showStructurePreviewDialog, structureDocCopyText, structureDocCopyTitle, structurePreviewDefaultFileName, structurePreviewError, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
@@ -246,7 +247,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       await saveFileContent(content, `${node.label}.sql`, "SQL", "sql");
       toast(t("grid.exported"));
     } catch (error: any) {
-      toast(t("grid.exportFailed", { message: error?.message || String(error) }), 5000);
+      toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
     }
   }
 
@@ -297,14 +298,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         currentTask.status = progress.status;
         currentTask.errorMessage = progress.errorMessage || null;
         if (progress.status === "Done") toast(t("grid.exported"));
-        else if (progress.status === "Error") toast(t("grid.exportFailed", { message: progress.errorMessage || "" }), 5000);
+        else if (progress.status === "Error") toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
       });
     } catch (error: any) {
       if (task) {
         task.status = "Error";
         task.errorMessage = error?.message || String(error);
       }
-      toast(t("grid.exportFailed", { message: error?.message || String(error) }), 5000);
+      toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
     }
   }
 

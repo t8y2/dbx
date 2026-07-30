@@ -1,5 +1,8 @@
+/**
+ * @vitest-environment happy-dom
+ */
 import { describe, expect, it, vi } from "vitest";
-import { createContextMenuRegistry } from "@/components/ui/customContextMenuRegistry";
+import { CONTEXT_MENU_SCROLL_ROOT_ATTR, createContextMenuRegistry } from "@/components/ui/customContextMenuRegistry";
 
 function callsFor(spy: ReturnType<typeof vi.spyOn>, eventName: string) {
   return spy.mock.calls.filter(([name]) => name === eventName);
@@ -32,6 +35,28 @@ describe("customContextMenuRegistry", () => {
     expect(closeSecond).toHaveBeenCalledOnce();
 
     registrations.forEach((registration) => registration.dispose());
+  });
+
+  it("does not close open menus when scroll originates inside a context menu root", () => {
+    const documentTarget = document;
+    const windowTarget = window;
+    const registry = createContextMenuRegistry(documentTarget, windowTarget);
+    const closeMenu = vi.fn();
+    const registration = registry.register(closeMenu);
+    registration.setOpen(true);
+
+    const menuRoot = document.createElement("div");
+    menuRoot.setAttribute(CONTEXT_MENU_SCROLL_ROOT_ATTR, "");
+    document.body.append(menuRoot);
+
+    menuRoot.dispatchEvent(new Event("scroll", { bubbles: true }));
+    expect(closeMenu).not.toHaveBeenCalled();
+
+    document.dispatchEvent(new Event("scroll", { bubbles: true }));
+    expect(closeMenu).toHaveBeenCalledOnce();
+
+    menuRoot.remove();
+    registration.dispose();
   });
 
   it("removes disposed callbacks and detaches listeners after the final host", () => {

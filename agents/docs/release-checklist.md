@@ -39,6 +39,8 @@ python3 scripts/validate_agent_jars.py
 git diff --check
 ```
 
+The package tests require the `zstd` CLI.
+
 Expected result:
 
 - Python script tests pass.
@@ -166,9 +168,11 @@ The release workflow will:
 
 - Bump changed module versions in `versions.json`.
 - Build all agent shadow jars.
-- Build/download JRE artifacts.
+- Build/download JRE `.tar.zst` artifacts.
 - Generate `agent-registry.json`.
-- Create a GitHub release with jars, JRE archives, and registry.
+- Create full offline platform ZIPs from raw staging files.
+- Create one `.tar.zst` package per Java or native driver.
+- Publish offline ZIPs, single-driver packages, JRE archives, and the registry.
 
 ## 9. Post-Release Verification
 

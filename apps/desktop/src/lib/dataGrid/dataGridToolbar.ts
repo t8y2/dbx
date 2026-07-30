@@ -1,4 +1,4 @@
-export const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
+export const DATA_GRID_COMPACT_TOPBAR_WIDTH = 1050;
 
 export type DataGridReloadIntent = "refresh";
 

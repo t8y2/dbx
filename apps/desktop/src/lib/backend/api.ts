@@ -175,12 +175,15 @@ export const listExtensions = forward("listExtensions");
 export const listAvailableExtensions = forward("listAvailableExtensions");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
+export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Query
 export const executeQuery = forward("executeQuery");
 export const executeMulti = forward("executeMulti");
+export const executeMultiWithProgress = forward("executeMultiWithProgress");
 export const executeBatch = forward("executeBatch");
 export const executeScript = forward("executeScript");
+export const executeScriptWith2pc = forward("executeScriptWith2pc");
 export const executeInTransaction = forward("executeInTransaction");
 export const beginManualTransaction = forward("beginManualTransaction");
 export const executeInManualTransaction = forward("executeInManualTransaction");
@@ -251,6 +254,9 @@ export const aiAgentStream = forward("aiAgentStream");
 export const aiCancelStream = forward("aiCancelStream");
 export const aiTestConnection = forward("aiTestConnection");
 export const aiListModels = forward("aiListModels");
+export const aiResolveModelEffort = forward("aiResolveModelEffort");
+export const saveAiChatSelection = forward("saveAiChatSelection");
+export const loadAiChatSelection = forward("loadAiChatSelection");
 export const saveAiConfig = forward("saveAiConfig");
 export const loadAiConfig = forward("loadAiConfig");
 export const saveAiConfigs = forward("saveAiConfigs");
@@ -266,6 +272,8 @@ export const loadMcpGlobalPolicy = forward("loadMcpGlobalPolicy");
 export const saveMcpGlobalPolicy = forward("saveMcpGlobalPolicy");
 export const loadMaxAgentTurns = forward("loadMaxAgentTurns");
 export const saveMaxAgentTurns = forward("saveMaxAgentTurns");
+export const loadMaxRetries = forward("loadMaxRetries");
+export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
 export const requestAppClose = forward("requestAppClose");
 export const setDriverStoreDir = forward("setDriverStoreDir");
@@ -384,6 +392,9 @@ export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
+export const redisGetStreamGroups = forward("redisGetStreamGroups");
+export const redisGetStreamConsumers = forward("redisGetStreamConsumers");
+export const redisGetStreamPending = forward("redisGetStreamPending");
 export const redisSetString = forward("redisSetString");
 export const redisDeleteKey = forward("redisDeleteKey");
 export const redisHashSet = forward("redisHashSet");
@@ -624,8 +635,13 @@ export type {
   RedisKeyInfo,
   RedisListItem,
   RedisSetItem,
+  RedisStreamConsumer,
   RedisStreamEntry,
   RedisStreamField,
+  RedisStreamGroup,
+  RedisStreamMetric,
+  RedisStreamPendingEntry,
+  RedisStreamPendingPage,
   RedisValue,
   RedisValueData,
   RedisZsetItem,

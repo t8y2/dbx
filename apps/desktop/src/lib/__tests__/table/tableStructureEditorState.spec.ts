@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  canEditStructuredTriggerDraft,
   combineDataTypeForDatabase,
   combineDataTypeForDatabaseWithLengthUnit,
   createColumnDrafts,
+  createTriggerDrafts,
   dataTypeLengthInputValue,
   dataTypeLengthUnitValue,
   DATA_TYPE_OPTIONS,
@@ -24,6 +26,25 @@ import {
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it("keeps existing Oracle trigger drafts read-only until full source editing is available", () => {
+    const [existing] = createTriggerDrafts([{ name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT OR UPDATE", statement: "BEGIN NULL; END;" }]);
+    if (!existing) throw new Error("expected an existing trigger draft");
+
+    expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(false);
+    expect(canEditStructuredTriggerDraft(undefined, existing)).toBe(false);
+    expect(canEditStructuredTriggerDraft("mysql", existing)).toBe(true);
+    expect(
+      canEditStructuredTriggerDraft("oracle", {
+        id: "new:trigger",
+        name: "ORDERS_AUDIT",
+        timing: "AFTER EACH ROW",
+        event: "INSERT",
+        statement: "BEGIN NULL; END;",
+        markedForDrop: false,
+      }),
+    ).toBe(true);
+  });
+
   it("hydrates Kingbase type parameters returned separately from the data type", () => {
     const columns = createColumnDrafts(
       [

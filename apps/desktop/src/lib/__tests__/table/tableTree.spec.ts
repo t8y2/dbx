@@ -109,6 +109,16 @@ describe("programmable database objects", () => {
       expect.arrayContaining([expect.objectContaining({ type: "trigger", objectName: "TRG_AUDIT", valid: false }), expect.objectContaining({ type: "type", objectName: "ADDRESS_T", valid: true }), expect.objectContaining({ type: "type-body", objectName: "ADDRESS_T", valid: true })]),
     );
   });
+
+  it("groups Xugu private synonyms as source objects", () => {
+    const objects: ObjectInfo[] = [{ name: "SYN_SHOP_USERS", object_type: "SYNONYM", schema: "SYSDBA", valid: true }];
+
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "SYSDBA", objects });
+    const synonymGroup = groups.find((node) => node.type === "group-synonyms");
+
+    expect(synonymGroup).toEqual(expect.objectContaining({ objectCount: 1, label: "tree.synonyms" }));
+    expect(synonymGroup?.children).toEqual([expect.objectContaining({ type: "synonym", objectName: "SYN_SHOP_USERS", valid: true })]);
+  });
 });
 
 describe("PostgreSQL table hierarchy", () => {

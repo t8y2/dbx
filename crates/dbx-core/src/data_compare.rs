@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::connection::AppState;
 use crate::data_grid_sql::{format_grid_sql_literal as format_data_grid_sql_literal, DataGridColumnInfo};
@@ -62,6 +63,12 @@ pub struct DataCompareFromTablesOptions {
     pub key_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation_threshold: Option<DegradationThreshold>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_strategy: Option<SamplingStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_checksum: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +177,112 @@ pub struct DataCompareFromTablesPreparation {
     pub target_row_count: u64,
     pub source_truncated: bool,
     pub target_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_checksums: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_checksums: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum DegradationLevel {
+    Full,
+    Sample,
+    SkipWithRisk,
+}
+
+impl std::fmt::Display for DegradationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DegradationLevel::Full => write!(f, "full"),
+            DegradationLevel::Sample => write!(f, "sample"),
+            DegradationLevel::SkipWithRisk => write!(f, "skip_with_risk"),
+        }
+    }
+}
+
+impl TryFrom<&str> for DegradationLevel {
+    type Error = String;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "full" => Ok(DegradationLevel::Full),
+            "sample" => Ok(DegradationLevel::Sample),
+            "skip_with_risk" => Ok(DegradationLevel::SkipWithRisk),
+            _ => Err(format!("Unknown degradation level: {s}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum SamplingStrategy {
+    Random,
+    ExtremeValues,
+    Hybrid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DegradationThreshold {
+    pub full_compare_max_rows: u64,
+    pub sample_max_rows: u64,
+    pub sample_size: usize,
+    pub extreme_sample_count: usize,
+}
+
+impl Default for DegradationThreshold {
+    fn default() -> Self {
+        Self {
+            full_compare_max_rows: 100_000,
+            sample_max_rows: 10_000_000,
+            sample_size: 10_000,
+            extreme_sample_count: 500,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyDataOptions {
+    pub source_connection_id: String,
+    pub source_database: String,
+    pub source_schema: String,
+    pub source_table: String,
+    pub target_connection_id: String,
+    pub target_database: String,
+    pub target_schema: String,
+    pub target_table: String,
+    pub columns: Vec<String>,
+    pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation_threshold: Option<DegradationThreshold>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_strategy: Option<SamplingStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_checksum: Option<bool>,
+}
+
+/// Result of a full verification pass including statistical metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyDataResult {
+    pub preparation: DataCompareFromTablesPreparation,
+    pub degradation_level: DegradationLevel,
+    pub sampling_rate: f64,
+    pub confidence_score: f64,
+    pub row_count_match: bool,
+    pub checksums_match: Option<bool>,
+    pub verification_method: String,
 }
 
 pub fn prepare_data_compare(options: DataComparePreparationOptions) -> Result<DataComparePreparation, String> {
@@ -238,30 +351,74 @@ pub async fn prepare_data_compare_from_tables(
     let source_row_count = first_count(&source_count_result.rows)?;
     let target_row_count = first_count(&target_count_result.rows)?;
 
-    let (source_rows, target_rows) = tokio::try_join!(
-        fetch_compare_rows(
-            state,
-            &options.source_connection_id,
-            &options.source_database,
-            &options.source_schema,
-            &options.source_table,
-            &options.columns,
-            &options.key_columns,
-            source_database_type,
-            fetch_batch_size,
-        ),
-        fetch_compare_rows(
-            state,
-            &options.target_connection_id,
-            &options.target_database,
-            &options.target_schema,
-            &options.target_table,
-            &options.columns,
-            &options.key_columns,
-            target_database_type,
-            fetch_batch_size,
-        )
-    )?;
+    let threshold = options.degradation_threshold.clone().unwrap_or_default();
+    let degradation_level = should_degrade(source_row_count, target_row_count, &threshold);
+    let sampling_strategy = options.sampling_strategy.clone().unwrap_or(SamplingStrategy::Hybrid);
+    let enable_checksum = options.enable_checksum.unwrap_or(true);
+
+    let (source_rows, target_rows, sampling_rate, verification_method) = match &degradation_level {
+        DegradationLevel::Full => {
+            let (src, tgt) = tokio::try_join!(
+                fetch_compare_rows(
+                    state,
+                    &options.source_connection_id,
+                    &options.source_database,
+                    &options.source_schema,
+                    &options.source_table,
+                    &options.columns,
+                    &options.key_columns,
+                    source_database_type,
+                    fetch_batch_size,
+                ),
+                fetch_compare_rows(
+                    state,
+                    &options.target_connection_id,
+                    &options.target_database,
+                    &options.target_schema,
+                    &options.target_table,
+                    &options.columns,
+                    &options.key_columns,
+                    target_database_type,
+                    fetch_batch_size,
+                )
+            )?;
+            (src, tgt, 1.0, "full_compare".to_string())
+        }
+        DegradationLevel::Sample => {
+            let (src, tgt) = tokio::try_join!(
+                fetch_sampled_compare_rows(
+                    state,
+                    &options.source_connection_id,
+                    &options.source_database,
+                    &options.source_schema,
+                    &options.source_table,
+                    &options.columns,
+                    &options.key_columns,
+                    source_database_type,
+                    &sampling_strategy,
+                    threshold.sample_size,
+                ),
+                fetch_sampled_compare_rows(
+                    state,
+                    &options.target_connection_id,
+                    &options.target_database,
+                    &options.target_schema,
+                    &options.target_table,
+                    &options.columns,
+                    &options.key_columns,
+                    target_database_type,
+                    &sampling_strategy,
+                    threshold.sample_size,
+                )
+            )?;
+            let max_count = source_row_count.max(target_row_count);
+            let sample_rate = if max_count > 0 { threshold.sample_size as f64 / max_count as f64 } else { 1.0 };
+            let method = "sampled".to_string();
+            (src, tgt, sample_rate.min(1.0), method)
+        }
+        DegradationLevel::SkipWithRisk => (Vec::new(), Vec::new(), 0.0, "skipped".to_string()),
+    };
+
     let target_columns = get_columns_core(
         state,
         &options.target_connection_id,
@@ -270,6 +427,21 @@ pub async fn prepare_data_compare_from_tables(
         &options.target_table,
     )
     .await?;
+
+    let source_checksums = if enable_checksum && !source_rows.is_empty() {
+        Some(compute_column_checksums(&options.columns, &source_rows))
+    } else {
+        None
+    };
+    let target_checksums = if enable_checksum && !target_rows.is_empty() {
+        Some(compute_column_checksums(&options.columns, &target_rows))
+    } else {
+        None
+    };
+
+    let row_count_match = source_row_count == target_row_count;
+    let confidence_score =
+        compute_confidence(sampling_rate, &degradation_level, row_count_match, source_row_count, target_row_count);
 
     let preparation = prepare_data_compare(DataComparePreparationOptions {
         table_name: options.target_table,
@@ -291,6 +463,12 @@ pub async fn prepare_data_compare_from_tables(
         target_row_count,
         source_truncated: false,
         target_truncated: false,
+        degradation_level: Some(degradation_level.to_string()),
+        sampling_rate: Some(sampling_rate),
+        confidence_score: Some(confidence_score),
+        verification_method: Some(verification_method),
+        source_checksums,
+        target_checksums,
     })
 }
 
@@ -383,6 +561,12 @@ pub async fn prepare_data_compare_missing_target(
         target_row_count: 0,
         source_truncated: false,
         target_truncated: false,
+        degradation_level: Some("full".to_string()),
+        sampling_rate: Some(1.0),
+        confidence_score: Some(1.0),
+        verification_method: Some("missing_target_full".to_string()),
+        source_checksums: None,
+        target_checksums: None,
     })
 }
 
@@ -1064,6 +1248,421 @@ fn data_grid_column_info(column: crate::types::ColumnInfo) -> DataGridColumnInfo
         column_default: column.column_default,
         extra: column.extra,
     }
+}
+
+fn should_degrade(source_row_count: u64, target_row_count: u64, threshold: &DegradationThreshold) -> DegradationLevel {
+    let max_count = source_row_count.max(target_row_count);
+    if max_count <= threshold.full_compare_max_rows {
+        DegradationLevel::Full
+    } else if max_count <= threshold.sample_max_rows {
+        DegradationLevel::Sample
+    } else {
+        DegradationLevel::SkipWithRisk
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DegradationEvent {
+    pub source_row_count: u64,
+    pub target_row_count: u64,
+    pub decided_level: String,
+    pub sample_rate: f64,
+    pub confidence: f64,
+    pub auto_decision: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DegradationChain {
+    pub threshold: DegradationThreshold,
+    pub events: Vec<DegradationEvent>,
+    pub auto_upgrade_enabled: bool,
+    pub auto_downgrade_enabled: bool,
+}
+
+impl DegradationChain {
+    pub fn new(threshold: DegradationThreshold) -> Self {
+        Self { threshold, events: Vec::new(), auto_upgrade_enabled: true, auto_downgrade_enabled: true }
+    }
+
+    pub fn decide(
+        &mut self,
+        source_row_count: u64,
+        target_row_count: u64,
+        metrics: Option<&crate::risk_metrics::DegradationMetrics>,
+    ) -> DegradationLevel {
+        let max_count = source_row_count.max(target_row_count);
+        let new_level = if max_count <= self.threshold.full_compare_max_rows {
+            DegradationLevel::Full
+        } else if max_count <= self.threshold.sample_max_rows {
+            DegradationLevel::Sample
+        } else {
+            DegradationLevel::SkipWithRisk
+        };
+
+        let (sample_rate, confidence) = match &new_level {
+            DegradationLevel::Full => (1.0, 1.0),
+            DegradationLevel::Sample => {
+                let rate = self.threshold.sample_size as f64 / max_count as f64;
+                let conf = 0.95 * rate;
+                (rate, conf.clamp(0.5, 0.95))
+            }
+            DegradationLevel::SkipWithRisk => (0.0, 0.0),
+        };
+
+        if self.auto_upgrade_enabled {
+            if let Some(last) = self.events.last() {
+                let auto_upgrade = matches!(
+                    (last.decided_level.as_str(), &new_level),
+                    ("skip_with_risk", DegradationLevel::Sample) | ("sample", DegradationLevel::Full)
+                );
+                if auto_upgrade {
+                    if let Some(m) = metrics {
+                        m.record_auto_upgrade();
+                    }
+                }
+            }
+        }
+
+        if self.auto_downgrade_enabled {
+            if let Some(last) = self.events.last() {
+                let auto_downgrade = matches!(
+                    (last.decided_level.as_str(), &new_level),
+                    ("full", DegradationLevel::Sample | DegradationLevel::SkipWithRisk)
+                        | ("sample", DegradationLevel::SkipWithRisk)
+                );
+                if auto_downgrade {
+                    if let Some(m) = metrics {
+                        m.record_auto_downgrade();
+                    }
+                }
+            }
+        }
+
+        if let Some(m) = metrics {
+            m.record_degradation(&new_level.to_string(), sample_rate, confidence);
+        }
+
+        let auto_decision = if new_level == DegradationLevel::Full {
+            "auto".to_string()
+        } else if new_level == DegradationLevel::Sample {
+            "auto_degraded".to_string()
+        } else {
+            "auto_skipped".to_string()
+        };
+
+        self.events.push(DegradationEvent {
+            source_row_count,
+            target_row_count,
+            decided_level: new_level.to_string(),
+            sample_rate,
+            confidence,
+            auto_decision,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
+
+        new_level
+    }
+
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn last_event(&self) -> Option<&DegradationEvent> {
+        self.events.last()
+    }
+}
+
+impl Default for DegradationChain {
+    fn default() -> Self {
+        Self::new(DegradationThreshold::default())
+    }
+}
+
+fn build_sampling_select_sql(
+    database_type: DatabaseType,
+    schema: &str,
+    table_name: &str,
+    columns: &[String],
+    key_columns: &[String],
+    strategy: &SamplingStrategy,
+    sample_size: usize,
+) -> String {
+    let table = qualified_table_name(Some(database_type), Some(schema), table_name);
+    let select_columns = if columns.is_empty() {
+        "*".to_string()
+    } else {
+        columns.iter().map(|column| quote_table_identifier(Some(database_type), column)).collect::<Vec<_>>().join(", ")
+    };
+
+    match strategy {
+        SamplingStrategy::Random => match database_type {
+            DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::DuckDb | DatabaseType::Databricks => {
+                format!("SELECT {select_columns} FROM {table} TABLESAMPLE SYSTEM (1) LIMIT {sample_size}")
+            }
+            DatabaseType::SqlServer => {
+                format!("SELECT TOP ({sample_size}) {select_columns} FROM {table} TABLESAMPLE ({sample_size} ROWS)")
+            }
+            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb => {
+                format!("SELECT {select_columns} FROM {table} ORDER BY RAND() LIMIT {sample_size}")
+            }
+            DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => {
+                format!("SELECT {select_columns} FROM {table} ORDER BY RANDOM() LIMIT {sample_size}")
+            }
+            DatabaseType::ClickHouse => {
+                format!("SELECT {select_columns} FROM {table} ORDER BY rand() LIMIT {sample_size}")
+            }
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => {
+                format!("SELECT {select_columns} FROM (SELECT {select_columns} FROM {table} ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= {sample_size}")
+            }
+            DatabaseType::Iris => {
+                format!("SELECT TOP {sample_size} {select_columns} FROM {table} ORDER BY RAND()")
+            }
+            DatabaseType::Questdb => {
+                format!("SELECT {select_columns} FROM {table} ORDER BY RAND() LIMIT {sample_size}")
+            }
+            DatabaseType::Informix => {
+                format!("SELECT FIRST {sample_size} {select_columns} FROM {table} ORDER BY RAND()")
+            }
+            _ => {
+                if key_columns.is_empty() {
+                    format!("SELECT {select_columns} FROM {table} LIMIT {sample_size}")
+                } else {
+                    let order_by = key_columns
+                        .iter()
+                        .map(|column| format!("{} ASC", quote_table_identifier(Some(database_type), column)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("SELECT {select_columns} FROM {table} ORDER BY {order_by} LIMIT {sample_size}")
+                }
+            }
+        },
+        SamplingStrategy::ExtremeValues => {
+            if key_columns.is_empty() {
+                return format!("SELECT {select_columns} FROM {table} LIMIT {sample_size}");
+            }
+            let order_keys = key_columns
+                .iter()
+                .map(|column| format!("{} ASC", quote_table_identifier(Some(database_type), column)))
+                .collect::<Vec<_>>();
+            let asc_order = order_keys.join(", ");
+            let desc_order = key_columns
+                .iter()
+                .map(|column| format!("{} DESC", quote_table_identifier(Some(database_type), column)))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let head_count = sample_size / 2;
+            let tail_count = sample_size - head_count;
+
+            format!(
+                "SELECT {select_columns} FROM ( \
+                 (SELECT {select_columns} FROM {table} ORDER BY {asc_order} LIMIT {head_count}) \
+                 UNION ALL \
+                 (SELECT {select_columns} FROM {table} ORDER BY {desc_order} LIMIT {tail_count}) \
+                 ) AS _extreme_sample"
+            )
+        }
+        SamplingStrategy::Hybrid => {
+            if key_columns.is_empty() {
+                return format!("SELECT {select_columns} FROM {table} LIMIT {sample_size}");
+            }
+            let order_keys = key_columns
+                .iter()
+                .map(|column| format!("{} ASC", quote_table_identifier(Some(database_type), column)))
+                .collect::<Vec<_>>();
+            let asc_order = order_keys.join(", ");
+            let desc_order = key_columns
+                .iter()
+                .map(|column| format!("{} DESC", quote_table_identifier(Some(database_type), column)))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let random_count = sample_size / 2;
+            let head_count = (sample_size - random_count) / 2;
+            let tail_count = sample_size - random_count - head_count;
+
+            let random_part = match database_type {
+                DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::DuckDb | DatabaseType::Databricks => {
+                    format!("(SELECT {select_columns} FROM {table} TABLESAMPLE SYSTEM (1) LIMIT {random_count})")
+                }
+                DatabaseType::SqlServer => {
+                    format!(
+                        "(SELECT TOP ({random_count}) {select_columns} FROM {table} TABLESAMPLE ({random_count} ROWS))"
+                    )
+                }
+                DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb => {
+                    format!("(SELECT {select_columns} FROM {table} ORDER BY RAND() LIMIT {random_count})")
+                }
+                DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => {
+                    format!("(SELECT {select_columns} FROM {table} ORDER BY RANDOM() LIMIT {random_count})")
+                }
+                DatabaseType::ClickHouse => {
+                    format!("(SELECT {select_columns} FROM {table} ORDER BY rand() LIMIT {random_count})")
+                }
+                DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => {
+                    format!("(SELECT {select_columns} FROM (SELECT {select_columns} FROM {table} ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= {random_count})")
+                }
+                DatabaseType::Iris => {
+                    format!("(SELECT TOP {random_count} {select_columns} FROM {table} ORDER BY RAND())")
+                }
+                DatabaseType::Questdb => {
+                    format!("(SELECT {select_columns} FROM {table} ORDER BY RAND() LIMIT {random_count})")
+                }
+                DatabaseType::Informix => {
+                    format!("(SELECT FIRST {random_count} {select_columns} FROM {table} ORDER BY RAND())")
+                }
+                _ => {
+                    format!("(SELECT {select_columns} FROM {table} LIMIT {random_count})")
+                }
+            };
+
+            format!(
+                "SELECT {select_columns} FROM ( \
+                 {random_part} \
+                 UNION ALL \
+                 (SELECT {select_columns} FROM {table} ORDER BY {asc_order} LIMIT {head_count}) \
+                 UNION ALL \
+                 (SELECT {select_columns} FROM {table} ORDER BY {desc_order} LIMIT {tail_count}) \
+                 ) AS _hybrid_sample"
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_sampled_compare_rows(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table_name: &str,
+    columns: &[String],
+    key_columns: &[String],
+    database_type: DatabaseType,
+    strategy: &SamplingStrategy,
+    sample_size: usize,
+) -> Result<Vec<Vec<Value>>, String> {
+    if sample_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let sql = build_sampling_select_sql(database_type, schema, table_name, columns, key_columns, strategy, sample_size);
+
+    let result = execute_sql_statement_with_options(
+        state,
+        connection_id,
+        database,
+        &sql,
+        Some(schema),
+        None,
+        QueryExecutionOptions { max_rows: Some(sample_size), ..Default::default() },
+    )
+    .await?;
+
+    Ok(result.rows)
+}
+
+fn compute_column_checksums(columns: &[String], rows: &[Vec<Value>]) -> HashMap<String, String> {
+    let mut column_hashers: HashMap<String, Sha256> = columns.iter().map(|col| (col.clone(), Sha256::new())).collect();
+
+    let column_indexes = column_index_map(columns);
+
+    for row in rows {
+        for (column_name, index) in &column_indexes {
+            if let Some(hasher) = column_hashers.get_mut(*column_name) {
+                let value_str = json_stringify(row_value(row, *index));
+                hasher.update(value_str.as_bytes());
+                hasher.update(b"\n");
+            }
+        }
+    }
+
+    column_hashers
+        .into_iter()
+        .map(|(name, hasher)| {
+            let hash = format!("{:x}", hasher.finalize());
+            (name, hash)
+        })
+        .collect()
+}
+
+fn compute_confidence(
+    sampling_rate: f64,
+    degradation_level: &DegradationLevel,
+    row_count_match: bool,
+    source_row_count: u64,
+    target_row_count: u64,
+) -> f64 {
+    match degradation_level {
+        DegradationLevel::Full => {
+            if row_count_match {
+                1.0
+            } else {
+                0.99
+            }
+        }
+        DegradationLevel::Sample => {
+            let count_ratio =
+                source_row_count.min(target_row_count) as f64 / source_row_count.max(target_row_count).max(1) as f64;
+            let base = if row_count_match { 0.95 } else { 0.85 };
+            let adjusted = base * sampling_rate * count_ratio.sqrt();
+            adjusted.clamp(0.5, 0.95)
+        }
+        DegradationLevel::SkipWithRisk => 0.0,
+    }
+}
+
+pub async fn verify_data(state: &AppState, options: VerifyDataOptions) -> Result<VerifyDataResult, String> {
+    let degradation_threshold = options.degradation_threshold.unwrap_or_default();
+    let sampling_strategy = options.sampling_strategy.unwrap_or(SamplingStrategy::Hybrid);
+    let enable_checksum = options.enable_checksum.unwrap_or(true);
+
+    let from_tables_options = DataCompareFromTablesOptions {
+        source_connection_id: options.source_connection_id,
+        source_database: options.source_database,
+        source_schema: options.source_schema,
+        source_table: options.source_table,
+        target_connection_id: options.target_connection_id,
+        target_database: options.target_database,
+        target_schema: options.target_schema,
+        target_table: options.target_table,
+        columns: options.columns,
+        key_columns: options.key_columns,
+        fetch_batch_size: options.fetch_batch_size,
+        degradation_threshold: Some(degradation_threshold),
+        sampling_strategy: Some(sampling_strategy),
+        enable_checksum: Some(enable_checksum),
+    };
+
+    let preparation = prepare_data_compare_from_tables(state, from_tables_options).await?;
+
+    let degradation_level = preparation
+        .degradation_level
+        .as_deref()
+        .and_then(|s| DegradationLevel::try_from(s).ok())
+        .unwrap_or(DegradationLevel::SkipWithRisk);
+    let sampling_rate = preparation.sampling_rate.unwrap_or(1.0);
+    let confidence_score = preparation.confidence_score.unwrap_or(0.0);
+    let row_count_match = preparation.source_row_count == preparation.target_row_count;
+
+    let checksums_match = match (&preparation.source_checksums, &preparation.target_checksums) {
+        (Some(src), Some(tgt)) => Some(src == tgt),
+        _ => None,
+    };
+    let verification_method = preparation.verification_method.clone().unwrap_or_else(|| "unknown".to_string());
+
+    Ok(VerifyDataResult {
+        preparation,
+        degradation_level,
+        sampling_rate,
+        confidence_score,
+        row_count_match,
+        checksums_match,
+        verification_method,
+    })
 }
 
 #[cfg(test)]
@@ -1791,5 +2390,81 @@ mod tests {
             ),
             "SELECT \"ID\", \"NAME\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC FETCH FIRST 25 ROWS ONLY"
         );
+    }
+
+    #[test]
+    fn degradation_chain_full_for_small_table() {
+        let threshold = DegradationThreshold::default();
+        let mut chain = DegradationChain::new(threshold);
+        let level = chain.decide(1000, 1000, None);
+        assert_eq!(level, DegradationLevel::Full);
+        assert_eq!(chain.event_count(), 1);
+        let last = chain.last_event().unwrap();
+        assert_eq!(last.decided_level, "full");
+        assert!((last.sample_rate - 1.0).abs() < f64::EPSILON);
+        assert!((last.confidence - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn degradation_chain_sample_for_large_table() {
+        let threshold = DegradationThreshold::default();
+        let mut chain = DegradationChain::new(threshold);
+        let level = chain.decide(500_000, 500_000, None);
+        assert_eq!(level, DegradationLevel::Sample);
+        let last = chain.last_event().unwrap();
+        assert_eq!(last.decided_level, "sample");
+        assert!(last.sample_rate < 1.0);
+        assert!(last.confidence >= 0.5);
+    }
+
+    #[test]
+    fn degradation_chain_skip_for_huge_table() {
+        let threshold = DegradationThreshold::default();
+        let mut chain = DegradationChain::new(threshold);
+        let level = chain.decide(20_000_000, 20_000_000, None);
+        assert_eq!(level, DegradationLevel::SkipWithRisk);
+        let last = chain.last_event().unwrap();
+        assert_eq!(last.decided_level, "skip_with_risk");
+        assert!((last.sample_rate - 0.0).abs() < f64::EPSILON);
+        assert!((last.confidence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn degradation_chain_records_multiple_events() {
+        let threshold = DegradationThreshold::default();
+        let mut chain = DegradationChain::new(threshold);
+        chain.decide(1000, 1000, None);
+        chain.decide(500_000, 500_000, None);
+        chain.decide(20_000_000, 20_000_000, None);
+        assert_eq!(chain.event_count(), 3);
+    }
+
+    #[test]
+    fn degradation_chain_with_metrics_integration() {
+        let threshold = DegradationThreshold::default();
+        let mut chain = DegradationChain::new(threshold);
+        let metrics = crate::risk_metrics::DegradationMetrics::new();
+
+        chain.decide(1000, 1000, Some(&metrics));
+        chain.decide(500_000, 500_000, Some(&metrics));
+        chain.decide(20_000_000, 20_000_000, Some(&metrics));
+
+        let snapshot = metrics.snapshot();
+        let total = snapshot.iter().find(|e| e.name == "dbx_degradation_total").unwrap();
+        assert_eq!(total.value, crate::risk_metrics::MetricValue::Counter(3));
+    }
+
+    #[test]
+    fn degradation_chain_auto_chain_detection() {
+        let threshold = DegradationThreshold::default();
+        let mut chain = DegradationChain::new(threshold);
+        let metrics = crate::risk_metrics::DegradationMetrics::new();
+
+        chain.decide(20_000_000, 20_000_000, Some(&metrics));
+        chain.decide(500_000, 500_000, Some(&metrics));
+
+        let snapshot = metrics.snapshot();
+        let up = snapshot.iter().find(|e| e.name == "dbx_auto_upgrade_total").unwrap();
+        assert_eq!(up.value, crate::risk_metrics::MetricValue::Counter(1));
     }
 }

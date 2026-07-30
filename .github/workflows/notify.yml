@@ -6,7 +6,7 @@ on:
   pull_request_target:
     types: [opened, closed]
   release:
-    types: [published, released]
+    types: [published]
 
 jobs:
   notify:
@@ -55,7 +55,7 @@ jobs:
               tag = os.environ["RELEASE_TAG"]
               name = os.environ["RELEASE_NAME"]
               url = os.environ["RELEASE_URL"]
-              body = os.environ.get("RELEASE_BODY", "")[:800]
+              body = os.environ.get("RELEASE_BODY", "")
 
               import re
               body = re.sub(r'#{1,6}\s*', '', body)

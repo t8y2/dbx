@@ -4,20 +4,23 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import CommonOptions from "./CommonOptions.vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{ params: GeneratorParams }>();
 
-const regions = [
-  { value: "us", label: "美国" },
-  { value: "uk", label: "英国" },
-  { value: "cn", label: "中国" },
-  { value: "jp", label: "日本" },
-];
+const { t } = useI18n();
 
-const languages = [
-  { value: "en", label: "English" },
-  { value: "native", label: "本地语言" },
-];
+const regions = computed(() => [
+  { value: "us", label: t("dataGenerate.countries.us") },
+  { value: "uk", label: t("dataGenerate.countries.uk") },
+  { value: "cn", label: t("dataGenerate.countries.cn") },
+  { value: "jp", label: t("dataGenerate.countries.jp") },
+]);
+
+const languages = computed(() => [
+  { value: "en", label: t("dataGenerate.cityLanguages.english") },
+  { value: "native", label: t("dataGenerate.cityLanguages.native") },
+]);
 
 if (!props.params.regions) props.params.regions = ["us"];
 if (!props.params.languages) props.params.languages = ["en"];
@@ -96,14 +99,14 @@ function refresh() {
 <template>
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">地区</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.regionLabel") }}</div>
       <div class="flex flex-wrap gap-1.5">
         <button v-for="r in regions" :key="r.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.regions ?? []).includes(r.value) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="toggleRegion(r.value)">{{ r.label }}</button>
       </div>
     </div>
 
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">语言</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.language") }}</div>
       <div class="flex items-center gap-2 text-xs">
         <button v-for="l in languages" :key="l.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.languages?.[0] || 'en') === l.value ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="setLang(l.value)">{{ l.label }}</button>
       </div>
@@ -111,7 +114,7 @@ function refresh() {
 
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="flex items-center gap-2 text-xs">
-        <span class="text-muted-foreground shrink-0">预览</span>
+        <span class="text-muted-foreground shrink-0">{{ t("dataGenerate.preview") }}</span>
         <span :key="previewKey" class="font-mono text-sm">{{ previewVal }}</span>
         <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="refresh">
           <RefreshCw class="h-3 w-3" />

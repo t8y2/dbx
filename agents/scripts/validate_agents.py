@@ -13,10 +13,12 @@ KOTLIN_SCAN_EXCLUDED_PARTS = {".git", ".gradle", "build"}
 DEFAULT_AGENT_JRE_KEY = "21"
 NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
 NATIVE_ONLY_AGENT_MODULES = {
+    "duckdb": "drivers/duckdb",
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
     "xugu": "drivers/xugu",
 }
+AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {
     "h2-legacy": "reuses the H2 agent implementation with an isolated legacy driver version",
     "access": "custom Access metadata and URL behavior pending migration",
@@ -90,7 +92,10 @@ def validate_versions(root: Path) -> list[str]:
     included = agent_modules(root)
     versions = set(json.loads((root / "versions.json").read_text(encoding="utf-8")))
     return (
-        [f"included module missing version: {name}" for name in sorted(included - versions)]
+        [
+            f"included module missing version: {name}"
+            for name in sorted(included - versions - AUTO_VERSIONED_NATIVE_MODULES)
+        ]
         + [f"versions key not included: {name}" for name in sorted(versions - included)]
     )
 

@@ -83,6 +83,24 @@ pub async fn save_max_agent_turns(
     Ok(Json(()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveMaxRetriesRequest {
+    pub max_retries: u32,
+}
+
+pub async fn load_max_retries(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    state.app.storage.load_max_retries().await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_max_retries(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveMaxRetriesRequest>,
+) -> Result<Json<()>, AppError> {
+    state.app.storage.save_max_retries(body.max_retries).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
 pub async fn decrypt_config(Json(body): Json<DecryptConfigRequest>) -> Result<Json<String>, AppError> {
     decrypt_config_payload(&body.payload, &body.passphrase).map(Json).map_err(AppError::from)
 }

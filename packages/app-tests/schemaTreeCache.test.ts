@@ -7,7 +7,7 @@ const now = Date.parse("2026-05-17T10:00:00.000Z");
 
 test("wraps tree children with a cache timestamp", () => {
   assert.deepEqual(encodeSchemaTreeCache(children, now), {
-    version: 2,
+    version: 3,
     cachedAt: "2026-05-17T10:00:00.000Z",
     children,
   });

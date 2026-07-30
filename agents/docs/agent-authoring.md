@@ -182,18 +182,16 @@ The root `build.gradle` convention derives the archive name from the module name
 Default to:
 
 ```groovy
-def java8Projects = ['common', 'test-support'] as Set
-
 subprojects {
     java {
         toolchain {
-            languageVersion = JavaLanguageVersion.of(java8Projects.contains(name) ? 8 : 21)
+            languageVersion = JavaLanguageVersion.of(21)
         }
     }
 }
 ```
 
-Most agents use JRE 21. If an agent needs a special runtime, update the root Gradle convention, the release workflow JRE detection logic, and document the reason in the module.
+All Java agent modules and shared infrastructure modules use Java 21. If an agent needs a special runtime, update the root Gradle convention, the release workflow JRE detection logic, and document the reason in the module.
 
 ## Tests
 

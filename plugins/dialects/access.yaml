@@ -1,0 +1,103 @@
+dialect:
+  name: "Access"
+  display_name: "Microsoft Access"
+  versions:
+    - version: "2019"
+      status: "RECOMMENDED"
+
+types:
+  - name: "BYTE"
+    category: "INTEGER"
+  - name: "SMALLINT"
+    category: "INTEGER"
+    aliases: ["SHORT"]
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT", "LONG"]
+  - name: "SINGLE"
+    category: "FLOAT"
+    aliases: ["FLOAT", "REAL"]
+  - name: "DOUBLE"
+    category: "FLOAT"
+    aliases: ["DOUBLE PRECISION"]
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["NUMERIC"]
+  - name: "CURRENCY"
+    category: "DECIMAL"
+    semantic_fidelity_base: 0.8
+  - name: "TEXT"
+    category: "STRING"
+    has_length: true
+    max_precision: 255
+    aliases: ["VARCHAR", "CHAR"]
+  - name: "LONGTEXT"
+    category: "STRING"
+    aliases: ["MEMO"]
+  - name: "DATETIME"
+    category: "DATETIME"
+    aliases: ["DATE", "TIME", "TIMESTAMP"]
+  - name: "YESNO"
+    category: "BOOLEAN"
+    aliases: ["BIT", "BOOLEAN"]
+  - name: "OLEOBJECT"
+    category: "BINARY"
+    semantic_fidelity_base: 0.3
+  - name: "BINARY"
+    category: "BINARY"
+  - name: "GUID"
+    category: "UUID"
+  - name: "HYPERLINK"
+    category: "STRING"
+    semantic_fidelity_base: 0.4
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  create_index: true
+  drop_index: true
+  create_table: true
+  drop_table: true
+  if_not_exists: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    create_table: "CREATE TABLE {table} ({columns})"
+    drop_table: "DROP TABLE {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+
+structural_capabilities:
+  max_columns_per_table: 255
+  max_indexes_per_table: 32
+  max_query_size_bytes: 65536
+  max_foreign_key_name_length: 64
+  supports_full_text_index: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: false
+  max_length: 64
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT Name FROM MSysObjects WHERE Type = 1 AND Flags = 0"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT * FROM {table} WHERE 1=0"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT Name FROM MSysObjects WHERE Type = 1"
+    depth_support: 0
+    performance_profile: "LIGHT"

@@ -2,10 +2,11 @@ export type DriverImportSelection = string | { name: string };
 
 export function isOfflineDriverPackage(selection: DriverImportSelection): boolean {
   const name = typeof selection === "string" ? selection : selection.name;
-  return name.toLowerCase().endsWith(".zip");
+  const lowerName = name.toLowerCase();
+  return lowerName.endsWith(".zip") || lowerName.endsWith(".tar.zst");
 }
 
 export function webDriverImportAccept(requiresJavaRuntime: boolean, isWindows: boolean): string {
-  if (requiresJavaRuntime) return ".zip,.jar";
-  return isWindows ? ".zip,.exe" : "";
+  if (requiresJavaRuntime) return ".zip,.tar.zst,.jar";
+  return isWindows ? ".zip,.tar.zst,.exe" : "";
 }

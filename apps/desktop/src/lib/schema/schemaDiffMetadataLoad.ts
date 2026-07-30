@@ -24,6 +24,34 @@ export function shouldFetchSchemaDiffDdl(isView: boolean, options: Pick<SchemaDi
   return isView ? options.views : options.tables;
 }
 
+export interface SchemaDiffMetadataLoadPlan {
+  columns: boolean;
+  indexes: boolean;
+  foreignKeys: boolean;
+  triggers: boolean;
+  ddl: boolean;
+}
+
+export function schemaDiffMetadataLoadPlan(isView: boolean, options: Pick<SchemaDiffCompareOptions, "tables" | "views" | "indexes" | "primaryKeys" | "uniqueKeys" | "foreignKeys" | "triggers">): SchemaDiffMetadataLoadPlan {
+  if (isView) {
+    return {
+      columns: false,
+      indexes: false,
+      foreignKeys: false,
+      triggers: false,
+      ddl: shouldFetchSchemaDiffDdl(true, options),
+    };
+  }
+
+  return {
+    columns: options.tables,
+    indexes: options.tables && (options.indexes || options.primaryKeys || options.uniqueKeys),
+    foreignKeys: options.tables && options.foreignKeys,
+    triggers: options.tables && options.triggers,
+    ddl: shouldFetchSchemaDiffDdl(false, options),
+  };
+}
+
 export async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const workerCount = Math.min(normalizeConcurrencyLimit(limit), items.length);
   if (workerCount === 0) return [];

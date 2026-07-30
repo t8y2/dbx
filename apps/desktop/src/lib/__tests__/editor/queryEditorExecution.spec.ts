@@ -27,6 +27,18 @@ describe("QueryEditor execution routing", () => {
     expect(executeModeBranch).toBeGreaterThan(selectionBranch);
   });
 
+  it("preserves the source range when executing a current/all candidate without a manual selection", () => {
+    expect(queryEditorSource).toContain("emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, candidate), options.openInNewResultTab)");
+    expect(queryEditorSource).toContain("currentView ? sqlExecutionSnapshotForRange(currentView, candidate) : candidate.sql");
+    expect(queryEditorSource).toContain("selectionFrom: range.from");
+    expect(queryEditorSource).toContain("selectionTo: range.to");
+  });
+
+  it("preserves the source range when executing from the statement gutter", () => {
+    expect(queryEditorSource).toContain("emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, statementRange))");
+    expect(queryEditorSource).not.toContain('emit("execute", statementRange.sql)');
+  });
+
   it("lets the shortcut skip the picker without affecting other execution entry points", () => {
     // The picker guard must also honor the shortcut's bypass flag, otherwise Ctrl+Enter would keep popping the dialog.
     expect(queryEditorSource).toContain("if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker");

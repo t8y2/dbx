@@ -57,6 +57,7 @@ RUN case "$TARGETARCH" in \
 
 # Copy real sources and rebuild (only application code recompiles)
 COPY crates/ crates/
+COPY plugins/dialects/ plugins/dialects/
 
 # Docker COPY preserves original file timestamps, which may be older than the
 # dummy-source binary compiled above. Touch all .rs files so cargo detects the

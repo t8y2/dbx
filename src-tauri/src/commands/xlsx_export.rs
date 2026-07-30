@@ -10,6 +10,8 @@ pub struct QueryResultXlsxExportRequest {
     pub columns: Vec<String>,
     #[serde(default)]
     pub column_types: Vec<String>,
+    #[serde(default)]
+    pub column_comments: Vec<Option<String>>,
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
@@ -29,6 +31,7 @@ pub async fn export_query_result_xlsx(request: QueryResultXlsxExportRequest) -> 
             sheet_name: request.sheet_name,
             columns: request.columns,
             column_types: request.column_types,
+            column_comments: request.column_comments,
             rows: request.rows,
             numeric_column_right_align: request.numeric_column_right_align,
         };

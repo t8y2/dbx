@@ -1,11 +1,13 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 
 export const TREE_SCHEMA_DEFAULT_DATABASE_SELECT_VALUE = "__dbx_tree_schema_default_database__";
 export const EMPTY_DATABASE_SELECT_VALUE = "__dbx_empty_database__";
 
-export function resolveDefaultDatabase(connection: Pick<ConnectionConfig, "database"> & Partial<Pick<ConnectionConfig, "db_type">>, options: string[]): string {
+export function resolveDefaultDatabase(connection: Pick<ConnectionConfig, "database"> & Partial<Pick<ConnectionConfig, "db_type" | "host">>, options: string[]): string {
   if (connection.db_type === "cloudflare-d1") return "main";
+  if (connection.db_type === "sqlite") return normalizeSqliteNamespace(connection.database || options[0], connection);
   return connection.database || options[0] || "";
 }
 
@@ -30,7 +32,8 @@ export function formatDatabaseLabel(connection: Pick<ConnectionConfig, "db_type"
   return database || labels.noDatabase;
 }
 
-export function isDefaultDatabase(connection: (Pick<ConnectionConfig, "database"> & Partial<Pick<ConnectionConfig, "db_type">>) | undefined, database: string): boolean {
+export function isDefaultDatabase(connection: (Pick<ConnectionConfig, "database"> & Partial<Pick<ConnectionConfig, "db_type" | "host">>) | undefined, database: string): boolean {
   if (connection?.db_type === "cloudflare-d1") return database === "main";
+  if (connection?.db_type === "sqlite") return database === normalizeSqliteNamespace(connection.database, connection);
   return !!connection?.database && !!database && connection.database === database;
 }

@@ -15,6 +15,10 @@ vi.mock("vue-i18n", () => ({
   useI18n: () => ({ t: (key: string, params?: { message?: string }) => (params?.message ? `${key}: ${params.message}` : key) }),
 }));
 
+vi.mock("@/i18n", () => ({
+  default: { install() {} },
+}));
+
 vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast }),
 }));

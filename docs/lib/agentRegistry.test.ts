@@ -45,8 +45,9 @@ test("catalog falls back from R2 to CNB without using GitHub API", async () => {
           access: {
             version: accessVersion,
             jar: {
-              url: `https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agent-access-${accessVersion}.jar`,
+              url: `https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agent-access-${accessVersion}.tar.zst`,
               size: 1,
+              format: "tar_zstd",
             },
           },
         },
@@ -54,8 +55,9 @@ test("catalog falls back from R2 to CNB without using GitHub API", async () => {
           "21": {
             platforms: {
               "macos-aarch64": {
-                url: "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-jre-21-macos-aarch64.tar.gz",
+                url: "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-jre-21-macos-aarch64.tar.zst",
                 size: 1,
+                format: "tar_zstd",
               },
             },
           },
@@ -77,7 +79,7 @@ test("unknown fallback asset sizes render as unavailable", () => {
   assert.equal(formatSize(0), "—");
 });
 
-test("Java agent ZIPs are preferred over raw JARs", () => {
+test("Java agent tar.zst packages are preferred over raw JARs", () => {
   const accessVersion = driverVersions.access;
   const entries = buildDriverEntries([
     {
@@ -86,17 +88,17 @@ test("Java agent ZIPs are preferred over raw JARs", () => {
       size: 1024,
     },
     {
-      name: `dbx-agent-access-${accessVersion}.zip`,
-      browser_download_url: `https://example.com/dbx-agent-access-${accessVersion}.zip`,
+      name: `dbx-agent-access-${accessVersion}.tar.zst`,
+      browser_download_url: `https://example.com/dbx-agent-access-${accessVersion}.tar.zst`,
       size: 2048,
     },
   ]);
 
   assert.equal(entries[0]?.key, "access");
-  assert.equal(entries[0]?.jar.url, `https://example.com/dbx-agent-access-${accessVersion}.zip`);
+  assert.equal(entries[0]?.jar.url, `https://example.com/dbx-agent-access-${accessVersion}.tar.zst`);
 });
 
-test("KingBase native ZIPs are preferred over raw release executables", () => {
+test("KingBase native tar.zst packages are preferred over raw release executables", () => {
   const entries = buildNativeAgentEntries([
     {
       name: "dbx-agent-kingbase-windows-x64.exe",
@@ -109,13 +111,13 @@ test("KingBase native ZIPs are preferred over raw release executables", () => {
       size: 2048,
     },
     {
-      name: "dbx-agent-kingbase-0.1.34-windows-x64.zip",
-      browser_download_url: "https://example.com/dbx-agent-kingbase-0.1.34-windows-x64.zip",
+      name: "dbx-agent-kingbase-0.1.34-windows-x64.tar.zst",
+      browser_download_url: "https://example.com/dbx-agent-kingbase-0.1.34-windows-x64.tar.zst",
       size: 4096,
     },
     {
-      name: "dbx-agent-kingbase-0.1.34-linux-x64.zip",
-      browser_download_url: "https://example.com/dbx-agent-kingbase-0.1.34-linux-x64.zip",
+      name: "dbx-agent-kingbase-0.1.34-linux-x64.tar.zst",
+      browser_download_url: "https://example.com/dbx-agent-kingbase-0.1.34-linux-x64.tar.zst",
       size: 3072,
     },
   ]);
@@ -127,14 +129,32 @@ test("KingBase native ZIPs are preferred over raw release executables", () => {
         key: "kingbase",
         version: "0.1.34",
         platformKey: "linux-x64",
-        filename: "dbx-agent-kingbase-0.1.34-linux-x64.zip",
+        filename: "dbx-agent-kingbase-0.1.34-linux-x64.tar.zst",
       },
       {
         key: "kingbase",
         version: "0.1.34",
         platformKey: "windows-x64",
-        filename: "dbx-agent-kingbase-0.1.34-windows-x64.zip",
+        filename: "dbx-agent-kingbase-0.1.34-windows-x64.tar.zst",
       },
     ],
   );
+});
+
+test("DuckDB native tar.zst packages appear in the native catalog", () => {
+  const entries = buildNativeAgentEntries([
+    {
+      name: "dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
+      browser_download_url: "https://example.com/dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
+      size: 4096,
+    },
+  ]);
+
+  assert.deepEqual(entries.map(({ key, platformKey, filename }) => ({ key, platformKey, filename })), [
+    {
+      key: "duckdb",
+      platformKey: "macos-aarch64",
+      filename: "dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
+    },
+  ]);
 });

@@ -17,9 +17,9 @@ import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
-import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem } from "@/types/ai";
+import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference } from "@/types/ai";
 
-export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem };
+export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem, AiChatSelectionState, AiEffortSelection };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -180,6 +180,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "anthropic-compatible": {
+    label: "Anthropic Compatible",
+    iconSlug: "anthropic",
+    provider: "anthropic-compatible",
+    endpoint: "",
+    model: "",
+    apiStyle: "anthropic-messages",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "openai-compatible": {
     label: "OpenAI Compatible",
     iconSlug: "openai",
@@ -204,6 +214,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     label: "Codex CLI",
     iconSlug: "codex",
     provider: "codex-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
+  "pi-agent-cli": {
+    label: "Pi Coding Agent",
+    iconSlug: "pi",
+    provider: "pi-agent-cli",
     endpoint: "",
     model: "default",
     apiStyle: "completions",
@@ -264,6 +284,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
     claudeCodeCliPath: config?.claudeCodeCliPath?.trim() || undefined,
     claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
+    piAgentCliPath: config?.piAgentCliPath?.trim() || undefined,
+    piAgentCliEnv: normalizeAiEnv(config?.piAgentCliEnv),
   };
 }
 
@@ -381,7 +403,14 @@ export interface CustomTheme {
   ddlColors: CustomThemeDdlColors;
 }
 
-export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [{ id: "default", name: "Custom", colors: { ...DEFAULT_CUSTOM_THEME_COLORS }, ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS } }];
+export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [
+  {
+    id: "default",
+    name: "Custom",
+    colors: { ...DEFAULT_CUSTOM_THEME_COLORS },
+    ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
+  },
+];
 
 export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "comment-right" | "size" | "hidden";
 
@@ -446,7 +475,10 @@ export interface EditorSettings {
   sidebarActivation: SidebarActivation;
   sidebarConnectionSortMode: ConnectionListSortMode;
   sidebarObjectDisplay: "grouped" | "simple";
+  routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
+  sidebarTableSearchLocal: boolean;
+  sidebarGlobalSearchLocal: boolean;
   autoSelectActiveSidebarNode: boolean;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
@@ -526,7 +558,11 @@ export function enforceRightSidebarPanelExclusivity(current: RightSidebarPanelSt
   return transitionRightSidebarPanels(current, panelToKeep, true, true);
 }
 
-export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }[] = [
+export const EDITOR_THEMES: {
+  value: EditorTheme;
+  label: string;
+  dark: boolean;
+}[] = [
   { value: "app", label: "Follow app theme", dark: false },
   { value: "one-dark", label: "One Dark", dark: true },
   { value: "vscode-dark", label: "VS Dark+", dark: true },
@@ -614,7 +650,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarActivation: "single",
   sidebarConnectionSortMode: "manual",
   sidebarObjectDisplay: "grouped",
+  routineSourceOpenMode: "query-tab",
   sidebarTableSearchEnabled: false,
+  sidebarTableSearchLocal: true,
+  sidebarGlobalSearchLocal: false,
   autoSelectActiveSidebarNode: false,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
@@ -778,7 +817,13 @@ function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnipp
     if (seenPrefixes.has(item.prefix)) continue;
     seenPrefixes.add(item.prefix);
     // Older settings do not have this field; only an explicit false disables a snippet.
-    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body, enabled: item.enabled !== false });
+    valid.push({
+      id: item.id,
+      label: item.label,
+      prefix: item.prefix,
+      body: item.body,
+      enabled: item.enabled !== false,
+    });
   }
   if (valid.length === 0) return existing ?? DEFAULT_SQL_SNIPPETS;
   return valid;
@@ -833,7 +878,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
           return {
             ...renamed,
             colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...renamed.colors },
-            ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS, ...(renamed as any).ddlColors },
+            ddlColors: {
+              ...DEFAULT_CUSTOM_THEME_DDL_COLORS,
+              ...(renamed as any).ddlColors,
+            },
           };
         });
       }
@@ -842,7 +890,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
             {
               id: "migrated",
               name: "Migrated",
-              colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...settings.customThemeColors },
+              colors: {
+                ...DEFAULT_CUSTOM_THEME_COLORS,
+                ...settings.customThemeColors,
+              },
               ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
             },
           ]
@@ -901,19 +952,48 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
+    routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
+    sidebarTableSearchLocal: typeof settings.sidebarTableSearchLocal === "boolean" ? settings.sidebarTableSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal,
+    sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
-    openTabsRestoreMode: normalizeOpenTabsRestoreMode((settings as Partial<EditorSettings>).openTabsRestoreMode, (settings as Partial<EditorSettings> & { restoreOpenTabsOnLaunch?: boolean }).restoreOpenTabsOnLaunch),
-    disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode((settings as Partial<EditorSettings>).disconnectTabHandlingMode, (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect),
+    openTabsRestoreMode: normalizeOpenTabsRestoreMode(
+      (settings as Partial<EditorSettings>).openTabsRestoreMode,
+      (
+        settings as Partial<EditorSettings> & {
+          restoreOpenTabsOnLaunch?: boolean;
+        }
+      ).restoreOpenTabsOnLaunch,
+    ),
+    disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode(
+      (settings as Partial<EditorSettings>).disconnectTabHandlingMode,
+      (
+        settings as Partial<EditorSettings> & {
+          closeQueryTabsOnDisconnect?: boolean;
+        }
+      ).closeQueryTabsOnDisconnect,
+    ),
     reuseDataTab: settings.reuseDataTab ?? DEFAULT_EDITOR_SETTINGS.reuseDataTab,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
     sidebarObjectInfoMode: normalizeSidebarObjectInfoMode(
       settings.sidebarObjectInfoMode,
-      (settings as Partial<EditorSettings> & { sidebarTableCommentLayout?: string }).sidebarTableCommentLayout,
-      (settings as Partial<EditorSettings> & { sidebarHideTableComments?: boolean }).sidebarHideTableComments,
-      (settings as Partial<EditorSettings> & { sidebarShowDatabaseSizes?: boolean }).sidebarShowDatabaseSizes,
+      (
+        settings as Partial<EditorSettings> & {
+          sidebarTableCommentLayout?: string;
+        }
+      ).sidebarTableCommentLayout,
+      (
+        settings as Partial<EditorSettings> & {
+          sidebarHideTableComments?: boolean;
+        }
+      ).sidebarHideTableComments,
+      (
+        settings as Partial<EditorSettings> & {
+          sidebarShowDatabaseSizes?: boolean;
+        }
+      ).sidebarShowDatabaseSizes,
     ),
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
@@ -980,13 +1060,18 @@ export const useSettingsStore = defineStore("settings", () => {
   const settingsPageActive = ref(false);
   const settingsNavigationRequest = ref<SettingsNavigationRequest | null>(null);
   const activeModel = ref<{ configId: string; modelId: string } | null>(null);
+  const effortPreferences = ref<AiModelEffortPreference[]>([]);
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
-  const mcpGlobalPolicy = ref<McpGlobalPolicy>({ ...DEFAULT_MCP_GLOBAL_POLICY });
+  const mcpGlobalPolicy = ref<McpGlobalPolicy>({
+    ...DEFAULT_MCP_GLOBAL_POLICY,
+  });
   const isDesktopSettingsLoaded = ref(false);
   const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
+  let pendingAiChatSelection: AiChatSelectionState | null = null;
+  let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
 
@@ -1094,14 +1179,24 @@ export const useSettingsStore = defineStore("settings", () => {
       aiConfigs.value = newConfigs.map(normalizeAiConfigItem);
     } else {
       // 迁移旧格式
+      aiConfigs.value = [];
       await migrateToMultiConfig();
     }
 
-    // 重置 activeModel 到默认配置是有意行为——activeModel 是本次运行 (run-scoped) 的末次使用选择，
-    // 应用启动和配置同步下载 (reloadAiConfigs) 两条路径均需丢弃会话内手动切换的模型、回到默认。
-    const defaultConfig = aiConfigs.value.find((c) => c.isDefault) || aiConfigs.value[0];
-    if (defaultConfig) {
-      activeModel.value = { configId: defaultConfig.id, modelId: defaultConfig.model };
+    const savedSelection = await api.loadAiChatSelection().catch(() => null);
+    effortPreferences.value = (savedSelection?.effortPreferences ?? []).filter((preference) => aiConfigs.value.some((config) => config.id === preference.configId));
+
+    const savedActive = savedSelection?.active;
+    const savedConfig = savedActive ? aiConfigs.value.find((config) => config.id === savedActive.configId) : undefined;
+    if (savedConfig && savedActive?.modelId.trim()) {
+      activeModel.value = {
+        configId: savedConfig.id,
+        modelId: savedActive.modelId.trim(),
+      };
+    } else {
+      const fallback = aiConfigs.value.find((config) => config.isDefault) || aiConfigs.value[0];
+      activeModel.value = fallback?.model.trim() ? { configId: fallback.id, modelId: fallback.model.trim() } : null;
+      if (activeModel.value) persistAiChatSelection();
     }
 
     isAiConfigLoaded.value = true;
@@ -1110,7 +1205,6 @@ export const useSettingsStore = defineStore("settings", () => {
   async function reloadAiConfigs(): Promise<void> {
     isAiConfigLoaded.value = false;
     await initAiConfigs();
-    if (aiConfigs.value.length === 0) activeModel.value = null;
   }
 
   async function migrateToMultiConfig(): Promise<void> {
@@ -1153,23 +1247,39 @@ export const useSettingsStore = defineStore("settings", () => {
     const normalized = normalizeAiConfigItem(config);
     await api.saveAiConfigItem(normalized);
     aiConfigs.value.push(normalized);
-    if (aiConfigs.value.length === 1) {
-      activeModel.value = { configId: normalized.id, modelId: normalized.model };
+    if (aiConfigs.value.length === 1 && normalized.model.trim()) {
+      activeModel.value = {
+        configId: normalized.id,
+        modelId: normalized.model,
+      };
+      persistAiChatSelection();
     }
   }
 
   async function updateAiConfigItem(id: string, config: Partial<AiConfigItem>): Promise<void> {
     const index = aiConfigs.value.findIndex((c) => c.id === id);
     if (index !== -1) {
-      const updated = normalizeAiConfigItem({ ...aiConfigs.value[index], ...config });
+      const previous = aiConfigs.value[index];
+      const updated = normalizeAiConfigItem({ ...previous, ...config });
       await api.saveAiConfigItem(updated);
       aiConfigs.value[index] = updated;
+      if (previous.provider !== updated.provider) {
+        effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== id);
+        if (activeModel.value?.configId === id) activeModel.value = null;
+        persistAiChatSelection();
+      }
     }
   }
 
   async function deleteAiConfig(id: string): Promise<void> {
     await api.deleteAiConfig(id);
     aiConfigs.value = aiConfigs.value.filter((c) => c.id !== id);
+    effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== id);
+    if (activeModel.value?.configId === id) {
+      const fallback = aiConfigs.value.find((config) => config.isDefault) || aiConfigs.value[0];
+      activeModel.value = fallback?.model.trim() ? { configId: fallback.id, modelId: fallback.model.trim() } : null;
+    }
+    persistAiChatSelection();
   }
 
   async function setDefaultAiConfig(id: string): Promise<void> {
@@ -1177,15 +1287,60 @@ export const useSettingsStore = defineStore("settings", () => {
     aiConfigs.value.forEach((c) => {
       c.isDefault = c.id === id;
     });
-    const config = aiConfigs.value.find((c) => c.id === id);
-    if (config) {
-      // 修改默认配置时丢弃用户手动选择的模型，回到新默认——放在 await 之后确保后端持久化成功才执行
-      activeModel.value = { configId: config.id, modelId: config.model };
-    }
   }
 
   function updateActiveModel(model: { configId: string; modelId: string }) {
-    activeModel.value = model;
+    activeModel.value = {
+      configId: model.configId,
+      modelId: model.modelId.trim(),
+    };
+    persistAiChatSelection();
+  }
+
+  const activeEffort = computed<AiEffortSelection | null>(() => {
+    const active = activeModel.value;
+    if (!active) return null;
+    return effortPreferences.value.find((preference) => preference.configId === active.configId && preference.modelId === active.modelId)?.selection ?? null;
+  });
+
+  function updateActiveEffort(selection: AiEffortSelection | null) {
+    const active = activeModel.value;
+    if (!active) return;
+    effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== active.configId || preference.modelId !== active.modelId);
+    if (selection) {
+      effortPreferences.value.push({
+        configId: active.configId,
+        modelId: active.modelId,
+        selection,
+      });
+    }
+    persistAiChatSelection();
+  }
+
+  function persistAiChatSelection() {
+    pendingAiChatSelection = {
+      version: 1,
+      active: activeModel.value ? { ...activeModel.value } : undefined,
+      effortPreferences: effortPreferences.value.map((preference) => ({
+        ...preference,
+        selection: { ...preference.selection },
+      })),
+    };
+    if (!aiChatSelectionSaveRunning) void flushAiChatSelection();
+  }
+
+  async function flushAiChatSelection() {
+    aiChatSelectionSaveRunning = true;
+    try {
+      while (pendingAiChatSelection) {
+        const selection = pendingAiChatSelection;
+        pendingAiChatSelection = null;
+        await api.saveAiChatSelection(selection).catch(() => {});
+      }
+    } finally {
+      aiChatSelectionSaveRunning = false;
+      if (pendingAiChatSelection) void flushAiChatSelection();
+    }
   }
 
   const isConfigured = computed((): boolean => {
@@ -1193,7 +1348,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 
@@ -1278,7 +1433,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
+    if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
+    if (partial.sidebarTableSearchLocal !== undefined) editorSettings.value.sidebarTableSearchLocal = partial.sidebarTableSearchLocal;
+    if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
@@ -1336,7 +1494,9 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   function deleteCustomColumnFormatter(id: string) {
-    const customColumnFormatters = { ...editorSettings.value.customColumnFormatters };
+    const customColumnFormatters = {
+      ...editorSettings.value.customColumnFormatters,
+    };
     delete customColumnFormatters[id];
     const columnFormatters = Object.fromEntries(
       Object.entries(editorSettings.value.columnFormatters).filter(([, formatter]) => {
@@ -1352,6 +1512,7 @@ export const useSettingsStore = defineStore("settings", () => {
     requestSettingsNavigation,
     clearSettingsNavigationRequest,
     activeModel,
+    activeEffort,
     isAiConfigLoaded,
     aiConfigs,
     initAiConfigs,
@@ -1362,6 +1523,7 @@ export const useSettingsStore = defineStore("settings", () => {
     deleteAiConfig,
     setDefaultAiConfig,
     updateActiveModel,
+    updateActiveEffort,
     isConfigured,
     isEditorSettingsLoaded,
     editorSettings,

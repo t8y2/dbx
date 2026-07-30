@@ -54,6 +54,42 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableDataIdentifier("kingbase", "order detail", "`")).toBe("`order detail`");
   });
 
+  it("selectively quotes GaussDB JDBC identifiers with the driver-reported quote", () => {
+    expect(quoteTableDataIdentifier("gaussdb", "table_01", '"')).toBe("table_01");
+    expect(quoteTableDataIdentifier("gaussdb", "MixedCase", '"')).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("gaussdb", "order", '"')).toBe('"order"');
+    expect(quoteTableDataIdentifier("gaussdb", "order detail", '"')).toBe('"order detail"');
+    expect(quoteTableDataIdentifier("gaussdb", 'already"quoted', '"')).toBe('"already""quoted"');
+    expect(quoteTableDataIdentifier("gaussdb", '"AlreadyQuoted"', '"')).toBe('"AlreadyQuoted"');
+
+    expect(quoteTableDataIdentifier("gaussdb", "table_01", "`")).toBe("table_01");
+    expect(quoteTableDataIdentifier("gaussdb", "MixedCase", "`")).toBe("`MixedCase`");
+    expect(quoteTableDataIdentifier("gaussdb", "order", "`")).toBe("`order`");
+    expect(quoteTableDataIdentifier("gaussdb", "order detail", "`")).toBe("`order detail`");
+    expect(quoteTableDataIdentifier("gaussdb", "already`quoted", "`")).toBe("`already``quoted`");
+    expect(quoteTableDataIdentifier("gaussdb", "`AlreadyQuoted`", "`")).toBe("`AlreadyQuoted`");
+  });
+
+  it("uses detected GaussDB compatibility quotes through PostgreSQL-compatible JDBC dialects", () => {
+    for (const databaseType of ["postgres", "opengauss"] as const) {
+      expect(quoteTableDataIdentifier(databaseType, "table_01", "`")).toBe("table_01");
+      expect(quoteTableDataIdentifier(databaseType, "MixedCase", "`")).toBe("`MixedCase`");
+      expect(quoteTableDataIdentifier(databaseType, "order", "`")).toBe("`order`");
+      expect(quoteTableDataIdentifier(databaseType, "order detail", "`")).toBe("`order detail`");
+      expect(quoteTableDataIdentifier(databaseType, "`AlreadyQuoted`", "`")).toBe("`AlreadyQuoted`");
+      expect(quoteTableDataIdentifier(databaseType, "MixedCase", '"')).toBe('"MixedCase"');
+    }
+  });
+
+  it("preserves native GaussDB and openGauss quoting behavior", () => {
+    expect(quoteTableDataIdentifier("gaussdb", "table_01")).toBe('"table_01"');
+    expect(quoteTableDataIdentifier("gaussdb", "MixedCase")).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("gaussdb", '"AlreadyQuoted"')).toBe('"AlreadyQuoted"');
+    expect(quoteTableDataIdentifier("opengauss", "table_01")).toBe('"table_01"');
+    expect(quoteTableDataIdentifier("opengauss", "MixedCase")).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("opengauss", '"AlreadyQuoted"')).toBe('"AlreadyQuoted"');
+  });
+
   it("escapes Kingbase identifiers without maintaining a reserved-word list", () => {
     expect(quoteTableDataIdentifier("kingbase", "ANALYZE", "`")).toBe("`ANALYZE`");
     expect(quoteTableDataIdentifier("kingbase", "AUTHORIZATION", '"')).toBe('"AUTHORIZATION"');

@@ -1,23 +1,35 @@
 import type { Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
+import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { executableStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 
 export interface ExecutableStatementRangeCache {
   doc: Text;
   databaseType?: DatabaseType;
+  parameterOptions?: SqlParameterOptions;
+  parameterSyntaxKey: string;
   byStart: Map<number, SqlTextRange>;
   byExecutableLineStart: Map<number, SqlTextRange>;
   ranges: SqlTextRange[];
 }
 
-export type ExecutableStatementRangeParser = (sql: string, databaseType?: DatabaseType) => SqlTextRange[];
+export type ExecutableStatementRangeParser = (sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions) => SqlTextRange[];
 
-export function executableStatementRangeCacheForDoc(cache: ExecutableStatementRangeCache | null, doc: Text, databaseType?: DatabaseType, parse: ExecutableStatementRangeParser = executableStatementRanges): ExecutableStatementRangeCache {
-  if (cache?.doc === doc && cache.databaseType === databaseType) return cache;
+export function executableStatementRangeCacheForDoc(
+  cache: ExecutableStatementRangeCache | null,
+  doc: Text,
+  databaseType?: DatabaseType,
+  parameterOptionsOrParse?: SqlParameterOptions | ExecutableStatementRangeParser,
+  customParse: ExecutableStatementRangeParser = executableStatementRanges,
+): ExecutableStatementRangeCache {
+  const parameterOptions = typeof parameterOptionsOrParse === "function" ? undefined : parameterOptionsOrParse;
+  const parse = typeof parameterOptionsOrParse === "function" ? parameterOptionsOrParse : customParse;
+  const parameterSyntaxKey = parameterOptions?.enabledSyntaxes ? parameterOptions.enabledSyntaxes.join(",") : "*";
+  if (cache?.doc === doc && cache.databaseType === databaseType && cache.parameterSyntaxKey === parameterSyntaxKey) return cache;
 
   const byStart = new Map<number, SqlTextRange>();
   const byExecutableLineStart = new Map<number, SqlTextRange>();
-  const ranges = parse(doc.toString(), databaseType);
+  const ranges = parse(doc.toString(), databaseType, parameterOptions);
   for (const range of ranges) {
     byStart.set(range.from, range);
     const line = doc.lineAt(range.from);
@@ -25,7 +37,7 @@ export function executableStatementRangeCacheForDoc(cache: ExecutableStatementRa
       byExecutableLineStart.set(line.from, range);
     }
   }
-  return { doc, databaseType, byStart, byExecutableLineStart, ranges };
+  return { doc, databaseType, parameterOptions, parameterSyntaxKey, byStart, byExecutableLineStart, ranges };
 }
 
 export function executableStatementRangeStartingAt(cache: ExecutableStatementRangeCache, lineFrom: number): SqlTextRange | null {
@@ -36,7 +48,9 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
   const pos = Math.max(0, Math.min(cursorPos, cache.doc.length));
   const line = cache.doc.lineAt(pos);
   const lineText = line.text.trim();
-  if (!lineText || lineText.startsWith("--") || lineText.startsWith("#") || isCursorOnLeadingBlockComment(line.text, pos - line.from)) return null;
+  const lineContentStart = line.from + line.text.search(/\S|$/);
+  const startsHashComment = lineText.startsWith("#") && readSqlBracedParameterAt(cache.doc.toString(), lineContentStart, cache.parameterOptions)?.syntax !== "mybatis";
+  if (!lineText || lineText.startsWith("--") || startsHashComment || isCursorOnLeadingBlockComment(line.text, pos - line.from)) return null;
 
   for (let index = 0; index < cache.ranges.length; index += 1) {
     const range = cache.ranges[index];

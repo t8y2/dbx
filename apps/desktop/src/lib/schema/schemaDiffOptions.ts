@@ -23,6 +23,9 @@ export const POSTGRES_SCHEMA_DIFF_OPTIONS: SchemaDiffOptionItem[] = [
   { id: "cascadeDelete", labelKey: "schemaDiff.options.cascadeDelete", defaultChecked: false },
   { id: "sequenceLastValues", labelKey: "schemaDiff.options.sequenceLastValues", defaultChecked: true },
   { id: "compareColumnOrder", labelKey: "schemaDiff.options.compareColumnOrder", defaultChecked: false },
+  { id: "detectRenames", labelKey: "schemaDiff.options.detectRenames", defaultChecked: false },
+  { id: "detectTableRenames", labelKey: "schemaDiff.options.detectTableRenames", defaultChecked: false },
+  { id: "enableRollback", labelKey: "schemaDiff.options.enableRollback", defaultChecked: false },
 ];
 
 export const SCHEMA_DIFF_OPTIONS_BY_DB_TYPE: Record<string, SchemaDiffOptionItem[]> = {

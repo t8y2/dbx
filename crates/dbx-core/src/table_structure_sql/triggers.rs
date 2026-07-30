@@ -26,6 +26,15 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
         }
 
         if let Some(original) = &trigger.original {
+            if dialect == StructureDialect::Oracle {
+                if has_trigger_change(trigger, original) {
+                    warnings.push(format!(
+                        "Editing existing Oracle trigger \"{}\" requires its complete source definition.",
+                        original.name
+                    ));
+                }
+                continue;
+            }
             if !has_trigger_change(trigger, original) {
                 continue;
             }

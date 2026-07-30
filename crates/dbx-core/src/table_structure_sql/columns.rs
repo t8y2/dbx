@@ -209,10 +209,20 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         }
     }
 
-    // Emit primary key constraint changes after individual column changes
+    // Keep the existing key while column DDL validates. This avoids leaving a table
+    // without a key when an incoming key column cannot be made valid.
     statements.extend(build_primary_key_sql(options, dialect, &table, warnings));
 
     statements
+}
+
+fn was_primary_key_column(column: &EditableStructureColumn) -> bool {
+    column.original.as_ref().is_some_and(|original| original.is_primary_key)
+}
+
+/// Columns that should appear in `ADD PRIMARY KEY (...)` (must remain on the table).
+fn appears_in_add_primary_key(column: &EditableStructureColumn) -> bool {
+    column.is_primary_key && !column.marked_for_drop
 }
 
 pub(super) fn build_primary_key_sql(
@@ -223,17 +233,21 @@ pub(super) fn build_primary_key_sql(
 ) -> Vec<String> {
     let capabilities = capabilities_for(options.database_type);
 
-    let old_pk_names: Vec<&str> = options
-        .columns
-        .iter()
-        .filter(|c| c.original.as_ref().is_some_and(|o| o.is_primary_key))
-        .map(|c| c.name.as_str())
-        .collect();
+    // A draft cannot drop a primary-key column. The column pass emits the user-facing
+    // warning; keep the entire PK change empty so another checked column cannot
+    // turn that invalid draft into a partial DROP/ADD constraint change.
+    if options.columns.iter().any(|column| column.marked_for_drop && was_primary_key_column(column)) {
+        return Vec::new();
+    }
 
-    let new_pk_names: Vec<&str> =
-        options.columns.iter().filter(|c| !c.marked_for_drop && c.is_primary_key).map(|c| c.name.as_str()).collect();
+    // Membership by draft id (set equality): pure rename / local reorder of the same key
+    // columns is not a PK change. ADD still lists columns in table order.
+    let old_pk_ids: HashSet<&str> =
+        options.columns.iter().filter(|c| was_primary_key_column(c)).map(|c| c.id.as_str()).collect();
+    let new_pk_ids: HashSet<&str> =
+        options.columns.iter().filter(|c| appears_in_add_primary_key(c)).map(|c| c.id.as_str()).collect();
 
-    if old_pk_names == new_pk_names {
+    if old_pk_ids == new_pk_ids {
         return Vec::new();
     }
 
@@ -246,27 +260,50 @@ pub(super) fn build_primary_key_sql(
     }
 
     let mut statements = Vec::new();
-
-    if !old_pk_names.is_empty() {
-        match dialect {
-            StructureDialect::Postgres => {
-                let raw_table = options.table_name.split('.').next_back().unwrap_or(&options.table_name);
-                let pk_name = format!("{}_pkey", clean(raw_table));
-                statements.push(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, &pk_name)));
-            }
-            StructureDialect::Mysql => {
-                statements.push(format!("ALTER TABLE {table} DROP PRIMARY KEY;"));
-            }
-            _ => {}
-        }
+    if !old_pk_ids.is_empty() {
+        let Some(drop_sql) = drop_primary_key_statement(dialect, table, options) else {
+            warnings.push(format!(
+                "Changing primary keys is not supported for {} from this editor.",
+                database_label(options.database_type)
+            ));
+            return Vec::new();
+        };
+        statements.push(drop_sql);
     }
 
+    let new_pk_names: Vec<&str> =
+        options.columns.iter().filter(|c| appears_in_add_primary_key(c)).map(|c| c.name.as_str()).collect();
     if !new_pk_names.is_empty() {
         let pk_list = new_pk_names.iter().map(|n| quote_ident(dialect, n)).collect::<Vec<_>>().join(", ");
+        // DM8: ADD [CONSTRAINT name] PRIMARY KEY; anonymous form matches Navicat/DBeaver/MySQL editors.
         statements.push(format!("ALTER TABLE {table} ADD PRIMARY KEY ({pk_list});"));
     }
 
     statements
+}
+
+/// Dialect-specific DROP for an existing primary key.
+///
+/// - MySQL: `DROP PRIMARY KEY`
+/// - Dameng (DM8): official `DROP PRIMARY KEY [RESTRICT|CASCADE]`; default RESTRICT
+///   (no CASCADE — dependent FKs should not be silently removed).
+///   System names (`CONS…`) are not stable; name-based DROP is avoided.
+///   Cluster primary keys cannot use this path (DM8 restriction) — left to the server.
+/// - Postgres: `DROP CONSTRAINT {table}_pkey` (default naming convention)
+fn drop_primary_key_statement(
+    dialect: StructureDialect,
+    table: &str,
+    options: &TableStructureSqlOptions,
+) -> Option<String> {
+    match dialect {
+        StructureDialect::Postgres => {
+            let raw_table = options.table_name.split('.').next_back().unwrap_or(&options.table_name);
+            let pk_name = format!("{}_pkey", clean(raw_table));
+            Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, &pk_name)))
+        }
+        StructureDialect::Mysql | StructureDialect::Dameng => Some(format!("ALTER TABLE {table} DROP PRIMARY KEY;")),
+        _ => None,
+    }
 }
 
 fn has_sqlserver_identity(column: &EditableStructureColumn) -> bool {

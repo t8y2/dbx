@@ -218,7 +218,8 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.();
       return;
     }
-    deps.activeOutputView.value = "result";
+    const statementCount = splitSqlStatementRanges(sql, executionDatabaseType).length;
+    deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";

@@ -19,6 +19,7 @@ describe("shortcutRegistry editor actions", () => {
     "uppercaseSelection",
     "lowercaseSelection",
     "exPasteSqlInCondition",
+    "toggleFold",
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection"];
 
@@ -100,6 +101,7 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.uppercaseSelection).toBe("Shift+Alt+U");
     expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
     expect(shortcuts.exPasteSqlInCondition).toBe("");
+    expect(shortcuts.toggleFold).toBe("Mod+.");
   });
 
   it("detects conflicts between formatter editor shortcuts and other editor shortcuts", () => {

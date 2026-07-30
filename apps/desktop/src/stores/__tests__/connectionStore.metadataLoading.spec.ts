@@ -312,6 +312,112 @@ describe("connectionStore metadata loading", () => {
     expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
   });
 
+  it("keeps concurrent table-tree and local-index refreshes in separate cache entries", async () => {
+    const treeCacheKey = "pg-1:app:public:group-tables:objects-v6";
+    const indexCacheKey = `${treeCacheKey}:table-search-index-v1`;
+    const cachedPayloads = new Map<string, unknown>([
+      [
+        treeCacheKey,
+        {
+          version: 3,
+          cachedAt: new Date().toISOString(),
+          children: [{ id: "old", label: "old_table", type: "table", connectionId: "pg-1", database: "app", schema: "public", isExpanded: false }],
+        },
+      ],
+    ]);
+    let releaseTableLists!: () => void;
+    let tableListCalls = 0;
+    const bothTableListsStarted = new Promise<void>((resolve) => {
+      releaseTableLists = resolve;
+    });
+    const listTables = vi.fn(async (_connectionId: string, _database: string, _schema: string, _filter?: string, limit?: number) => {
+      tableListCalls += 1;
+      if (tableListCalls === 2) releaseTableLists();
+      await bothTableListsStarted;
+      return limit === 2 ? ([{ name: "indexed_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]) : ([{ name: "fresh_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]);
+    });
+    const loadSchemaCache = vi.fn(async (key: string) => {
+      const payload = cachedPayloads.get(key) ?? null;
+      await Promise.resolve();
+      return payload == null ? null : structuredClone(payload);
+    });
+    const saveSchemaCache = vi.fn(async (key: string, payload: unknown) => {
+      cachedPayloads.set(key, structuredClone(payload));
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listTables,
+      loadSchemaCache,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache,
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { decodeSchemaTreeCache } = await import("@/lib/metadata/schemaTreeCache");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().desktopSettings.sidebar_table_page_size = 2;
+
+    const connection = postgresConnection();
+    const tablesGroup: TreeNode = {
+      id: "pg-1:app:public:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      schema: "public",
+      isExpanded: true,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "pg-1:app",
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: true,
+            children: [
+              {
+                id: "pg-1:app:public",
+                label: "public",
+                type: "schema",
+                connectionId: connection.id,
+                database: "app",
+                schema: "public",
+                isExpanded: true,
+                children: [tablesGroup],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    await Promise.all([store.loadObjectGroupChildren(tablesGroup, { force: true }), store.refreshSidebarTableSearchIndex(tablesGroup.id)]);
+
+    const treeCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(treeCacheKey));
+    const indexCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(indexCacheKey));
+    expect(treeCache?.children.map((node) => node.label)).toEqual(["fresh_table"]);
+    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE" }]);
+    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE" }]);
+    expect(loadSchemaCache).toHaveBeenLastCalledWith(indexCacheKey);
+  });
+
   it("bypasses Oracle object-group caches created before DIP visibility was fixed", async () => {
     const listTables = vi.fn().mockResolvedValue([
       { name: "V_ONE", table_type: "VIEW", comment: null },
@@ -336,6 +442,7 @@ describe("connectionStore metadata loading", () => {
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       loadSchemaCache,
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -541,6 +648,65 @@ describe("connectionStore metadata loading", () => {
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
     expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions"]);
+  });
+
+  it.each(["opengauss", "kingbase"] as const)("reloads %s sidebar schemas when system visibility changes", async (dbType) => {
+    const listSchemaInfos = vi.fn().mockResolvedValue([
+      { name: "information_schema", comment: null },
+      { name: "pg_catalog", comment: null },
+      { name: "public", comment: null },
+    ]);
+    const loadSchemaCache = vi.fn().mockResolvedValue(null);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listSchemaInfos,
+      loadSchemaCache,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = { ...postgresConnection(), id: `${dbType}-1`, db_type: dbType, show_system_schemas: false } as ConnectionConfig;
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: `${connection.id}:app`,
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: false,
+            children: [],
+          },
+        ],
+      },
+    ];
+    const databaseNode = store.treeNodes[0]!.children![0]!;
+
+    await store.loadSchemas(connection.id, "app");
+    expect(databaseNode.children?.map((node) => node.label).filter((label) => label !== "tree.extensions")).toEqual(["public"]);
+
+    store.connections[0]!.show_system_schemas = true;
+    databaseNode.children = [];
+    databaseNode.isExpanded = false;
+    await store.loadSchemas(connection.id, "app");
+
+    expect(loadSchemaCache.mock.calls.map(([key]) => key)).toEqual([`${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:show-system`]);
+    expect(databaseNode.children?.map((node) => node.label).filter((label) => label !== "tree.extensions")).toEqual(["information_schema", "pg_catalog", "public"]);
   });
 
   it("clears a failed metadata warning when the driver hint finishes during retry", async () => {
@@ -891,6 +1057,7 @@ describe("connectionStore metadata loading", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       listObjects,
       loadSchemaCache: vi.fn().mockResolvedValue(null),
@@ -1224,6 +1391,7 @@ describe("connectionStore metadata loading", () => {
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       loadSchemaCache,
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -1293,6 +1461,7 @@ describe("connectionStore metadata loading", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),

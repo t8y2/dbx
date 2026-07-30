@@ -147,6 +147,36 @@ function getItemClasses(state: "checked" | "unchecked" | "indeterminate"): strin
             </SelectContent>
           </Select>
         </div>
+
+        <!-- Advanced options -->
+        <div class="col-span-2 pt-3 pb-1 text-xs font-medium text-muted-foreground border-t mt-2">{{ t("schemaDiff.options.advancedSection") }}</div>
+
+        <label class="pt-2 text-xs font-medium text-muted-foreground" for="schema-diff-rename-threshold">{{ t("schemaDiff.options.renameThreshold") }}</label>
+        <div v-if="localOptions.detectRenames || localOptions.detectTableRenames" class="flex items-center gap-2 pt-1">
+          <input id="schema-diff-rename-threshold" type="range" min="0" max="1" step="0.05" v-model.number="localOptions.renameThreshold" class="flex-1 h-1.5 accent-primary cursor-pointer" />
+          <span class="text-xs font-mono w-10 text-right">{{ localOptions.renameThreshold.toFixed(2) }}</span>
+        </div>
+        <div v-else class="pt-1 text-xs text-muted-foreground italic">
+          {{ t("schemaDiff.options.detectRenames") }}
+        </div>
+
+        <label class="pt-2 text-xs font-medium text-muted-foreground" for="schema-diff-compat-threshold">{{ t("schemaDiff.options.compatibilityThreshold") }}</label>
+        <div class="flex items-center gap-2 pt-1">
+          <input id="schema-diff-compat-threshold" type="range" min="0" max="1" step="0.05" v-model.number="localOptions.compatibilityThreshold" class="flex-1 h-1.5 accent-primary cursor-pointer" />
+          <span class="text-xs font-mono w-10 text-right">{{ localOptions.compatibilityThreshold.toFixed(2) }}</span>
+        </div>
+
+        <label class="pt-2 text-xs font-medium text-muted-foreground" for="schema-diff-source-dialect">{{ t("schemaDiff.options.sourceDialect") }}</label>
+        <input id="schema-diff-source-dialect" v-model="localOptions.sourceDialect" class="h-8 w-full rounded-md border border-input bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-ring" :placeholder="t('schemaDiff.options.dialectAuto')" />
+
+        <label class="pt-2 text-xs font-medium text-muted-foreground" for="schema-diff-target-dialect">{{ t("schemaDiff.options.targetDialect") }}</label>
+        <input id="schema-diff-target-dialect" v-model="localOptions.targetDialect" class="h-8 w-full rounded-md border border-input bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-ring" :placeholder="t('schemaDiff.options.dialectAuto')" />
+
+        <div class="col-span-2 pt-3 pb-1 text-xs font-medium text-muted-foreground border-t mt-2">{{ t("schemaDiff.options.batchSection") }}</div>
+
+        <div class="flex items-center gap-2 col-span-2 pt-1">
+          <input id="schema-diff-batch-patterns" v-model="localOptions.batchPatterns" class="h-8 w-full rounded-md border border-input bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-ring" :placeholder="t('schemaDiff.options.batchPatterns')" />
+        </div>
       </div>
     </div>
 

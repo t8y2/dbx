@@ -1,6 +1,18 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { codeMirrorSqlDialectForConnection, connectionShouldDiscoverJdbcSchemas, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect, sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
+import {
+  codeMirrorSqlDialectForConnection,
+  connectionShouldDiscoverJdbcSchemas,
+  connectionShouldLoadIdentifierQuote,
+  connectionUsesDatabaseObjectTreeMode,
+  effectiveDatabaseTypeForConnection,
+  gaussdbIdentifierQuoteOverride,
+  gaussdbIdentifierQuoteStyle,
+  inferJdbcDialect,
+  setGaussdbIdentifierQuoteStyle,
+  sqlSnippetDatabaseTypeForConnection,
+  supportsGaussdbIdentifierQuoteStyle,
+} from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 test("infers GoldenDB for generic JDBC connections", () => {
   assert.equal(
@@ -29,6 +41,16 @@ test("infers JDBC dialect from driver profile", () => {
   );
 });
 
+test("uses dedicated ClickHouse editor syntax for inferred JDBC connections", () => {
+  const connection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:clickhouse://127.0.0.1:8123/default",
+  };
+
+  assert.equal(inferJdbcDialect(connection), "clickhouse");
+  assert.equal(codeMirrorSqlDialectForConnection(connection), "clickhouse");
+});
+
 test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
   const gaussdbConnection = {
     db_type: "jdbc" as const,
@@ -45,6 +67,42 @@ test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
   assert.equal(connectionUsesDatabaseObjectTreeMode(gaussdbConnection), false);
   assert.equal(inferJdbcDialect(opengaussConnection), "opengauss");
   assert.equal(connectionUsesDatabaseObjectTreeMode(opengaussConnection), false);
+});
+
+test("loads driver-reported identifier quotes for compatible JDBC connections", () => {
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.opengauss.Driver" }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.postgresql.Driver" }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" }), true);
+});
+
+test("GaussDB server metadata overrides PostgreSQL-compatible JDBC driver identity", () => {
+  const connection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:postgresql://localhost:5432/postgres",
+    jdbc_driver_class: "org.postgresql.Driver",
+    database_info: { productName: "GaussDB Kernel" },
+  };
+
+  assert.equal(inferJdbcDialect(connection), "gaussdb");
+  assert.equal(effectiveDatabaseTypeForConnection(connection), "gaussdb");
+  assert.equal(connectionShouldLoadIdentifierQuote(connection), true);
+});
+
+test("persists and resolves GaussDB identifier quote overrides", () => {
+  const config = {
+    db_type: "jdbc" as const,
+    jdbc_driver_paths: ["/drivers/gaussdb.jar"],
+    external_config: { retained: true } as unknown,
+  };
+
+  assert.equal(supportsGaussdbIdentifierQuoteStyle(config), true);
+  assert.equal(gaussdbIdentifierQuoteStyle(config), "auto");
+  setGaussdbIdentifierQuoteStyle(config, "backtick");
+  assert.deepEqual(config.external_config, { retained: true, gaussdbIdentifierQuoteStyle: "backtick" });
+  assert.equal(gaussdbIdentifierQuoteOverride(config), "`");
+  assert.equal(connectionShouldLoadIdentifierQuote(config), false);
 });
 
 test("infers Dameng JDBC connections", () => {

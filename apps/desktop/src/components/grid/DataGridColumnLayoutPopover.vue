@@ -34,6 +34,8 @@ const listScrollTop = ref(0);
 const draggedDisplayPosition = ref<number | null>(null);
 const dragTargetDisplayPosition = ref<number | null>(null);
 const dragInsertionIndex = ref<number | null>(null);
+const dragPreviewOption = ref<DataGridColumnLayoutOption | null>(null);
+const dragPreviewStyle = ref<CSSProperties>();
 let columnDragAutoScrollFrame = 0;
 
 interface ColumnDragState {
@@ -45,6 +47,10 @@ interface ColumnDragState {
   lastClientY: number;
   active: boolean;
   handle: HTMLElement;
+  option: DataGridColumnLayoutOption;
+  previewOffsetX: number;
+  previewOffsetY: number;
+  previewWidth: number;
   previousBodyUserSelect: string;
 }
 
@@ -77,6 +83,18 @@ const renderedOptionsStyle = computed<CSSProperties | undefined>(() => {
     transform: `translateY(${virtualWindow.value.offsetTop}px)`,
   };
 });
+
+function columnLayoutRowStyle(option: DataGridColumnLayoutOption): CSSProperties {
+  const style: CSSProperties = { height: `${DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT}px` };
+  const sourcePosition = draggedDisplayPosition.value;
+  const targetPosition = dragTargetDisplayPosition.value;
+  if (sourcePosition === null || targetPosition === null || option.displayPosition === sourcePosition) return style;
+  let offset = 0;
+  if (targetPosition < sourcePosition && option.displayPosition >= targetPosition && option.displayPosition < sourcePosition) offset = DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT;
+  if (targetPosition > sourcePosition && option.displayPosition > sourcePosition && option.displayPosition <= targetPosition) offset = -DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT;
+  if (!offset) return style;
+  return { ...style, transform: `translateY(${offset}px)`, transition: "transform 120ms ease-out" };
+}
 
 function resetListScroll() {
   listScrollTop.value = 0;
@@ -113,6 +131,8 @@ function resetColumnDragState() {
   draggedDisplayPosition.value = null;
   dragTargetDisplayPosition.value = null;
   dragInsertionIndex.value = null;
+  dragPreviewOption.value = null;
+  dragPreviewStyle.value = undefined;
 }
 
 function updateColumnDragTarget(clientY: number) {
@@ -163,6 +183,16 @@ function scheduleColumnDragAutoScroll() {
   columnDragAutoScrollFrame = window.requestAnimationFrame(runColumnDragAutoScroll);
 }
 
+function updateColumnDragPreview(clientX: number, clientY: number) {
+  const state = columnDragState;
+  if (!state?.active) return;
+  dragPreviewStyle.value = {
+    height: `${DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT}px`,
+    transform: `translate3d(${clientX - state.previewOffsetX}px, ${clientY - state.previewOffsetY}px, 0)`,
+    width: `${state.previewWidth}px`,
+  };
+}
+
 function activateColumnDrag(event: PointerEvent) {
   const state = columnDragState;
   if (!state || state.active) return;
@@ -170,6 +200,8 @@ function activateColumnDrag(event: PointerEvent) {
   state.previousBodyUserSelect = document.body.style.userSelect;
   document.body.style.userSelect = "none";
   draggedDisplayPosition.value = state.fromDisplayPosition;
+  dragPreviewOption.value = state.option;
+  updateColumnDragPreview(event.clientX, event.clientY);
   updateColumnDragTarget(event.clientY);
 }
 
@@ -182,6 +214,7 @@ function onWindowPointerMove(event: PointerEvent) {
   if (!state.active && !movedPastThreshold) return;
   event.preventDefault();
   activateColumnDrag(event);
+  updateColumnDragPreview(event.clientX, event.clientY);
   updateColumnDragTarget(event.clientY);
   scheduleColumnDragAutoScroll();
 }
@@ -207,6 +240,19 @@ function onWindowKeyDown(event: KeyboardEvent) {
   resetColumnDragState();
 }
 
+function columnDragPreviewMetrics(handle: HTMLElement, event: PointerEvent) {
+  const rowRect = handle.closest<HTMLElement>("[data-column-layout-row]")?.getBoundingClientRect();
+  const listRect = listRef.value?.getBoundingClientRect();
+  const previewWidth = rowRect?.width || listRect?.width || 288;
+  const rowLeft = rowRect?.width ? rowRect.left : (listRect?.left ?? event.clientX);
+  const rowTop = rowRect?.height ? rowRect.top : event.clientY - DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT / 2;
+  return {
+    previewOffsetX: Math.min(previewWidth, Math.max(0, event.clientX - rowLeft)),
+    previewOffsetY: Math.min(DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT, Math.max(0, event.clientY - rowTop)),
+    previewWidth,
+  };
+}
+
 function startColumnDrag(option: DataGridColumnLayoutOption, event: PointerEvent) {
   if (!columnReorderEnabled.value || event.button !== 0) return;
   resetColumnDragState();
@@ -220,6 +266,8 @@ function startColumnDrag(option: DataGridColumnLayoutOption, event: PointerEvent
     lastClientY: event.clientY,
     active: false,
     handle,
+    option,
+    ...columnDragPreviewMetrics(handle, event),
     previousBodyUserSelect: "",
   };
   window.addEventListener("pointermove", onWindowPointerMove, true);
@@ -281,8 +329,8 @@ onBeforeUnmount(resetColumnDragState);
               data-column-layout-row
               :data-display-position="option.displayPosition"
               class="grid w-full grid-cols-[1.5rem_minmax(0,1fr)] items-center px-1 text-xs hover:bg-accent"
-              :class="{ 'bg-accent/60': draggedDisplayPosition === option.displayPosition }"
-              :style="{ height: `${DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT}px` }"
+              :class="{ 'opacity-25': draggedDisplayPosition === option.displayPosition }"
+              :style="columnLayoutRowStyle(option)"
             >
               <button
                 type="button"
@@ -337,4 +385,24 @@ onBeforeUnmount(resetColumnDragState);
       </div>
     </PopoverContent>
   </Popover>
+  <Teleport to="body">
+    <div
+      v-if="dragPreviewOption"
+      data-column-drag-preview
+      aria-hidden="true"
+      class="pointer-events-none fixed left-0 top-0 z-[100] grid grid-cols-[1.5rem_1.5rem_minmax(0,1fr)] items-center rounded border bg-background px-1 text-xs shadow-lg ring-1 ring-primary/40 will-change-transform dark:bg-muted"
+      :style="dragPreviewStyle"
+    >
+      <span class="flex h-5 w-5 items-center justify-center text-muted-foreground">
+        <GripVertical class="h-3.5 w-3.5" />
+      </span>
+      <span class="flex h-4 w-4 items-center justify-center rounded border" :class="dragPreviewOption.visible ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'">
+        <Check class="h-3 w-3 stroke-[3]" />
+      </span>
+      <span class="flex min-w-0 items-baseline gap-1.5">
+        <span class="truncate font-mono text-xs">{{ dragPreviewOption.column }}</span>
+        <span v-if="dragPreviewOption.comment" class="truncate text-[10px] text-muted-foreground">{{ dragPreviewOption.comment }}</span>
+      </span>
+    </div>
+  </Teleport>
 </template>

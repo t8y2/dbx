@@ -196,17 +196,30 @@ describe("data grid column layout popover", () => {
     dispatchPointer(window, "pointermove", { clientY: 18 });
     await nextTick();
     expect(host.querySelector("[data-column-drop-indicator]")).toBeNull();
+    expect(document.body.querySelector("[data-column-drag-preview]")).toBeNull();
 
     dispatchPointer(window, "pointermove", { clientY: 50 });
     await nextTick();
+    const dragPreview = document.body.querySelector<HTMLElement>("[data-column-drag-preview]")!;
+    const initialPreviewTransform = dragPreview.style.transform;
     expect(host.querySelector<HTMLElement>("[data-column-drop-indicator]")?.style.top).toBe(`${2 * DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT}px`);
+    expect(dragPreview.textContent).toContain("column_0");
+    expect(initialPreviewTransform).toBe("translate3d(0px, 36px, 0)");
+    expect(host.querySelector<HTMLElement>('[data-display-position="1"]')?.style.transform).toBe(`translateY(-${DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT}px)`);
     expect(document.body.style.userSelect).toBe("none");
 
-    dispatchPointer(window, "pointerup", { clientY: 50 });
-    dispatchPointer(window, "pointerup", { clientY: 50 });
+    dispatchPointer(window, "pointermove", { clientX: 36, clientY: 52 });
+    await nextTick();
+    expect(dragPreview.style.transform).not.toBe(initialPreviewTransform);
+    expect(dragPreview.style.transform).toBe("translate3d(16px, 38px, 0)");
+
+    dispatchPointer(window, "pointerup", { clientX: 36, clientY: 52 });
+    dispatchPointer(window, "pointerup", { clientX: 36, clientY: 52 });
+    await nextTick();
     expect(moveDisplayableColumn).toHaveBeenCalledOnce();
     expect(moveDisplayableColumn).toHaveBeenCalledWith(0, 1);
     expect(toggleColumnVisibility).not.toHaveBeenCalled();
+    expect(document.body.querySelector("[data-column-drag-preview]")).toBeNull();
     expect(document.body.style.userSelect).toBe("");
   });
 
@@ -246,6 +259,7 @@ describe("data grid column layout popover", () => {
     host.querySelector<HTMLButtonElement>(".test-close-popover")?.click();
     await nextTick();
     expect(host.querySelector("[data-column-drop-indicator]")).toBeNull();
+    expect(document.body.querySelector("[data-column-drag-preview]")).toBeNull();
     dispatchPointer(window, "pointerup", { clientY: 50 });
     expect(moveDisplayableColumn).not.toHaveBeenCalled();
   });
@@ -267,6 +281,7 @@ describe("data grid column layout popover", () => {
 
     expect(moveDisplayableColumn).not.toHaveBeenCalled();
     expect(host.querySelector("[data-column-drop-indicator]")).toBeNull();
+    expect(document.body.querySelector("[data-column-drag-preview]")).toBeNull();
     expect(document.body.style.userSelect).toBe("");
   });
 
@@ -300,6 +315,7 @@ describe("data grid column layout popover", () => {
 
     expect(list.scrollTop).toBeGreaterThan(DATA_GRID_COLUMN_LAYOUT_VIEWPORT_HEIGHT);
     expect(host.querySelector('[data-display-position="0"]')).toBeNull();
+    expect(document.body.querySelector("[data-column-drag-preview]")?.textContent).toContain("column_0");
     dispatchPointer(window, "pointerup", { pointerId: 7, clientY: 286 });
     expect(moveDisplayableColumn).toHaveBeenCalledOnce();
     expect(moveDisplayableColumn.mock.calls[0]?.[1]).toBeGreaterThan(10);

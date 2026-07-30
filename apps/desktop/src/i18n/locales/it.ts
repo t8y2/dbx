@@ -3453,6 +3453,9 @@ export default withEnglishFallback({
       error: "Errore",
       cancelled: "Annullato",
     },
+    fileProgress: "File {current} di {total}",
+    fileColumn: "File",
+    totalFiles: "{count} file",
   },
   diff: {
     title: "Confronta Schemi",

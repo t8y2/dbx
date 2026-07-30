@@ -3649,6 +3649,9 @@ export default {
       error: "Error",
       cancelled: "Cancelled",
     },
+    fileProgress: "File {current} of {total}",
+    fileColumn: "File",
+    totalFiles: "{count} files",
   },
   sqlFileTree: {
     title: "SQL Files",

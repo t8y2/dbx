@@ -3649,6 +3649,9 @@ export default withEnglishFallback({
       error: "错误",
       cancelled: "已取消",
     },
+    fileProgress: "第 {current}/{total} 个文件",
+    fileColumn: "文件",
+    totalFiles: "{count} 个文件",
   },
   sqlFileTree: {
     title: "SQL 文件",

@@ -3454,6 +3454,9 @@ export default withEnglishFallback({
       error: "エラー",
       cancelled: "キャンセル済み",
     },
+    fileProgress: "ファイル {current}/{total}",
+    fileColumn: "ファイル",
+    totalFiles: "{count} ファイル",
   },
   diff: {
     title: "スキーマを比較",

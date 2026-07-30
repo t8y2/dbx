@@ -3125,6 +3125,9 @@ export default withEnglishFallback({
       error: "錯誤",
       cancelled: "已取消",
     },
+    fileProgress: "第 {current}/{total} 個檔案",
+    fileColumn: "檔案",
+    totalFiles: "{count} 個檔案",
     runInBackground: "背景執行",
   },
   diff: {

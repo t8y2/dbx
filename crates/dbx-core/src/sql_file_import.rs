@@ -390,7 +390,32 @@ pub async fn execute_sql_file_paths(
             return Err(error);
         }
     };
-    for file_path in file_paths {
+    let file_count = file_paths.len();
+    let mut prev_statement_index = 0usize;
+    let mut prev_success_count = 0usize;
+    let mut prev_failure_count = 0usize;
+    let mut prev_affected_rows = 0u64;
+    for (file_index, file_path) in file_paths.iter().enumerate() {
+        let file_name = file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+
+        // Emit a file-boundary progress event so the frontend knows which file is
+        // currently executing and can display a "File N/M" indicator.
+        if file_count > 1 {
+            emit(SqlFileProgress {
+                execution_id: request.execution_id.clone(),
+                status: SqlFileStatus::Running,
+                statement_index: progress.statement_index,
+                success_count: progress.success_count,
+                failure_count: progress.failure_count,
+                affected_rows: progress.affected_rows,
+                elapsed_ms: started_at.elapsed().as_millis(),
+                statement_summary: String::new(),
+                error: None,
+                file_index: Some(file_index),
+                file_name: Some(file_name.clone()),
+            });
+        }
+
         let mut splitter = StreamingSqlFileSplitter::new(database_type, options);
         let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
         let mut decoder = match SqlFileStreamDecoder::open(file_path).await {
@@ -457,6 +482,28 @@ pub async fn execute_sql_file_paths(
             &mut emit,
         )
         .await?;
+
+        // After each file, emit a per-file summary with diff-based counters so
+        // the frontend can build a per-file breakdown table.
+        if file_count > 1 {
+            emit(SqlFileProgress {
+                execution_id: request.execution_id.clone(),
+                status: SqlFileStatus::StatementDone,
+                statement_index: progress.statement_index - prev_statement_index,
+                success_count: progress.success_count - prev_success_count,
+                failure_count: progress.failure_count - prev_failure_count,
+                affected_rows: progress.affected_rows - prev_affected_rows,
+                elapsed_ms: started_at.elapsed().as_millis(),
+                statement_summary: String::new(),
+                error: None,
+                file_index: Some(file_index),
+                file_name: Some(file_name),
+            });
+            prev_statement_index = progress.statement_index;
+            prev_success_count = progress.success_count;
+            prev_failure_count = progress.failure_count;
+            prev_affected_rows = progress.affected_rows;
+        }
     }
     emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
     Ok(())

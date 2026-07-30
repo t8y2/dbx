@@ -237,6 +237,12 @@ pub struct SqlFileProgress {
     pub elapsed_ms: u128,
     pub statement_summary: String,
     pub error: Option<String>,
+    /// When processing multiple files, the 0-based index of the current file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_index: Option<usize>,
+    /// When processing multiple files, the name of the current file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
 }
 
 pub fn decode_sql_file_bytes(bytes: &[u8]) -> Result<String, String> {

@@ -17,7 +17,7 @@ test("SQL file execution dialog SFC compiles", () => {
 });
 
 test("SQL file execution dialog keeps actions visible within narrow viewports", () => {
-  assert.match(dialogSource, /summaryExpanded[\s\S]*max-h-\[calc\(var\(--dbx-viewport-height\)-2rem\)\][\s\S]*max-h-\[calc\(var\(--dbx-viewport-height\)-6rem\)\]/);
+  assert.match(dialogSource, /DialogScrollContent class="[^"]*max-h-\[calc\(var\(--dbx-viewport-height\)-6rem\)\][^"]*flex-col[^"]*overflow-hidden/);
   assert.match(dialogSource, /<DialogHeader class="shrink-0">/);
   assert.match(dialogSource, /class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3"/);
   assert.match(dialogSource, /class="grid grid-cols-1 gap-3 sm:grid-cols-2"/);
@@ -30,8 +30,6 @@ test("SQL file execution summary reserves space for aggregate columns", () => {
   assert.match(dialogSource, /<table class="w-full table-fixed">/);
   assert.match(dialogSource, /<colgroup>[\s\S]*<col \/>[\s\S]*<col class="w-\[4\.5rem\]" \/>[\s\S]*<col class="w-\[5\.5rem\]" \/>[\s\S]*<\/colgroup>/);
   assert.match(dialogSource, /<td class="px-2\.5 py-1\.5 truncate" :title="item\.fileName">/);
-  assert.match(dialogSource, /summaryExpanded \? 'max-h-\[min\(56vh,600px\)\]' : 'max-h-\[min\(22vh,200px\)\]'/);
-  assert.match(dialogSource, /@click="summaryExpanded = !summaryExpanded"/);
   assert.match(dialogSource, /<thead class="sticky top-0 z-10 border-b border-border bg-muted text-foreground shadow-/);
   assert.match(dialogSource, /<tfoot class="sticky bottom-0 z-10 border-t-2 border-primary\/35 bg-muted font-semibold text-foreground/);
   assert.match(dialogSource, /<th scope="row" class="px-2\.5 py-2 text-left">\{\{ t\("sqlFile\.totalFiles"/);

@@ -21,7 +21,7 @@ import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connect
 import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Maximize2, Minimize2, Play, Square, X } from "@lucide/vue";
+import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -107,9 +107,6 @@ interface PerFileSummary {
 const perFileResults = ref<PerFileSummary[]>([]);
 const currentFileIndex = ref(-1);
 const currentFileName = ref("");
-// Keep the regular execution flow compact, but let large batches use most of
-// the viewport without opening a second, nested dialog.
-const summaryExpanded = ref(false);
 function resetPerFileState() {
   perFileResults.value = [];
   currentFileIndex.value = -1;
@@ -222,7 +219,6 @@ function resetExecution() {
   terminalStatus.value = "idle";
   terminalError.value = "";
   refreshedTarget.value = false;
-  summaryExpanded.value = false;
   resetPerFileState();
 }
 
@@ -548,7 +544,7 @@ watch(
 
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
-    <DialogScrollContent :class="['flex min-h-0 min-w-0 flex-col overflow-hidden', summaryExpanded ? 'max-h-[calc(var(--dbx-viewport-height)-2rem)] sm:max-w-[min(96vw,1180px)]' : 'max-h-[calc(var(--dbx-viewport-height)-6rem)] sm:max-w-[860px]']" :trap-focus="false" @interact-outside.prevent>
+    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 min-w-0 flex-col overflow-hidden sm:max-w-[860px]" :trap-focus="false" @interact-outside.prevent>
       <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <FileCode class="w-4 h-4" />
@@ -697,17 +693,7 @@ watch(
           </div>
 
           <template v-if="!running && previews.length > 1 && perFileResults.length > 0">
-            <div class="flex items-center justify-between gap-3">
-              <div class="text-xs font-medium text-muted-foreground">
-                {{ t("sqlFile.totalFiles", { count: perFileResults.length }) }}
-              </div>
-              <Button variant="outline" size="sm" class="h-7 shrink-0 px-2 text-xs" :aria-pressed="summaryExpanded" @click="summaryExpanded = !summaryExpanded">
-                <Minimize2 v-if="summaryExpanded" class="mr-1 h-3.5 w-3.5" />
-                <Maximize2 v-else class="mr-1 h-3.5 w-3.5" />
-                {{ summaryExpanded ? t("sqlFile.restoreSummary") : t("sqlFile.expandSummary") }}
-              </Button>
-            </div>
-            <div :class="summaryExpanded ? 'max-h-[min(56vh,600px)]' : 'max-h-[min(22vh,200px)]'" class="min-w-0 overflow-y-auto rounded-md border text-xs">
+            <div class="max-h-[min(22vh,200px)] min-w-0 overflow-y-auto rounded-md border text-xs">
               <!-- Keep aggregate columns readable when a file name is long. -->
               <table class="w-full table-fixed">
                 <colgroup>

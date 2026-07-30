@@ -3913,8 +3913,6 @@ export default withEnglishFallback({
     fileProgress: "第 {current}/{total} 个文件",
     fileColumn: "文件",
     totalFiles: "{count} 个文件",
-    expandSummary: "展开统计表",
-    restoreSummary: "还原统计表",
   },
   sqlFileTree: {
     title: "SQL 文件",

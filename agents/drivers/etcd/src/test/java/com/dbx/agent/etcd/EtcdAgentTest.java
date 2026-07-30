@@ -297,7 +297,7 @@ final class EtcdAgentTest {
     }
 
     @Test
-    void watchOverflowClearsBufferedPayloadAndReportsTerminalState() {
+    void watchOverflowPreservesBufferedPayloadAndReportsTerminalState() {
         EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
         EtcdAgent.EtcdWatchState watch = new EtcdAgent.EtcdWatchState("watch-1", session);
         List<Map<String, Object>> events = List.of(Map.of("eventType", "put"));
@@ -309,7 +309,9 @@ final class EtcdAgentTest {
         Map<String, Object> result = watch.poll();
 
         Assertions.assertEquals(0, session.watchBufferedBytes());
-        Assertions.assertTrue(((List<?>) result.get("batches")).isEmpty());
+        List<?> batches = (List<?>) result.get("batches");
+        Assertions.assertEquals(1, batches.size());
+        Assertions.assertEquals("1", ((Map<?, ?>) batches.get(0)).get("revision"));
         Assertions.assertEquals("overflow", ((Map<?, ?>) result.get("terminal")).get("reason"));
     }
 

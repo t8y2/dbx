@@ -1318,7 +1318,6 @@ public final class EtcdAgent {
             if (terminalReason != null) return;
             terminalReason = "overflow";
             terminalMessage = "ETCD_WATCH_OVERFLOW: the event buffer reached its byte or event limit";
-            clearBuffered();
             closeWatcher();
         }
 

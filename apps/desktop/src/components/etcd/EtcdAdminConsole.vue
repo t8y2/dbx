@@ -168,7 +168,7 @@ function reset(message = "") {
 }
 async function dangerousApproval(action: string, params: Record<string, unknown>) {
   const preflight = await api.etcdPreflight(props.connectionId, action, params);
-  const entered = window.prompt(`此操作可能影响 etcd 集群。请输入确认文本：\n${preflight.confirmationText}`, "");
+  const entered = window.prompt(t("etcd.admin.confirmationPrompt", { confirmationText: preflight.confirmationText }), "");
   if (entered !== preflight.confirmationText) return null;
   return { preflightToken: preflight.token, confirmationText: entered };
 }
@@ -660,24 +660,24 @@ onBeforeUnmount(() => {
             <label class="block space-y-1.5">
               <span class="text-xs font-medium">{{ t("etcd.admin.compactRevision") }}</span>
               <Input v-model="revision" inputmode="numeric" :placeholder="t('etcd.admin.compactPlaceholder', { revision: currentRevision ?? '' })" />
-              <span class="block text-xs leading-5 text-muted-foreground">将删除小于该值的历史记录。执行前请确认不再需要这些历史版本。</span>
+              <span class="block text-xs leading-5 text-muted-foreground">{{ t("etcd.admin.compactInputHint") }}</span>
             </label>
-            <Button variant="destructive" :disabled="busy || maintenanceApprovalLoading || !/^\d+$/.test(revision)" @click="compact">清理历史版本</Button>
+            <Button variant="destructive" :disabled="busy || maintenanceApprovalLoading || !/^\d+$/.test(revision)" @click="compact">{{ t("etcd.admin.compactAction") }}</Button>
           </section>
           <section class="space-y-4 px-5 py-5">
             <div class="flex items-start gap-3">
               <HardDrive class="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
               <div>
-                <h3 class="font-medium">回收磁盘空间</h3>
-                <p class="mt-1 text-xs leading-5 text-muted-foreground">整理 backend 文件中的空洞空间。适合压缩后磁盘占用仍然偏高，或监控显示碎片率较高的场景。</p>
+                <h3 class="font-medium">{{ t("etcd.admin.defragTitle") }}</h3>
+                <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("etcd.admin.defragDescription") }}</p>
               </div>
             </div>
-            <div class="border-l-2 border-amber-500/70 pl-3 text-xs leading-5 text-muted-foreground">每个成员整理期间会短暂不可用。系统会逐个执行，并将当前 leader 放在最后；请先确认集群健康。</div>
+            <div class="border-l-2 border-amber-500/70 pl-3 text-xs leading-5 text-muted-foreground">{{ t("etcd.admin.defragWarning") }}</div>
             <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span class="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2.5 py-1.5"><Server class="h-3.5 w-3.5" />将处理 {{ endpoints.length }} 个可达成员</span>
-              <span v-if="leaderEndpoint" class="max-w-full truncate rounded-md border bg-muted/30 px-2.5 py-1.5" :title="leaderEndpoint">Leader 最后：{{ leaderEndpoint }}</span>
+              <span class="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2.5 py-1.5"><Server class="h-3.5 w-3.5" />{{ t("etcd.admin.defragReachableMembers", { count: endpoints.length }) }}</span>
+              <span v-if="leaderEndpoint" class="max-w-full truncate rounded-md border bg-muted/30 px-2.5 py-1.5" :title="leaderEndpoint">{{ t("etcd.admin.leaderLast", { endpoint: leaderEndpoint }) }}</span>
             </div>
-            <Button variant="outline" :disabled="busy || maintenanceApprovalLoading || !endpoints.length" @click="defrag">回收 {{ endpoints.length }} 个成员的磁盘空间</Button>
+            <Button variant="outline" :disabled="busy || maintenanceApprovalLoading || !endpoints.length" @click="defrag">{{ t("etcd.admin.defragAction", { count: endpoints.length }) }}</Button>
           </section>
         </div>
       </template>
@@ -685,67 +685,78 @@ onBeforeUnmount(() => {
         <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
           <div class="min-w-0">
             <div class="flex items-center gap-2">
-              <h2 class="text-base font-semibold">监视器</h2>
-              <span class="text-xs text-muted-foreground">{{ watchMonitors.length }} 个已创建</span><span v-if="runningWatchCount" class="rounded-full border border-emerald-500/50 px-2 py-0.5 text-xs text-emerald-700 dark:text-emerald-300">{{ runningWatchCount }} 个运行中</span>
+              <h2 class="text-base font-semibold">{{ t("etcd.admin.watch") }}</h2>
+              <span class="text-xs text-muted-foreground">{{ t("etcd.admin.watchCount", { count: watchMonitors.length }) }}</span
+              ><span v-if="runningWatchCount" class="rounded-full border border-emerald-500/50 px-2 py-0.5 text-xs text-emerald-700 dark:text-emerald-300">{{ t("etcd.admin.runningWatchCount", { count: runningWatchCount }) }}</span>
             </div>
-            <p class="mt-1 text-xs text-muted-foreground">仅在当前连接会话中运行，关闭连接或离开 etcd 页面后会停止。</p>
+            <p class="mt-1 text-xs text-muted-foreground">{{ t("etcd.admin.watchSessionHint") }}</p>
           </div>
           <div class="flex w-full items-center gap-2 sm:w-auto">
-            <div class="relative min-w-0 flex-1 sm:w-56 sm:flex-none"><Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input v-model="watchSearch" class="h-9 pl-8 text-sm" placeholder="搜索监视器" /></div>
-            <Button size="sm" class="h-9 shrink-0 gap-1.5" @click="openWatchDialog()"><Plus class="h-3.5 w-3.5" />新建</Button>
+            <div class="relative min-w-0 flex-1 sm:w-56 sm:flex-none"><Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input v-model="watchSearch" class="h-9 pl-8 text-sm" :placeholder="t('etcd.admin.watchSearch')" /></div>
+            <Button size="sm" class="h-9 shrink-0 gap-1.5" @click="openWatchDialog()"><Plus class="h-3.5 w-3.5" />{{ t("etcd.admin.newWatch") }}</Button>
           </div>
         </div>
         <div class="grid min-h-[22rem] gap-5 xl:grid-cols-[minmax(22rem,0.9fr)_minmax(0,1.1fr)]">
           <section class="min-w-0 space-y-2">
             <div class="flex items-center justify-between text-xs text-muted-foreground">
-              <span>已创建的监视器</span><span>{{ filteredWatchMonitors.length }} 项</span>
+              <span>{{ t("etcd.admin.watchList") }}</span
+              ><span>{{ t("etcd.admin.itemCount", { count: filteredWatchMonitors.length }) }}</span>
             </div>
             <div class="overflow-hidden rounded-md border">
-              <div class="grid grid-cols-[minmax(9rem,1fr)_5rem_6.5rem_auto] gap-2 border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground"><span>Key</span><span>范围</span><span>状态</span><span class="text-right">操作</span></div>
+              <div class="grid grid-cols-[minmax(9rem,1fr)_5rem_6.5rem_auto] gap-2 border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                <span>Key</span><span>{{ t("etcd.admin.scope") }}</span
+                ><span>{{ t("etcd.admin.status") }}</span
+                ><span class="text-right">{{ t("etcd.admin.actions") }}</span>
+              </div>
               <div v-for="monitor in filteredWatchMonitors" :key="monitor.id" class="grid grid-cols-[minmax(9rem,1fr)_5rem_6.5rem_auto] items-center gap-2 border-b px-3 py-2.5 text-sm last:border-b-0" :class="selectedWatchId === monitor.id ? 'bg-accent/60' : ''">
                 <button type="button" class="min-w-0 text-left" @click="selectedWatchId = monitor.id">
                   <code class="block truncate" :title="monitor.key">{{ monitor.key }}</code
                   ><span v-if="monitor.error" class="mt-1 block truncate text-xs text-destructive" :title="monitor.error">{{ monitor.error }}</span>
                 </button>
-                <span class="text-xs text-muted-foreground">{{ monitor.scope === "key" ? "精确" : "前缀" }}</span>
+                <span class="text-xs text-muted-foreground">{{ monitor.scope === "key" ? t("etcd.admin.exact") : t("etcd.admin.prefix") }}</span>
                 <span :class="monitor.status === 'running' ? 'border-emerald-500/50 text-emerald-700 dark:text-emerald-300' : monitor.status === 'error' ? 'border-destructive/50 text-destructive' : 'text-muted-foreground'" class="inline-flex w-fit rounded-full border px-2 py-0.5 text-xs">{{
-                  monitor.status === "running" ? "运行中" : monitor.status === "error" ? "异常" : "已停止"
+                  monitor.status === "running" ? t("etcd.admin.running") : monitor.status === "error" ? t("etcd.admin.error") : t("etcd.admin.stopped")
                 }}</span>
                 <div class="flex justify-end gap-0.5">
-                  <Button size="sm" variant="ghost" class="h-7 w-7 p-0" title="编辑监视器" @click="editWatchMonitor(monitor)"><Pencil class="h-3.5 w-3.5" /></Button
-                  ><Button v-if="monitor.status === 'running'" size="sm" variant="ghost" class="h-7 w-7 p-0 text-amber-700 hover:text-amber-700 dark:text-amber-300" title="停止监视器" @click="requestStopWatchMonitor(monitor)"><Square class="h-3.5 w-3.5" /></Button
-                  ><Button v-else size="sm" variant="ghost" class="h-7 w-7 p-0 text-emerald-700 hover:text-emerald-700 dark:text-emerald-300" title="启动监视器" @click="void resumeWatchMonitor(monitor)"><Play class="h-3.5 w-3.5" /></Button
-                  ><Button size="sm" variant="ghost" class="h-7 w-7 p-0 text-destructive hover:text-destructive" title="删除监视器" @click="void deleteWatchMonitor(monitor)"><Trash2 class="h-3.5 w-3.5" /></Button>
+                  <Button size="sm" variant="ghost" class="h-7 w-7 p-0" :title="t('etcd.admin.editWatchTitle')" @click="editWatchMonitor(monitor)"><Pencil class="h-3.5 w-3.5" /></Button
+                  ><Button v-if="monitor.status === 'running'" size="sm" variant="ghost" class="h-7 w-7 p-0 text-amber-700 hover:text-amber-700 dark:text-amber-300" :title="t('etcd.admin.stopWatch')" @click="requestStopWatchMonitor(monitor)"><Square class="h-3.5 w-3.5" /></Button
+                  ><Button v-else size="sm" variant="ghost" class="h-7 w-7 p-0 text-emerald-700 hover:text-emerald-700 dark:text-emerald-300" :title="t('etcd.admin.startWatch')" @click="void resumeWatchMonitor(monitor)"><Play class="h-3.5 w-3.5" /></Button
+                  ><Button size="sm" variant="ghost" class="h-7 w-7 p-0 text-destructive hover:text-destructive" :title="t('etcd.admin.deleteWatch')" @click="void deleteWatchMonitor(monitor)"><Trash2 class="h-3.5 w-3.5" /></Button>
                 </div>
               </div>
-              <div v-if="filteredWatchMonitors.length === 0" class="px-3 py-12 text-center text-sm text-muted-foreground">{{ watchMonitors.length ? "未找到匹配的监视器" : "还没有监视器。" }}</div>
+              <div v-if="filteredWatchMonitors.length === 0" class="px-3 py-12 text-center text-sm text-muted-foreground">{{ watchMonitors.length ? t("etcd.admin.noMatchingWatches") : t("etcd.admin.noWatches") }}</div>
             </div>
           </section>
           <section v-if="selectedWatchMonitor" class="min-w-0 space-y-3 border-t pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
             <div class="flex flex-wrap items-center gap-2">
               <div class="min-w-0 flex-1">
-                <h3 class="text-sm font-semibold">事件流</h3>
+                <h3 class="text-sm font-semibold">{{ t("etcd.admin.eventStream") }}</h3>
                 <code class="mt-1 block truncate text-xs text-muted-foreground" :title="selectedWatchMonitor.key">{{ selectedWatchMonitor.key }}</code>
               </div>
-              <span class="text-xs text-muted-foreground">{{ selectedWatchMonitor.events.length }} 条事件</span>
+              <span class="text-xs text-muted-foreground">{{ t("etcd.admin.eventCount", { count: selectedWatchMonitor.events.length }) }}</span>
             </div>
             <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <span class="mr-1 text-xs font-medium text-muted-foreground">筛选</span
+              <span class="mr-1 text-xs font-medium text-muted-foreground">{{ t("etcd.admin.filter") }}</span
               ><label v-for="item in watchEventFilterOptions" :key="item.value" class="inline-flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"><input v-model="watchEventFilters[item.value]" type="checkbox" class="h-3.5 w-3.5 rounded border-input" />{{ item.label }}</label>
             </div>
             <div class="overflow-hidden rounded-md border">
-              <div class="grid grid-cols-[7rem_5.5rem_minmax(0,1fr)] gap-3 border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground"><span>Revision</span><span>事件</span><span>Key</span></div>
+              <div class="grid grid-cols-[7rem_5.5rem_minmax(0,1fr)] gap-3 border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                <span>Revision</span><span>{{ t("etcd.admin.event") }}</span
+                ><span>Key</span>
+              </div>
               <div class="max-h-72 overflow-auto">
                 <div v-for="event in visibleWatchEvents" :key="`${event.revision}:${event.key}:${event.eventType}`" class="grid grid-cols-[7rem_5.5rem_minmax(0,1fr)] gap-3 border-b px-3 py-2 text-xs last:border-b-0">
                   <span class="font-mono text-muted-foreground">{{ event.revision }}</span
                   ><span :class="event.category === 'delete' ? 'text-destructive' : event.category === 'update' ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'">{{ watchEventCategoryLabel(event.category) }}</span
                   ><code class="truncate" :title="event.key">{{ event.key }}</code>
                 </div>
-                <div v-if="!visibleWatchEvents.length" class="p-8 text-center text-xs text-muted-foreground">{{ selectedWatchMonitor.status === "running" ? (selectedWatchMonitor.events.length ? "当前筛选没有匹配事件" : "正在等待 Key 变更...") : "该监视器当前没有运行。" }}</div>
+                <div v-if="!visibleWatchEvents.length" class="p-8 text-center text-xs text-muted-foreground">
+                  {{ selectedWatchMonitor.status === "running" ? (selectedWatchMonitor.events.length ? t("etcd.admin.noFilteredEvents") : t("etcd.admin.waitingEvents")) : t("etcd.admin.watchNotRunning") }}
+                </div>
               </div>
             </div>
           </section>
-          <div v-else class="flex items-center justify-center border-t pt-4 text-sm text-muted-foreground xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">从左侧选择一个监视器查看事件流</div>
+          <div v-else class="flex items-center justify-center border-t pt-4 text-sm text-muted-foreground xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">{{ t("etcd.admin.selectWatch") }}</div>
         </div>
       </template>
       <template v-else-if="active === 'lease'">
@@ -763,14 +774,14 @@ onBeforeUnmount(() => {
           <div class="space-y-2">
             <div v-for="lease in leases?.leases || []" :key="lease.id" class="flex w-full cursor-pointer items-center gap-3 rounded border px-3 py-2 text-left hover:bg-accent" :class="selectedLease?.id === lease.id ? 'border-primary bg-accent' : ''" @click="openLease(lease.id)">
               <code class="min-w-0 flex-1 truncate">{{ lease.id }}</code
-              ><span class="shrink-0 text-xs text-muted-foreground">TTL {{ displayedLeaseTtl(lease.id, lease.ttl) }}s</span><Button size="sm" variant="ghost" class="shrink-0" :disabled="busy" @click.stop="renewLease(lease.id)">续期</Button
-              ><Button size="sm" variant="ghost" class="shrink-0 text-destructive hover:text-destructive" :disabled="busy" @click.stop="revokeLease(lease.id)">撤销</Button>
+              ><span class="shrink-0 text-xs text-muted-foreground">TTL {{ displayedLeaseTtl(lease.id, lease.ttl) }}s</span><Button size="sm" variant="ghost" class="shrink-0" :disabled="busy" @click.stop="renewLease(lease.id)">{{ t("etcd.admin.renew") }}</Button
+              ><Button size="sm" variant="ghost" class="shrink-0 text-destructive hover:text-destructive" :disabled="busy" @click.stop="revokeLease(lease.id)">{{ t("etcd.admin.revoke") }}</Button>
             </div>
             <div v-if="!leases?.leases.length" class="rounded border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">{{ t("etcd.admin.noKnownLeases") }}</div>
             <div v-if="leases && (leasePreviousContinuations.length || leases.nextContinuation)" class="flex items-center justify-between gap-2 pt-1">
-              <Button size="sm" variant="outline" :disabled="busy || !leasePreviousContinuations.length" @click="previousLeasePage">上一页</Button>
-              <span class="text-xs text-muted-foreground">每页最多 100 项</span>
-              <Button size="sm" variant="outline" :disabled="busy || !leases.nextContinuation" @click="nextLeasePage">下一页</Button>
+              <Button size="sm" variant="outline" :disabled="busy || !leasePreviousContinuations.length" @click="previousLeasePage">{{ t("etcd.admin.previousPage") }}</Button>
+              <span class="text-xs text-muted-foreground">{{ t("etcd.admin.leasePageSize", { count: 100 }) }}</span>
+              <Button size="sm" variant="outline" :disabled="busy || !leases.nextContinuation" @click="nextLeasePage">{{ t("etcd.admin.nextPage") }}</Button>
             </div>
           </div>
           <div class="rounded border p-3">
@@ -778,18 +789,19 @@ onBeforeUnmount(() => {
             <div v-else-if="selectedLease" class="space-y-3">
               <div class="flex flex-wrap items-center gap-2">
                 <code class="mr-auto text-sm">{{ selectedLease.id }}</code
-                ><span class="text-xs text-muted-foreground">TTL {{ displayedLeaseTtl(selectedLease.id, selectedLease.ttl) }}s / 授予 {{ selectedLease.grantedTtl }}s</span>
+                ><span class="text-xs text-muted-foreground">TTL {{ displayedLeaseTtl(selectedLease.id, selectedLease.ttl) }}s / {{ t("etcd.admin.grantedTtl", { ttl: selectedLease.grantedTtl }) }}</span>
               </div>
-              <label class="flex items-center gap-2 rounded border bg-muted/20 px-3 py-2 text-xs"><input v-model="autoKeepalive" type="checkbox" class="h-3.5 w-3.5" />页面保持打开时按 TTL / 3 自动续期</label>
+              <label class="flex items-center gap-2 rounded border bg-muted/20 px-3 py-2 text-xs"><input v-model="autoKeepalive" type="checkbox" class="h-3.5 w-3.5" />{{ t("etcd.admin.keepalive") }}</label>
               <div>
                 <div class="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-                  <span>附着 Key</span><span>{{ selectedLease.keys.length }}{{ selectedLease.truncated ? "+" : "" }}</span>
+                  <span>{{ t("etcd.admin.attachedKeys") }}</span
+                  ><span>{{ selectedLease.keys.length }}{{ selectedLease.truncated ? "+" : "" }}</span>
                 </div>
                 <div class="max-h-44 overflow-auto rounded border">
                   <code v-for="key in selectedLease.keys" :key="`${key.encoding}:${key.data}`" class="block truncate border-b px-2 py-1 text-xs last:border-b-0">{{ key.encoding === "utf8" ? key.data : `base64:${key.data}` }}</code>
-                  <div v-if="selectedLease.keys.length === 0" class="px-2 py-4 text-center text-xs text-muted-foreground">没有附着 Key</div>
+                  <div v-if="selectedLease.keys.length === 0" class="px-2 py-4 text-center text-xs text-muted-foreground">{{ t("etcd.admin.noAttachedKeys") }}</div>
                 </div>
-                <p v-if="selectedLease.truncated" class="mt-2 text-xs text-muted-foreground">附着 Key 结果已截断，最多显示 256 项。</p>
+                <p v-if="selectedLease.truncated" class="mt-2 text-xs text-muted-foreground">{{ t("etcd.admin.attachedKeysTruncated") }}</p>
               </div>
             </div>
             <div v-else class="flex h-32 items-center justify-center text-xs text-muted-foreground">{{ t("etcd.admin.selectLease") }}</div>
@@ -823,11 +835,11 @@ onBeforeUnmount(() => {
     <Dialog :open="watchDialogOpen" @update:open="updateWatchDialog">
       <DialogContent class="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{{ watchEditingId ? "编辑监视器" : "新建监视器" }}</DialogTitle>
+          <DialogTitle>{{ watchEditingId ? t("etcd.admin.editWatch") : t("etcd.admin.newWatch") }}</DialogTitle>
         </DialogHeader>
         <form class="space-y-5" @submit.prevent="saveWatchMonitor">
           <label class="grid gap-1.5">
-            <span class="text-sm font-medium">Key 或前缀</span>
+            <span class="text-sm font-medium">{{ t("etcd.keyOrPrefix") }}</span>
             <div class="relative">
               <Input
                 v-model="watchFormKey"
@@ -837,7 +849,7 @@ onBeforeUnmount(() => {
                 :aria-expanded="showWatchKeySuggestions"
                 aria-controls="etcd-watch-key-suggestions"
                 :aria-activedescendant="watchSuggestionIndex >= 0 ? `etcd-watch-key-suggestion-${watchSuggestionIndex}` : undefined"
-                placeholder="例如 /apps/payment/config"
+                :placeholder="t('etcd.admin.watchKeyPlaceholder')"
                 autofocus
                 @focus="watchSuggestionOpen = Boolean(watchFormKey.trim())"
                 @blur="closeWatchKeySuggestions"
@@ -864,12 +876,12 @@ onBeforeUnmount(() => {
             </div>
           </label>
           <fieldset class="grid gap-2">
-            <legend class="text-sm font-medium">监视范围</legend>
+            <legend class="text-sm font-medium">{{ t("etcd.admin.watchScope") }}</legend>
             <div class="flex w-fit rounded-md border p-0.5">
-              <Button type="button" size="sm" :variant="watchFormScope === 'key' ? 'secondary' : 'ghost'" class="h-8 px-3" @click="watchFormScope = 'key'">精确 Key</Button>
-              <Button type="button" size="sm" :variant="watchFormScope === 'prefix' ? 'secondary' : 'ghost'" class="h-8 px-3" @click="watchFormScope = 'prefix'">前缀</Button>
+              <Button type="button" size="sm" :variant="watchFormScope === 'key' ? 'secondary' : 'ghost'" class="h-8 px-3" @click="watchFormScope = 'key'">{{ t("etcd.admin.exact") }}</Button>
+              <Button type="button" size="sm" :variant="watchFormScope === 'prefix' ? 'secondary' : 'ghost'" class="h-8 px-3" @click="watchFormScope = 'prefix'">{{ t("etcd.admin.prefix") }}</Button>
             </div>
-            <p class="text-xs leading-5 text-muted-foreground">{{ watchFormScope === "key" ? "只接收这个 Key 的创建、值变更和删除事件。" : "接收以该前缀开头的所有 Key 事件。" }}</p>
+            <p class="text-xs leading-5 text-muted-foreground">{{ watchFormScope === "key" ? t("etcd.admin.watchKeyHint") : t("etcd.admin.watchPrefixHint") }}</p>
           </fieldset>
           <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">{{ t("etcd.admin.watchSessionHint") }}</div>
           <DialogFooter class="gap-2 sm:gap-2">

@@ -640,6 +640,7 @@ mod tests {
         ConnectionConfig {
             id: "conn".to_string(),
             name: "test".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,
@@ -652,6 +653,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: vec![],
             init_script: None,
             color: None,
@@ -678,6 +680,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: Some(1000),
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

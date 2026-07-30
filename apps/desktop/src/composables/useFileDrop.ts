@@ -7,6 +7,7 @@ import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
+import { externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -72,7 +73,7 @@ export function useFileDrop() {
               const content = await api.readExternalSqlFile(path);
               await openDroppedSqlFile(name, content, path);
             } catch (e: any) {
-              toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+              toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
             }
             continue;
           }
@@ -108,15 +109,11 @@ export function useFileDrop() {
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
           if (!isSqlFilePath(file.name)) continue;
-          const reader = new FileReader();
-          reader.onload = () => {
-            if (typeof reader.result === "string") {
-              openDroppedSqlFile(file.name, reader.result).catch((e: any) => {
-                toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
-              });
-            }
-          };
-          reader.readAsText(file);
+          void readBrowserSqlFile(file)
+            .then((content) => openDroppedSqlFile(file.name, content))
+            .catch((e: any) => {
+              toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+            });
         }
       });
       document.addEventListener("dragover", (event: DragEvent) => {

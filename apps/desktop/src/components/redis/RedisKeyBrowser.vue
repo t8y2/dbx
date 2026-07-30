@@ -418,7 +418,7 @@ async function fetchScanPage(requestId = searchRequestId): Promise<RedisScanResu
       return { cursor, keys: [], total_keys: totalKeys };
     }
     const iterations = Math.min(iterationsPerCall, maxIterations - completedIterations);
-    const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, false);
+    const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
     if (totalKeys === 0) totalKeys = result.total_keys;
     if (result.keys.length > 0 || result.cursor === 0) {
       return { ...result, total_keys: totalKeys };
@@ -1432,9 +1432,19 @@ onDeactivated(pauseRedisBrowserBackgroundWork);
 onUnmounted(pauseRedisBrowserBackgroundWork);
 
 watch(
-  () => props.db,
-  (db) => {
+  () => [props.connectionId, props.db] as const,
+  async ([connectionId, db]) => {
+    // ContentArea remounts this browser for scope changes; keep embedded uses
+    // in sync as well so an old scan cannot populate the new scope.
     commandDb.value = db;
+    resetLoadedKeys();
+    try {
+      await connectionStore.ensureConnected(connectionId);
+    } catch (error) {
+      console.warn("[DBX] ensureConnected failed for", connectionId, error);
+    }
+    if (connectionId !== props.connectionId || db !== props.db) return;
+    void loadKeys();
   },
 );
 

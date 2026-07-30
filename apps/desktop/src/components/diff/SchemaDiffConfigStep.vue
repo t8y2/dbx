@@ -11,7 +11,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
-import type { SchemaDiffConfig, SchemaDiffCompareOptions } from "@/types/schemaDiff";
+import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry } from "@/types/schemaDiff";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -39,6 +39,8 @@ const emit = defineEmits<{
   (e: "update:targetDatabase", value: string): void;
   (e: "update:targetSchema", value: string): void;
   (e: "update:ignoreComments", value: boolean): void;
+  (e: "update:fieldMappings", value: FieldMappingEntry[]): void;
+  (e: "open-field-mapping"): void;
   (e: "compare"): void;
   (e: "saveConfig"): void;
   (e: "loadConfig"): void;
@@ -59,6 +61,11 @@ const sqlConnections = computed(() => store.connections.filter((c: any) => !["mo
 
 const sourceConfig = computed(() => store.getConfig(props.sourceConnectionId));
 const targetConfig = computed(() => store.getConfig(props.targetConnectionId));
+
+const sourceDbType = computed(() => sourceConfig.value?.db_type || "");
+const targetDbType = computed(() => targetConfig.value?.db_type || "");
+const showFieldMapping = computed(() => sourceDbType.value && targetDbType.value && sourceDbType.value !== targetDbType.value);
+const activeFieldMappings = computed(() => props.options?.fieldMappings ?? []);
 
 const canCompare = computed(() => {
   return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
@@ -472,6 +479,11 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
         <Button variant="outline" size="sm" @click="$emit('showOptions')">
           <Settings class="w-3.5 h-3.5 mr-1" />
           {{ t("diff.options") }}
+        </Button>
+        <Button v-if="showFieldMapping" variant="outline" size="sm" @click="$emit('open-field-mapping')">
+          <ArrowLeftRight class="w-3.5 h-3.5 mr-1" />
+          {{ t("diff.openFieldMapping") }}
+          <span v-if="activeFieldMappings.length > 0" class="ml-1 inline-flex items-center justify-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">{{ activeFieldMappings.length }}</span>
         </Button>
       </div>
       <Button size="sm" :disabled="!canCompare || loading" @click="$emit('compare')">

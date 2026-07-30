@@ -413,7 +413,7 @@ impl MessageQueueAdmin for KafkaAdmin {
     }
 
     async fn unload_topic(&self, _topic: &TopicRef) -> Result<(), String> {
-        Err("Kafka 不支持卸载主题".to_string())
+        Err("Kafka does not support unloading topics".to_string())
     }
 
     // ---- Rate limits / quotas / retention ----

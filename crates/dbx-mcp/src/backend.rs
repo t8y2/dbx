@@ -58,9 +58,13 @@ fn effective_mcp_policy_with_legacy_allow_writes(
     state: McpGlobalPolicyState,
     legacy_allow_writes: Option<bool>,
 ) -> McpGlobalPolicy {
-    let configured = state.configured;
     let mut policy = state.policy();
-    if !configured && legacy_allow_writes == Some(false) {
+    // When DBX_MCP_ALLOW_WRITES is explicitly set to false by the CLI agent
+    // for an unconfirmed run, force read-only regardless of the configured
+    // persistent MCP policy. Run-scoped CLI restrictions must override the
+    // persistent policy, otherwise a user with a writable configured policy
+    // can execute unconfirmed writes through CLI providers.
+    if legacy_allow_writes == Some(false) {
         policy.read_only = true;
     }
     policy
@@ -130,6 +134,16 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, command);
         Err("MongoDB shell commands are not supported by this backend.".to_string())
     }
+    /// Release the connection pool pinned by an MCP session (`client_session_id`).
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let _ = (connection_id, database, client_session_id);
+        Err("Session cleanup is not supported by this backend.".to_string())
+    }
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
@@ -152,6 +166,7 @@ pub struct WebBackend {
     password: String,
     client: reqwest::Client,
     auth: Mutex<WebAuthState>,
+    connected: Mutex<HashMap<String, ConnectionConfig>>,
 }
 
 impl WebBackend {
@@ -164,7 +179,13 @@ impl WebBackend {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
-        Ok(Self { base_url, password, client, auth: Mutex::new(WebAuthState::default()) })
+        Ok(Self {
+            base_url,
+            password,
+            client,
+            auth: Mutex::new(WebAuthState::default()),
+            connected: Mutex::new(HashMap::new()),
+        })
     }
 
     async fn ensure_auth(&self) -> Result<(), String> {
@@ -256,7 +277,12 @@ impl WebBackend {
     }
 
     async fn ensure_connected(&self, connection: &ConnectionConfig) -> Result<(), String> {
+        let mut connected = self.connected.lock().await;
+        if connected.get(&connection.id) == Some(connection) {
+            return Ok(());
+        }
         self.request(reqwest::Method::POST, "/api/connection/connect", Some(json!({ "config": connection }))).await?;
+        connected.insert(connection.id.clone(), connection.clone());
         Ok(())
     }
 }
@@ -296,7 +322,8 @@ impl DbxBackend for LocalBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
-        let call = ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments };
+        let call =
+            ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
         agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions).await
     }
 
@@ -593,6 +620,16 @@ impl DbxBackend for LocalBackend {
         }
     }
 
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let database = if database.trim().is_empty() { None } else { Some(database) };
+        self.state.close_client_session_pool(connection_id, database, client_session_id).await
+    }
+
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
             .await
@@ -636,7 +673,7 @@ impl DbxBackend for WebBackend {
         database: &str,
         tool_name: &str,
         arguments: Value,
-        _permissions: AgentSqlPermissions,
+        permissions: AgentSqlPermissions,
     ) -> ToolResult {
         let result = async {
             if tool_name != "execute_query" {
@@ -649,14 +686,36 @@ impl DbxBackend for WebBackend {
             }
             self.ensure_connected(connection).await?;
             let sql = arguments.get("sql").and_then(Value::as_str).ok_or("Missing SQL query")?;
+
+            // Replicate the confirmed-SQL binding check here because the
+            // /api/query/execute endpoint performs its own risk checks but
+            // does NOT receive the confirmed_write_sql binding from the MCP
+            // layer.  Without this, a CLI/MCP agent could execute a different
+            // write/DDL statement after a single user confirmation.
+            let risk = dbx_core::sql_risk::classify_sql_risk_for_database(sql, connection.db_type)
+                .map_err(|error| format!("SQL risk classification failed: {error}"))?;
+            if risk != dbx_core::sql_risk::SqlRisk::ReadOnly {
+                if let Some(ref confirmed) = permissions.confirmed_write_sql {
+                    let normalized = agent_tools::normalize_sql_for_confirmation(sql);
+                    let normalized_confirmed = agent_tools::normalize_sql_for_confirmation(confirmed);
+                    if normalized != normalized_confirmed {
+                        return Err(format!(
+                            "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
+                             Confirmed: {}\n\
+                             Attempted: {}",
+                            confirmed, sql,
+                        ));
+                    }
+                }
+            }
+
             let max_rows = arguments.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let response = self
-                .request(
-                    reqwest::Method::POST,
-                    "/api/query/execute",
-                    Some(json!({ "connectionId": connection.id, "database": database, "sql": sql })),
-                )
-                .await?;
+            let mut body = json!({ "connectionId": connection.id, "database": database, "sql": sql });
+            // Stateful MCP sessions pin every query to the same backend pool.
+            if let Some(client_session_id) = arguments.get("client_session_id").and_then(Value::as_str) {
+                body["clientSessionId"] = json!(client_session_id);
+            }
+            let response = self.request(reqwest::Method::POST, "/api/query/execute", Some(body)).await?;
             let query_result: dbx_core::db::QueryResult =
                 response.json().await.map_err(|error| format!("Invalid query response: {error}"))?;
             Ok(format_query_result(&query_result, max_rows))
@@ -694,6 +753,27 @@ impl DbxBackend for WebBackend {
         .map_err(|error| format!("Invalid query response: {error}"))
     }
 
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/query/close-client-session",
+            Some(json!({
+                "connectionId": connection_id,
+                "database": database,
+                "clientSessionId": client_session_id,
+            })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid close session response: {error}"))
+    }
+
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         self.request(reqwest::Method::POST, "/api/connection/mcp/add", Some(json!({ "config": config })))
             .await?
@@ -703,15 +783,20 @@ impl DbxBackend for WebBackend {
     }
 
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
-        self.request(
-            reqwest::Method::POST,
-            "/api/connection/mcp/remove",
-            Some(json!({ "connectionId": connection_id })),
-        )
-        .await?
-        .json()
-        .await
-        .map_err(|error| format!("Invalid MCP connection response: {error}"))
+        let removed = self
+            .request(
+                reqwest::Method::POST,
+                "/api/connection/mcp/remove",
+                Some(json!({ "connectionId": connection_id })),
+            )
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid MCP connection response: {error}"))?;
+        if removed {
+            self.connected.lock().await.remove(connection_id);
+        }
+        Ok(removed)
     }
 
     async fn list_tables(
@@ -1235,6 +1320,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         truncated: false,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 
@@ -1396,11 +1482,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_read_only_only_restricts_an_unconfigured_policy() {
+    fn legacy_read_only_overrides_configured_and_unconfigured_policies() {
+        // DBX_MCP_ALLOW_WRITES=0 always forces read_only, even when the
+        // persistent MCP policy is configured as writable.
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(false)).read_only);
         assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(true)).read_only);
-        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(false)).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(false)).read_only);
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(true)).read_only);
+        // Configured read_only is a hard upper bound — env var cannot relax it.
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), Some(true)).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), Some(false)).read_only);
+        // Unset env var leaves the policy as-is.
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), None).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), None).read_only);
     }
 
     #[test]

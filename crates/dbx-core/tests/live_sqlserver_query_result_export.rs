@@ -10,6 +10,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
     dbx_core::models::connection::ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::SqlServer,
         driver_profile: None,
         driver_label: None,
@@ -46,6 +47,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         redis_cluster_nodes: String::new(),
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         redis_scan_page_size: None,
+        redis_database_aliases: Default::default(),
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),
@@ -56,6 +58,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        show_system_schemas: false,
         database_info: None,
     }
 }
@@ -109,6 +112,10 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         client_session_id: None,
         execution_id: Some(format!("live-sqlserver-xlsx-{suffix}")),
         date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        column_comments: None,
+        numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);

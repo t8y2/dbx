@@ -84,14 +84,33 @@ pub struct AgentLoopContext {
     pub max_agent_turns: u32,
 }
 
-/// Check if the provider supports function calling / tool use.
-/// Returns false for providers that are known to lack reliable tool support.
-fn provider_supports_function_calling(config: &AiConfig) -> bool {
-    match config.provider {
-        // Ollama function calling support varies by model/version; conservative default is false.
-        // Users with capable models can override via openai-compatible with an Ollama endpoint.
-        AiProvider::Ollama => false,
-        _ => true,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FunctionCallingSupport {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+/// Resolve function calling support for the selected provider/model.
+///
+/// Native Ollama capabilities are model-specific. Missing metadata is kept as
+/// unknown so older servers and compatible proxies can still attempt tools.
+async fn provider_function_calling_support(config: &AiConfig) -> FunctionCallingSupport {
+    if !matches!(config.provider, AiProvider::Ollama) {
+        return FunctionCallingSupport::Supported;
+    }
+
+    match ai::ollama_selected_model_tool_support(config).await {
+        Ok(Some(true)) => FunctionCallingSupport::Supported,
+        Ok(Some(false)) => FunctionCallingSupport::Unsupported,
+        Ok(None) => FunctionCallingSupport::Unknown,
+        Err(error) => {
+            log::debug!(
+                "[agent][ollama] tool capability unavailable for model {}: {error}; attempting tool call",
+                config.model
+            );
+            FunctionCallingSupport::Unknown
+        }
     }
 }
 
@@ -100,8 +119,9 @@ fn provider_supports_function_calling(config: &AiConfig) -> bool {
 /// The `on_event` callback receives streaming events for the frontend.
 /// Returns the final accumulated assistant text.
 ///
-/// If the provider does not support function calling (e.g., Ollama), automatically
-/// degrades to a text-only completion with schema context injected into the system prompt.
+/// If the selected model explicitly does not support function calling,
+/// automatically degrades to a text-only completion with schema context
+/// injected into the system prompt.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     config: &AiConfig,
@@ -117,7 +137,7 @@ pub async fn run_agent_loop(
     let contract_system_prompt = augment_system_prompt_with_task_contract(system_prompt, task_contract, is_agent_mode);
     let system_prompt = contract_system_prompt.as_str();
 
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         let connection_name = {
             let configs = agent_ctx.state.configs.read().await;
             configs
@@ -132,6 +152,7 @@ pub async fn run_agent_loop(
             agent_mode: is_agent_mode,
             allow_writes: agent_ctx.sql_permissions.allow_writes,
             allow_dangerous: agent_ctx.sql_permissions.allow_dangerous,
+            confirmed_write_sql: agent_ctx.sql_permissions.confirmed_write_sql.clone(),
             mcp_server_command: agent_ctx.cli_mcp_server_command.clone(),
         };
         if matches!(config.provider, AiProvider::ClaudeCodeCli) {
@@ -143,13 +164,32 @@ pub async fn run_agent_loop(
             return crate::ai_claude_code_cli::run_claude_code_agent(config, &prompt, options, cancelled, on_event)
                 .await;
         }
+        if matches!(config.provider, AiProvider::PiAgentCli) {
+            let prompt = crate::ai_pi_agent_cli::build_pi_agent_prompt(
+                system_prompt,
+                messages,
+                agent_ctx.sql_permissions.allow_writes,
+            );
+            return crate::ai_pi_agent_cli::run_pi_agent(config, &prompt, options, cancelled, on_event).await;
+        }
         let prompt =
             crate::ai_codex_cli::build_codex_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
         return crate::ai_codex_cli::run_codex_agent(config, &prompt, options, cancelled, on_event).await;
     }
 
-    // Auto-degrade: providers without function calling fall back to text-only completion.
-    if !provider_supports_function_calling(config) {
+    // Auto-degrade only models that explicitly advertise no tool support.
+    // Unknown Ollama capabilities still get a chance to use tools so older
+    // servers and compatible proxies are not disabled provider-wide.
+    let function_calling_support = tokio::select! {
+        support = provider_function_calling_support(config) => support,
+        _ = cancelled.notified() => {
+            let message = "Agent run was cancelled before producing output.".to_string();
+            on_event(AgentEvent::TextDelta { delta: message.clone() });
+            on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+            return Ok(message);
+        }
+    };
+    if function_calling_support == FunctionCallingSupport::Unsupported {
         return run_agent_loop_text_only(
             config,
             system_prompt,
@@ -163,7 +203,7 @@ pub async fn run_agent_loop(
         .await;
     }
     let tools = if is_agent_mode {
-        agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions)
+        agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions.clone())
     } else {
         agent_tools::read_only_tools(agent_ctx.db_type)
     };
@@ -248,6 +288,29 @@ pub async fn run_agent_loop(
                     break;
                 }
                 Err(err)
+                    if turn == 0
+                        && matches!(config.provider, AiProvider::Ollama)
+                        && is_tool_unsupported_error(&err)
+                        && !emitted_any_chunk.load(Ordering::Relaxed) =>
+                {
+                    log::debug!(
+                        "[agent][ollama] model {} rejected tools before producing output; falling back to text-only mode",
+                        config.model
+                    );
+                    on_event(AgentEvent::TurnEnd { turn });
+                    return run_agent_loop_text_only(
+                        config,
+                        system_prompt,
+                        messages,
+                        agent_ctx,
+                        on_event,
+                        cancelled,
+                        max_tokens,
+                        task_contract.as_ref(),
+                    )
+                    .await;
+                }
+                Err(err)
                     if attempt == 0 && is_context_length_error(&err) && !emitted_any_chunk.load(Ordering::Relaxed) =>
                 {
                     last_stream_error = Some(err);
@@ -314,7 +377,12 @@ pub async fn run_agent_loop(
             tool_call_id: None,
             tool_calls: collected_tool_calls
                 .iter()
-                .map(|tc| ai::ToolCallRef { id: tc.id.clone(), name: tc.name.clone(), arguments: tc.arguments.clone() })
+                .map(|tc| ai::ToolCallRef {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    arguments: tc.arguments.clone(),
+                    provider_payload: tc.provider_payload.clone(),
+                })
                 .collect(),
         });
 
@@ -368,7 +436,7 @@ pub async fn run_agent_loop(
         let conn2 = agent_ctx.connection_id.clone();
         let db2 = agent_ctx.database.clone();
         let db_type = agent_ctx.db_type;
-        let sql_permissions = agent_ctx.sql_permissions;
+        let sql_permissions = agent_ctx.sql_permissions.clone();
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
@@ -376,8 +444,12 @@ pub async fn run_agent_loop(
         let (parallel_indices, sequential_indices): (Vec<usize>, Vec<usize>) = (0..collected_tool_calls.len())
             .partition(|&i| *tool_parallel_map.get(collected_tool_calls[i].name.as_str()).unwrap_or(&false));
 
-        let make_tc =
-            |tc: &ToolCall| ToolCall { id: tc.id.clone(), name: tc.name.clone(), arguments: tc.arguments.clone() };
+        let make_tc = |tc: &ToolCall| ToolCall {
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+            provider_payload: tc.provider_payload.clone(),
+        };
 
         // Run parallel group
         let parallel_futures: Vec<_> = parallel_indices
@@ -387,7 +459,8 @@ pub async fn run_agent_loop(
                 let state = Arc::clone(&state2);
                 let conn = conn2.clone();
                 let db = db2.clone();
-                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, sql_permissions).await }
+                let perms = sql_permissions.clone();
+                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, perms).await }
             })
             .collect();
         let parallel_results = join_all(parallel_futures).await;
@@ -397,7 +470,7 @@ pub async fn run_agent_loop(
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
             sequential_results
-                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions).await);
+                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions.clone()).await);
         }
 
         // Merge results back into original order
@@ -690,6 +763,24 @@ fn is_context_length_error(error: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+fn is_tool_unsupported_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    let mentions_tool_use = lower.contains("tool") || lower.contains("function call");
+    let rejects_capability = [
+        "does not support",
+        "doesn't support",
+        "not supported",
+        "unsupported",
+        "unknown field",
+        "unknown parameter",
+        "unrecognized field",
+        "unrecognized parameter",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    mentions_tool_use && rejects_capability
+}
+
 /// Text-only fallback for providers that don't support function calling.
 ///
 /// Injects database schema context into the system prompt so the LLM can still
@@ -833,6 +924,11 @@ fn estimate_message_tokens(message: &AiMessage) -> u32 {
         tokens += estimate_text_tokens(&tool_call.id) + estimate_text_tokens(&tool_call.name) + 4;
         if let Ok(args) = serde_json::to_string(&tool_call.arguments) {
             tokens += estimate_text_tokens(&args);
+        }
+        if let Some(provider_payload) = &tool_call.provider_payload {
+            if let Ok(payload) = serde_json::to_string(provider_payload) {
+                tokens += estimate_text_tokens(&payload);
+            }
         }
     }
 
@@ -1197,6 +1293,32 @@ mod tests {
         assert_eq!(clamp_max_agent_turns(DEFAULT_MAX_AGENT_TURNS), DEFAULT_MAX_AGENT_TURNS);
         assert_eq!(clamp_max_agent_turns(200), 200);
         assert_eq!(clamp_max_agent_turns(u32::MAX), MAX_MAX_AGENT_TURNS);
+    }
+
+    #[test]
+    fn identifies_explicit_tool_rejection_errors() {
+        for error in [
+            "model does not support tools",
+            "tool use is not supported by this model",
+            "unsupported parameter: tools",
+            "unknown field `tools`",
+            "function calling is not supported",
+        ] {
+            assert!(is_tool_unsupported_error(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn does_not_hide_unrelated_ollama_errors_as_tool_rejections() {
+        for error in [
+            "connection refused",
+            "model not found",
+            "context length exceeded",
+            "invalid tool arguments returned by model",
+            "request timed out",
+        ] {
+            assert!(!is_tool_unsupported_error(error), "{error}");
+        }
     }
 
     fn generate_contract(user_request: &str, mode: &str) -> AiTaskContract {

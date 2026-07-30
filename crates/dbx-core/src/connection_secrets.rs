@@ -737,6 +737,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: format!("{id} connection"),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,
@@ -749,6 +750,7 @@ mod tests {
             database: Some("postgres".to_string()),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -773,6 +775,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

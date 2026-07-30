@@ -10,8 +10,6 @@ use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions};
 use crate::sql::split_sql_statements;
-#[cfg(feature = "duckdb-bundled")]
-use crate::sql::starts_with_executable_sql_keyword;
 use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
@@ -22,6 +20,33 @@ const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
 const MAX_ORACLE_INSERT_ALL_ROWS: usize = 500;
 const MAX_ORACLE_MERGE_ROWS: usize = 500;
 const TRANSFER_TARGET_TABLE_LOOKUP_LIMIT: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SqlBatchLimits {
+    max_rows: usize,
+    target_sql_bytes: usize,
+    hard_sql_bytes: Option<usize>,
+}
+
+impl SqlBatchLimits {
+    pub(crate) fn for_database(db_type: &DatabaseType, requested_max_rows: usize) -> Self {
+        let max_rows = requested_max_rows.max(1).min(match db_type {
+            DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
+            DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            _ => usize::MAX,
+        });
+        let target_sql_bytes = match db_type {
+            DatabaseType::CloudflareD1 => crate::db::cloudflare_d1::MAX_SQL_STATEMENT_BYTES,
+            _ => MAX_TRANSFER_WRITE_SQL_BYTES,
+        };
+        Self { max_rows, target_sql_bytes, hard_sql_bytes: None }
+    }
+
+    pub(crate) fn with_hard_sql_bytes(mut self, hard_sql_bytes: Option<usize>) -> Self {
+        self.hard_sql_bytes = hard_sql_bytes;
+        self
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -308,12 +333,28 @@ fn is_postgres_integer_like_type(data_type: &str) -> bool {
     postgres_integer_bounds(data_type).is_some()
 }
 
-pub(crate) fn normalize_postgres_integer_literal(
+fn sqlserver_integer_bounds(data_type: &str) -> Option<(i128, i128)> {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    match normalized.split(['(', ' ']).next().unwrap_or("") {
+        "bit" => Some((i128::MIN, i128::MAX)),
+        "tinyint" => Some((0, i128::from(u8::MAX))),
+        "smallint" => Some((i128::from(i16::MIN), i128::from(i16::MAX))),
+        "int" | "integer" => Some((i128::from(i32::MIN), i128::from(i32::MAX))),
+        "bigint" => Some((i128::from(i64::MIN), i128::from(i64::MAX))),
+        _ => None,
+    }
+}
+
+pub(crate) fn normalize_integer_literal(
     value: &str,
     db_type: &DatabaseType,
     column_type: Option<&str>,
 ) -> Option<String> {
-    let bounds = column_type.filter(|_| is_postgres_transfer_dialect(db_type)).and_then(postgres_integer_bounds)?;
+    let bounds = match db_type {
+        db_type if is_postgres_transfer_dialect(db_type) => column_type.and_then(postgres_integer_bounds),
+        DatabaseType::SqlServer => column_type.and_then(sqlserver_integer_bounds),
+        _ => None,
+    }?;
 
     // Excel numeric cells arrive as f64; normalize only an explicit zero fraction so real decimals,
     // scientific notation, and values outside the target integer range stay untouched.
@@ -1115,7 +1156,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         },
         serde_json::Value::Number(n) => {
-            if let Some(integer_literal) = normalize_postgres_integer_literal(&n.to_string(), db_type, column_type) {
+            if let Some(integer_literal) = normalize_integer_literal(&n.to_string(), db_type, column_type) {
                 return integer_literal;
             }
             match db_type {
@@ -1130,13 +1171,16 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         }
         serde_json::Value::String(s) => {
-            if let Some(integer_literal) = normalize_postgres_integer_literal(s, db_type, column_type) {
+            if let Some(integer_literal) = normalize_integer_literal(s, db_type, column_type) {
                 return integer_literal;
             }
             if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
             if let Some(binary_literal) = format_mysql_binary_sql_literal(s, db_type, column_type) {
+                return binary_literal;
+            }
+            if let Some(binary_literal) = format_sqlserver_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
             if let Some(numeric_literal) = format_mysql_numeric_string_literal(s, db_type, column_type) {
@@ -1150,7 +1194,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if *db_type == DatabaseType::Postgres {
                 return quote_postgres_string_literal(&literal);
             }
-            let escaped = if is_postgres_family_target(db_type) {
+            let escaped = if is_postgres_family_target(db_type) || *db_type == DatabaseType::SqlServer {
                 literal.replace('\'', "''")
             } else {
                 literal.replace('\\', "\\\\").replace('\'', "''")
@@ -1248,6 +1292,29 @@ fn format_mysql_binary_sql_literal(value: &str, db_type: &DatabaseType, column_t
     } else {
         None
     }
+}
+
+fn format_sqlserver_binary_sql_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if !matches!(db_type, DatabaseType::SqlServer) {
+        return None;
+    }
+    let column_type = column_type.filter(|column_type| is_binary_transfer_column_type(column_type))?;
+
+    let trimmed = value.trim();
+    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        if hex.len() % 2 == 0 && hex.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+            return Some(format!("0x{hex}"));
+        }
+    }
+    // SQL Server does not implicitly convert NVARCHAR literals to binary targets.
+    // Use the target type so text fallback preserves the same Unicode byte encoding
+    // that a direct typed conversion would produce.
+    let escaped = value.replace('\'', "''");
+    Some(format!("CONVERT({column_type}, N'{escaped}')"))
 }
 
 fn format_oracle_temporal_sql_literal(
@@ -1914,21 +1981,71 @@ pub fn generate_insert_typed(
         return String::new();
     }
 
-    let full_table = qualified_table(table, schema, db_type);
-    let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-
+    let template = InsertSqlTemplate::new(columns, table, schema, db_type);
     let value_rows = value_rows_sql(rows, column_types, db_type);
-    if matches!(db_type, DatabaseType::Oracle) && rows.len() > 1 {
-        // Oracle 11g does not accept comma-separated multi-row VALUES lists.
-        let into_rows = value_rows
-            .iter()
-            .map(|values| format!("INTO {full_table} ({col_list}) VALUES {values}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return format!("INSERT ALL\n{into_rows}\nSELECT 1 FROM dual");
+    template.build(&value_rows)
+}
+
+#[derive(Debug)]
+struct InsertSqlTemplate {
+    standard_prefix: String,
+    oracle_into_prefix: Option<String>,
+}
+
+impl InsertSqlTemplate {
+    fn new(columns: &[String], table: &str, schema: &str, db_type: &DatabaseType) -> Self {
+        let full_table = qualified_table(table, schema, db_type);
+        let col_list = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+        Self {
+            standard_prefix: format!("INSERT INTO {full_table} ({col_list}) VALUES\n"),
+            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
+                .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
+        }
     }
 
-    format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"))
+    fn build(&self, value_rows: &[String]) -> String {
+        if value_rows.is_empty() {
+            return String::new();
+        }
+        if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| value_rows.len() > 1) {
+            let mut sql = String::from("INSERT ALL\n");
+            for (index, values) in value_rows.iter().enumerate() {
+                if index > 0 {
+                    sql.push('\n');
+                }
+                sql.push_str(into_prefix);
+                sql.push_str(values);
+            }
+            sql.push_str("\nSELECT 1 FROM dual");
+            return sql;
+        }
+
+        let mut sql = self.standard_prefix.clone();
+        sql.push_str(&value_rows.join(",\n"));
+        sql
+    }
+
+    fn statement_bytes(&self, value_rows_bytes: usize, row_count: usize, db_type: &DatabaseType) -> usize {
+        if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| row_count > 1) {
+            return sql_text_bytes("INSERT ALL\n", db_type)
+                .saturating_add(sql_text_bytes(into_prefix, db_type).saturating_mul(row_count))
+                .saturating_add(value_rows_bytes)
+                .saturating_add(sql_text_bytes("\n", db_type).saturating_mul(row_count - 1))
+                .saturating_add(sql_text_bytes("\nSELECT 1 FROM dual", db_type));
+        }
+
+        sql_text_bytes(&self.standard_prefix, db_type)
+            .saturating_add(value_rows_bytes)
+            .saturating_add(sql_text_bytes(",\n", db_type).saturating_mul(row_count.saturating_sub(1)))
+    }
+}
+
+fn sql_text_bytes(sql: &str, db_type: &DatabaseType) -> usize {
+    if matches!(db_type, DatabaseType::SqlServer) {
+        sql.encode_utf16().count().saturating_mul(2)
+    } else {
+        sql.len()
+    }
 }
 
 fn value_rows_sql(
@@ -2167,53 +2284,55 @@ pub(crate) fn generate_insert_typed_sql_batches(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
-    requested_max_rows: usize,
-) -> Vec<(String, usize)> {
+    limits: SqlBatchLimits,
+) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let max_rows = requested_max_rows.max(1);
-    let max_sql_bytes = match db_type {
-        DatabaseType::CloudflareD1 => crate::db::cloudflare_d1::MAX_SQL_STATEMENT_BYTES,
-        _ => MAX_TRANSFER_WRITE_SQL_BYTES,
-    };
+    let max_rows = limits.max_rows.max(1).min(match db_type {
+        DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
+        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        _ => usize::MAX,
+    });
+    let target_sql_bytes = limits.target_sql_bytes.max(1);
+    let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
+    let template = InsertSqlTemplate::new(columns, table, schema, db_type);
+    let value_rows = value_rows_sql(rows, column_types, db_type);
+    let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
-    let mut start = 0;
+    let mut start = 0usize;
 
-    // First honor the row limit, then use binary search to find the largest statement that
-    // also fits the backend byte limit. This avoids generating every intermediate size.
-    while start < rows.len() {
-        let max_end = start.saturating_add(max_rows).min(rows.len());
-        let mut end = max_end;
-        let mut accepted = generate_insert_typed(columns, column_types, &rows[start..max_end], table, schema, db_type);
-
-        if accepted.len() > max_sql_bytes && max_end > start + 1 {
-            end = start + 1;
-            accepted = generate_insert_typed(columns, column_types, &rows[start..end], table, schema, db_type);
-            let mut low = start + 2;
-            let mut high = max_end;
-            while low <= high {
-                let candidate_end = low + (high - low) / 2;
-                let candidate =
-                    generate_insert_typed(columns, column_types, &rows[start..candidate_end], table, schema, db_type);
-                if candidate.len() <= max_sql_bytes {
-                    accepted = candidate;
-                    end = candidate_end;
-                    low = candidate_end + 1;
-                } else {
-                    high = candidate_end - 1;
+    while start < value_rows.len() {
+        let mut end = start;
+        let mut rows_bytes = 0usize;
+        while end < value_rows.len() && end - start < max_rows {
+            let single_row_bytes = template.statement_bytes(value_row_bytes[end], 1, db_type);
+            if let Some(hard_sql_bytes) = limits.hard_sql_bytes {
+                if single_row_bytes > hard_sql_bytes {
+                    return Err(format!(
+                        "SQL batch row {} requires {} bytes and exceeds the {} byte hard limit",
+                        end + 1,
+                        single_row_bytes,
+                        hard_sql_bytes
+                    ));
                 }
             }
+            let candidate_rows_bytes = rows_bytes.saturating_add(value_row_bytes[end]);
+            let candidate_row_count = end - start + 1;
+            let candidate_bytes = template.statement_bytes(candidate_rows_bytes, candidate_row_count, db_type);
+            if candidate_row_count > 1 && candidate_bytes > batch_sql_bytes {
+                break;
+            }
+            rows_bytes = candidate_rows_bytes;
+            end += 1;
         }
 
-        if !accepted.is_empty() {
-            statements.push((accepted, end - start));
-        }
+        statements.push((template.build(&value_rows[start..end]), end - start));
         start = end;
     }
 
-    statements
+    Ok(statements)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2226,24 +2345,24 @@ fn generate_transfer_write_sql_batches(
     schema: &str,
     db_type: &DatabaseType,
     pk_columns: &[String],
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     if rows.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     if matches!(mode, TransferMode::Append | TransferMode::Overwrite) {
-        return generate_insert_typed_sql_batches(
+        return Ok(generate_insert_typed_sql_batches(
             columns,
             column_types,
             rows,
             table,
             schema,
             db_type,
-            max_transfer_write_rows(db_type, mode),
-        )
+            SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode)),
+        )?
         .into_iter()
         .map(|(sql, _)| sql)
-        .collect();
+        .collect());
     }
 
     let max_rows = max_transfer_write_rows(db_type, mode);
@@ -2291,7 +2410,7 @@ fn generate_transfer_write_sql_batches(
         start = end;
     }
 
-    statements
+    Ok(statements)
 }
 
 pub fn pagination_sql(
@@ -2927,87 +3046,12 @@ async fn execute_on_pool_once(
             );
             client.execute_query(params).await
         }
-        #[cfg(feature = "duckdb-bundled")]
-        PoolKind::DuckDb(con) => {
-            let con = con.clone();
+        #[cfg(feature = "duckdb-sidecar")]
+        PoolKind::DuckDbWorker(client) => {
+            let client = client.clone();
             let sql = sql.to_string();
             drop(connections);
-            tokio::task::spawn_blocking(move || {
-                let con = con.lock().map_err(|e| e.to_string())?;
-                if max_rows.is_some()
-                    && starts_with_executable_sql_keyword(&sql, &["SELECT", "SHOW", "DESCRIBE", "WITH", "PRAGMA"])
-                {
-                    return crate::query::duckdb_execute_with_max_rows(&con, &sql, max_rows);
-                }
-                let start = std::time::Instant::now();
-                if starts_with_executable_sql_keyword(&sql, &["SELECT", "SHOW", "DESCRIBE", "WITH", "PRAGMA"]) {
-                    let mut stmt = con.prepare(&sql).map_err(|e| e.to_string())?;
-                    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-                    let stmt_ref = rows.as_ref().ok_or("DuckDB statement unavailable")?;
-                    let col_count = stmt_ref.column_count();
-                    let columns: Vec<String> = (0..col_count)
-                        .map(|i| stmt_ref.column_name(i).map(|s| s.to_string()).unwrap_or_else(|_| "?".to_string()))
-                        .collect();
-                    let mut result_rows = Vec::new();
-                    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                        let vals: Vec<serde_json::Value> = (0..col_count)
-                            .map(|i| {
-                                row.get::<_, String>(i)
-                                    .map(serde_json::Value::String)
-                                    .or_else(|_| row.get::<_, i64>(i).map(|v| serde_json::Value::Number(v.into())))
-                                    .or_else(|_| {
-                                        row.get::<_, f64>(i).map(|v| {
-                                            serde_json::Number::from_f64(v)
-                                                .map(serde_json::Value::Number)
-                                                .unwrap_or(serde_json::Value::Null)
-                                        })
-                                    })
-                                    .or_else(|_| row.get::<_, bool>(i).map(serde_json::Value::Bool))
-                                    .unwrap_or(serde_json::Value::Null)
-                            })
-                            .collect();
-                        result_rows.push(vals);
-                    }
-                    Ok(db::QueryResult {
-                        columns,
-                        column_types: Vec::new(),
-                        column_sortables: vec![],
-                        rows: result_rows,
-                        affected_rows: 0,
-                        execution_time_ms: start.elapsed().as_millis(),
-                        truncated: false,
-                        session_id: None,
-                        has_more: false,
-                    })
-                } else {
-                    let affected = con.execute(&sql, []).map_err(|e| e.to_string())?;
-                    Ok(db::QueryResult {
-                        columns: vec![],
-                        column_types: Vec::new(),
-                        column_sortables: vec![],
-                        rows: vec![],
-                        affected_rows: affected as u64,
-                        execution_time_ms: start.elapsed().as_millis(),
-                        truncated: false,
-                        session_id: None,
-                        has_more: false,
-                    })
-                }
-            })
-            .await
-            .map_err(|e| e.to_string())?
-        }
-        #[cfg(feature = "duckdb-bundled")]
-        PoolKind::ExternalTabular(ext_pool) => {
-            let con = ext_pool.cache.clone();
-            let sql = sql.to_string();
-            drop(connections);
-            tokio::task::spawn_blocking(move || {
-                let con = con.lock().map_err(|e| e.to_string())?;
-                crate::query::duckdb_execute_with_max_rows(&con, &sql, max_rows)
-            })
-            .await
-            .map_err(|e| e.to_string())?
+            client.execute(None, sql, max_rows, None, None).await
         }
         _ => Err("Unsupported database type for transfer".to_string()),
     }
@@ -3038,32 +3082,14 @@ pub async fn get_columns_for_transfer(
 ) -> Result<Vec<db::ColumnInfo>, String> {
     let connections = state.connections.read().await;
 
-    #[cfg(feature = "duckdb-bundled")]
-    if let Some(PoolKind::DuckDb(con)) = connections.get(pool_key) {
-        let con = con.clone();
-        drop(connections);
-        let table = table.to_string();
+    #[cfg(feature = "duckdb-sidecar")]
+    if let Some(PoolKind::DuckDbWorker(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
         let schema = schema.to_string();
-        return tokio::task::spawn_blocking(move || {
-            let con = con.lock().map_err(|e| e.to_string())?;
-            crate::schema::duckdb_query_columns_in_database(&con, "main", &schema, &table)
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    if let Some(PoolKind::ExternalTabular(ext_pool)) = connections.get(pool_key) {
-        let con = ext_pool.cache.clone();
-        drop(connections);
         let table = table.to_string();
-        let schema = schema.to_string();
-        return tokio::task::spawn_blocking(move || {
-            let con = con.lock().map_err(|e| e.to_string())?;
-            crate::schema::duckdb_query_columns_in_database(&con, "main", &schema, &table)
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+        drop(connections);
+        return client.list_columns(database, schema, table).await;
     }
 
     if let Some(PoolKind::ClickHouse(client)) = connections.get(pool_key) {
@@ -4105,7 +4131,7 @@ where
                 &request.target_schema,
                 target_db_type,
                 &[],
-            );
+            )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
                     format!(
@@ -4450,7 +4476,7 @@ where
             &request.target_schema,
             target_db_type,
             &pk_columns,
-        );
+        )?;
         for (statement_index, batch_sql) in write_statements.iter().enumerate() {
             execute_transfer_write_statement(
                 state,
@@ -4906,70 +4932,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "duckdb-bundled")]
-    use crate::connection::{AppState, PoolKind};
-    #[cfg(feature = "duckdb-bundled")]
-    use crate::models::connection::default_redis_key_separator;
-    #[cfg(feature = "duckdb-bundled")]
-    use crate::storage::Storage;
     use serde_json::json;
-    #[cfg(feature = "duckdb-bundled")]
-    use std::sync::Arc;
-
-    #[cfg(feature = "duckdb-bundled")]
-    fn duckdb_test_config(id: &str) -> crate::models::connection::ConnectionConfig {
-        crate::models::connection::ConnectionConfig {
-            id: id.to_string(),
-            name: id.to_string(),
-            db_type: DatabaseType::DuckDb,
-            driver_profile: None,
-            driver_label: None,
-            url_params: None,
-            agent_java_options: Vec::new(),
-            host: ":memory:".to_string(),
-            port: 0,
-            username: String::new(),
-            password: String::new(),
-            database: None,
-            visible_databases: None,
-            visible_schemas: None,
-            attached_databases: Vec::new(),
-            init_script: None,
-            color: None,
-            transport_layers: Vec::new(),
-            connect_timeout_secs: 5,
-            query_timeout_secs: 30,
-            idle_timeout_secs: 60,
-            keepalive_interval_secs: 0,
-            ssl: false,
-            ca_cert_path: String::new(),
-            client_cert_path: String::new(),
-            client_key_path: String::new(),
-            sysdba: false,
-            oracle_connection_type: None,
-            connection_string: None,
-            redis_connection_mode: None,
-            redis_sentinel_master: String::new(),
-            redis_sentinel_nodes: String::new(),
-            redis_sentinel_username: String::new(),
-            redis_sentinel_password: String::new(),
-            redis_sentinel_tls: false,
-            redis_cluster_nodes: String::new(),
-            redis_key_separator: default_redis_key_separator(),
-            redis_scan_page_size: None,
-            etcd_endpoints: String::new(),
-            gbase_server: String::new(),
-            informix_server: String::new(),
-            external_config: None,
-            jdbc_driver_class: None,
-            jdbc_driver_paths: Vec::new(),
-            one_time: false,
-            read_only: false,
-            is_production: false,
-            production_databases: vec![],
-            database_info: None,
-        }
-    }
 
     fn test_column(name: &str, data_type: &str) -> db::ColumnInfo {
         db::ColumnInfo {
@@ -5009,6 +4972,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         }
     }
 
@@ -6246,6 +6210,27 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_insert_preserves_backslashes_control_characters_quotes_and_unicode() {
+        let sql = generate_insert_typed(
+            &[String::from("escape_sequence"), String::from("line_break"), String::from("quote_and_unicode")],
+            &[
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+            ],
+            &[vec![json!(r#"\n"#), json!("line1\r\nline2"), json!("O'Brien / Tiếng Việt")]],
+            "notes",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[notes] ([escape_sequence], [line_break], [quote_and_unicode]) VALUES\n(N'\\n', N'line1\r\nline2', N'O''Brien / Tiếng Việt')"
+        );
+    }
+
+    #[test]
     fn sqlserver_insert_formats_datetime_literals_with_supported_precision() {
         let sql = generate_insert_typed(
             &[String::from("id"), String::from("date1"), String::from("date2"), String::from("note")],
@@ -6284,6 +6269,34 @@ mod tests {
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[flags] ([enabled], [deleted]) VALUES\n(1, 0)");
+    }
+
+    #[test]
+    fn sqlserver_insert_formats_prefixed_hex_for_varbinary_columns() {
+        let sql = generate_insert_typed(
+            &[String::from("payload"), String::from("note")],
+            &[Some(String::from("varbinary(max)")), Some(String::from("nvarchar(64)"))],
+            &[vec![json!("0x0001ABff"), json!("0x0001ABff")]],
+            "files",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(sql, "INSERT INTO [dbo].[files] ([payload], [note]) VALUES\n(0x0001ABff, N'0x0001ABff')");
+    }
+
+    #[test]
+    fn sqlserver_insert_explicitly_converts_plain_text_for_varbinary_columns() {
+        let sql = generate_insert_typed(
+            &[String::from("payload")],
+            &[Some(String::from("varbinary(max)"))],
+            &[vec![json!("O'Brien")]],
+            "files",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(sql, "INSERT INTO [dbo].[files] ([payload]) VALUES\n(CONVERT(varbinary(max), N'O''Brien'))");
     }
 
     #[test]
@@ -6559,7 +6572,8 @@ SELECT 1 FROM dual"#
             "APP",
             &DatabaseType::Oracle,
             &[],
-        );
+        )
+        .unwrap();
 
         assert_eq!(statements.len(), 2);
         assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
@@ -6579,10 +6593,93 @@ SELECT 1 FROM dual"#
             "",
             &DatabaseType::Mysql,
             &[],
-        );
+        )
+        .unwrap();
 
         assert!(statements.len() > 1);
         assert!(statements.iter().all(|sql| sql.starts_with("INSERT INTO `events`")));
+    }
+
+    #[test]
+    fn mysql_sql_batch_allows_one_row_over_soft_target() {
+        let rows = vec![vec![json!("x".repeat(256))]];
+        let limits = SqlBatchLimits { max_rows: 100, target_sql_bytes: 128, hard_sql_bytes: Some(1024) };
+
+        let batches = generate_insert_typed_sql_batches(
+            &[String::from("payload")],
+            &[Some(String::from("text"))],
+            &rows,
+            "events",
+            "",
+            &DatabaseType::Mysql,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 1);
+    }
+
+    #[test]
+    fn mysql_sql_batch_rejects_one_row_over_known_hard_limit() {
+        let rows = vec![vec![json!("x".repeat(256))]];
+        let limits = SqlBatchLimits { max_rows: 100, target_sql_bytes: 128, hard_sql_bytes: Some(200) };
+
+        let error = generate_insert_typed_sql_batches(
+            &[String::from("payload")],
+            &[Some(String::from("text"))],
+            &rows,
+            "events",
+            "",
+            &DatabaseType::Mysql,
+            limits,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("row 1"));
+        assert!(error.contains("200 byte hard limit"));
+    }
+
+    #[test]
+    fn sqlserver_insert_batches_enforce_values_row_limit() {
+        let rows = (0..(MAX_SQLSERVER_INSERT_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+
+        let batches = generate_insert_typed_sql_batches(
+            &[String::from("id")],
+            &[Some(String::from("int"))],
+            &rows,
+            "events",
+            "dbo",
+            &DatabaseType::SqlServer,
+            SqlBatchLimits::for_database(&DatabaseType::SqlServer, rows.len()),
+        )
+        .unwrap();
+
+        assert_eq!(batches.iter().map(|(_, row_count)| *row_count).collect::<Vec<_>>(), vec![1000, 1]);
+    }
+
+    #[test]
+    fn sqlserver_insert_batches_measure_unicode_sql_as_utf16() {
+        let rows = (0..2).map(|_| vec![json!("x".repeat(140 * 1024))]).collect::<Vec<_>>();
+
+        let batches = generate_insert_typed_sql_batches(
+            &[String::from("payload")],
+            &[Some(String::from("nvarchar(max)"))],
+            &rows,
+            "events",
+            "dbo",
+            &DatabaseType::SqlServer,
+            SqlBatchLimits::for_database(&DatabaseType::SqlServer, rows.len()),
+        )
+        .unwrap();
+
+        assert_eq!(batches.iter().map(|(_, row_count)| *row_count).collect::<Vec<_>>(), vec![1, 1]);
+    }
+
+    #[test]
+    fn sqlserver_sql_byte_count_uses_utf16_code_units() {
+        assert_eq!(sql_text_bytes("AA\u{8d8a}\u{1f600}", &DatabaseType::SqlServer), 10);
+        assert_eq!(sql_text_bytes("AA\u{8d8a}\u{1f600}", &DatabaseType::Postgres), 9);
     }
 
     #[test]
@@ -6596,30 +6693,11 @@ SELECT 1 FROM dual"#
             "",
             &DatabaseType::Mysql,
             &[String::from("id")],
-        );
+        )
+        .unwrap();
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].contains("ON DUPLICATE KEY UPDATE"));
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[tokio::test]
-    async fn duckdb_transfer_columns_use_requested_schema() {
-        let dir = std::env::temp_dir().join(format!("dbx-transfer-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-        let con = duckdb::Connection::open_in_memory().unwrap();
-        con.execute_batch("CREATE SCHEMA analytics; CREATE TABLE analytics.items(id INTEGER);").unwrap();
-
-        let state = AppState::new(storage);
-        let con = Arc::new(crate::db::duckdb_driver::DuckDbConnection::new(con));
-        state.connections.write().await.insert("duckdb-1".to_string(), PoolKind::DuckDb(con));
-        state.configs.write().await.insert("duckdb-1".to_string(), duckdb_test_config("duckdb-1"));
-
-        let columns =
-            get_columns_for_transfer(&state, "duckdb-1", "duckdb-1", "main", "analytics", "items").await.unwrap();
-
-        assert_eq!(columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["id"]);
     }
 
     #[test]

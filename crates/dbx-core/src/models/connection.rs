@@ -72,6 +72,8 @@ pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnec
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -90,6 +92,8 @@ pub struct ConnectionConfig {
     pub visible_databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_system_schemas: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -140,6 +144,8 @@ pub struct ConnectionConfig {
     pub redis_key_separator: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_scan_page_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub redis_database_aliases: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -433,6 +439,7 @@ pub enum ProxyType {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
     Mysql,
@@ -452,6 +459,7 @@ pub enum DatabaseType {
     Oracle,
     #[serde(rename = "elasticsearch")]
     Elasticsearch,
+    Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
     #[serde(rename = "milvus")]
@@ -536,6 +544,8 @@ pub enum DatabaseType {
 struct ConnectionConfigData {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -554,6 +564,8 @@ struct ConnectionConfigData {
     pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
+    #[serde(default)]
+    pub show_system_schemas: bool,
     #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
@@ -603,6 +615,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub redis_scan_page_size: Option<u64>,
     #[serde(default)]
+    pub redis_database_aliases: HashMap<String, String>,
+    #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
     pub gbase_server: String,
@@ -631,6 +645,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
         Self {
             id: data.id,
             name: data.name,
+            note: data.note,
             db_type: data.db_type,
             driver_profile: data.driver_profile,
             driver_label: data.driver_label,
@@ -643,6 +658,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             database: data.database,
             visible_databases: data.visible_databases,
             visible_schemas: data.visible_schemas,
+            show_system_schemas: data.show_system_schemas,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -667,6 +683,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_cluster_nodes: data.redis_cluster_nodes,
             redis_key_separator: data.redis_key_separator,
             redis_scan_page_size: data.redis_scan_page_size,
+            redis_database_aliases: data.redis_database_aliases,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
             informix_server: data.informix_server,
@@ -995,6 +1012,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -1143,6 +1161,7 @@ impl ConnectionConfig {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -2175,6 +2194,7 @@ mod tests {
         ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,
@@ -2187,6 +2207,7 @@ mod tests {
             database: database.map(str::to_string),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -2211,6 +2232,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -2241,6 +2263,38 @@ mod tests {
         .unwrap();
         assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
         assert!(!legacy.read_only);
+    }
+
+    #[test]
+    fn connection_note_is_optional_and_round_trips_when_present() {
+        let config = mysql_config("root", "secret", Some("app"));
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("note").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note.is_empty());
+
+        let mut config = config;
+        config.note = "Production reporting".to_string();
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["note"], "Production reporting");
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note, config.note);
+    }
+
+    #[test]
+    fn redis_database_aliases_are_optional_and_round_trip() {
+        let config = mysql_config("default", "secret", None);
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("redis_database_aliases").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value).unwrap().redis_database_aliases.is_empty());
+
+        let mut config = config;
+        config.db_type = DatabaseType::Redis;
+        config.redis_database_aliases.insert("3".to_string(), "orders".to_string());
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["redis_database_aliases"]["3"], "orders");
+        assert_eq!(
+            serde_json::from_value::<ConnectionConfig>(value).unwrap().redis_database_aliases,
+            config.redis_database_aliases
+        );
     }
 
     #[test]
@@ -2739,6 +2793,20 @@ mod tests {
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+    }
+
+    #[test]
+    fn hbase_rest_url_uses_http_or_https_without_embedding_credentials() {
+        let mut config = mysql_config("hbase-user", "secret", None);
+        config.db_type = DatabaseType::Hbase;
+        config.port = 8080;
+
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "http://10.1.2.3:8080");
+
+        config.ssl = true;
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "https://10.1.2.3:8080");
     }
 
     #[test]

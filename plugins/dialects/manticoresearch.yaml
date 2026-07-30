@@ -1,0 +1,85 @@
+dialect:
+  name: "ManticoreSearch"
+  display_name: "ManticoreSearch"
+  versions:
+    - version: "6"
+      status: "RECOMMENDED"
+
+types:
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT", "BIGINT"]
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "TEXT"
+    category: "STRING"
+    aliases: ["STRING"]
+  - name: "JSON"
+    category: "JSON"
+  - name: "MULTI"
+    category: "ARRAY"
+    semantic_fidelity_base: 0.5
+  - name: "MULTI64"
+    category: "ARRAY"
+    semantic_fidelity_base: 0.5
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  create_index: false
+  drop_index: false
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  auto_increment: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    create_table: "CREATE TABLE {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  create_table: "DROP TABLE IF EXISTS {table}"
+  drop_table: "-- Restore from backup: {table}"
+
+online_safety:
+  add_column:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+  drop_table:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+  add_column: "SAFE"
+  create_table: "SAFE"
+
+structural_capabilities:
+  max_columns_per_table: 512
+  max_query_size_bytes: 16777216
+  supports_full_text_index: true
+  supports_spatial_index: true
+  supports_json_type: true
+
+identifier_rules:
+  quote_char: '`'
+  case_sensitive: false
+  max_length: 256
+
+metadata_queries:
+  list_tables:
+    sql: "SHOW TABLES"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "DESC {table}"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SHOW TABLES"
+    depth_support: 0
+    performance_profile: "LIGHT"

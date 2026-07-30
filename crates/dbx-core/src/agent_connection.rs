@@ -7,6 +7,15 @@ const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY: &str = "compatibleOjdbcVers
 const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM: &str = "compatibleOjdbcVersion=8";
 const ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS: u64 = 15_000;
 
+fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
+    let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
+    if config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana") {
+        ""
+    } else {
+        driver_class
+    }
+}
+
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
@@ -70,7 +79,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "zookeeper_connect_string": zookeeper_connect_string,
         "gbase_server": config.gbase_server,
         "informix_server": config.informix_server,
-        "jdbc_driver_class": config.jdbc_driver_class.as_deref().unwrap_or(""),
+        "jdbc_driver_class": agent_jdbc_driver_class(config),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
     });
     if config.db_type == DatabaseType::ZooKeeper {
@@ -598,6 +607,7 @@ mod tests {
         ConnectionConfig {
             id: "conn".to_string(),
             name: "Connection".to_string(),
+            note: String::new(),
             db_type,
             driver_profile: None,
             driver_label: None,
@@ -610,6 +620,7 @@ mod tests {
             database: database.map(str::to_string),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -634,6 +645,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -1015,6 +1027,42 @@ mod tests {
         let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
 
         assert_eq!(params["connection_string"], "jdbc:sap://hana.example.com:30013/?databaseName=TENANT1&encrypt=true");
+    }
+
+    #[test]
+    fn sap_hana_agent_connect_params_normalizes_legacy_driver_class_aliases() {
+        for alias in ["sap_hana", "saphana"] {
+            let mut cfg = config(DatabaseType::SapHana, Some("TENANT1"));
+            cfg.jdbc_driver_class = Some(alias.to_string());
+            cfg.jdbc_driver_paths = vec!["/tmp/ngdbc.jar".to_string()];
+
+            let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
+
+            assert_eq!(params["jdbc_driver_class"], "");
+            assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/ngdbc.jar"]));
+        }
+    }
+
+    #[test]
+    fn sap_hana_agent_connect_params_preserves_custom_driver_class() {
+        let mut cfg = config(DatabaseType::SapHana, Some("TENANT1"));
+        cfg.jdbc_driver_class = Some("com.example.CustomSapHanaDriver".to_string());
+
+        let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
+
+        assert_eq!(params["jdbc_driver_class"], "com.example.CustomSapHanaDriver");
+    }
+
+    #[test]
+    fn other_agent_connect_params_preserve_sap_hana_driver_alias() {
+        let mut cfg = config(DatabaseType::Mysql, Some("test"));
+        cfg.jdbc_driver_class = Some("sap_hana".to_string());
+        cfg.jdbc_driver_paths = vec!["/tmp/custom-driver.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "test");
+
+        assert_eq!(params["jdbc_driver_class"], "sap_hana");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/custom-driver.jar"]));
     }
 
     #[test]

@@ -107,11 +107,11 @@ const emit = defineEmits<{
 }
 
 .data-grid-header-cell--selected {
-  background-color: rgb(209, 213, 219) !important;
+  background-color: var(--data-grid-cell-selected-single-bg, rgb(191, 219, 254)) !important;
 }
 
 .data-grid-header-cell--dark.data-grid-header-cell--selected {
-  background-color: rgb(66, 67, 70) !important;
+  background-color: var(--data-grid-cell-selected-single-bg, rgb(30, 64, 96)) !important;
   color: rgb(244, 244, 245) !important;
 }
 

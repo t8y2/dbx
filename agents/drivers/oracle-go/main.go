@@ -2112,16 +2112,7 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 	}
 	upperType := strings.ToUpper(objectType)
 	if upperType == "VIEW" {
-		// ALL_VIEWS.TEXT for views — ALL_SOURCE doesn't contain views, and
-		// DBMS_METADATA.GET_DDL fails on XE editions.
-		var source string
-		err = s.db.QueryRow(
-			"SELECT TEXT FROM ALL_VIEWS WHERE OWNER = :1 AND VIEW_NAME = :2",
-			schema, strings.ToUpper(name),
-		).Scan(&source)
-		if errors.Is(err, sql.ErrNoRows) {
-			return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
-		}
+		source, err := s.getViewSource(schema, name)
 		if err != nil {
 			return nil, err
 		}
@@ -2219,22 +2210,51 @@ func normalizeDDLObjectType(value string) string {
 }
 
 func (s *server) buildViewDDL(schema, name string) (string, error) {
+	source, err := s.getViewSource(schema, name)
+	if err != nil {
+		return "", err
+	}
+	trimmed := strings.TrimSpace(source)
+	upperSource := strings.ToUpper(trimmed)
+	if strings.HasPrefix(upperSource, "CREATE ") || strings.HasPrefix(upperSource, "ALTER ") {
+		return trimmed, nil
+	}
+	return fmt.Sprintf("CREATE OR REPLACE VIEW %s.%s AS\n%s", quoteIdentifier(schema), quoteIdentifier(name), trimmed), nil
+}
+
+func (s *server) getViewSource(schema, name string) (string, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
+	viewName := strings.TrimSpace(name)
+	var ddl string
+	metadataErr := db.QueryRow(
+		"SELECT DBMS_METADATA.GET_DDL('VIEW', :1, :2) FROM DUAL",
+		viewName, schema,
+	).Scan(&ddl)
+	if metadataErr == nil && strings.TrimSpace(ddl) != "" {
+		return strings.TrimSpace(ddl), nil
+	}
+
 	var source string
-	err = db.QueryRow(
+	fallbackErr := db.QueryRow(
 		"SELECT TEXT FROM ALL_VIEWS WHERE OWNER = :1 AND VIEW_NAME = :2",
-		schema, strings.ToUpper(name),
+		schema, viewName,
 	).Scan(&source)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("view not found: %s.%s", schema, name)
+	if fallbackErr == nil && strings.TrimSpace(source) != "" {
+		return strings.TrimSpace(source), nil
 	}
-	if err != nil {
-		return "", err
+	if fallbackErr != nil && !errors.Is(fallbackErr, sql.ErrNoRows) {
+		if metadataErr != nil {
+			return "", fmt.Errorf(
+				"failed to load view source for %s.%s: DBMS_METADATA: %v; ALL_VIEWS: %w",
+				schema, viewName, metadataErr, fallbackErr,
+			)
+		}
+		return "", fmt.Errorf("failed to load view source for %s.%s from ALL_VIEWS: %w", schema, viewName, fallbackErr)
 	}
-	return fmt.Sprintf("CREATE OR REPLACE VIEW %s.%s AS\n%s", quoteIdentifier(schema), quoteIdentifier(name), strings.TrimSpace(source)), nil
+	return "", fmt.Errorf("view source not found: %s.%s", schema, viewName)
 }
 
 func (s *server) buildTableDDL(schema, table string) (string, error) {

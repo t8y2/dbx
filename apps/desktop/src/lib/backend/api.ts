@@ -67,6 +67,7 @@ export const loadConnections = forward("loadConnections");
 export const loadTunnelProfiles = forward("loadTunnelProfiles");
 export const saveTunnelProfiles = forward("saveTunnelProfiles");
 export const testTunnelProfile = forward("testTunnelProfile");
+export const resolveSshPrompt = forward("resolveSshPrompt");
 export const readKeychainPassword = forward("readKeychainPassword");
 export const readKeychainPasswords = forward("readKeychainPasswords");
 export const decryptConfig = forward("decryptConfig");
@@ -165,6 +166,7 @@ export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");
 export const listSubpartitions = forward("listSubpartitions");
 export const getTableDdl = forward("getTableDdl");
+export const getTableDisplayDdl = forward("getTableDisplayDdl");
 export const listFunctions = forward("listFunctions");
 export const listSequences = forward("listSequences");
 export const listRules = forward("listRules");
@@ -173,12 +175,15 @@ export const listExtensions = forward("listExtensions");
 export const listAvailableExtensions = forward("listAvailableExtensions");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
+export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Query
 export const executeQuery = forward("executeQuery");
 export const executeMulti = forward("executeMulti");
+export const executeMultiWithProgress = forward("executeMultiWithProgress");
 export const executeBatch = forward("executeBatch");
 export const executeScript = forward("executeScript");
+export const executeScriptWith2pc = forward("executeScriptWith2pc");
 export const executeInTransaction = forward("executeInTransaction");
 export const beginManualTransaction = forward("beginManualTransaction");
 export const executeInManualTransaction = forward("executeInManualTransaction");
@@ -225,6 +230,7 @@ export const buildCreateTableSql = forward("buildCreateTableSql");
 export const buildSingleColumnAlterSql = forward("buildSingleColumnAlterSql");
 export const analyzeEditableQueryEditability = forward("analyzeEditableQueryEditability");
 export const prepareDataGridSave = forward("prepareDataGridSave");
+export const extractDataGridSelection = forward("extractDataGridSelection");
 export const buildDataGridCopyUpdateStatements = forward("buildDataGridCopyUpdateStatements");
 export const buildDataGridCopyInsertStatement = forward("buildDataGridCopyInsertStatement");
 export const buildDataGridContextFilterCondition = forward("buildDataGridContextFilterCondition");
@@ -248,6 +254,9 @@ export const aiAgentStream = forward("aiAgentStream");
 export const aiCancelStream = forward("aiCancelStream");
 export const aiTestConnection = forward("aiTestConnection");
 export const aiListModels = forward("aiListModels");
+export const aiResolveModelEffort = forward("aiResolveModelEffort");
+export const saveAiChatSelection = forward("saveAiChatSelection");
+export const loadAiChatSelection = forward("loadAiChatSelection");
 export const saveAiConfig = forward("saveAiConfig");
 export const loadAiConfig = forward("loadAiConfig");
 export const saveAiConfigs = forward("saveAiConfigs");
@@ -263,6 +272,8 @@ export const loadMcpGlobalPolicy = forward("loadMcpGlobalPolicy");
 export const saveMcpGlobalPolicy = forward("saveMcpGlobalPolicy");
 export const loadMaxAgentTurns = forward("loadMaxAgentTurns");
 export const saveMaxAgentTurns = forward("saveMaxAgentTurns");
+export const loadMaxRetries = forward("loadMaxRetries");
+export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
 export const requestAppClose = forward("requestAppClose");
 export const setDriverStoreDir = forward("setDriverStoreDir");
@@ -383,6 +394,9 @@ export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
+export const redisGetStreamGroups = forward("redisGetStreamGroups");
+export const redisGetStreamConsumers = forward("redisGetStreamConsumers");
+export const redisGetStreamPending = forward("redisGetStreamPending");
 export const redisSetString = forward("redisSetString");
 export const redisDeleteKey = forward("redisDeleteKey");
 export const redisHashSet = forward("redisHashSet");
@@ -423,6 +437,15 @@ export const zookeeperListPrefix = forward("zookeeperListPrefix");
 export const zookeeperGet = forward("zookeeperGet");
 export const zookeeperPut = forward("zookeeperPut");
 export const zookeeperDelete = forward("zookeeperDelete");
+
+// HBase
+export const hbaseGetTableSchema = forward("hbaseGetTableSchema");
+export const hbaseScanRows = forward("hbaseScanRows");
+export const hbaseGetRow = forward("hbaseGetRow");
+export const hbasePutRow = forward("hbasePutRow");
+export const hbaseDeleteRow = forward("hbaseDeleteRow");
+export const hbaseCreateTable = forward("hbaseCreateTable");
+export const hbaseDeleteTable = forward("hbaseDeleteTable");
 
 // Message Queue
 export const mqTestConnection = forward("mqTestConnection");
@@ -614,8 +637,13 @@ export type {
   RedisKeyInfo,
   RedisListItem,
   RedisSetItem,
+  RedisStreamConsumer,
   RedisStreamEntry,
   RedisStreamField,
+  RedisStreamGroup,
+  RedisStreamMetric,
+  RedisStreamPendingEntry,
+  RedisStreamPendingPage,
   RedisValue,
   RedisValueData,
   RedisZsetItem,

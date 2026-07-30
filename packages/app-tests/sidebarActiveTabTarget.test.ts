@@ -154,12 +154,7 @@ test("findNodePathForTarget handles loaded, unloaded, and MySQL schema fallback 
         schema: "app_dev",
         tableName: "enum_info",
       },
-      expectedPath: [
-        "mysql-conn-1",
-        "mysql-conn-1:app_dev",
-        "mysql-conn-1:app_dev:__tables",
-        "mysql-conn-1:app_dev:__tables:enum_info",
-      ],
+      expectedPath: ["mysql-conn-1", "mysql-conn-1:app_dev", "mysql-conn-1:app_dev:__tables", "mysql-conn-1:app_dev:__tables:enum_info"],
     },
   ] satisfies Array<{
     name: string;
@@ -223,6 +218,33 @@ test("mongo tabs target the matching visible collection node", () => {
   };
 
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(collection)])?.id, "events-node");
+});
+
+test("HBase tabs target the matching table in their namespace", () => {
+  const tab: QueryTab = {
+    id: "tab-hbase",
+    title: "events",
+    connectionId: "conn-hbase",
+    database: "analytics",
+    sql: "events",
+    isExecuting: false,
+    mode: "hbase",
+  };
+  const table: TreeNode = {
+    id: "hbase-events",
+    label: "events",
+    type: "table",
+    connectionId: "conn-hbase",
+    database: "analytics",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(tab), {
+    type: "hbase-table",
+    connectionId: "conn-hbase",
+    namespace: "analytics",
+    tableName: "events",
+  });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(table)])?.id, "hbase-events");
 });
 
 test("GridFS tabs target the shared GridFS sidebar entry", () => {

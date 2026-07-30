@@ -14,3 +14,14 @@
 - `diagram`, `document`, `export`, `imports`: feature-specific utilities that are shared by more than one component.
 
 Tests under `src/lib/__tests__` mirror the same domain folders. When moving a module, update both runtime imports and colocated tests so stale root-level aliases do not return.
+
+## Schema Diff Metadata Guardrails
+
+Schema comparison must filter disabled object types before loading metadata. Tables load columns and the relational metadata enabled by the compare options; views load DDL only.
+
+Do not call column, index, foreign-key, or trigger metadata APIs for views. MySQL 5.7 can validate a `SQL SECURITY DEFINER` view during column discovery and return error 1143 when its definer account no longer exists, even though `SHOW CREATE VIEW` still succeeds. Keep view detection centralized in `schema/schemaDiffTableFilter.ts` and preserve the DDL-only plan in `schema/schemaDiffMetadataLoad.ts`.
+
+Regression coverage belongs in:
+
+- `src/lib/__tests__/schema/schemaDiffTableFilter.spec.ts`
+- `src/lib/__tests__/schema/schemaDiffMetadataLoad.spec.ts`

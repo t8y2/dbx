@@ -1,0 +1,142 @@
+dialect:
+  name: "openGauss"
+  display_name: "openGauss"
+  versions:
+    - version: "6.0"
+      status: "RECOMMENDED"
+    - version: "5.0"
+      status: "COMPATIBLE"
+
+types:
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT", "INT4"]
+  - name: "BIGINT"
+    category: "INTEGER"
+    aliases: ["INT8"]
+  - name: "TINYINT"
+    category: "INTEGER"
+  - name: "REAL"
+    category: "FLOAT"
+    aliases: ["FLOAT4"]
+  - name: "DOUBLE PRECISION"
+    category: "FLOAT"
+    aliases: ["FLOAT8"]
+  - name: "NUMERIC"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["DECIMAL"]
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+  - name: "TEXT"
+    category: "STRING"
+  - name: "CLOB"
+    category: "STRING"
+  - name: "BYTEA"
+    category: "BINARY"
+  - name: "BOOLEAN"
+    category: "BOOLEAN"
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIME"
+    category: "TIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "TIMESTAMPTZ"
+    category: "DATETIME"
+    semantic_fidelity_base: 0.9
+  - name: "UUID"
+    category: "UUID"
+  - name: "JSON"
+    category: "JSON"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  comment: true
+  create_index: true
+  drop_index: true
+  rebuild_index: true
+  alter_primary_key: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_function: true
+  drop_function: true
+  create_sequence: true
+  drop_sequence: true
+  alter_owner: true
+  grant_revoke: true
+  if_not_exists: true
+  create_or_replace: true
+  transactional_ddl: true
+  temporary_table: true
+  identity_columns: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} ALTER COLUMN {column} TYPE {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+  modify_column: "ALTER TABLE {table} ALTER COLUMN {column} TYPE {original_type}"
+
+online_safety:
+  add_column:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+  modify_column:
+    level: "BLOCKING_LONG"
+    cost: "MEDIUM"
+
+destruction_level:
+  drop_table: "FATAL"
+  drop_schema: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 1600
+  max_indexes_per_table: 100
+  max_query_size_bytes: 268435456
+  max_foreign_key_name_length: 63
+  supports_partitioning: true
+  supports_deferrable_constraints: true
+  supports_json_type: true
+  supports_uuid_type: true
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 63
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = '{schema}'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = '{schema}' AND table_name = '{table}' ORDER BY ordinal_position"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT tc.table_name, ccu.table_name AS ref_table FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = '{schema}'"
+    depth_support: 2
+    performance_profile: "HEAVY"
+
+pre_execution_checks:
+  - name: "lock_timeout"
+    sql: "SET lock_timeout = '3s'"

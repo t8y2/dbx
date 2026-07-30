@@ -8,6 +8,7 @@ import { aiTableMentionKey, type AiTableMention } from "@/lib/ai/aiTableMentions
 import { aiSkillForAction } from "@/lib/ai/aiSkills";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 
@@ -95,6 +96,11 @@ export interface AiRequestInput {
   instruction: string;
   context: AiContext;
   allowWriteSql?: boolean;
+  /** When allowWriteSql is true, the specific write SQL the user confirmed. */
+  confirmedWriteSql?: string;
+  /** Connection/database snapshot at confirmation time; verified at backend. */
+  confirmedConnectionId?: string;
+  confirmedDatabase?: string;
 }
 
 export interface CustomPromptContext {
@@ -187,6 +193,9 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     onEvent,
     input.mode || "ask",
     input.allowWriteSql || false,
+    input.confirmedWriteSql,
+    input.confirmedConnectionId,
+    input.confirmedDatabase,
   );
 }
 
@@ -348,8 +357,8 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
         ? "用户提出数据查询意图时，必须调用 execute_query 工具执行 SQL，不要只输出 SQL 文本后停止。先用 list_tables/get_columns 了解 schema，再调用 execute_query 获取真实结果，最后基于结果回答用户。"
         : "When the user expresses a data query intent, you MUST call the execute_query tool to run the SQL — do NOT just output SQL text and stop. Use list_tables/get_columns to understand the schema first, then call execute_query to get real results, then answer based on the actual data.",
       isZh
-        ? "只有 SELECT、WITH、SHOW、DESCRIBE、EXPLAIN 可以通过 execute_query 执行。如果用户要求写入操作，先解释原因，不要执行。"
-        : "Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN can be executed via execute_query. If the user requests a write operation, explain why it is blocked instead of executing.",
+        ? "当用户要求写入操作（INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE 等）时，先在一个 ```sql 代码块中给出精确的写 SQL，再在回复末尾用问句明确询问用户是否确认执行（例如'需要我执行这条 CREATE TABLE 语句吗？'）。待用户明确确认后再调用 execute_query，并原样使用该代码块中的 SQL，不得改写、重新格式化或补充语句。禁止不经确认直接执行写入。"
+        : "When the user requests a write operation (INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE, etc.), first put the exact proposed write SQL in one ```sql code block, then ask for explicit confirmation at the end of your reply with a question that names the specific operation (e.g., 'Should I execute this CREATE TABLE?'). Only call execute_query for writes after the user explicitly confirms, and use the exact SQL from that code block without rewriting, reformatting, or adding statements. Never execute writes without confirmation.",
       isZh ? "如果安全执行条件不满足，先说明原因，再给只读预览或澄清问题。" : "If safe execution requirements are not met, explain why first, then provide a read-only preview or a clarifying question.",
     ];
   }
@@ -426,6 +435,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
   const maxIndexesPerTable = options.maxIndexesPerTable ?? 10;
   const maxFksPerTable = options.maxFksPerTable ?? 10;
   const databaseType = aiDatabaseTypeForConnection(connection);
+  const database = aiDatabaseNamespace(tab, connection);
   const tables: AiSchemaTable[] = [];
   const tableKeys = new Set<string>();
   let truncated = false;
@@ -436,8 +446,8 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
     schemaScope = "focused_table";
     const s = tab.tableMeta.schema ?? "";
     const tName = tab.tableMeta.tableName;
-    const [indexes, foreignKeys] = await Promise.all([api.listIndexes(tab.connectionId, tab.database, s, tName).catch(() => [] as IndexInfo[]), api.listForeignKeys(tab.connectionId, tab.database, s, tName).catch(() => [] as ForeignKeyInfo[])]);
-    const tableComment = await loadTableComment(tab.connectionId, tab.database, s, tName).catch(() => undefined);
+    const [indexes, foreignKeys] = await Promise.all([api.listIndexes(tab.connectionId, database, s, tName).catch(() => [] as IndexInfo[]), api.listForeignKeys(tab.connectionId, database, s, tName).catch(() => [] as ForeignKeyInfo[])]);
+    const tableComment = await loadTableComment(tab.connectionId, database, s, tName).catch(() => undefined);
     tables.push({
       schema: tab.tableMeta.schema,
       name: tName,
@@ -463,7 +473,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
   // Vector databases: load collections instead of SQL tables
   if (isVectorDbType(databaseType)) {
     try {
-      const collections = await api.vectorListCollections(tab.connectionId, tab.database);
+      const collections = await api.vectorListCollections(tab.connectionId, database);
 
       // Find the currently opened collection (tab.sql is UUID for ChromaDB, name for others)
       const currentCollection = collections.find((c) => c.id === tab.sql || c.name === tab.sql);
@@ -500,26 +510,24 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
     try {
       const schemas = await loadCandidateSchemas(tab, connection);
       for (const schema of schemas) {
-        const tableList = await api.listTables(tab.connectionId, tab.database, schema);
+        const tableList = await api.listTables(tab.connectionId, database, schema);
         const candidates = tableList.slice(0, maxTables - tables.length);
         if (candidates.length < tableList.length) truncated = true;
 
         const metaResults = await Promise.all(
           candidates.map((table) =>
-            Promise.all([
-              api.getColumns(tab.connectionId, tab.database, schema, table.name),
-              api.listIndexes(tab.connectionId, tab.database, schema, table.name).catch(() => [] as IndexInfo[]),
-              api.listForeignKeys(tab.connectionId, tab.database, schema, table.name).catch(() => [] as ForeignKeyInfo[]),
-            ]).then(([columns, indexes, foreignKeys]) => ({
-              schema: schema === tab.database && !isSchemaAware(databaseType) ? undefined : schema,
-              name: table.name,
-              tableType: table.table_type,
-              comment: table.comment,
-              columns: columns.slice(0, maxColumnsPerTable),
-              indexes: indexes.slice(0, maxIndexesPerTable),
-              foreignKeys: foreignKeys.slice(0, maxFksPerTable),
-              _truncatedCols: columns.length > maxColumnsPerTable,
-            })),
+            Promise.all([api.getColumns(tab.connectionId, database, schema, table.name), api.listIndexes(tab.connectionId, database, schema, table.name).catch(() => [] as IndexInfo[]), api.listForeignKeys(tab.connectionId, database, schema, table.name).catch(() => [] as ForeignKeyInfo[])]).then(
+              ([columns, indexes, foreignKeys]) => ({
+                schema: schema === database && !isSchemaAware(databaseType) ? undefined : schema,
+                name: table.name,
+                tableType: table.table_type,
+                comment: table.comment,
+                columns: columns.slice(0, maxColumnsPerTable),
+                indexes: indexes.slice(0, maxIndexesPerTable),
+                foreignKeys: foreignKeys.slice(0, maxFksPerTable),
+                _truncatedCols: columns.length > maxColumnsPerTable,
+              }),
+            ),
           ),
         );
 
@@ -542,7 +550,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
     connectionId: tab.connectionId,
     connectionName: connection.name,
     databaseType,
-    database: tab.database,
+    database,
     currentSql: currentCollectionName ?? tab.sql,
     lastError: extractLastError(tab.result),
     lastResultPreview: formatResultPreview(tab.result),
@@ -555,15 +563,16 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
 
 async function loadMentionedTableContext(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number, maxIndexesPerTable: number, maxFksPerTable: number): Promise<AiSchemaTable | undefined> {
   const databaseType = aiDatabaseTypeForConnection(connection);
+  const database = aiDatabaseNamespace(tab, connection);
   const schema = await resolveMentionedTableSchema(tab, connection, mention);
   const [columns, indexes, foreignKeys, tableComment] = await Promise.all([
-    api.getColumns(tab.connectionId, tab.database, schema, mention.table),
-    api.listIndexes(tab.connectionId, tab.database, schema, mention.table).catch(() => [] as IndexInfo[]),
-    api.listForeignKeys(tab.connectionId, tab.database, schema, mention.table).catch(() => [] as ForeignKeyInfo[]),
-    loadTableComment(tab.connectionId, tab.database, schema, mention.table).catch(() => undefined),
+    api.getColumns(tab.connectionId, database, schema, mention.table),
+    api.listIndexes(tab.connectionId, database, schema, mention.table).catch(() => [] as IndexInfo[]),
+    api.listForeignKeys(tab.connectionId, database, schema, mention.table).catch(() => [] as ForeignKeyInfo[]),
+    loadTableComment(tab.connectionId, database, schema, mention.table).catch(() => undefined),
   ]);
   return {
-    schema: schema === tab.database && !isSchemaAware(databaseType) ? undefined : schema,
+    schema: schema === database && !isSchemaAware(databaseType) ? undefined : schema,
     name: mention.table,
     tableType: "TABLE",
     comment: tableComment,
@@ -584,25 +593,32 @@ async function resolveMentionedTableSchema(tab: QueryTab, connection: Connection
     return tab.tableMeta.schema;
   }
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
+    const database = aiDatabaseNamespace(tab, connection);
     const schemas = await loadCandidateSchemas(tab, connection);
     for (const schema of schemas) {
-      const tables = await api.listTables(tab.connectionId, tab.database, schema, mention.table, 10).catch(() => []);
+      const tables = await api.listTables(tab.connectionId, database, schema, mention.table, 10).catch(() => []);
       if (tables.some((table) => table.name.toLowerCase() === mention.table.toLowerCase())) return schema;
     }
   }
-  return tab.database || connection.database || "main";
+  return aiDatabaseNamespace(tab, connection);
 }
 
 async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig): Promise<string[]> {
+  const database = aiDatabaseNamespace(tab, connection);
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
-    const schemas = await api.listSchemas(tab.connectionId, tab.database);
+    const schemas = await api.listSchemas(tab.connectionId, database);
     return prioritizeSchemas(schemas);
   }
-  return [tab.database || connection.database || "main"];
+  return [database];
 }
 
 function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType {
   return effectiveDatabaseTypeForConnection(connection) ?? connection.db_type;
+}
+
+function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
+  const database = tab.database || connection.database || "main";
+  return connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database;
 }
 
 function prioritizeSchemas(schemas: string[]): string[] {

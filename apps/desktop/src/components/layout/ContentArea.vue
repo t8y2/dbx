@@ -5,7 +5,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, PanelsTopLeft } from "@lucide/vue";
+import { Check, Columns3, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -50,6 +50,7 @@ const DocumentBrowser = defineAsyncComponent(() => import("@/components/document
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
+const HBaseBrowser = defineAsyncComponent(() => import("@/components/hbase/HBaseBrowser.vue"));
 const ElasticsearchJsonResponsePanel = defineAsyncComponent(() => import("@/components/common/ElasticsearchJsonResponsePanel.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
@@ -67,14 +68,16 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems } from "@/lib/tabs/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems, type ExecutionSummaryItem } from "@/lib/tabs/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
+import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
@@ -264,6 +267,12 @@ function setTableFontSize(value: number) {
   settingsStore.updateEditorSettings({ tableFontSize: value });
 }
 
+const numericColumnRightAlign = computed(() => settingsStore.editorSettings.numericColumnRightAlign ?? true);
+
+function setNumericColumnRightAlign(value: boolean) {
+  settingsStore.updateEditorSettings({ numericColumnRightAlign: value });
+}
+
 function decreaseTableFontSize() {
   setTableFontSize(tableFontSize.value - 1);
 }
@@ -285,7 +294,7 @@ const activeTabDimension = computed(() => {
 const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialect(activeEffectiveDatabaseType.value));
-const editorSyntaxDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialectForConnection(props.activeConnection));
+const editorSyntaxDialect = computed<CodeMirrorSqlDialectName>(() => codeMirrorSqlDialectForConnection(props.activeConnection));
 
 const shortcutModifier = computed(() => (navigator.platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl"));
 
@@ -359,9 +368,23 @@ const activeStatementExecutionMarkers = computed(() =>
     activeEffectiveDatabaseType.value,
     props.activeTab.resultBaseSql || props.activeTab.lastExecutedSql || props.activeTab.sql,
     props.activeTab.resultEditorFingerprint ?? "",
+    props.activeTab.batchSqlExecution,
   ),
 );
 const activeElasticsearchJsonResponse = computed(() => elasticsearchJsonResponseForResult(activeEffectiveDatabaseType.value, activeResultSql.value, props.activeTab.result));
+/** Whether the active result is an Elasticsearch _source table that also has a raw JSON toggle. */
+const activeElasticsearchRawBody = computed(() => {
+  if (activeEffectiveDatabaseType.value !== "elasticsearch") return undefined;
+  return props.activeTab.result?.elasticsearch_raw_body;
+});
+/** Toggle between the _source table and the raw JSON panel for Elasticsearch REST results. */
+const showElasticsearchRawJson = ref(false);
+watch(
+  () => props.activeTab.result?.elasticsearch_raw_body,
+  () => {
+    showElasticsearchRawJson.value = false;
+  },
+);
 const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
@@ -379,6 +402,11 @@ watch(
 );
 const summaryItems = computed(() => executionSummaryItems(props.activeTab));
 const hasExecutionSummary = computed(() => summaryItems.value.length > 0 || props.activeTab.isExecuting);
+const batchExecutionProgress = computed(() => props.activeTab.batchSqlExecution);
+const batchExecutionPercent = computed(() => {
+  const progress = batchExecutionProgress.value;
+  return progress?.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+});
 const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length) return true;
   return visibleResultItems.value.length > 0;
@@ -829,6 +857,21 @@ function selectResultItem(item: (typeof visibleResultItems.value)[number]) {
   });
 }
 
+function executionSummaryItemRange(item: ExecutionSummaryItem) {
+  if (typeof item.sourceFrom === "number" && typeof item.sourceTo === "number" && item.sql && props.activeTab.sql.slice(item.sourceFrom, item.sourceTo) === item.sql) {
+    return { from: item.sourceFrom, to: item.sourceTo };
+  }
+  return item.result ? resultSourceRange(props.activeTab.sql, item.result, item.statementIndex, activeEffectiveDatabaseType.value) : undefined;
+}
+
+function previewExecutionSummaryItem(item: ExecutionSummaryItem) {
+  queryEditorRef.value?.previewStatementRange(executionSummaryItemRange(item) ?? null);
+}
+
+function focusExecutionSummaryItem(item: ExecutionSummaryItem) {
+  queryEditorRef.value?.focusStatementRange(executionSummaryItemRange(item) ?? null);
+}
+
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
@@ -843,6 +886,20 @@ function requestQueryEditorExecute() {
 
 function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
+}
+
+async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
+  const tab = props.activeTab;
+  if (!tab || tab.mode !== "query") return;
+  let filePath = `query-result.${payload.format}`;
+  if (isTauriRuntime()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const filterName = payload.format === "csv" ? "CSV" : payload.format === "xlsx" ? "Excel" : "Text";
+    const picked = await save({ defaultPath: filePath, filters: [{ name: filterName, extensions: [payload.format] }] });
+    if (!picked) return;
+    filePath = picked as string;
+  }
+  await queryStore.exportQuerySqlDirect(tab.id, payload.sql, payload.format, filePath, payload.columnComments);
 }
 
 function pasteClipboardAsSqlInCondition() {
@@ -912,6 +969,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               @format-error="emit('formatError')"
               @execute="emit('execute', $event)"
               @execute-in-new-result-tab="emit('executeInNewResultTab', $event)"
+              @export-query="handleExportQuery"
               @save="emit('saveSql')"
               @click-table="onHandleClickTable"
               @view-table-data="onHandleViewTableData"
@@ -1180,6 +1238,30 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                         </div>
                       </LightTooltip>
                     </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <component :is="numericColumnRightAlign ? AlignRight : AlignLeft" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.numericColumnAlign") }}</span>
+                      </div>
+                      <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          :class="!numericColumnRightAlign ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setNumericColumnRightAlign(false)"
+                        >
+                          {{ t("grid.numericColumnAlignLeft") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          :class="numericColumnRightAlign ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setNumericColumnRightAlign(true)"
+                        >
+                          {{ t("grid.numericColumnAlignRight") }}
+                        </button>
+                      </div>
+                    </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
                       <span class="min-w-0 flex items-center gap-2 font-medium">
                         <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1235,42 +1317,74 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
             <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex-1 min-h-0 overflow-auto bg-background">
-              <div v-if="activeTab.isExecuting" class="flex h-full items-center justify-center text-sm text-muted-foreground">
-                <Loader2 class="mr-2 h-4 w-4 animate-spin" />
-                {{ t("executionSummary.executing") }}
+              <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
+                <Loader2 v-if="activeTab.isExecuting" class="mr-2 h-4 w-4 animate-spin" />
+                <template v-if="activeTab.isExecuting">{{ t("executionSummary.executing") }}</template>
+                <template v-else>{{ t("executionSummary.empty") }}</template>
               </div>
-              <div v-else-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
-                {{ t("executionSummary.empty") }}
-              </div>
-              <div v-else>
+              <div v-else class="min-w-[46rem]">
+                <div v-if="batchExecutionProgress" class="sticky top-0 z-10 border-b bg-background/95 px-3 py-2 backdrop-blur">
+                  <div class="mb-1.5 flex items-center gap-3 text-xs">
+                    <span class="font-medium">{{ activeTab.isExecuting ? t("executionSummary.executing") : t("executionSummary.finished") }}</span>
+                    <span class="tabular-nums text-muted-foreground">{{ batchExecutionProgress.completed }} / {{ batchExecutionProgress.total }}</span>
+                    <span class="ml-auto tabular-nums text-muted-foreground">{{ batchExecutionPercent }}%</span>
+                  </div>
+                  <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${batchExecutionPercent}%` }" />
+                  </div>
+                </div>
                 <div class="overflow-hidden border-b">
-                  <div class="grid grid-cols-[4rem_1fr_8rem_8rem_7rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                  <div class="grid grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
                     <div>{{ t("executionSummary.statement") }}</div>
-                    <div>{{ t("executionSummary.type") }}</div>
-                    <div class="text-right">{{ t("executionSummary.rows") }}</div>
+                    <div>{{ t("executionSummary.sql") }}</div>
+                    <div>{{ t("executionSummary.status") }}</div>
                     <div class="text-right">{{ t("executionSummary.affected") }}</div>
                     <div class="text-right">{{ t("executionSummary.time") }}</div>
                   </div>
-                  <div v-for="item in summaryItems" :key="item.index" class="grid grid-cols-[4rem_1fr_8rem_8rem_7rem] items-center border-b px-3 py-2 text-xs last:border-b-0">
-                    <div class="font-mono text-muted-foreground">#{{ item.index + 1 }}</div>
-                    <div class="flex min-w-0 items-center gap-2">
-                      <span class="inline-flex h-5 items-center rounded-full border px-2 text-[10px]" :class="item.isError ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'">
-                        {{ item.isError ? t("executionSummary.error") : t("executionSummary.success") }}
-                      </span>
-                      <span class="truncate">
-                        {{ item.hasTabularResult ? t("executionSummary.returnedTable", { count: item.returnedColumns }) : t("executionSummary.noTable") }}
+                  <button
+                    v-for="item in summaryItems"
+                    :key="item.statementIndex"
+                    type="button"
+                    class="grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs transition-colors last:border-b-0 hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
+                    :title="item.error || item.sql"
+                    @click="previewExecutionSummaryItem(item)"
+                    @dblclick="focusExecutionSummaryItem(item)"
+                    @keydown.enter.prevent="focusExecutionSummaryItem(item)"
+                  >
+                    <div class="font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
+                    <div class="min-w-0">
+                      <div class="truncate font-mono text-[11px] text-foreground">{{ item.sql || t("executionSummary.noSql") }}</div>
+                      <div v-if="item.error" class="mt-0.5 truncate text-[11px] text-destructive">{{ item.error }}</div>
+                    </div>
+                    <div>
+                      <span
+                        class="inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px]"
+                        :class="{
+                          'border-primary/35 bg-primary/10 text-primary': item.status === 'running',
+                          'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300': item.status === 'success',
+                          'border-destructive/40 bg-destructive/10 text-destructive': item.status === 'error',
+                          'border-border bg-muted/40 text-muted-foreground': item.status === 'pending' || item.status === 'skipped',
+                          'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300': item.status === 'cancelled',
+                        }"
+                      >
+                        <Loader2 v-if="item.status === 'running'" class="h-3 w-3 animate-spin" />
+                        <Check v-else-if="item.status === 'success'" class="h-3 w-3" />
+                        <X v-else-if="item.status === 'error'" class="h-3 w-3" />
+                        <SquareDashed v-else class="h-3 w-3" />
+                        {{ t(`executionSummary.statuses.${item.status}`) }}
                       </span>
                     </div>
-                    <div class="text-right tabular-nums">{{ item.returnedRows.toLocaleString() }}</div>
-                    <div class="text-right tabular-nums">{{ item.affectedRows.toLocaleString() }}</div>
-                    <div class="text-right tabular-nums">{{ item.executionTimeMs }}ms</div>
-                  </div>
+                    <div class="text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.affectedRows.toLocaleString() }}</div>
+                    <div class="text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                  </button>
                 </div>
+                <div class="px-3 py-2 text-[11px] text-muted-foreground">{{ t("executionSummary.navigationHint") }}</div>
               </div>
             </div>
 
             <template v-else>
               <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
+              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
               <DataGrid
                 v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
@@ -1309,17 +1423,32 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"
                 :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
-                :query-result-export-request="(options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' | 'txt'; includeSqlSheet?: boolean }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)"
+                :query-result-export-request="
+                  (options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' | 'txt' | 'sql'; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)
+                "
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeTab.title"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
                 @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
+                @hidden-column-keys-change="(keys: string[]) => queryStore.updateDataGridHiddenColumnKeys(activeTab.id, keys)"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template #result-toolbar-leading="{ compact }">
                   <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse" :compact="compact" @select-view="emit('update:activeOutputView', $event)" />
+                  <template v-if="activeElasticsearchRawBody">
+                    <div class="mx-1 h-4 w-px bg-border" />
+                    <button
+                      type="button"
+                      class="inline-flex h-5 shrink-0 items-center rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
+                      :class="showElasticsearchRawJson ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                      :aria-pressed="showElasticsearchRawJson"
+                      @click="showElasticsearchRawJson = !showElasticsearchRawJson"
+                    >
+                      {{ showElasticsearchRawJson ? t("tabs.tableData") : t("redis.jsonView") }}
+                    </button>
+                  </template>
                 </template>
                 <template #result-toolbar-actions="{ compact }">
                   <QueryResultToolbarActions
@@ -1597,6 +1726,30 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   </div>
                 </LightTooltip>
               </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <component :is="numericColumnRightAlign ? AlignRight : AlignLeft" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.numericColumnAlign") }}</span>
+                </div>
+                <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    :class="!numericColumnRightAlign ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setNumericColumnRightAlign(false)"
+                  >
+                    {{ t("grid.numericColumnAlignLeft") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    :class="numericColumnRightAlign ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setNumericColumnRightAlign(true)"
+                  >
+                    {{ t("grid.numericColumnAlignRight") }}
+                  </button>
+                </div>
+              </div>
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
                 <span class="min-w-0 flex items-center gap-2 font-medium">
                   <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1642,6 +1795,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           @update:where-input="(v: string) => (activeTab.whereInput = v)"
           @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
           @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
+          @hidden-column-keys-change="(keys: string[]) => queryStore.updateDataGridHiddenColumnKeys(activeTab.id, keys)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
@@ -1670,7 +1824,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <!-- Redis mode: key browser -->
     <template v-else-if="activeTab.mode === 'redis'">
       <div class="flex-1 min-h-0">
-        <RedisKeyBrowser ref="redisKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :db="Number(activeTab.database)" :block-dangerous-redis-commands="props.blockDangerousRedisCommands" />
+        <RedisKeyBrowser ref="redisKeyBrowserRef" :key="`${activeTab.id}:${activeTab.connectionId}:${activeTab.database}`" :connection-id="activeTab.connectionId" :db="Number(activeTab.database)" :block-dangerous-redis-commands="props.blockDangerousRedisCommands" />
       </div>
     </template>
 
@@ -1725,6 +1879,12 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'vector'">
       <div class="flex-1 min-h-0">
         <VectorBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :collection-label="activeTab.title" :database-type="activeEffectiveDatabaseType" :dimension="activeTabDimension" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'hbase'">
+      <div class="flex-1 min-h-0">
+        <HBaseBrowser :key="activeTab.id" :tab-id="activeTab.id" :connection-id="activeTab.connectionId" :namespace="activeTab.database" :table="activeTab.sql" :create-table-on-open="activeTab.hbaseCreateTableOnOpen" />
       </div>
     </template>
 

@@ -87,6 +87,7 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
     ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::Postgres,
         driver_profile: None,
         driver_label: None,
@@ -123,6 +124,7 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         redis_cluster_nodes: String::new(),
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         redis_scan_page_size: None,
+        redis_database_aliases: Default::default(),
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),
@@ -133,6 +135,7 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        show_system_schemas: false,
         database_info: None,
     }
 }

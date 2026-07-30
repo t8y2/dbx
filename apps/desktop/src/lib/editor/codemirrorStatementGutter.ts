@@ -30,9 +30,16 @@ function createStatusIconDom(status: StatementExecutionMarkerStatus, includeCirc
     svg.appendChild(circle);
   }
 
-  const mark = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  mark.setAttribute("d", status === "error" ? "m16 8-8 8m0-8 8 8" : "m7 12 3 3 7-7");
-  svg.appendChild(mark);
+  if (status === "running") {
+    svg.classList.add("cm-statement-execution-spinner");
+    const arc = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    arc.setAttribute("d", "M21 12a9 9 0 1 1-6.22-8.56");
+    svg.appendChild(arc);
+  } else {
+    const mark = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    mark.setAttribute("d", status === "error" ? "m16 8-8 8m0-8 8 8" : "m7 12 3 3 7-7");
+    svg.appendChild(mark);
+  }
   return svg;
 }
 

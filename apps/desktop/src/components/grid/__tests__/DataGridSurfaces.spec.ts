@@ -213,6 +213,26 @@ describe("DataGridPagination", () => {
     expect(nextPage).toHaveBeenCalledOnce();
     expect(lastPage).toHaveBeenCalledOnce();
   });
+
+  it("hides pagination controls when the data source does not support paging", () => {
+    const mounted = mountComponent(DataGridPagination, {
+      paginationEnabled: false,
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    });
+
+    expect(findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0")).toHaveLength(0);
+  });
 });
 
 describe("DataGridColumnHeader", () => {

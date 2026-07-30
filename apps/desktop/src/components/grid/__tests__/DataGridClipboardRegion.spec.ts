@@ -7,4 +7,8 @@ describe("DataGrid native clipboard regions", () => {
   it("keeps table info text selection out of grid copy shortcuts", () => {
     expect(dataGridSource).toMatch(/<div\b(?=[^>]*\bv-if="showTableInfo")(?=[^>]*\bdata-native-clipboard)[^>]*>/);
   });
+
+  it("keeps transposed field-name text selection out of grid copy shortcuts", () => {
+    expect(dataGridSource).toMatch(/<div\b(?=[^>]*\bdata-native-clipboard)(?=[^>]*:title="item\.column")[^>]*>/);
+  });
 });

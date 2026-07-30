@@ -104,6 +104,7 @@ mod tests {
         let mut cfg = ConnectionConfig {
             id: "c1".to_string(),
             name: "mq".to_string(),
+            note: String::new(),
             db_type: crate::models::connection::DatabaseType::MessageQueue,
             driver_profile: None,
             driver_label: None,
@@ -116,6 +117,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -140,6 +142,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: String::new(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

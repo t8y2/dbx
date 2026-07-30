@@ -42,6 +42,7 @@ pub struct UpdateInfo {
     pub latest_version: String,
     pub update_available: bool,
     pub portable_mode: bool,
+    pub manual_update_only: bool,
     pub release_name: String,
     pub release_url: String,
     pub release_notes: String,
@@ -292,6 +293,7 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
     UpdateInfo {
         update_available: is_newer_version(&latest_version, current_version),
         portable_mode: false,
+        manual_update_only: false,
         current_version: current_version.to_string(),
         release_name,
         release_url,

@@ -491,13 +491,13 @@ defineExpose({
 }
 
 .editor-search-panel--editor {
-  background: #f6f7f9;
-  border-color: #d8dce3;
+  background: var(--popover);
+  border-color: var(--border);
   border-radius: var(--dbx-radius-fixed-6);
   box-shadow:
-    0 8px 22px rgb(15 23 42 / 0.14),
-    0 1px 0 rgb(255 255 255 / 0.78) inset;
-  color: #20242a;
+    0 8px 22px color-mix(in srgb, var(--foreground) 14%, transparent),
+    0 1px 0 color-mix(in srgb, var(--background) 78%, transparent) inset;
+  color: var(--foreground);
   gap: 3px;
   max-width: min(calc(100vw - 2rem), 500px);
   padding: 4px 6px;
@@ -535,96 +535,46 @@ defineExpose({
 }
 
 .editor-search-panel--editor :deep(.border-input) {
-  background: #ffffff;
-  border-color: #c7ccd5;
+  background: var(--background);
+  border-color: var(--input);
   border-radius: var(--dbx-radius-fixed-5);
-  box-shadow: 0 1px 0 rgb(15 23 42 / 0.03) inset;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--foreground) 3%, transparent) inset;
 }
 
 .editor-search-panel--editor :deep(.focus-within\:border-ring:focus-within) {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 1px #3b82f6;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
 }
 
 .editor-search-panel--editor :deep(input) {
-  color: #20242a;
+  color: var(--foreground);
   font-size: 12px;
 }
 
 .editor-search-panel--editor :deep(input::placeholder) {
-  color: #7a828e;
+  color: var(--muted-foreground);
 }
 
 .editor-search-panel--editor :deep(.text-muted-foreground) {
-  color: #6e7681;
+  color: var(--muted-foreground);
 }
 
 .editor-search-panel--editor :deep(.text-destructive) {
-  color: #c2410c;
+  color: var(--destructive);
 }
 
 .editor-search-panel--editor :deep(.hover\:bg-accent:hover),
 .editor-search-panel--editor :deep(.bg-accent) {
-  background: #e6e9ef;
+  background: var(--accent);
 }
 
 .editor-search-panel--editor :deep(.hover\:text-foreground:hover),
 .editor-search-panel--editor :deep(.text-foreground) {
-  color: #1f2329;
+  color: var(--foreground);
 }
 
 .editor-search-panel--editor :deep(button.border-border) {
-  border-color: #d0d5dd;
-}
-
-:global(.dark) .editor-search-panel--editor {
-  background: #20252d;
-  border-color: #2c333d;
-  box-shadow:
-    0 8px 24px rgb(0 0 0 / 0.28),
-    0 1px 0 rgb(255 255 255 / 0.04) inset;
-  color: #d4d7dc;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(.border-input) {
-  background: #191d25;
-  border-color: #2f3742;
-  box-shadow: none;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(.focus-within\:border-ring:focus-within) {
-  border-color: #4d8dff;
-  box-shadow: 0 0 0 1px #4d8dff;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(input) {
-  color: #d7dae0;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(input::placeholder) {
-  color: #858c97;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(.text-muted-foreground) {
-  color: #9aa2ad;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(.text-destructive) {
-  color: #f59e7a;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(.hover\:bg-accent:hover),
-:global(.dark) .editor-search-panel--editor :deep(.bg-accent) {
-  background: #303844;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(.hover\:text-foreground:hover),
-:global(.dark) .editor-search-panel--editor :deep(.text-foreground) {
-  color: #f2f4f8;
-}
-
-:global(.dark) .editor-search-panel--editor :deep(button.border-border) {
-  border-color: #38414d;
+  border-color: var(--border);
 }
 
 @media (max-width: 720px) {

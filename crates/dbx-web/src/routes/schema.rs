@@ -25,6 +25,7 @@ pub struct SchemaQuery {
     pub table_name_filter: Option<String>,
     pub apply_visible_filter: Option<bool>,
     pub client_session_id: Option<String>,
+    pub include_postgres_access: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -461,6 +462,17 @@ pub async fn get_ddl(
         dbx_core::schema::get_doris_catalog_table_ddl_core(&state.app, &q.connection_id, &catalog, database, table)
             .await
             .map_err(AppError::from)?
+    } else if q.include_postgres_access.unwrap_or(false) {
+        dbx_core::schema::get_table_display_ddl_core(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            table,
+            q.object_type,
+        )
+        .await
+        .map_err(AppError::from)?
     } else {
         dbx_core::schema::get_table_ddl_core(&state.app, &q.connection_id, database, schema, table, q.object_type)
             .await

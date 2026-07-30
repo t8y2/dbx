@@ -16,6 +16,8 @@ pub fn generate_schema_sync_sql(
     database_type: dbx_core::models::connection::DatabaseType,
     target_schema: Option<String>,
     cascade_delete: Option<bool>,
+    source_dialect: Option<dbx_core::sql_dialect::descriptor::DialectKind>,
+    field_mappings: Option<Vec<dbx_core::schema_diff::FieldMapping>>,
 ) -> Result<String, String> {
     Ok(dbx_core::schema_diff::generate_schema_sync_sql(
         &diffs,
@@ -26,5 +28,7 @@ pub fn generate_schema_sync_sql(
         database_type,
         target_schema.as_deref(),
         cascade_delete.unwrap_or(false),
+        source_dialect,
+        &field_mappings.unwrap_or_default(),
     ))
 }

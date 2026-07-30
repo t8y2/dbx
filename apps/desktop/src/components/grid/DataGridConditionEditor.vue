@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
-import { useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
+import { completeDataGridConditionQuote, useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
 import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 
@@ -14,6 +14,7 @@ const props = withDefaults(
     ariaLabel?: string;
     historyEmptyText?: string;
     historyNoMatchesText?: string;
+    identifierQuote?: string;
     suggestionProvider?: DataGridConditionSuggestionProvider;
     suggestionDebounceMs?: number;
     disabled?: boolean;
@@ -39,6 +40,8 @@ const emit = defineEmits<{
 }>();
 
 const inputRef = ref<HTMLTextAreaElement>();
+const selectionStart = ref(modelValue.value.length);
+const selectionEnd = ref(modelValue.value.length);
 const suggestionListId = `${useId()}-${props.kind}-condition-suggestions`;
 const overlayRef = ref<HTMLTextAreaElement>();
 const controlRef = ref<HTMLDivElement>();
@@ -56,6 +59,9 @@ let expandAfterComposition = false;
 const editor = useDataGridConditionEditor({
   kind: props.kind,
   value: modelValue,
+  selectionStart,
+  selectionEnd,
+  identifierQuote: () => props.identifierQuote,
   columns: () => props.columns,
   historyScope: () => props.historyScope,
   suggestionProvider: props.suggestionProvider,
@@ -92,7 +98,7 @@ function createTextProbe(input: HTMLTextAreaElement, wrap: boolean) {
   const probe = document.createElement(wrap ? "div" : "span");
   const style = window.getComputedStyle(input);
   probe.textContent = input.value || input.placeholder || "";
-  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${input.clientWidth}px;white-space:pre-wrap;overflow-wrap:anywhere;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
+  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${input.clientWidth}px;white-space:pre-wrap;overflow-wrap:normal;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
   document.body.appendChild(probe);
   return probe;
 }
@@ -136,7 +142,15 @@ function updateSuggestionPosition() {
   void nextTick(() => {
     const target = activeEditor.value;
     if (!target) return;
-    suggestionPosition.value = getDataGridConditionSuggestionPosition(target.getBoundingClientRect(), {
+    const targetRect = target.getBoundingClientRect();
+    const suggestionAnchor = expanded.value
+      ? {
+          left: targetRect.left,
+          bottom: expandedRect.value.top + expandedHeight.value,
+          width: targetRect.width,
+        }
+      : targetRect;
+    suggestionPosition.value = getDataGridConditionSuggestionPosition(suggestionAnchor, {
       viewportWidth: window.innerWidth,
       preferredWidth: suggestionPreferredWidth.value,
       maxWidth: suggestionPreferredWidth.value === undefined ? undefined : 520,
@@ -154,7 +168,8 @@ function resizeEditor(forceExpand = false) {
       expandAfterComposition = true;
       return;
     }
-    const focused = document.activeElement === input || document.activeElement === overlayRef.value;
+    const overlayFocused = document.activeElement === overlayRef.value;
+    const focused = document.activeElement === input || overlayFocused;
     const nextExpanded = focused && shouldExpand(input) && (forceExpand || expanded.value);
     if (nextExpanded) {
       expandedRect.value = measureExpandedRect(input);
@@ -166,9 +181,15 @@ function resizeEditor(forceExpand = false) {
       void nextTick(() => {
         const overlay = overlayRef.value;
         if (!overlay || composing.value) return;
-        const start = input.selectionStart;
+        syncSelection(input);
         overlay.focus();
-        overlay.setSelectionRange(start, start);
+        overlay.setSelectionRange(selectionStart.value, selectionEnd.value);
+      });
+    }
+    if (!nextExpanded && overlayFocused && !composing.value) {
+      void nextTick(() => {
+        input.focus();
+        input.setSelectionRange(selectionStart.value, selectionEnd.value);
       });
     }
   });
@@ -188,7 +209,61 @@ function onCompositionEnd() {
 function focus(select = false) {
   const target = activeEditor.value ?? inputRef.value;
   target?.focus();
-  if (select) target?.select();
+  if (select) {
+    target?.select();
+    if (target) syncSelection(target);
+  } else {
+    target?.setSelectionRange(selectionStart.value, selectionEnd.value);
+  }
+  resizeEditor(true);
+}
+
+function scrollCaretIntoView() {
+  const target = activeEditor.value;
+  if (!target || target.scrollHeight <= target.clientHeight) return;
+  const style = window.getComputedStyle(target);
+  const probe = document.createElement("div");
+  const caretMarker = document.createElement("span");
+  const caret = Math.min(Math.max(selectionStart.value, 0), target.value.length);
+  probe.textContent = target.value.slice(0, caret) || " ";
+  caretMarker.textContent = "\u200b";
+  probe.appendChild(caretMarker);
+  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;width:${target.clientWidth}px;white-space:${style.whiteSpace};overflow-wrap:${style.overflowWrap};padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};text-indent:${style.textIndent};`;
+  document.body.appendChild(probe);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 24;
+  const caretTop = caretMarker.offsetTop;
+  const topPadding = Number.parseFloat(style.paddingTop) || 0;
+  const bottomPadding = Number.parseFloat(style.paddingBottom) || 0;
+  const visibleTop = target.scrollTop + topPadding;
+  const visibleBottom = target.scrollTop + target.clientHeight - bottomPadding;
+  if (caretTop < visibleTop) target.scrollTop = Math.max(0, caretTop - topPadding);
+  else if (caretTop + lineHeight > visibleBottom) target.scrollTop = caretTop + lineHeight + bottomPadding - target.clientHeight;
+  probe.remove();
+}
+
+function focusAfterAccept() {
+  void nextTick(() => {
+    focus();
+    void nextTick(scrollCaretIntoView);
+  });
+}
+
+function syncSelection(target: HTMLTextAreaElement) {
+  selectionStart.value = target.selectionStart;
+  selectionEnd.value = target.selectionEnd;
+}
+
+function onFocus(event: FocusEvent) {
+  syncSelection(event.currentTarget as HTMLTextAreaElement);
+  resizeEditor(true);
+}
+
+function onSelectionChange(event: Event) {
+  syncSelection(event.currentTarget as HTMLTextAreaElement);
+}
+
+function onClick(event: MouseEvent) {
+  onSelectionChange(event);
   resizeEditor(true);
 }
 
@@ -201,7 +276,8 @@ function scheduleCollapse() {
   }, 0);
 }
 
-function onInput() {
+function onInput(event: Event) {
+  syncSelection(event.currentTarget as HTMLTextAreaElement);
   resizeEditor(true);
   updateSuggestionPosition();
 }
@@ -221,9 +297,27 @@ async function clearCondition() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (completeQuote(event)) return;
   const action = editor.handleKeydown(event);
   if (action === "apply") void applyCondition();
-  if (action === "accept") void nextTick(() => focus());
+  if (action === "accept") focusAfterAccept();
+}
+
+function completeQuote(event: KeyboardEvent) {
+  if (props.kind !== "where" || (event.key !== "'" && event.key !== '"') || event.isComposing || event.keyCode === 229 || event.metaKey || event.ctrlKey || event.altKey) return false;
+  const target = event.currentTarget as HTMLTextAreaElement;
+  const completion = completeDataGridConditionQuote(modelValue.value, target.selectionStart, target.selectionEnd, event.key);
+  event.preventDefault();
+  modelValue.value = completion.value;
+  selectionStart.value = completion.selectionStart;
+  selectionEnd.value = completion.selectionEnd;
+  editor.dismiss();
+  void nextTick(() => {
+    const active = activeEditor.value;
+    active?.focus();
+    active?.setSelectionRange(completion.selectionStart, completion.selectionEnd);
+  });
+  return true;
 }
 
 function openHistory() {
@@ -234,7 +328,7 @@ function openHistory() {
 
 function acceptSuggestion(index: number) {
   editor.accept(index);
-  void nextTick(() => focus());
+  focusAfterAccept();
 }
 
 function eventInside(event: Event, element?: HTMLElement) {
@@ -340,9 +434,11 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           class="data-grid-topbar-condition-input absolute inset-x-0 top-0 h-6 min-w-0 resize-none bg-transparent outline-none"
           :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact }]"
           style="height: 24px"
-          @focus="resizeEditor(true)"
+          @focus="onFocus"
           @blur="scheduleCollapse"
-          @click="resizeEditor(true)"
+          @click="onClick"
+          @select="onSelectionChange"
+          @keyup="onSelectionChange"
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"
@@ -373,13 +469,17 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           class="data-grid-topbar-condition-input data-grid-topbar-condition-input--expanded absolute resize-none outline-none"
           :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact }]"
           @blur="scheduleCollapse"
+          @focus="onFocus"
+          @click="onSelectionChange"
+          @select="onSelectionChange"
+          @keyup="onSelectionChange"
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"
           @keydown="onKeydown"
         />
-        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex h-6 min-w-0 items-center gap-1">
-          <span class="data-grid-topbar-condition-label" :class="[props.kind === 'where' ? 'data-grid-topbar-condition-label--where' : 'data-grid-topbar-condition-label--order', { 'data-grid-topbar-condition-label--compact': props.compact }]">
+        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[2] flex h-6 min-w-0 items-center gap-1">
+          <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--floating" :class="[props.kind === 'where' ? 'data-grid-topbar-condition-label--where' : 'data-grid-topbar-condition-label--order', { 'data-grid-topbar-condition-label--compact': props.compact }]">
             {{ props.kind === "where" ? "WHERE" : "ORDER BY" }}
           </span>
           <div class="min-w-0 flex-1" />
@@ -460,12 +560,30 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   color: rgb(234 88 12);
 }
 
-:global(.dark) .data-grid-topbar-condition-label--where {
+.data-grid-topbar-condition-label--floating {
+  position: relative;
+  z-index: 1;
+  text-shadow:
+    -1px 0 color-mix(in oklab, var(--background) 96%, var(--muted) 4%),
+    1px 0 color-mix(in oklab, var(--background) 96%, var(--muted) 4%),
+    0 -1px color-mix(in oklab, var(--background) 96%, var(--muted) 4%),
+    0 1px color-mix(in oklab, var(--background) 96%, var(--muted) 4%);
+}
+
+:global(.dark .data-grid-topbar-condition-label--where) {
   color: rgb(96 165 250);
 }
 
-:global(.dark) .data-grid-topbar-condition-label--order {
+:global(.dark .data-grid-topbar-condition-label--order) {
   color: rgb(251 146 60);
+}
+
+:global(.dark .data-grid-topbar-condition-label--floating) {
+  text-shadow:
+    -1px 0 rgb(24, 24, 27),
+    1px 0 rgb(24, 24, 27),
+    0 -1px rgb(24, 24, 27),
+    0 1px rgb(24, 24, 27);
 }
 
 .data-grid-topbar-condition-label--compact {
@@ -499,7 +617,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   line-height: 1.5rem;
 }
 
-:global(.dark) .data-grid-topbar-condition-input {
+:global(.dark .data-grid-topbar-condition-input) {
   color: rgb(244, 244, 245);
   background-color: transparent !important;
 }
@@ -531,9 +649,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   box-shadow:
     inset 0 -1px 0 var(--border),
     0 8px 16px rgb(15 23 42 / 8%);
-  transition:
-    height 150ms ease,
-    box-shadow 150ms ease;
+  transition: box-shadow 150ms ease;
   --data-grid-expanded-scrollbar-offset: 8px;
   --data-grid-condition-controls-top: 0.125rem;
   --data-grid-condition-input-top: 0.125rem;
@@ -541,7 +657,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   --data-grid-condition-suffix-width: 0px;
 }
 
-:global(.dark) .data-grid-topbar-condition-pane--expanded {
+:global(.dark .data-grid-topbar-condition-pane--expanded) {
   background: rgb(24, 24, 27) !important;
   color: rgb(244, 244, 245);
   box-shadow:
@@ -565,7 +681,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   overflow-x: hidden;
   overflow-y: auto;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -590,11 +706,11 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   color: rgb(249 115 22 / 70%);
 }
 
-:global(.dark) .data-grid-topbar-condition-input--where.data-grid-topbar-condition-input--compact::placeholder {
+:global(.dark .data-grid-topbar-condition-input--where.data-grid-topbar-condition-input--compact::placeholder) {
   color: rgb(147 197 253 / 70%);
 }
 
-:global(.dark) .data-grid-topbar-condition-input--order.data-grid-topbar-condition-input--compact::placeholder {
+:global(.dark .data-grid-topbar-condition-input--order.data-grid-topbar-condition-input--compact::placeholder) {
   color: rgb(253 186 116 / 70%);
 }
 </style>

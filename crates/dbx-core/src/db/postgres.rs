@@ -30,6 +30,41 @@ use crate::types::{
     OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
+const GAUSSDB_COMPATIBILITY_SQL: &str =
+    "SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()";
+
+pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
+    let timeout = super::connection_timeout();
+    let client = checkout_postgres_client(pool, None, timeout).await.ok()?;
+    let row = tokio::time::timeout(timeout, client.query_opt(GAUSSDB_COMPATIBILITY_SQL, &[])).await.ok()?.ok()??;
+    let compatibility_mode = row.try_get::<_, String>(0).ok()?;
+    gaussdb_identifier_quote_for_compatibility_mode(&compatibility_mode).map(str::to_string)
+}
+
+fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
+    match compatibility_mode.trim().to_ascii_uppercase().as_str() {
+        "M" | "B" | "MYSQL" => Some("`"),
+        "A" | "PG" | "ORA" | "POSTGRESQL" => Some("\""),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresTablePrivilegeInfo {
+    pub grantor: String,
+    pub grantee: String,
+    pub privilege_type: String,
+    pub is_grantable: bool,
+    pub column_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresTableAccessInfo {
+    pub owner: String,
+    pub owner_default_privileges: Vec<String>,
+    pub privileges: Vec<PostgresTablePrivilegeInfo>,
+}
+
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
     if let Ok(v) = row.try_get::<_, DateTime<Local>>(idx) {
         return Some(serde_json::Value::String(format_pg_timestamptz(v)));
@@ -90,6 +125,69 @@ impl<'a> FromSql<'a> for PgRawBytes {
     fn accepts(_: &Type) -> bool {
         true
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PgInterval {
+    microseconds: i64,
+    days: i32,
+    months: i32,
+}
+
+impl<'a> FromSql<'a> for PgInterval {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_interval_bytes(raw).ok_or_else(|| "expected 16 bytes for PostgreSQL interval".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::INTERVAL
+    }
+}
+
+fn decode_pg_interval_bytes(raw: &[u8]) -> Option<PgInterval> {
+    let raw: [u8; 16] = raw.try_into().ok()?;
+    Some(PgInterval {
+        microseconds: i64::from_be_bytes(raw[0..8].try_into().ok()?),
+        days: i32::from_be_bytes(raw[8..12].try_into().ok()?),
+        months: i32::from_be_bytes(raw[12..16].try_into().ok()?),
+    })
+}
+
+fn push_pg_interval_component(parts: &mut Vec<String>, value: i64, singular: &str, plural: &str) {
+    if value == 0 {
+        return;
+    }
+    let unit = if value.abs() == 1 { singular } else { plural };
+    parts.push(format!("{value} {unit}"));
+}
+
+fn format_pg_interval_time(microseconds: i64) -> String {
+    let signed_microseconds = i128::from(microseconds);
+    let sign = if signed_microseconds < 0 { "-" } else { "" };
+    let absolute_microseconds = signed_microseconds.abs();
+    let hours = absolute_microseconds / 3_600_000_000;
+    let minutes = absolute_microseconds / 60_000_000 % 60;
+    let seconds = absolute_microseconds / 1_000_000 % 60;
+    let fraction = absolute_microseconds % 1_000_000;
+    let mut formatted = format!("{sign}{hours:02}:{minutes:02}:{seconds:02}");
+    if fraction != 0 {
+        let fraction = format!("{fraction:06}");
+        formatted.push('.');
+        formatted.push_str(fraction.trim_end_matches('0'));
+    }
+    formatted
+}
+
+fn format_pg_interval(interval: PgInterval) -> String {
+    let total_months = i64::from(interval.months);
+    let years = total_months / 12;
+    let months = total_months % 12;
+    let mut parts = Vec::with_capacity(4);
+    push_pg_interval_component(&mut parts, years, "year", "years");
+    push_pg_interval_component(&mut parts, months, "mon", "mons");
+    push_pg_interval_component(&mut parts, i64::from(interval.days), "day", "days");
+    parts.push(format_pg_interval_time(interval.microseconds));
+    parts.join(" ")
 }
 
 /// Decode pgvector binary format into a Vec<f32>.
@@ -321,6 +419,7 @@ pub(crate) enum PgColType {
     Bytea,
     Json,
     Bool,
+    Interval,
     Temporal { fallback: PgTemporalFallback },
     Numeric,
     Uuid,
@@ -363,6 +462,9 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     }
     if upper == "BOOL" {
         return PgColType::Bool;
+    }
+    if upper == "INTERVAL" {
+        return PgColType::Interval;
     }
     if upper.contains("TIMESTAMP")
         || upper == "DATE"
@@ -440,7 +542,11 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
             }
             serde_json::Value::Null
         }
-        PgColType::Bool => row.try_get::<_, bool>(idx).map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
+        PgColType::Bool => pg_bool_value_to_json(row, idx),
+        PgColType::Interval => row
+            .try_get::<_, PgInterval>(idx)
+            .map(|interval| serde_json::Value::String(format_pg_interval(interval)))
+            .unwrap_or_else(|_| pg_fallback_value_to_json(row, idx)),
         PgColType::Temporal { fallback } => {
             if let Some(v) = pg_temporal_to_json_value(row, idx) {
                 return v;
@@ -801,6 +907,7 @@ async fn execute_select_prepared(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }))
 }
 
@@ -863,6 +970,7 @@ async fn execute_select_text(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -1780,6 +1888,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1808,6 +1917,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1836,6 +1946,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: row.try_get::<_, Option<String>>(4).ok().flatten(),
+                signature: row.try_get::<_, Option<String>>(5).ok().flatten(),
             });
         }
     }
@@ -1873,6 +1984,7 @@ pub async fn completion_assistant_search(
                     parent_name: Some(table.to_string()),
                     comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
                     data_type: Some(pg_row_try_string(&row, 1)),
+                    signature: None,
                 });
             }
         }
@@ -1901,7 +2013,8 @@ fn postgres_completion_tables_sql() -> &'static str {
 
 fn postgres_completion_routines_sql() -> &'static str {
     "SELECT p.proname, n.nspname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
-            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type \
+            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type, \
+            pg_get_function_identity_arguments(p.oid) AS signature \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
      WHERE n.nspname = $1 AND p.prokind::text = ANY($3::text[]) \
@@ -2410,27 +2523,49 @@ pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<Obj
 }
 
 pub async fn list_schemas(pool: &Pool) -> Result<Vec<String>, String> {
-    Ok(list_schema_infos(pool).await?.into_iter().map(|schema| schema.name).collect())
+    list_schemas_with_system(pool, false).await
 }
 
 pub async fn list_schema_infos(pool: &Pool) -> Result<Vec<SchemaInfo>, String> {
+    list_schema_infos_with_system(pool, false).await
+}
+
+pub async fn list_schemas_with_system(pool: &Pool, show_system_schemas: bool) -> Result<Vec<String>, String> {
+    Ok(list_schema_infos_with_system(pool, show_system_schemas).await?.into_iter().map(|schema| schema.name).collect())
+}
+
+const POSTGRES_SCHEMA_INFOS_SQL: &str = "SELECT n.nspname AS schema_name, d.description AS schema_comment \
+     FROM pg_catalog.pg_namespace n \
+     LEFT JOIN pg_catalog.pg_description d \
+       ON d.objoid = n.oid \
+      AND d.objsubid = 0 \
+      AND d.classoid = 'pg_namespace'::regclass \
+     ORDER BY n.nspname";
+
+const POSTGRES_SCHEMA_INFOS_HIDE_SYSTEM_SQL: &str = "SELECT n.nspname AS schema_name, d.description AS schema_comment \
+     FROM pg_catalog.pg_namespace n \
+     LEFT JOIN pg_catalog.pg_description d \
+       ON d.objoid = n.oid \
+      AND d.objsubid = 0 \
+      AND d.classoid = 'pg_namespace'::regclass \
+     WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+     AND n.nspname NOT LIKE 'pg_toast_temp_%' \
+     AND n.nspname NOT LIKE 'pg_temp_%' \
+     ORDER BY n.nspname";
+
+fn postgres_schema_infos_sql(show_system_schemas: bool) -> &'static str {
+    if show_system_schemas {
+        POSTGRES_SCHEMA_INFOS_SQL
+    } else {
+        POSTGRES_SCHEMA_INFOS_HIDE_SYSTEM_SQL
+    }
+}
+
+pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: bool) -> Result<Vec<SchemaInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT n.nspname AS schema_name, d.description AS schema_comment \
-         FROM pg_catalog.pg_namespace n \
-         LEFT JOIN pg_catalog.pg_description d \
-           ON d.objoid = n.oid \
-          AND d.objsubid = 0 \
-          AND d.classoid = 'pg_namespace'::regclass \
-         WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
-         AND n.nspname NOT LIKE 'pg_toast_temp_%' \
-         AND n.nspname NOT LIKE 'pg_temp_%' \
-         ORDER BY n.nspname",
-        &[],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, postgres_schema_infos_sql(show_system_schemas), &[])
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -2542,11 +2677,42 @@ fn parse_enum_values_from_row(row: &Row, index: usize) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(&raw).ok()
 }
 
+/// Decode a boolean column to JSON, tolerating databases (e.g. GaussDB) that
+/// encode booleans as the ASCII bytes `t` (0x74) / `f` (0x66) in the binary
+/// protocol instead of the standard PostgreSQL 0x00 / 0x01.
+fn pg_bool_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
+    if let Some(v) = pg_row_try_bool(row, idx) {
+        return serde_json::Value::Bool(v);
+    }
+    serde_json::Value::Null
+}
+
+/// Map raw boolean bytes to a Rust `bool`.
+///
+/// Standard PostgreSQL binary uses `[0x00]` / `[0x01]`; GaussDB sends the ASCII
+/// text representation `[b't']` / `[b'f']` instead.
+fn decode_bool_bytes(raw: &[u8]) -> Option<bool> {
+    match raw {
+        [0x00] => Some(false),
+        [0x01] => Some(true),
+        [b't'] | [b'T'] => Some(true),
+        [b'f'] | [b'F'] => Some(false),
+        _ => None,
+    }
+}
+
+fn decode_bool_candidates(raw: Option<&[u8]>, standard: Option<bool>) -> Option<bool> {
+    raw.and_then(decode_bool_bytes).or(standard)
+}
+
 /// Read a boolean column from a PostgreSQL row, tolerating databases that
 /// encode booleans as integers (0/1) or text ('t'/'f') instead of the standard
 /// `bool` OID.  Returns `None` when the column is NULL or truly unreadable.
 fn pg_row_try_bool(row: &Row, idx: usize) -> Option<bool> {
-    if let Ok(v) = row.try_get::<_, bool>(idx) {
+    // GaussDB encodes boolean as ASCII 't' (0x74) / 'f' (0x66) in binary.
+    let raw = row.try_get::<_, PgRawBytes>(idx).ok();
+    let standard = row.try_get::<_, bool>(idx).ok();
+    if let Some(v) = decode_bool_candidates(raw.as_ref().map(|value| value.0.as_slice()), standard) {
         return Some(v);
     }
     if let Ok(v) = row.try_get::<_, i32>(idx) {
@@ -2700,6 +2866,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -3207,6 +3374,7 @@ async fn execute_query_with_max_rows_inner(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -3262,6 +3430,37 @@ const POSTGRES_OWNERS_SQL: &str =
      JOIN pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 \
        AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')";
+
+const POSTGRES_TABLE_OWNER_SQL: &str = "SELECT pg_get_userbyid(c.relowner)::text, \
+            ARRAY(SELECT default_acl.privilege_type::text \
+                  FROM pg_catalog.aclexplode(pg_catalog.acldefault('r', c.relowner)) default_acl \
+                  WHERE default_acl.grantee = c.relowner \
+                  ORDER BY default_acl.privilege_type) \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY c.oid LIMIT 1";
+
+const POSTGRES_TABLE_ACL_PRIVILEGES_SQL: &str =
+    "SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END::text, \
+            acl.privilege_type::text, acl.is_grantable, pg_get_userbyid(acl.grantor)::text \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) acl ON true \
+     LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY 4, 1, 2, 3";
+
+const POSTGRES_COLUMN_ACL_PRIVILEGES_SQL: &str =
+    "SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END::text, \
+            acl.privilege_type::text, acl.is_grantable, a.attname::text, pg_get_userbyid(acl.grantor)::text \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+     JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl ON true \
+     LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY 5, 1, 2, 3, 4";
 
 fn postgres_owner_object_type(relkind: &str) -> &str {
     match relkind {
@@ -3476,28 +3675,59 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
         .collect())
 }
 
-pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
+fn postgres_sequences_sql() -> &'static str {
+    "SELECT c.relname, \
+      COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
+      COALESCE(s.seqstart::text, '1'), \
+      COALESCE(s.seqmin::text, '1'), \
+      COALESCE(s.seqmax::text, '9223372036854775807'), \
+      COALESCE(s.seqincrement::text, '1'), \
+      CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
+     WHERE c.relkind = 'S' AND n.nspname = $1 \
+     ORDER BY c.relname"
+}
+
+fn opengauss_sequences_sql() -> &'static str {
+    "SELECT s.sequence_name, \
+      COALESCE(s.data_type::text, 'bigint'), \
+      COALESCE(s.start_value::text, '1'), \
+      COALESCE(s.minimum_value::text, '1'), \
+      COALESCE(s.maximum_value::text, '9223372036854775807'), \
+      COALESCE(s.increment::text, '1'), \
+      COALESCE(s.cycle_option::text, 'NO') \
+     FROM information_schema.sequences s \
+     JOIN pg_namespace n ON n.nspname = s.sequence_schema \
+     JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = s.sequence_name \
+     WHERE s.sequence_schema = $1 AND c.relkind IN ('S','L','z','Z') \
+     ORDER BY s.sequence_name"
+}
+
+fn postgres_sequence_last_values_sql() -> &'static str {
+    "SELECT c.relname, pg_sequence_last_value(c.oid)::text \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind = 'S' AND n.nspname = $1"
+}
+
+fn opengauss_sequence_last_values_sql() -> &'static str {
+    "SELECT c.relname, (pg_sequence_last_value(c.oid)).last_value::text \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('S','L','z','Z') AND n.nspname = $1"
+}
+
+async fn list_sequences_with_sql(
+    pool: &Pool,
+    schema: &str,
+    with_last_values: bool,
+    metadata_sql: &str,
+    last_values_sql: &str,
+) -> Result<Vec<SequenceInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    // Use pg_class + pg_sequence + pg_namespace instead of pg_sequences view
-    // for better compatibility and permission handling
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT c.relname, \
-          COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
-          COALESCE(s.seqstart::text, '1'), \
-          COALESCE(s.seqmin::text, '1'), \
-          COALESCE(s.seqmax::text, '9223372036854775807'), \
-          COALESCE(s.seqincrement::text, '1'), \
-          CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END \
-         FROM pg_class c \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
-         WHERE c.relkind = 'S' AND n.nspname = $1 \
-         ORDER BY c.relname",
-        &[&schema],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, metadata_sql, &[&schema]).await.map_err(|e| e.to_string())?;
 
     let mut sequences: Vec<SequenceInfo> = rows
         .iter()
@@ -3514,17 +3744,12 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
         .collect();
 
     if with_last_values {
-        // Batch query: get last values for all sequences in one query
-        let sql = "SELECT c.relname, pg_sequence_last_value(c.oid) \
-                   FROM pg_class c \
-                   JOIN pg_namespace n ON n.oid = c.relnamespace \
-                   WHERE c.relkind = 'S' AND n.nspname = $1";
-        if let Ok(rows) = postgres_query_cached(&client, sql, &[&schema]).await {
+        if let Ok(rows) = postgres_query_cached(&client, last_values_sql, &[&schema]).await {
             for row in rows {
                 let name: String = pg_row_try_string(&row, 0);
-                if let Ok(val) = row.try_get::<_, i64>(1) {
+                if let Ok(Some(value)) = row.try_get::<_, Option<String>>(1) {
                     if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
-                        seq.last_value = Some(val.to_string());
+                        seq.last_value = Some(value);
                     }
                 }
             }
@@ -3532,6 +3757,36 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
     }
 
     Ok(sequences)
+}
+
+pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
+    // PostgreSQL 10+ stores sequence properties in pg_sequence.
+    list_sequences_with_sql(
+        pool,
+        schema,
+        with_last_values,
+        postgres_sequences_sql(),
+        postgres_sequence_last_values_sql(),
+    )
+    .await
+}
+
+pub async fn list_opengauss_sequences(
+    pool: &Pool,
+    schema: &str,
+    with_last_values: bool,
+) -> Result<Vec<SequenceInfo>, String> {
+    // openGauss does not expose PostgreSQL 10's pg_sequence catalog. Its
+    // information_schema view contains the portable sequence properties, while
+    // pg_sequence_last_value returns a record rather than a scalar.
+    list_sequences_with_sql(
+        pool,
+        schema,
+        with_last_values,
+        opengauss_sequences_sql(),
+        opengauss_sequence_last_values_sql(),
+    )
+    .await
 }
 
 pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, String> {
@@ -3684,6 +3939,53 @@ pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, St
         .collect())
 }
 
+pub async fn get_table_access(pool: &Pool, schema: &str, table: &str) -> Result<PostgresTableAccessInfo, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let owner_rows =
+        postgres_query_cached(&client, POSTGRES_TABLE_OWNER_SQL, &params).await.map_err(pg_error_to_string)?;
+    let owner_row = owner_rows.first().ok_or_else(|| "Table owner not found".to_string())?;
+    let owner = pg_row_try_string(owner_row, 0);
+    if owner.is_empty() {
+        return Err("Table owner not found".to_string());
+    }
+    let owner_default_privileges = owner_row.try_get::<_, Vec<String>>(1).unwrap_or_default();
+    if owner_default_privileges.is_empty() {
+        return Err("Table owner default privileges are unavailable".to_string());
+    }
+
+    let (table_privileges, column_privileges) = tokio::try_join!(
+        postgres_query_cached(&client, POSTGRES_TABLE_ACL_PRIVILEGES_SQL, &params),
+        postgres_query_cached(&client, POSTGRES_COLUMN_ACL_PRIVILEGES_SQL, &params),
+    )
+    .map_err(pg_error_to_string)?;
+
+    let privileges = table_privileges
+        .iter()
+        .map(|row| PostgresTablePrivilegeInfo {
+            grantor: pg_row_try_string(row, 3),
+            grantee: pg_row_try_string(row, 0),
+            privilege_type: pg_row_try_string(row, 1),
+            is_grantable: pg_row_try_bool(row, 2).unwrap_or(false),
+            column_name: None,
+        })
+        .chain(column_privileges.iter().map(|row| PostgresTablePrivilegeInfo {
+            grantor: pg_row_try_string(row, 4),
+            grantee: pg_row_try_string(row, 0),
+            privilege_type: pg_row_try_string(row, 1),
+            is_grantable: pg_row_try_bool(row, 2).unwrap_or(false),
+            column_name: Some(pg_row_try_string(row, 3)),
+        }))
+        .collect::<Vec<_>>();
+    if privileges.iter().any(|privilege| {
+        privilege.grantor.is_empty() || privilege.grantee.is_empty() || privilege.privilege_type.is_empty()
+    }) {
+        return Err("Table ACL metadata is incomplete".to_string());
+    }
+
+    Ok(PostgresTableAccessInfo { owner, owner_default_privileges, privileges })
+}
+
 /// Execute multiple SQL statements in a single round-trip using batch_execute.
 /// Best for DDL scripts where per-statement affected-row counts are not needed.
 pub async fn execute_batch(pool: &Pool, statements: &[String]) -> Result<(), String> {
@@ -3761,6 +4063,62 @@ mod tests {
     use std::process::Command;
     use std::time::Instant;
     use tokio_postgres::types::FromSql;
+
+    #[test]
+    fn gaussdb_compatibility_mode_selects_identifier_quote() {
+        for mode in ["M", "B", "mysql", " MYSQL "] {
+            assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(mode), Some("`"));
+        }
+        for mode in ["A", "PG", "ora", " PostgreSQL "] {
+            assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(mode), Some("\""));
+        }
+        assert_eq!(gaussdb_identifier_quote_for_compatibility_mode("C"), None);
+        assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(""), None);
+    }
+
+    fn pg_interval_bytes(microseconds: i64, days: i32, months: i32) -> [u8; 16] {
+        let mut raw = [0_u8; 16];
+        raw[0..8].copy_from_slice(&microseconds.to_be_bytes());
+        raw[8..12].copy_from_slice(&days.to_be_bytes());
+        raw[12..16].copy_from_slice(&months.to_be_bytes());
+        raw
+    }
+
+    #[test]
+    fn postgres_interval_binary_decodes_and_formats_components() {
+        let microseconds = 4 * 3_600_000_000 + 5 * 60_000_000 + 6 * 1_000_000 + 123_456;
+        let interval = PgInterval::from_sql(&Type::INTERVAL, &pg_interval_bytes(microseconds, 3, 14)).unwrap();
+
+        assert_eq!(interval, PgInterval { microseconds, days: 3, months: 14 });
+        assert_eq!(format_pg_interval(interval), "1 year 2 mons 3 days 04:05:06.123456");
+    }
+
+    #[test]
+    fn postgres_interval_formats_negative_mixed_and_zero_values() {
+        assert_eq!(
+            format_pg_interval(PgInterval { microseconds: -3_723_450_000, days: -2, months: -13 }),
+            "-1 year -1 mon -2 days -01:02:03.45"
+        );
+        assert_eq!(
+            format_pg_interval(PgInterval { microseconds: -1, days: 2, months: -1 }),
+            "-1 mon 2 days -00:00:00.000001"
+        );
+        assert_eq!(format_pg_interval(PgInterval { microseconds: 0, days: 0, months: 0 }), "00:00:00");
+    }
+
+    #[test]
+    fn postgres_interval_formats_now_minus_xact_start_shape() {
+        let elapsed = PgInterval { microseconds: 123_450_000, days: 0, months: 0 };
+        assert_eq!(format_pg_interval(elapsed), "00:02:03.45");
+    }
+
+    #[test]
+    fn postgres_interval_rejects_invalid_binary_and_keeps_binary_protocol() {
+        assert!(PgInterval::from_sql(&Type::INTERVAL, &[0; 15]).is_err());
+        assert_eq!(classify_pg_type("interval"), PgColType::Interval);
+        assert_eq!(classify_pg_type("_interval"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
+        assert!(!pg_type_requires_text_protocol(&Type::INTERVAL, PgColType::Interval));
+    }
 
     #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
@@ -3856,7 +4214,7 @@ mod tests {
         assert_eq!(classify_pg_type("date"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("time"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("timetz"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
-        assert_eq!(classify_pg_type("interval"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
+        assert_eq!(classify_pg_type("interval"), PgColType::Interval);
         // 时间数组类型名在原实现中先进时间分支、解码失败后落到通用数组分支
         assert_eq!(classify_pg_type("_timestamp"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
         assert_eq!(classify_pg_type("_interval"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
@@ -4228,6 +4586,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_bool_bytes_handles_standard_and_gaussdb_encodings() {
+        // Standard PostgreSQL binary boolean: 0x00 / 0x01
+        assert_eq!(decode_bool_bytes(&[0x00]), Some(false));
+        assert_eq!(decode_bool_bytes(&[0x01]), Some(true));
+        // GaussDB binary boolean: ASCII 't' (0x74) / 'f' (0x66)
+        assert_eq!(decode_bool_bytes(&[0x74]), Some(true));
+        assert_eq!(decode_bool_bytes(&[0x66]), Some(false));
+        assert_eq!(decode_bool_bytes(b"t"), Some(true));
+        assert_eq!(decode_bool_bytes(b"f"), Some(false));
+        assert_eq!(decode_bool_bytes(b"T"), Some(true));
+        assert_eq!(decode_bool_bytes(b"F"), Some(false));
+        // Unrecognized encodings return None
+        assert_eq!(decode_bool_bytes(&[0x02]), None);
+        assert_eq!(decode_bool_bytes(&[0x74, 0x66]), None);
+        assert_eq!(decode_bool_bytes(&[]), None);
+    }
+
+    #[test]
+    fn raw_gaussdb_boolean_takes_precedence_over_standard_decoder() {
+        assert_eq!(decode_bool_candidates(Some(b"f"), Some(true)), Some(false));
+        assert_eq!(decode_bool_candidates(Some(b"t"), Some(true)), Some(true));
+        assert_eq!(decode_bool_candidates(Some(&[0x00]), Some(true)), Some(false));
+        assert_eq!(decode_bool_candidates(Some(&[0x01]), Some(false)), Some(true));
+        assert_eq!(decode_bool_candidates(Some(&[0x02]), Some(false)), Some(false));
+    }
+
+    #[test]
     fn postgres_foreign_keys_sql_selects_referential_actions() {
         let sql = postgres_foreign_keys_sql();
 
@@ -4440,6 +4825,19 @@ mod tests {
         // Double quotes should be doubled, not breaking out
         assert_eq!(escaped, r#""public""; DROP TABLE users; --""#);
         assert!(escaped.matches('"').count().is_multiple_of(2), "quote count should be even");
+    }
+
+    #[test]
+    fn postgres_table_access_reads_complete_catalog_acls() {
+        assert!(POSTGRES_TABLE_OWNER_SQL.contains("acldefault('r', c.relowner)"));
+        assert!(
+            POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))")
+        );
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("aclexplode(a.attacl)"));
+        assert!(POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("acl.grantee = 0 THEN 'PUBLIC'"));
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("acl.grantee = 0 THEN 'PUBLIC'"));
+        assert!(POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("pg_get_userbyid(acl.grantor)"));
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("pg_get_userbyid(acl.grantor)"));
     }
 
     // --- query_result_row_limit ---
@@ -4739,6 +5137,36 @@ mod tests {
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("NULL::text AS enum_values"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("pg_attribute"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("regclass"));
+    }
+
+    #[test]
+    fn opengauss_sequence_metadata_uses_compatible_information_schema_view() {
+        let sql = opengauss_sequences_sql();
+
+        assert!(sql.contains("information_schema.sequences"));
+        assert!(sql.contains("s.sequence_schema = $1"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(sql.contains("sequence_name"));
+        assert!(sql.contains("start_value"));
+        assert!(sql.contains("minimum_value"));
+        assert!(sql.contains("maximum_value"));
+        assert!(sql.contains("increment"));
+        assert!(sql.contains("cycle_option"));
+        assert!(!sql.contains("pg_sequence s"));
+    }
+
+    #[test]
+    fn opengauss_sequence_last_values_extract_record_field_as_text() {
+        let sql = opengauss_sequence_last_values_sql();
+
+        assert!(sql.contains("(pg_sequence_last_value(c.oid)).last_value::text"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(sql.contains("n.nspname = $1"));
+    }
+
+    #[test]
+    fn postgres_sequence_last_values_are_read_as_text() {
+        assert!(postgres_sequence_last_values_sql().contains("pg_sequence_last_value(c.oid)::text"));
     }
 
     #[test]
@@ -5339,8 +5767,20 @@ mod tests {
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_routines_sql().contains("p.proname ILIKE $2 ESCAPE '~'"));
         assert!(postgres_completion_routines_sql().contains("p.prokind::text = ANY($3::text[])"));
+        assert!(postgres_completion_routines_sql().contains("pg_get_function_identity_arguments(p.oid) AS signature"));
         assert!(postgres_completion_routines_sql().contains("ORDER BY p.proname LIMIT $4"));
         assert!(postgres_completion_columns_sql().contains("a.attname ILIKE $3 ESCAPE '~'"));
         assert!(postgres_visible_table_schema_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
+    }
+
+    #[test]
+    fn postgres_schema_info_sql_only_filters_system_schemas_when_disabled() {
+        let hidden_sql = postgres_schema_infos_sql(false);
+        assert!(hidden_sql.contains("information_schema"));
+        assert!(hidden_sql.contains("pg_temp_%"));
+
+        let visible_sql = postgres_schema_infos_sql(true);
+        assert!(!visible_sql.contains("NOT IN"));
+        assert!(!visible_sql.contains("NOT LIKE"));
     }
 }

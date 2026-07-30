@@ -13,10 +13,12 @@ KOTLIN_SCAN_EXCLUDED_PARTS = {".git", ".gradle", "build"}
 DEFAULT_AGENT_JRE_KEY = "21"
 NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
 NATIVE_ONLY_AGENT_MODULES = {
+    "duckdb": "drivers/duckdb",
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
     "xugu": "drivers/xugu",
 }
+AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {
     "h2-legacy": "reuses the H2 agent implementation with an isolated legacy driver version",
     "access": "custom Access metadata and URL behavior pending migration",
@@ -90,7 +92,10 @@ def validate_versions(root: Path) -> list[str]:
     included = agent_modules(root)
     versions = set(json.loads((root / "versions.json").read_text(encoding="utf-8")))
     return (
-        [f"included module missing version: {name}" for name in sorted(included - versions)]
+        [
+            f"included module missing version: {name}"
+            for name in sorted(included - versions - AUTO_VERSIONED_NATIVE_MODULES)
+        ]
         + [f"versions key not included: {name}" for name in sorted(versions - included)]
     )
 
@@ -244,6 +249,14 @@ def validate_release_runtime_keys(root: Path) -> list[str]:
         (
             r"jdk\.security\.jgss",
             "release workflow JRE must include jdk.security.jgss for Kafka GSSAPI SASL support",
+        ),
+        (
+            r"jdk\.crypto\.ec",
+            "release workflow JRE must include jdk.crypto.ec for Kafka EC TLS support",
+        ),
+        (
+            r'\["windows-aarch64"\]\s*=\s*"windows/aarch64"',
+            "release workflow must build the managed JRE for windows-aarch64",
         ),
         (
             r"legacy-placeholder\.jar",

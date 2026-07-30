@@ -243,7 +243,7 @@ describe("native RedisJSON editor", () => {
     const labels = templateElements(parsedViewer.descriptor.template!.ast as unknown as TemplateElement);
     const stringTextarea = findTemplateElement((element) => element.tag === "textarea" && directiveExpression(element, "model") === "editValue");
     const memberTextarea = findTemplateElement((element) => element.tag === "textarea" && directiveExpression(element, "model") === "memberEditValue");
-    const refreshButton = findTemplateElement((element) => element.tag === "Button" && directiveExpression(element, "on", "click") === "load");
+    const refreshButton = findTemplateElement((element) => element.tag === "Button" && directiveExpression(element, "on", "click") === "refreshValueAndStreamGroups");
 
     expect(autoRefresh.getText()).toContain("if (hasUnsavedRedisDraft.value) return;");
     expect(autoRefresh.getText()).toContain("load({ preserveDraft: true })");

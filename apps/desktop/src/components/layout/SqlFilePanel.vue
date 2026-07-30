@@ -9,8 +9,10 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFolderPaths, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
@@ -155,7 +157,7 @@ async function revealInFileManager(path: string) {
   try {
     await api.revealPathInFileManager(path);
   } catch (e: any) {
-    toast(t("sqlFileTree.revealFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("sqlFileTree.revealFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -211,7 +213,12 @@ async function openFile(path: string) {
     const database = connection ? resolveDefaultDatabase(connection, []) : "";
     queryStore.openExternalSqlFile(connectionId, database, path, content);
   } catch (e: any) {
-    toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+    if (isExternalSqlFileTooLargeError(e)) {
+      executeFile(path);
+      toast(t("sqlFile.largeFileExecutionOpened", { size: formatSqlFileSize(e.sizeBytes) }), 6000);
+      return;
+    }
+    toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
 }
 

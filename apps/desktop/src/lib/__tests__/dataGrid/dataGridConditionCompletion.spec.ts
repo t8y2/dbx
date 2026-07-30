@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dataGridConditionColumnOptions } from "@/lib/dataGrid/dataGridConditionCompletion";
+import { dataGridConditionColumnOptions, dataGridConditionIdentifierQuote } from "@/lib/dataGrid/dataGridConditionCompletion";
 
 describe("dataGridConditionColumnOptions", () => {
   it("reuses PostgreSQL completion quoting while preserving display metadata", () => {
@@ -16,5 +16,13 @@ describe("dataGridConditionColumnOptions", () => {
       { name: "OrderId", insertText: "OrderId" },
       { name: "order", insertText: "order" },
     ]);
+  });
+
+  it("uses the active dialect identifier quote while preserving runtime overrides", () => {
+    expect(dataGridConditionIdentifierQuote("postgres")).toBe('"');
+    expect(dataGridConditionIdentifierQuote("oracle")).toBe('"');
+    expect(dataGridConditionIdentifierQuote("sqlite")).toBe('"');
+    expect(dataGridConditionIdentifierQuote("mysql")).toBe("`");
+    expect(dataGridConditionIdentifierQuote("kingbase", "`")).toBe("`");
   });
 });

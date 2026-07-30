@@ -35,6 +35,8 @@ export const DATA_GRID_DARK_SEARCH_COLORS = {
   current: "rgb(116, 87, 0)",
   currentBorder: "rgb(239, 177, 0)",
 } as const;
+export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(244, 248, 255)";
+export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(25, 34, 46)";
 export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(240, 240, 240)";
 export const DATA_GRID_DARK_STRIPED_ROW_BG = "rgb(40, 40, 43)";
 export const DATA_GRID_DARK_ROW_NUMBER_BG = "rgb(35, 37, 42)";
@@ -218,6 +220,10 @@ export function cssVarColor(getVar: (name: string) => string, name: string, fall
   return toCanvasSafeColor(getVar(name), fallback);
 }
 
+export function dataGridActiveRowBackground(isDark: boolean): string {
+  return isDark ? DATA_GRID_DARK_ACTIVE_ROW_BG : DATA_GRID_LIGHT_ACTIVE_ROW_BG;
+}
+
 function resolveCssVarReferences(value: string, getVar: (name: string) => string, depth = 0): string {
   if (depth > 6 || !value.includes("var(")) return value;
   return value.replace(/var\(\s*(--[\w-]+)(?:\s*,\s*([^)]+))?\s*\)/g, (_match, name: string, fallback?: string) => {
@@ -240,16 +246,16 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const primary = cssVarColor(getVar, "--primary", isDark ? "rgb(208, 208, 214)" : "rgb(23, 23, 23)");
   const destructive = cssVarColor(getVar, "--destructive", isDark ? "rgb(243, 98, 95)" : "rgb(231, 0, 11)");
   const accent = cssVarColor(getVar, "--accent", isDark ? "rgb(46, 47, 51)" : "rgb(245, 245, 245)");
-  const activeSurface = isDark ? "rgb(64, 64, 64)" : "rgb(232, 232, 232)";
+  const activeSurface = dataGridActiveRowBackground(isDark);
   const rowMuted = isDark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG;
   const rowNew = isDark ? "rgb(51, 51, 55)" : "rgb(243, 243, 243)";
   const rowDeleted = isDark ? "rgb(55, 31, 32)" : "rgb(255, 244, 244)";
   const cellActive = activeSurface;
   const cellDirty = isDark ? "rgb(94, 75, 26)" : "rgb(255, 248, 230)";
-  const cellSelected = isDark ? "rgb(66, 67, 70)" : "rgb(226, 226, 226)";
-  const cellSelectedDirty = isDark ? "rgb(94, 75, 26)" : "rgb(244, 229, 186)";
-  const cellSelectedBorder = isDark ? "rgb(170, 170, 175)" : "rgb(90, 90, 90)";
-  const cellSelectedSingle = isDark ? "rgb(17, 24, 39)" : "rgb(209, 213, 219)";
+  const cellSelected = isDark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)";
+  const cellSelectedDirty = isDark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)";
+  const cellSelectedBorder = isDark ? "rgb(96, 165, 250)" : "rgb(59, 130, 246)";
+  const cellSelectedSingle = isDark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)";
   const cellHover = accent;
   const cellSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.match : "rgb(253, 245, 184)";
   const cellCurrentSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.current : "rgba(253, 224, 71, 0.52)";
@@ -259,7 +265,7 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNumberEdited = isDark ? DATA_GRID_DARK_ROW_NUMBER_EDITED_BG : DATA_GRID_LIGHT_ROW_NUMBER_EDITED_BG;
   const rowNumberDeleted = isDark ? DATA_GRID_DARK_ROW_NUMBER_DELETED_BG : DATA_GRID_LIGHT_ROW_NUMBER_DELETED_BG;
   const rowNumberActive = activeSurface;
-  const rowNumberSelected = isDark ? "rgb(31, 41, 55)" : "rgb(209, 213, 219)";
+  const rowNumberSelected = isDark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)";
 
   return {
     background,

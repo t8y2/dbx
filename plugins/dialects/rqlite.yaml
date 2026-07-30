@@ -1,0 +1,76 @@
+dialect:
+  name: "Rqlite"
+  display_name: "rqlite"
+  versions:
+    - version: "8"
+      status: "RECOMMENDED"
+
+types:
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT"]
+  - name: "REAL"
+    category: "FLOAT"
+  - name: "TEXT"
+    category: "STRING"
+    aliases: ["VARCHAR"]
+  - name: "BLOB"
+    category: "BINARY"
+  - name: "NUMERIC"
+    category: "DECIMAL"
+    has_precision: true
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  create_index: true
+  drop_index: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  if_not_exists: true
+  auto_increment: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  max_columns_per_table: 2000
+  max_indexes_per_table: 200
+  max_foreign_key_name_length: 255
+  supports_full_text_index: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: false
+  max_length: 255
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "PRAGMA table_info('{table}')"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "PRAGMA foreign_key_list('{table}')"
+    depth_support: 1
+    performance_profile: "MEDIUM"

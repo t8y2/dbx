@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "@/types/database";
-import { createSidebarActionRequest, createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { createSidebarActionRequest, createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActionTarget, releaseRemovedSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 
 function tableNode(): TreeNode {
   return {
@@ -36,6 +36,19 @@ describe("sidebar action targets", () => {
     expect(request.payload).toEqual({ initialEditing: true });
     expect(Object.isFrozen(request.selectedNodeIds)).toBe(true);
     expect(Object.isFrozen(request)).toBe(true);
+  });
+
+  it("matches a live node with the same action target identity", () => {
+    const node = tableNode();
+
+    expect(matchesSidebarActionTarget(node, createSidebarActionTarget(node))).toBe(true);
+  });
+
+  it("does not match the same id after identity fields change", () => {
+    const target = createSidebarActionTarget(tableNode());
+    const changedNode = { ...tableNode(), connectionId: "connection-2", label: "accounts" };
+
+    expect(matchesSidebarActionTarget(changedNode, target)).toBe(false);
   });
 
   it("does not resolve a recycled row with the same local id", () => {

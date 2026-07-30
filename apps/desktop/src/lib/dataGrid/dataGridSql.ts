@@ -19,6 +19,7 @@ export interface DataGridColumnInfo {
   is_primary_key?: boolean;
   column_default?: string | null;
   extra?: string | null;
+  comment?: string | null;
 }
 
 export interface DataGridSaveStatementOptions {
@@ -51,6 +52,7 @@ export interface DataGridCopyInsertStatementOptions {
   sourceColumns?: Array<string | undefined>;
   rows: GridCellValue[][];
   excludePrimaryKeys?: boolean;
+  includeComputedColumns?: boolean;
   insertMode?: DataGridCopyInsertMode;
 }
 

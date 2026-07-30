@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/qdrant:v1.8.3
     container_name: dbx-qdrant-1.8
+    restart: always
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-6334}:6333"
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-6335}:6334"

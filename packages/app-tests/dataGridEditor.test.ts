@@ -1825,7 +1825,7 @@ test("custom save handler without insert support keeps pending new rows", async 
   await editor.saveChanges();
 
   assert.equal(saveCalls, 0);
-  assert.equal(editor.saveError.value, "当前保存目标不支持新增行。");
+  assert.equal(editor.saveError.value, "The current save target does not support adding rows.");
   assert.deepEqual(editor.newRows.value, [[null, "Grace"]]);
   assert.equal(editor.hasPendingChanges.value, true);
 });

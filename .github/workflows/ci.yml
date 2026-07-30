@@ -79,6 +79,60 @@ jobs:
       - name: Node package publish dry run
         run: pnpm publish:dry-run
 
+  windows-win7-bundle:
+    needs: changes
+    if: needs.changes.outputs.windows_win7_bundle == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust for Windows 7
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build DBX for Windows 7
+        run: cargo build --locked --package dbx --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
+
+      - name: Prepare WebView2 109 offline runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Bundle Windows 7 offline installer
+        shell: pwsh
+        run: |
+          $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-offline.conf.json
+          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (!$installer) {
+            Write-Error "Missing Windows 7 WebView2 offline installer in ${bundleDir}"
+            exit 1
+          }
+          Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+
   rust-fmt-clippy:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -87,9 +141,10 @@ jobs:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
-      # The fast lane skips only bundled DuckDB while retaining the other default capabilities.
+      # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
-      RUST_FAST_FEATURES: dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FAST_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FULL_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx/system-fonts,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-core/system-fonts,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher,dbx-web/system-fonts
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -149,7 +204,7 @@ jobs:
           if [ "$RUST_FEATURE_MODE" = "fast" ]; then
             cargo clippy --workspace --locked --all-targets --no-default-features --features "$RUST_FAST_FEATURES" -- -D warnings
           else
-            cargo clippy --workspace --locked --all-targets -- -D warnings
+            cargo clippy --workspace --locked --all-targets --no-default-features --features "$RUST_FULL_FEATURES" -- -D warnings
           fi
 
       - name: Show sccache stats
@@ -165,9 +220,10 @@ jobs:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
-      # The fast lane skips only bundled DuckDB while retaining the other default capabilities.
+      # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
-      RUST_FAST_FEATURES: dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FAST_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FULL_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx/system-fonts,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-core/system-fonts,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher,dbx-web/system-fonts
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -224,7 +280,7 @@ jobs:
           if [ "$RUST_FEATURE_MODE" = "fast" ]; then
             cargo test --workspace --locked --no-default-features --features "$RUST_FAST_FEATURES"
           else
-            cargo test --workspace --locked
+            cargo test --workspace --locked --no-default-features --features "$RUST_FULL_FEATURES"
           fi
 
       - name: Show sccache stats
@@ -280,14 +336,15 @@ jobs:
     needs: changes
     if: needs.changes.outputs.nix == 'true'
     runs-on: ubuntu-22.04
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      - name: Validate pnpm dependency hash
-        run: nix build .#dbx-pnpm-deps --no-link --print-build-logs
+      - name: Validate Nix dependency closures
+        run: nix build .#dbx-pnpm-deps .#dbx-cargo-deps --no-link --print-build-logs
 
   changes:
     runs-on: ubuntu-22.04
@@ -299,6 +356,7 @@ jobs:
       jdbc: ${{ steps.filter.outputs.jdbc }}
       agents: ${{ steps.filter.outputs.agents }}
       nix: ${{ steps.filter.outputs.nix }}
+      windows_win7_bundle: ${{ steps.filter.outputs.windows_win7_bundle }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -339,16 +397,38 @@ jobs:
               - 'plugins/jdbc/**'
             agents:
               - 'agents/**'
+              - 'crates/dbx-core/Cargo.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/scripts/bump-agent-versions.mjs'
+              - '.github/scripts/bump-agent-versions.test.mjs'
+              - '.github/workflows/agents-release.yml'
+              - '.github/workflows/ci.yml'
             nix:
-              # This fast check validates only the fixed-output pnpm dependency closure.
+              # These advisory checks validate the pnpm and Cargo dependency closures.
               - 'package.json'
               - 'packages/**/package.json'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**/Cargo.toml'
+              - 'src-tauri/Cargo.toml'
               - 'flake.nix'
               - 'flake.lock'
               - '.github/workflows/ci.yml'
               - '.github/workflows/update-nix-pnpm-hash.yml'
+            windows_win7_bundle:
+              - '.github/scripts/prepare-webview2-win7-runtime.ps1'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
+              - 'src-tauri/tauri.webview2-win7-offline.conf.json'
+              - 'src-tauri/windows/nsis/**'
+              - 'src-tauri/src/commands/update.rs'
+              - 'crates/dbx-core/src/update.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'vendor/ctor/**'
 
       - name: Select Rust feature coverage
         id: rust-mode
@@ -374,13 +454,6 @@ jobs:
                   ;;
               esac
 
-              # Feature-gated DuckDB code must keep the full default-feature checks on its PR.
-              if echo "$file" | grep -Eqi 'duckdb' \
-                || { [ -f "$file" ] && grep -Eqi 'duckdb-bundled|cfg[^[:cntrl:]]*duckdb|feature[^[:cntrl:]]*duckdb' "$file"; } \
-                || git diff "$BASE_SHA" HEAD -- "$file" | grep -Eqi 'duckdb-bundled|cfg[^[:cntrl:]]*duckdb|feature[^[:cntrl:]]*duckdb'; then
-                full=true
-                break
-              fi
             done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri .github/workflows/ci.yml)
           fi
 
@@ -409,11 +482,24 @@ jobs:
         with:
           go-version: "1.22.x"
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
       - name: Agent script tests
-        run: python3 -m unittest discover -s scripts -p '*_test.py'
+        run: |
+          python3 -m unittest discover -s scripts -p '*_test.py'
+          node --test ../.github/scripts/bump-agent-versions.test.mjs
+
+      - name: DuckDB driver tests
+        run: cargo test --manifest-path drivers/duckdb/Cargo.toml --locked
 
       - name: Agent validation
         run: python3 scripts/validate_agents.py

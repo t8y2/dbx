@@ -25,6 +25,28 @@ use super::file_validator::validate_file_path;
 
 pub type MySqlPool = mysql_async::Pool;
 const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
+const MYSQL_SQL_PACKET_MARGIN_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MySqlCatalogDialect {
+    Doris,
+    StarRocks,
+}
+
+pub(crate) fn mysql_catalog_dialect(
+    db_type: DatabaseType,
+    driver_profile: Option<&str>,
+) -> Option<MySqlCatalogDialect> {
+    match db_type {
+        DatabaseType::Doris => Some(MySqlCatalogDialect::Doris),
+        DatabaseType::StarRocks => Some(MySqlCatalogDialect::StarRocks),
+        _ => match driver_profile.map(str::to_ascii_lowercase).as_deref() {
+            Some("doris" | "selectdb") => Some(MySqlCatalogDialect::Doris),
+            Some("starrocks") => Some(MySqlCatalogDialect::StarRocks),
+            _ => None,
+        },
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MySqlQueryDialect {
@@ -637,6 +659,72 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     setup_mode: MySqlSetupMode,
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
+    let mut retry_url = url.to_string();
+    let mut retry_ca_cert_path = ca_cert_path;
+    let mut result = connect_pool_attempt(
+        url,
+        ca_cert_path,
+        timeout,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+        MySqlEofMode::Deprecate,
+    )
+    .await;
+
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_without_ssl(error)) {
+        if let Some(fallback_url) = ssl_fallback_url(url) {
+            log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
+            retry_url = fallback_url;
+            retry_ca_cert_path = None;
+            result = connect_pool_attempt(
+                &retry_url,
+                None,
+                timeout,
+                max_connections,
+                idle_timeout_secs,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                MySqlEofMode::Deprecate,
+            )
+            .await;
+        }
+    }
+
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+        log::info!("MySQL proxy returned legacy EOF packets; retrying with CLIENT_DEPRECATE_EOF disabled");
+        return connect_pool_attempt(
+            &retry_url,
+            retry_ca_cert_path,
+            timeout,
+            max_connections,
+            idle_timeout_secs,
+            setup_database,
+            extra_setup_queries,
+            setup_mode,
+            MySqlEofMode::Legacy,
+        )
+        .await;
+    }
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_pool_attempt(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+) -> Result<MySqlPool, String> {
     let pool = create_pool(
         url,
         ca_cert_path,
@@ -645,8 +733,9 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
+        eof_mode,
     )?;
-    let result = verify_pool_connection_with_setup_fallback(
+    verify_pool_connection_with_setup_fallback(
         pool,
         timeout,
         url,
@@ -656,39 +745,9 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
+        eof_mode,
     )
-    .await;
-
-    if let Err(ref e) = result {
-        if mysql_error_should_retry_without_ssl(e) {
-            if let Some(fallback_url) = ssl_fallback_url(url) {
-                log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
-                let fallback_pool = create_pool(
-                    &fallback_url,
-                    None,
-                    max_connections,
-                    idle_timeout_secs,
-                    setup_database,
-                    extra_setup_queries,
-                    setup_mode,
-                )?;
-                return verify_pool_connection_with_setup_fallback(
-                    fallback_pool,
-                    timeout,
-                    &fallback_url,
-                    None,
-                    max_connections,
-                    idle_timeout_secs,
-                    setup_database,
-                    extra_setup_queries,
-                    setup_mode,
-                )
-                .await;
-            }
-        }
-    }
-
-    result
+    .await
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -701,6 +760,18 @@ struct MySqlTlsFiles {
 enum MySqlSetupMode {
     Standard,
     Compatible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlEofMode {
+    Deprecate,
+    Legacy,
+}
+
+impl MySqlEofMode {
+    fn deprecate_eof(self) -> bool {
+        self == Self::Deprecate
+    }
 }
 
 const MYSQL_GROUP_CONCAT_MAX_LEN: u64 = 1_048_576;
@@ -724,6 +795,7 @@ async fn verify_pool_connection_with_setup_fallback(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
     match verify_pool_connection(&pool, timeout).await {
         Ok(()) => Ok(pool),
@@ -742,6 +814,7 @@ async fn verify_pool_connection_with_setup_fallback(
                 setup_database,
                 extra_setup_queries,
                 fallback_mode,
+                eof_mode,
             )?;
             verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
         }
@@ -783,6 +856,7 @@ fn create_pool(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
@@ -816,6 +890,7 @@ fn create_pool(
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
         .tcp_keepalive(Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))))
+        .deprecate_eof(eof_mode.deprecate_eof())
         .setup(setup_queries);
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
@@ -959,7 +1034,6 @@ fn mysql_setup_queries_for_database_with_mode(
     setup_mode: MySqlSetupMode,
 ) -> Vec<String> {
     let charset = mysql_connection_charset(url).unwrap_or("utf8mb4");
-    let catalog = mysql_connection_catalog(url);
     let database = setup_database.map(ToOwned::to_owned).or_else(|| mysql_connection_database(url));
     let mut queries = Vec::new();
     if let Some(database) = database.as_deref() {
@@ -978,20 +1052,49 @@ fn mysql_setup_queries_for_database_with_mode(
     if let Some(query) = setup_mode.group_concat_max_len_query() {
         queries.push(query);
     }
-    // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
-    // catalog. `SET catalog` must run *before* `USE <database>` (the database
-    // lives in the external catalog and is unknown to the default one).
-    // mysql_async drains the setup list back-to-front (Vec::pop), so push it
-    // last to make it execute first. The handshake does not send the database
-    // as schema (see `mysql_async_url`, which strips the path when a catalog is
-    // configured), so the connection establishes in the default catalog and
-    // this setup query is what switches it. The pool re-runs these queries
-    // after every connection reset, so the catalog stays current.
-    if let Some(catalog) = catalog.as_deref() {
-        queries.push(format!("SET catalog = {}", quote_identifier(catalog)));
-    }
     queries.extend(extra_setup_queries.iter().cloned());
     queries
+}
+
+fn catalog_switch_query(dialect: MySqlCatalogDialect, catalog: &str) -> String {
+    let catalog = quote_identifier(catalog);
+    match dialect {
+        MySqlCatalogDialect::Doris => format!("SWITCH {catalog}"),
+        MySqlCatalogDialect::StarRocks => format!("SET CATALOG {catalog}"),
+    }
+}
+
+pub(crate) fn catalog_setup_query_for_url(dialect: MySqlCatalogDialect, url: &str) -> Option<String> {
+    mysql_connection_catalog(url).map(|catalog| catalog_switch_query(dialect, &catalog))
+}
+
+pub(crate) fn catalog_database_context_queries(
+    dialect: Option<MySqlCatalogDialect>,
+    catalog: Option<&str>,
+    database: &str,
+) -> Result<Vec<String>, String> {
+    let Some(catalog) = catalog.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let dialect = dialect.ok_or("Catalog selection is only supported for Doris and StarRocks")?;
+    let mut queries = Vec::with_capacity(2);
+    queries.push(catalog_switch_query(dialect, catalog));
+    if !database.trim().is_empty() {
+        queries.push(format!("USE {}", quote_identifier(database)));
+    }
+    Ok(queries)
+}
+
+pub(crate) async fn apply_catalog_database_context(
+    conn: &mut mysql_async::Conn,
+    dialect: Option<MySqlCatalogDialect>,
+    catalog: Option<&str>,
+    database: &str,
+) -> Result<(), String> {
+    for query in catalog_database_context_queries(dialect, catalog, database)? {
+        conn.query_drop(&query).await.map_err(|error| format!("Failed to select query catalog/database: {error}"))?;
+    }
+    Ok(())
 }
 
 fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
@@ -1072,8 +1175,8 @@ fn mysql_connection_database(url: &str) -> Option<String> {
 
 /// Extracts an opt-in `catalog=<name>` URL parameter. dbx strips it from the
 /// URL before handing it to mysql_async (see `is_dbx_handled_mysql_url_param`)
-/// and instead emits `SET catalog = <name>` during connection setup. This is
-/// how StarRocks/Doris connections reach an external catalog such as Paimon.
+/// and emits the database-specific catalog switch during connection setup.
+/// This is how StarRocks/Doris connections reach an external catalog such as Paimon.
 fn mysql_connection_catalog(url: &str) -> Option<String> {
     let (_, query) = url.split_once('?')?;
     let query = query.split('#').next().unwrap_or(query);
@@ -1323,6 +1426,10 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
         || (error.contains("client asked for ssl") && error.contains("server does not have this capability"))
 }
 
+fn mysql_error_should_retry_with_legacy_eof(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("packets out of sync")
+}
+
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     (lower.contains("1105") && lower.contains("hy000"))
@@ -1537,7 +1644,7 @@ fn mysql_url_param_value_is_true(value: &str) -> bool {
 /// Strips the database path from a `mysql://[user[:pass]@]host[:port][/path]`
 /// URL, returning only the scheme and authority. Used so mysql_async does not
 /// send the database as the schema during the MySQL handshake (StarRocks would
-/// reject an external-catalog database before `SET catalog` runs in setup).
+/// reject an external-catalog database before the catalog switch runs in setup).
 fn strip_mysql_url_path(base: &str) -> &str {
     let Some(rest) = base.strip_prefix("mysql://") else {
         return base;
@@ -1658,9 +1765,36 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool =
-        create_pool(url, None, max_connections, None, setup_database, extra_setup_queries, MySqlSetupMode::Compatible)?;
-    verify_pool_connection(&pool, timeout).await.map(|_| pool)
+    let result = connect_pool_attempt(
+        url,
+        None,
+        timeout,
+        max_connections,
+        None,
+        setup_database,
+        extra_setup_queries,
+        MySqlSetupMode::Compatible,
+        MySqlEofMode::Deprecate,
+    )
+    .await;
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+        log::info!(
+            "MySQL proxy returned legacy EOF packets; retrying bare connection with CLIENT_DEPRECATE_EOF disabled"
+        );
+        return connect_pool_attempt(
+            url,
+            None,
+            timeout,
+            max_connections,
+            None,
+            setup_database,
+            extra_setup_queries,
+            MySqlSetupMode::Compatible,
+            MySqlEofMode::Legacy,
+        )
+        .await;
+    }
+    result
 }
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
@@ -1919,6 +2053,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1944,6 +2079,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1969,6 +2105,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: get_opt_str(&row, "data_type"),
+                signature: None,
             });
         }
     }
@@ -1990,6 +2127,7 @@ pub async fn completion_assistant_search(
                         .map(|s| fix_potential_double_encoding(&s))
                         .filter(|s| !s.is_empty()),
                     data_type: Some(get_str_by_name(&row, "data_type")),
+                    signature: None,
                 });
             }
         }
@@ -2411,6 +2549,29 @@ fn starrocks_materialized_views_sql(database: &str) -> String {
     )
 }
 
+/// Fallback DDL source for StarRocks materialized views when `SHOW CREATE
+/// MATERIALIZED VIEW` fails (e.g. on versions predating starrocks/starrocks#73396,
+/// merged 2026-05-19, which reject the statement for sync MVs with "Table not
+/// found" because sync MVs are not registered as separate Tables).
+///
+/// `information_schema.materialized_views` is documented as the authoritative
+/// list of all materialized views, with a column distinguishing SYNC from
+/// ASYNC. See
+/// https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/.
+///
+/// Made `pub(super)` so the dispatch site in `schema::mysql_object_source` can
+/// rely on it without rewriting the escape convention.
+pub(crate) fn mysql_materialized_view_definition_sql(database: &str, name: &str) -> String {
+    format!(
+        "SELECT MATERIALIZED_VIEW_DEFINITION \
+         FROM information_schema.materialized_views \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         LIMIT 1",
+        quote_value(database),
+        quote_value(name)
+    )
+}
+
 async fn list_starrocks_materialized_view_names(pool: &MySqlPool, database: &str) -> Result<HashSet<String>, String> {
     let sql = starrocks_materialized_views_sql(database);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
@@ -2425,8 +2586,8 @@ async fn list_starrocks_materialized_view_names(pool: &MySqlPool, database: &str
         .collect())
 }
 
-fn classify_starrocks_materialized_views(
-    tables: &mut [TableInfo],
+fn merge_starrocks_materialized_views(
+    tables: &mut Vec<TableInfo>,
     materialized_view_names: Result<HashSet<String>, String>,
     database: &str,
 ) {
@@ -2440,9 +2601,36 @@ fn classify_starrocks_materialized_views(
         }
     };
 
-    for table in tables {
-        if table.table_type.eq_ignore_ascii_case("VIEW") && materialized_view_names.contains(&table.name) {
+    // Snapshot the names already returned by SHOW FULL TABLES so the second pass can
+    // append MVs that are absent from SHOW FULL TABLES without duplicating rows.
+    let known_names: HashSet<String> = tables.iter().map(|table| table.name.clone()).collect();
+
+    // Step 1 — reclassify: rows whose name appears in `information_schema.materialized_views`
+    // are MVs even when SHOW FULL TABLES labeled them as VIEW (sync MVs) or BASE TABLE
+    // (async MVs). See https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/
+    // for the authoritative distinction between the two MV kinds.
+    for table in tables.iter_mut() {
+        if materialized_view_names.contains(&table.name) {
             table.table_type = "MATERIALIZED_VIEW".to_string();
+        }
+    }
+
+    // Step 2 — union: on StarRocks versions predating starrocks/starrocks#73396 (merged
+    // 2026-05-19), sync MVs "are not registered as separate Tables" so SHOW FULL TABLES
+    // omits them entirely. Append those rows from the system view so they appear in the
+    // sidebar and the DDL source path has something to resolve. Sort names so that
+    // the resulting table order is deterministic across runs.
+    let mut materialized_view_names_sorted: Vec<&String> = materialized_view_names.iter().collect();
+    materialized_view_names_sorted.sort();
+    for name in materialized_view_names_sorted {
+        if !known_names.contains(name.as_str()) {
+            tables.push(TableInfo {
+                name: name.clone(),
+                table_type: "MATERIALIZED_VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            });
         }
     }
 }
@@ -2456,7 +2644,7 @@ async fn list_starrocks_tables_with_status(
         list_starrocks_materialized_view_names(pool, database)
     );
     let (mut tables, status) = tables?;
-    classify_starrocks_materialized_views(&mut tables, materialized_view_names, database);
+    merge_starrocks_materialized_views(&mut tables, materialized_view_names, database);
     Ok((tables, status))
 }
 
@@ -3343,6 +3531,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
@@ -3367,6 +3556,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             truncated,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 
@@ -3401,6 +3591,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -3457,11 +3648,29 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
 pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<QueryResult, String> {
     execute_query_with_max_rows(pool, sql, bare, None, MySqlQueryDialect::default()).await
+}
+
+pub async fn max_allowed_packet(pool: &MySqlPool) -> Result<u64, String> {
+    let mut conn = get_conn_with_health_check(pool).await?;
+    conn.query_first::<u64, _>("SELECT @@max_allowed_packet")
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "MySQL did not return @@max_allowed_packet".to_string())
+}
+
+pub(crate) fn mysql_sql_statement_hard_limit(max_allowed_packet: u64) -> Option<usize> {
+    let packet_bytes = usize::try_from(max_allowed_packet).ok()?;
+    if packet_bytes == 0 {
+        return None;
+    }
+    let margin = (packet_bytes / 10).clamp(1024, MYSQL_SQL_PACKET_MARGIN_MAX_BYTES).min(packet_bytes / 2);
+    packet_bytes.checked_sub(margin).filter(|limit| *limit > 0)
 }
 
 pub async fn execute_query_with_max_rows(
@@ -3698,6 +3907,7 @@ pub async fn execute_query_on_conn_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -3966,8 +4176,45 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_sql_statement_limit_reserves_packet_headroom() {
+        let packet_bytes = 64 * 1024 * 1024;
+        let hard_limit = mysql_sql_statement_hard_limit(packet_bytes).unwrap();
+
+        assert!(hard_limit < packet_bytes as usize);
+        assert!(hard_limit >= packet_bytes as usize * 9 / 10);
+        assert_eq!(mysql_sql_statement_hard_limit(0), None);
+        assert_eq!(mysql_sql_statement_hard_limit(4096), Some(3072));
+    }
     use crate::db::connection_timeout;
     use mysql_async::consts::ColumnFlags;
+    #[test]
+    fn catalog_database_context_uses_database_specific_syntax_before_database() {
+        assert_eq!(
+            catalog_database_context_queries(Some(MySqlCatalogDialect::Doris), Some("paimon`catalog"), "bi").unwrap(),
+            vec!["SWITCH `paimon``catalog`", "USE `bi`"]
+        );
+        assert_eq!(
+            catalog_database_context_queries(Some(MySqlCatalogDialect::StarRocks), Some("paimon`catalog"), "bi")
+                .unwrap(),
+            vec!["SET CATALOG `paimon``catalog`", "USE `bi`"]
+        );
+        assert_eq!(
+            catalog_database_context_queries(Some(MySqlCatalogDialect::Doris), None, "").unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(catalog_database_context_queries(None, Some("paimon_catalog"), "bi").is_err());
+    }
+
+    #[test]
+    fn catalog_dialect_supports_native_and_profile_connections() {
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Doris, None), Some(MySqlCatalogDialect::Doris));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::StarRocks, None), Some(MySqlCatalogDialect::StarRocks));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Mysql, Some("selectdb")), Some(MySqlCatalogDialect::Doris));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Mysql, Some("STARROCKS")), Some(MySqlCatalogDialect::StarRocks));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Mysql, None), None);
+    }
 
     fn mysql_test_object(name: &str, object_type: &str) -> ObjectInfo {
         ObjectInfo {
@@ -4399,12 +4646,43 @@ mod tests {
         ];
         let materialized_views = HashSet::from(["orders_mv".to_string(), "orders_mv".to_string()]);
 
-        classify_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
 
         assert_eq!(tables.len(), 3);
         assert_eq!(
             tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
             vec![("orders", "BASE TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
+        );
+    }
+
+    #[test]
+    fn starrocks_async_materialized_views_reported_as_base_table_are_reclassified() {
+        // Async materialized views (StarRocks >= 2.5) appear as `BASE TABLE` in
+        // `SHOW FULL TABLES`. Classification must trust the
+        // `information_schema.materialized_views` source.
+        let mut tables = vec![
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_async_mv".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let materialized_views = HashSet::from(["orders_async_mv".to_string()]);
+
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![("orders", "BASE TABLE"), ("orders_async_mv", "MATERIALIZED_VIEW")]
         );
     }
 
@@ -4418,9 +4696,41 @@ mod tests {
             parent_name: None,
         }];
 
-        classify_starrocks_materialized_views(&mut tables, Err("permission denied".to_string()), "analytics");
+        merge_starrocks_materialized_views(&mut tables, Err("permission denied".to_string()), "analytics");
 
         assert_eq!(tables[0].table_type, "VIEW");
+    }
+
+    #[test]
+    fn starrocks_sync_mv_absent_from_show_full_tables_is_appended_from_information_schema() {
+        // StarRocks versions predating starrocks/starrocks#73396 (merged
+        // 2026-05-19) report sync MVs as "not registered as separate Tables",
+        // so SHOW FULL TABLES omits them. The merger must union names from
+        // information_schema.materialized_views so the sidebar and DDL path
+        // still resolve them.
+        let mut tables = vec![TableInfo {
+            name: "orders".to_string(),
+            table_type: "BASE TABLE".to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }];
+        let materialized_views = HashSet::from([
+            "orders_mv".to_string(),       // already present (reclassify path)
+            "daily_orders_mv".to_string(), // absent from SHOW FULL TABLES (union path)
+        ]);
+
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(tables.len(), 3);
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![
+                ("orders", "BASE TABLE"),
+                ("daily_orders_mv", "MATERIALIZED_VIEW"),
+                ("orders_mv", "MATERIALIZED_VIEW"),
+            ]
+        );
     }
 
     #[test]
@@ -4430,6 +4740,24 @@ mod tests {
         assert_eq!(
             sql,
             "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics'"
+        );
+    }
+
+    #[test]
+    fn mysql_materialized_view_definition_fallback_is_scoped_to_db_and_name() {
+        // StarRocks predating PR 73396 (merged 2026-05-19) rejects
+        // `SHOW CREATE MATERIALIZED VIEW` for sync MVs with "Table not found"
+        // because sync MVs are not registered as separate Tables. The fallback
+        // path queries information_schema.materialized_views directly. The
+        // regression guards the SQL shape and the value escaping used by that
+        // fallback so the wire format isn't accidentally regressed.
+        assert_eq!(
+            mysql_materialized_view_definition_sql("shop", "daily_sales_mv"),
+            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME = 'daily_sales_mv' LIMIT 1"
+        );
+        assert_eq!(
+            mysql_materialized_view_definition_sql("tenant's analytics", "weird'name"),
+            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics' AND TABLE_NAME = 'weird\\'name' LIMIT 1"
         );
     }
 
@@ -4811,6 +5139,22 @@ mod tests {
         let error = "MySQL connection failed: Input/output error: Input/output error: packet out of order";
 
         assert!(mysql_error_should_retry_without_ssl(error));
+        assert!(!mysql_error_should_retry_with_legacy_eof(error));
+    }
+
+    #[test]
+    fn mysql_packets_out_of_sync_retries_with_legacy_eof() {
+        let error = "MySQL connection failed: Input/output error: Input/output error: Packets out of sync";
+
+        assert!(mysql_error_should_retry_with_legacy_eof(error));
+        assert!(!mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_async_builder_can_disable_deprecated_eof_protocol() {
+        let opts = mysql_async::Opts::from(mysql_async::OptsBuilder::default().deprecate_eof(false));
+
+        assert!(!opts.deprecate_eof());
     }
 
     #[test]
@@ -5076,7 +5420,7 @@ mod tests {
     }
 
     #[test]
-    fn mysql_compatible_setup_queries_keep_catalog_and_extra_queries() {
+    fn mysql_compatible_setup_queries_leave_catalog_to_database_specific_setup() {
         let extra = vec!["SET ob_query_timeout = 30000000".to_string()];
         let queries = mysql_setup_queries_with_mode(
             "mysql://root:secret@localhost:9030/clip?catalog=paimon_catalog",
@@ -5084,15 +5428,19 @@ mod tests {
             MySqlSetupMode::Compatible,
         );
 
-        assert_eq!(
-            queries,
-            vec![
-                "USE `clip`",
-                "SET NAMES utf8mb4",
-                "SET catalog = `paimon_catalog`",
-                "SET ob_query_timeout = 30000000"
-            ]
+        assert_eq!(queries, vec!["USE `clip`", "SET NAMES utf8mb4", "SET ob_query_timeout = 30000000"]);
+    }
+
+    #[test]
+    fn mysql_setup_appends_database_specific_catalog_for_reverse_execution() {
+        let extra = vec!["SWITCH `paimon_catalog`".to_string()];
+        let queries = mysql_setup_queries_with_mode(
+            "mysql://root:secret@localhost:9030/clip?catalog=paimon_catalog",
+            &extra,
+            MySqlSetupMode::Compatible,
         );
+
+        assert_eq!(queries, vec!["USE `clip`", "SET NAMES utf8mb4", "SWITCH `paimon_catalog`"]);
     }
 
     #[test]
@@ -5463,38 +5811,21 @@ mod tests {
     }
 
     #[test]
-    fn mysql_setup_queries_switch_catalog_when_present() {
-        // `SET catalog` is pushed last so mysql_async's back-to-front setup
-        // execution (Vec::pop) runs it before `USE <database>`.
+    fn catalog_setup_query_for_url_uses_database_specific_syntax() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/clip?catalog=paimon_catalog", &[]),
-            vec![
-                "USE `clip`",
-                "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
-                "SET catalog = `paimon_catalog`"
-            ]
+            catalog_setup_query_for_url(MySqlCatalogDialect::Doris, "mysql://host:3306/clip?catalog=paimon_catalog"),
+            Some("SWITCH `paimon_catalog`".to_string())
         );
-    }
-
-    #[test]
-    fn mysql_setup_queries_switch_catalog_without_database() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog", &[]),
-            vec!["SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576", "SET catalog = `paimon_catalog`"]
+            catalog_setup_query_for_url(
+                MySqlCatalogDialect::StarRocks,
+                "mysql://host:3306/clip?catalog=paimon_catalog"
+            ),
+            Some("SET CATALOG `paimon_catalog`".to_string())
         );
-    }
-
-    #[test]
-    fn mysql_setup_queries_decodes_catalog_parameter() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog", &[]),
-            vec![
-                "USE `db`",
-                "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
-                "SET catalog = `my_catalog`"
-            ]
+            catalog_setup_query_for_url(MySqlCatalogDialect::Doris, "mysql://host:3306/db?catalog=my%5Fcatalog"),
+            Some("SWITCH `my_catalog`".to_string())
         );
     }
 

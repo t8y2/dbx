@@ -984,15 +984,15 @@ onUnmounted(() => {
   --monitor-muted: var(--color-text-secondary, var(--color-muted-foreground, #64748b));
   --monitor-faint: var(--color-text-tertiary, color-mix(in srgb, var(--monitor-muted) 72%, transparent));
   --monitor-hover: color-mix(in srgb, var(--color-hover, var(--color-muted, #f4f4f5)) 72%, var(--monitor-accent) 7%);
-  --monitor-accent: #0f766e;
-  --monitor-accent-soft: rgb(15 118 110 / 0.1);
-  --monitor-accent-border: rgb(15 118 110 / 0.22);
-  --monitor-success: #15803d;
-  --monitor-success-soft: rgb(21 128 61 / 0.1);
-  --monitor-warning: #b45309;
-  --monitor-warning-soft: rgb(180 83 9 / 0.12);
-  --monitor-danger: #b91c1c;
-  --monitor-danger-soft: rgb(185 28 28 / 0.1);
+  --monitor-accent: var(--info);
+  --monitor-accent-soft: var(--info-bg);
+  --monitor-accent-border: color-mix(in srgb, var(--info) 22%, transparent);
+  --monitor-success: var(--success);
+  --monitor-success-soft: var(--success-bg);
+  --monitor-warning: var(--warning);
+  --monitor-warning-soft: var(--warning-bg);
+  --monitor-danger: var(--destructive);
+  --monitor-danger-soft: color-mix(in srgb, var(--destructive) 10%, transparent);
   --monitor-shadow: 0 18px 38px -28px rgb(15 23 42 / 0.42);
   height: 100%;
   display: flex;
@@ -1003,20 +1003,20 @@ onUnmounted(() => {
 }
 
 :global(.dark) .monitoring-panel {
-  --monitor-panel-bg: color-mix(in srgb, var(--color-background, #131416) 90%, #0f766e 4%);
+  --monitor-panel-bg: color-mix(in srgb, var(--color-background, #131416) 90%, var(--info) 4%);
   --monitor-surface: color-mix(in srgb, var(--color-card, #1b1b1e) 94%, #ffffff 2%);
-  --monitor-surface-raised: color-mix(in srgb, var(--monitor-surface) 92%, #0f766e 8%);
+  --monitor-surface-raised: color-mix(in srgb, var(--monitor-surface) 92%, var(--info) 8%);
   --monitor-border: color-mix(in srgb, var(--color-border, rgb(110 110 114 / 0.28)) 82%, transparent);
-  --monitor-border-strong: color-mix(in srgb, var(--monitor-border) 76%, #2dd4bf 24%);
-  --monitor-accent: #2dd4bf;
-  --monitor-accent-soft: rgb(45 212 191 / 0.12);
-  --monitor-accent-border: rgb(45 212 191 / 0.24);
-  --monitor-success: #4ade80;
-  --monitor-success-soft: rgb(74 222 128 / 0.12);
-  --monitor-warning: #f59e0b;
-  --monitor-warning-soft: rgb(245 158 11 / 0.14);
-  --monitor-danger: #f87171;
-  --monitor-danger-soft: rgb(248 113 113 / 0.12);
+  --monitor-border-strong: color-mix(in srgb, var(--monitor-border) 76%, var(--info) 24%);
+  --monitor-accent: var(--info);
+  --monitor-accent-soft: var(--info-bg);
+  --monitor-accent-border: color-mix(in srgb, var(--info) 24%, transparent);
+  --monitor-success: var(--success);
+  --monitor-success-soft: var(--success-bg);
+  --monitor-warning: var(--warning);
+  --monitor-warning-soft: var(--warning-bg);
+  --monitor-danger: var(--destructive);
+  --monitor-danger-soft: color-mix(in srgb, var(--destructive) 12%, transparent);
   --monitor-shadow: 0 18px 42px -28px rgb(0 0 0 / 0.72);
 }
 

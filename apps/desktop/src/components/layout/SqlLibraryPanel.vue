@@ -10,6 +10,7 @@ import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
+import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -265,7 +266,7 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
 
     toast(t("sqlLibrary.imported", { count: sqlPaths.length }), 2500);
   } catch (e: any) {
-    toast(t("sqlLibrary.importFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("sqlLibrary.importFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
 }
 

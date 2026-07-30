@@ -1,10 +1,14 @@
+import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
+
 export type XlsxCellValue = string | number | boolean | null | undefined;
 
 export interface XlsxWorksheetData {
   sheetName?: string;
   columns: readonly string[];
   columnTypes?: readonly string[];
+  columnComments?: readonly (string | null)[] | undefined;
   rows: readonly (readonly XlsxCellValue[])[];
+  numericColumnRightAlign?: boolean;
 }
 
 type ZipEntry = {
@@ -96,49 +100,13 @@ function normalizeUniqueSheetNames(sheets: readonly XlsxWorksheetData[]): string
   return names;
 }
 
-function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[]): number[] {
+function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], columnComments?: readonly (string | null)[]): number[] {
   return columns.map((column, colIndex) => {
+    const headerText = columnComments?.[colIndex] || column;
     const values = rows.slice(0, 100).map((row) => row[colIndex]);
-    const maxLen = [column, ...values.map((value) => (value == null ? "" : String(value)))].map((value) => Math.min(value.length, 60)).reduce((max, length) => Math.max(max, length), 8);
+    const maxLen = [headerText, ...values.map((value) => (value == null ? "" : String(value)))].map((value) => Math.min(value.length, 60)).reduce((max, length) => Math.max(max, length), 8);
     return Math.max(10, Math.min(60, maxLen + 2));
   });
-}
-
-function isNumericColumnType(columnType?: string): boolean {
-  const base = (columnType || "")
-    .trim()
-    .toLowerCase()
-    .split(/[\s([]/, 1)[0];
-  return new Set([
-    "bit",
-    "tinyint",
-    "smallint",
-    "mediumint",
-    "int",
-    "integer",
-    "bigint",
-    "int2",
-    "int4",
-    "int8",
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "uint128",
-    "uint256",
-    "float",
-    "float4",
-    "float8",
-    "float32",
-    "float64",
-    "real",
-    "double",
-    "decimal",
-    "numeric",
-    "number",
-    "money",
-    "smallmoney",
-  ]).has(base);
 }
 
 function safeExcelNumber(value: string): string | undefined {
@@ -146,6 +114,14 @@ function safeExcelNumber(value: string): string | undefined {
   if (!trimmed || !Number.isFinite(Number(trimmed))) return undefined;
   const significantDigits = (trimmed.split(/[eE]/, 1)[0].match(/\d/g) || []).join("").replace(/^0+/, "").length;
   return significantDigits <= 15 ? trimmed : undefined;
+}
+
+const NUMERIC_RIGHT_ALIGN_STYLE_INDEX = 2;
+const NUMERIC_LEFT_ALIGN_STYLE_INDEX = 3;
+
+function numericColumnStyle(columnType?: string, enabled = true): number | undefined {
+  if (!isNumericColumnType(columnType)) return undefined;
+  return enabled ? NUMERIC_RIGHT_ALIGN_STYLE_INDEX : NUMERIC_LEFT_ALIGN_STYLE_INDEX;
 }
 
 function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style?: number, columnType?: string): string {
@@ -172,13 +148,14 @@ function worksheetXml(data: XlsxWorksheetData): string {
   const rows = data.rows;
   const totalRows = rows.length + 1;
   const range = sheetRange(columns.length, totalRows);
-  const widths = estimateColumnWidths(columns, rows);
+  const widths = estimateColumnWidths(columns, rows, data.columnComments);
+  const rightAlignEnabled = data.numericColumnRightAlign !== false;
   const colsXml = widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join("");
-  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(column, 0, index, 1)).join("")}</row>`;
+  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(data.columnComments?.[index] || column, 0, index, 1)).join("")}</row>`;
   const bodyXml = rows
     .map((row, rowIndex) => {
       const excelRowIndex = rowIndex + 2;
-      const cells = columns.map((_, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, undefined, data.columnTypes?.[colIndex])).join("");
+      const cells = columns.map((_, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, numericColumnStyle(data.columnTypes?.[colIndex], rightAlignEnabled), data.columnTypes?.[colIndex])).join("");
       return `<row r="${excelRowIndex}">${cells}</row>`;
     })
     .join("");
@@ -237,7 +214,7 @@ function stylesXml(): string {
   <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>
+  <cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="left"/></xf></cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
 }

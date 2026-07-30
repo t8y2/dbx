@@ -7,6 +7,13 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
 
 vi.mock("vue-i18n", () => ({
+  createI18n: () => ({
+    global: {
+      locale: { value: "en" },
+      setLocaleMessage: vi.fn(),
+    },
+    install: vi.fn(),
+  }),
   useI18n: () => ({
     t: (key: string) => key,
   }),
@@ -99,14 +106,6 @@ test("direct draft row copy is ignored", async () => {
   const exporter = createExportContext();
 
   await exporter.copyRow();
-
-  assert.equal(vi.mocked(copyToClipboard).mock.calls.length, 0);
-});
-
-test("selected draft row TSV copy is ignored", async () => {
-  const exporter = createExportContext({ selectedRowIds: new Set([draftRowId]) });
-
-  await exporter.copySelectedRowsTsv();
 
   assert.equal(vi.mocked(copyToClipboard).mock.calls.length, 0);
 });

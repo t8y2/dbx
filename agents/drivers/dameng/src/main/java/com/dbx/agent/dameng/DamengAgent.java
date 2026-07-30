@@ -408,8 +408,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
         if (!constraints.hasFilter()) {
             return;
         }
-        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '\\\\'");
-        args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '~'");
+        args.add(constraints.fuzzyLikePattern('~').toUpperCase(Locale.ROOT));
     }
 
     private static void appendLimitOffset(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
@@ -1324,10 +1324,13 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return result;
     }
 
-    private static String indexDdl(String schema, String table, IndexInfo index) {
+    static String indexDdl(String schema, String table, IndexInfo index) {
         StringBuilder ddl = new StringBuilder("CREATE ");
         if (index.getIs_unique()) {
             ddl.append("UNIQUE ");
+        }
+        if ("SPATIAL".equalsIgnoreCase(coalesce(index.getIndex_type()).trim())) {
+            ddl.append("SPATIAL ");
         }
         ddl.append("INDEX ")
             .append(qualifiedName(schema, index.getName()))

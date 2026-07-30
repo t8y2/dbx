@@ -6,13 +6,29 @@ import { describe, expect, it, vi } from "vitest";
 import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 
 describe("QueryEditor search keymap precedence", () => {
-  it("runs the custom search binding before lower-priority CodeMirror bindings", () => {
+  it("runs configured editor actions before the built-in search fallback", () => {
+    const formatSql = vi.fn(() => true);
+    const openSearch = vi.fn(() => true);
+    const view = new EditorView({
+      parent: document.createElement("div"),
+      state: EditorState.create({
+        extensions: [Prec.high(keymap.of([{ key: "Mod-f", run: formatSql }, ...createQueryEditorSearchKeymap({ openSearch, openReplace: () => true, isReadOnly: () => false })]))],
+      }),
+    });
+
+    expect(runScopeHandlers(view, new KeyboardEvent("keydown", { key: "f", ctrlKey: true }), "editor")).toBe(true);
+    expect(formatSql).toHaveBeenCalledOnce();
+    expect(openSearch).not.toHaveBeenCalled();
+    view.destroy();
+  });
+
+  it("keeps the search fallback above lower-priority CodeMirror bindings", () => {
     const openSearch = vi.fn(() => true);
     const lowerPrioritySearch = vi.fn(() => true);
     const view = new EditorView({
       parent: document.createElement("div"),
       state: EditorState.create({
-        extensions: [keymap.of([{ key: "Mod-f", run: lowerPrioritySearch }]), Prec.highest(keymap.of(createQueryEditorSearchKeymap({ openSearch, openReplace: () => true, isReadOnly: () => false })))],
+        extensions: [keymap.of([{ key: "Mod-f", run: lowerPrioritySearch }]), Prec.high(keymap.of(createQueryEditorSearchKeymap({ openSearch, openReplace: () => true, isReadOnly: () => false })))],
       }),
     });
 

@@ -4,14 +4,17 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import CommonOptions from "./CommonOptions.vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{ params: GeneratorParams }>();
 
-const nameFormats: Array<{ value: "full" | "last" | "first"; label: string }> = [
-  { value: "full", label: "全名" },
-  { value: "last", label: "仅姓氏" },
-  { value: "first", label: "仅名字" },
-];
+const { t } = useI18n();
+
+const nameFormats = computed<Array<{ value: "full" | "last" | "first"; label: string }>>(() => [
+  { value: "full", label: t("dataGenerate.nameFormats.full") },
+  { value: "last", label: t("dataGenerate.nameFormats.last") },
+  { value: "first", label: t("dataGenerate.nameFormats.first") },
+]);
 
 const languageOptions = [
   { value: "en", label: "English" },
@@ -78,14 +81,14 @@ function refresh() {
 <template>
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">格式类型</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.nameFormat") }}</div>
       <div class="flex items-center gap-2 text-xs">
         <button v-for="f in nameFormats" :key="f.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.nameFormat || 'full') === f.value ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.nameFormat = f.value">{{ f.label }}</button>
       </div>
     </div>
 
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">语言选择</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.language") }}</div>
       <div class="flex flex-wrap gap-1.5">
         <button v-for="l in languageOptions" :key="l.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.languages ?? []).includes(l.value) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="toggleLang(l.value)">{{ l.label }}</button>
       </div>
@@ -93,7 +96,7 @@ function refresh() {
 
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="flex items-center gap-2 text-xs">
-        <span class="text-muted-foreground shrink-0">预览</span>
+        <span class="text-muted-foreground shrink-0">{{ t("dataGenerate.preview") }}</span>
         <span :key="previewKey" class="font-mono text-sm">{{ previewVal }}</span>
         <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="refresh">
           <RefreshCw class="h-3 w-3" />

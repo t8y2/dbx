@@ -26,6 +26,11 @@ test("complex tree changes retain the full rebuild fallback", () => {
   assert.match(connectionTree, /watch\(flatNodes,/);
 });
 
+test("tree rebuilds keep a context menu only while its target row remains visible", () => {
+  assert.match(connectionTree, /nodes\.find\(\(\{ node \}\) => matchesSidebarActionTarget\(node, contextMenuTarget\)\)\?\.node/);
+  assert.match(connectionTree, /if \(!visibleContextMenuTarget \|\| visibleContextMenuTarget\.valid === false\)/);
+});
+
 test("programmable object groups use the shared metadata loader", () => {
   assert.match(runtimeHost, /const databaseObjectGroup = !!objectTypesForGroupNode\(node\.type\)/);
   assert.match(connectionStore, /else if \(objectTypesForGroupNode\(node\.type\)\) \{\s*await loadObjectGroupChildren\(node, options\);/);

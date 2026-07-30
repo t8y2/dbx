@@ -26,6 +26,11 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
+  prefillSchema?: string;
+  prefillTables?: string[];
+  prefillTargetConnectionId?: string;
+  prefillTargetDatabase?: string;
+  prefillTargetSchema?: string;
 }>();
 
 const store = useConnectionStore();
@@ -42,6 +47,8 @@ const sourceTables = ref<string[]>([]);
 const selectedTables = ref<Set<string>>(new Set());
 const tableSearch = ref("");
 const loadingTables = ref(false);
+const pendingSourceSchemaPrefill = ref("");
+const pendingSelectedTablesPrefill = ref<string[] | null>(null);
 
 // Target state
 const targetConnectionId = ref("");
@@ -49,6 +56,7 @@ const targetDatabase = ref("");
 const targetDatabases = ref<string[]>([]);
 const targetSchemas = ref<string[]>([]);
 const targetSchema = ref("");
+const pendingTargetSchemaPrefill = ref("");
 
 // Options
 const createTable = ref(true);
@@ -77,7 +85,12 @@ function isMongoConnection(id: string): boolean {
   return connectionType(id) === "mongodb";
 }
 
-const canStart = computed(() => sourceConnectionId.value && sourceDatabase.value && targetConnectionId.value && targetDatabase.value && selectedTables.value.size > 0 && sourceConnectionId.value + sourceDatabase.value !== targetConnectionId.value + targetDatabase.value);
+const canStart = computed(() => {
+  const effectiveSourceSchema = sourceSchema.value || sourceDatabase.value;
+  const effectiveTargetSchema = targetSchema.value || targetDatabase.value;
+  const sameSourceAndTarget = sourceConnectionId.value === targetConnectionId.value && sourceDatabase.value === targetDatabase.value && effectiveSourceSchema === effectiveTargetSchema;
+  return sourceConnectionId.value && sourceDatabase.value && targetConnectionId.value && targetDatabase.value && selectedTables.value.size > 0 && !sameSourceAndTarget;
+});
 
 function toggleSelectAll() {
   if (allSelected.value) {
@@ -148,6 +161,12 @@ async function loadSchemas(connectionId: string, database: string, side: "source
   }
 }
 
+function applyPendingTableSelection() {
+  const pending = pendingSelectedTablesPrefill.value;
+  selectedTables.value = pending ? new Set(sourceTables.value.filter((table) => pending.includes(table))) : new Set(sourceTables.value);
+  pendingSelectedTablesPrefill.value = null;
+}
+
 async function loadTables() {
   if (!sourceConnectionId.value || !sourceDatabase.value) {
     sourceTables.value = [];
@@ -157,7 +176,7 @@ async function loadTables() {
   try {
     if (isMongoConnection(sourceConnectionId.value)) {
       sourceTables.value = (await api.mongoListCollections(sourceConnectionId.value, sourceDatabase.value)).map((c) => c.name);
-      selectedTables.value = new Set(sourceTables.value);
+      applyPendingTableSelection();
       return;
     }
     const config = store.getConfig(sourceConnectionId.value);
@@ -165,7 +184,7 @@ async function loadTables() {
     const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;
     const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema);
     sourceTables.value = tables.filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE").map((t) => t.name);
-    selectedTables.value = new Set(sourceTables.value);
+    applyPendingTableSelection();
   } catch {
     sourceTables.value = [];
   } finally {
@@ -174,6 +193,7 @@ async function loadTables() {
 }
 
 const skipSourceWatch = ref(false);
+const skipTargetWatch = ref(false);
 
 watch(sourceConnectionId, (id) => {
   if (skipSourceWatch.value) {
@@ -183,6 +203,8 @@ watch(sourceConnectionId, (id) => {
   sourceDatabase.value = "";
   sourceTables.value = [];
   selectedTables.value.clear();
+  pendingSourceSchemaPrefill.value = "";
+  pendingSelectedTablesPrefill.value = null;
   loadDatabases(id, "source");
 });
 
@@ -195,7 +217,8 @@ watch(sourceDatabase, async (db) => {
       sourceSchemas.value = [];
       sourceSchema.value = db;
     } else if (isSchemaAware(config?.db_type)) {
-      await loadSchemas(sourceConnectionId.value, db, "source");
+      await loadSchemas(sourceConnectionId.value, db, "source", pendingSourceSchemaPrefill.value);
+      pendingSourceSchemaPrefill.value = "";
     } else {
       sourceSchema.value = db;
     }
@@ -205,6 +228,10 @@ watch(sourceDatabase, async (db) => {
 watch(sourceSchema, () => loadTables());
 
 watch(targetConnectionId, (id) => {
+  if (skipTargetWatch.value) {
+    skipTargetWatch.value = false;
+    return;
+  }
   targetDatabase.value = "";
   targetSchemas.value = [];
   targetSchema.value = "";
@@ -218,7 +245,8 @@ watch(targetDatabase, async (db) => {
       targetSchemas.value = [];
       targetSchema.value = db;
     } else if (isSchemaAware(config?.db_type)) {
-      await loadSchemas(targetConnectionId.value, db, "target");
+      await loadSchemas(targetConnectionId.value, db, "target", pendingTargetSchemaPrefill.value);
+      pendingTargetSchemaPrefill.value = "";
     } else {
       targetSchema.value = db;
     }
@@ -230,13 +258,20 @@ watch(
   async (val) => {
     if (val) {
       resetState();
+      pendingSourceSchemaPrefill.value = props.prefillSchema ?? "";
+      pendingSelectedTablesPrefill.value = props.prefillTables?.length ? [...props.prefillTables] : null;
+      pendingTargetSchemaPrefill.value = props.prefillTargetSchema ?? "";
       if (props.prefillConnectionId) {
         skipSourceWatch.value = true;
         sourceConnectionId.value = props.prefillConnectionId;
         await loadDatabases(props.prefillConnectionId, "source");
-        if (props.prefillDatabase) {
-          sourceDatabase.value = props.prefillDatabase;
-        }
+        if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
+      }
+      if (props.prefillTargetConnectionId) {
+        skipTargetWatch.value = true;
+        targetConnectionId.value = props.prefillTargetConnectionId;
+        await loadDatabases(props.prefillTargetConnectionId, "target");
+        if (props.prefillTargetDatabase) targetDatabase.value = props.prefillTargetDatabase;
       }
     }
   },
@@ -251,12 +286,15 @@ function resetState() {
   sourceSchema.value = "";
   sourceTables.value = [];
   selectedTables.value.clear();
+  pendingSourceSchemaPrefill.value = "";
+  pendingSelectedTablesPrefill.value = null;
   tableSearch.value = "";
   targetConnectionId.value = "";
   targetDatabase.value = "";
   targetDatabases.value = [];
   targetSchemas.value = [];
   targetSchema.value = "";
+  pendingTargetSchemaPrefill.value = "";
   createTable.value = true;
   transferMode.value = "append";
   targetTableNameCase.value = "preserve";
@@ -359,15 +397,15 @@ function getConnectionName(id: string) {
 <template>
   <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-[780px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
-      <DialogHeader>
+      <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <ArrowRightLeft class="w-4 h-4" />
           {{ t("transfer.title") }}
         </DialogTitle>
       </DialogHeader>
 
-      <div class="flex-1 min-h-0 overflow-auto">
-        <div class="grid gap-4 py-3">
+      <div class="min-h-0 flex-1 overflow-hidden">
+        <div class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 py-3">
           <!-- Source / Target Side by Side -->
           <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
             <!-- Source Section -->
@@ -495,7 +533,7 @@ function getConnectionName(id: string) {
           </div>
 
           <!-- Tables Section -->
-          <div class="space-y-2">
+          <div class="flex min-h-0 flex-col gap-2">
             <div class="flex items-center justify-between">
               <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 {{ t("transfer.tables") }}
@@ -518,7 +556,7 @@ function getConnectionName(id: string) {
             <div v-else-if="sourceTables.length === 0" class="text-xs text-muted-foreground py-4 text-center">
               {{ t("transfer.noTables") }}
             </div>
-            <div v-else class="border rounded-md max-h-[200px] overflow-y-auto">
+            <div v-else class="min-h-0 max-h-[200px] overflow-y-auto rounded-md border">
               <div v-for="table in filteredTables" :key="table" class="flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/50 cursor-pointer text-xs" @click="toggleTable(table)">
                 <CheckSquare v-if="selectedTables.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
                 <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
@@ -568,7 +606,7 @@ function getConnectionName(id: string) {
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <Button variant="outline" size="sm" @click="open = false">
           {{ t("transfer.cancel") }}
         </Button>

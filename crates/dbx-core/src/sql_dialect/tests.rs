@@ -26,10 +26,37 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "order"), "\"order\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "MixedCase"), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "order detail"), "\"order detail\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Gaussdb), "\"MixedCase\""), "\"MixedCase\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::OpenGauss), "\"MixedCase\""), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Informix), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
+}
+
+#[test]
+fn quotes_gaussdb_jdbc_identifiers_selectively() {
+    for (name, expected) in [
+        ("schema_01", "schema_01"),
+        ("MixedCase", "\"MixedCase\""),
+        ("order", "\"order\""),
+        ("order detail", "\"order detail\""),
+        ("already\"quoted", "\"already\"\"quoted\""),
+        ("\"AlreadyQuoted\"", "\"AlreadyQuoted\""),
+    ] {
+        assert_eq!(quote_table_data_identifier(Some(DatabaseType::Gaussdb), name, Some("\"")), expected);
+    }
+
+    for (name, expected) in [
+        ("schema_01", "schema_01"),
+        ("MixedCase", "`MixedCase`"),
+        ("order", "`order`"),
+        ("order detail", "`order detail`"),
+        ("already`quoted", "`already``quoted`"),
+        ("`AlreadyQuoted`", "`AlreadyQuoted`"),
+    ] {
+        assert_eq!(quote_table_data_identifier(Some(DatabaseType::Gaussdb), name, Some("`")), expected);
+    }
 }
 
 #[test]
@@ -341,6 +368,72 @@ fn builds_table_data_where_and_schema_queries() {
             ..Default::default()
         }),
         "SELECT * FROM \"App Schema\".\"ANALYZE\" LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            identifier_quote: Some("\"".to_string()),
+            schema: Some("schema_01".to_string()),
+            table_name: "table_01".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM schema_01.table_01 LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            identifier_quote: Some("`".to_string()),
+            schema: Some("App Schema".to_string()),
+            table_name: "order".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `App Schema`.`order` LIMIT 100;"
+    );
+    for database_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(database_type),
+                identifier_quote: Some("`".to_string()),
+                schema: Some("App Schema".to_string()),
+                table_name: "order".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM `App Schema`.`order` LIMIT 100;"
+        );
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(database_type),
+                identifier_quote: Some("\"".to_string()),
+                schema: Some("schema_01".to_string()),
+                table_name: "MixedCase".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM schema_01.\"MixedCase\" LIMIT 100;"
+        );
+    }
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            schema: Some("schema_01".to_string()),
+            table_name: "table_01".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM \"schema_01\".\"table_01\" LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::OpenGauss),
+            schema: Some("schema_01".to_string()),
+            table_name: "table_01".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM \"schema_01\".\"table_01\" LIMIT 100;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -819,7 +912,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             include_row_id: true,
             ..Default::default()
         }),
-        "SELECT \"ID\", \"NAME\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") WHERE ROWNUM <= 100"
+        "SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\""
     );
     assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -839,6 +932,44 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` LIMIT 100;"
         );
+}
+
+#[test]
+fn oracle_view_first_page_preserves_filter_and_sort_without_rownum() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            order_by: Some("\"ID\" DESC".to_string()),
+            limit: Some(100),
+            offset: Some(0),
+            where_input: Some("STATUS = 'A'".to_string()),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\" WHERE (STATUS = 'A') ORDER BY \"ID\" DESC"
+    );
+}
+
+#[test]
+fn oracle_view_later_pages_keep_rownum_pagination() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            limit: Some(100),
+            offset: Some(100),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"ID\", \"NAME\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") dbx_inner WHERE ROWNUM <= 200) WHERE \"__dbx_row_num\" > 100"
+    );
 }
 
 #[test]

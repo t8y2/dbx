@@ -1,0 +1,113 @@
+dialect:
+  name: "Vertica"
+  display_name: "Vertica"
+  versions:
+    - version: "24"
+      status: "RECOMMENDED"
+
+types:
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT"]
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "NUMERIC"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+    max_precision: 65000
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+  - name: "BOOLEAN"
+    category: "BOOLEAN"
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIME"
+    category: "TIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "TIMESTAMPTZ"
+    category: "DATETIME"
+  - name: "INTERVAL"
+    category: "INTERVAL"
+  - name: "BINARY"
+    category: "BINARY"
+  - name: "VARBINARY"
+    category: "BINARY"
+  - name: "UUID"
+    category: "UUID"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  comment: true
+  create_index: true
+  drop_index: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_function: true
+  drop_function: true
+  create_sequence: true
+  drop_sequence: true
+  grant_revoke: true
+  if_not_exists: true
+  temporary_table: true
+  transactional_ddl: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} ALTER COLUMN {column} SET DATA TYPE {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  drop_schema: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 1600
+  max_indexes_per_table: 100
+  max_query_size_bytes: 268435456
+  supports_partitioning: true
+  supports_table_sampling: true
+  supports_uuid_type: true
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 128
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT table_name FROM v_catalog.tables WHERE table_schema = '{schema}'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT column_name, data_type, is_nullable, column_default FROM v_catalog.columns WHERE table_schema = '{schema}' AND table_name = '{table}' ORDER BY ordinal_position"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT table_name FROM v_catalog.tables WHERE table_schema = '{schema}'"
+    depth_support: 1
+    performance_profile: "MEDIUM"

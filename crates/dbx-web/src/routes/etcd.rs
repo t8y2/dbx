@@ -65,6 +65,14 @@ pub struct EtcdConnectionRequest {
     pub connection_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdLeaseListRequest {
+    pub connection_id: String,
+    pub limit: Option<usize>,
+    pub continuation: Option<String>,
+}
+
 pub async fn supports_ttl(
     State(state): State<Arc<WebState>>,
     Json(req): Json<EtcdConnectionRequest>,
@@ -336,9 +344,18 @@ pub async fn watch_stop(
 }
 pub async fn lease_list(
     State(state): State<Arc<WebState>>,
-    Json(req): Json<EtcdConnectionRequest>,
+    Json(req): Json<EtcdLeaseListRequest>,
 ) -> Result<Json<dbx_core::agent_kv::EtcdLeaseListResponse>, AppError> {
-    Ok(Json(dbx_core::agent_kv::etcd_lease_list_core(&state.app, &req.connection_id).await.map_err(AppError::from)?))
+    Ok(Json(
+        dbx_core::agent_kv::etcd_lease_list_core(
+            &state.app,
+            &req.connection_id,
+            req.limit.unwrap_or(100),
+            req.continuation.as_deref(),
+        )
+        .await
+        .map_err(AppError::from)?,
+    ))
 }
 pub async fn lease_call(
     State(state): State<Arc<WebState>>,

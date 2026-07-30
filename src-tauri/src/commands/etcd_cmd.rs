@@ -213,8 +213,11 @@ pub async fn etcd_watch_stop(
 pub async fn etcd_lease_list(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
+    limit: Option<usize>,
+    continuation: Option<String>,
 ) -> Result<EtcdLeaseListResponse, String> {
-    dbx_core::agent_kv::etcd_lease_list_core(&state, &connection_id).await
+    dbx_core::agent_kv::etcd_lease_list_core(&state, &connection_id, limit.unwrap_or(100), continuation.as_deref())
+        .await
 }
 
 #[tauri::command]

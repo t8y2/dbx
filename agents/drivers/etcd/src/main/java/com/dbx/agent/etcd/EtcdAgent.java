@@ -108,7 +108,13 @@ public final class EtcdAgent {
     private static final int MAX_WATCHES = 4;
     private static final int MAX_WATCH_BATCHES = 256;
     private static final int MAX_WATCH_EVENTS = 10_000;
+    static final long MAX_WATCH_BUFFER_BYTES = 8L * 1024 * 1024;
+    static final long MAX_SESSION_WATCH_BUFFER_BYTES = 16L * 1024 * 1024;
     private static final int MAX_LEASE_ATTACHED_KEYS = 256;
+    private static final int DEFAULT_LEASE_LIST_LIMIT = 100;
+    private static final int MAX_LEASE_LIST_LIMIT = 200;
+    private static final int LEASE_LIST_CONCURRENCY = 8;
+    private static final int LEASE_LIST_DEADLINE_SECONDS = 5;
     private static final MethodDescriptor.Marshaller<byte[]> BYTE_ARRAY_MARSHALLER = new MethodDescriptor.Marshaller<>() {
         @Override
         public InputStream stream(byte[] value) {
@@ -877,30 +883,36 @@ public final class EtcdAgent {
             startedRevision = response.getHeader().getRevision() + 1;
         }
         String watchId = UUID.randomUUID().toString();
-        EtcdWatchState state = new EtcdWatchState(watchId);
+        EtcdWatchState state = new EtcdWatchState(watchId, session);
         WatchOption.Builder option = WatchOption.newBuilder().withRevision(startedRevision)
             .withPrevKV(boolOrDefault(params, "includePrevKv", false));
         if ("prefix".equals(scope)) option.withRange(prefixEnd(key));
         try {
-            state.watcher = requireClient().getWatchClient().watch(key, option.build(), new Watch.Listener() {
+            Watch.Watcher watcher = requireClient().getWatchClient().watch(key, option.build(), new Watch.Listener() {
                 @Override
                 public void onNext(WatchResponse response) {
                     if (response.getEvents().isEmpty()) return;
                     List<Map<String, Object>> events = new ArrayList<>();
+                    long bufferedBytes = 128;
                     for (WatchEvent event : response.getEvents()) {
                         KeyValue item = event.getKeyValue();
+                        KeyValue previous = event.getPrevKV();
+                        bufferedBytes += watchEventBufferBytes(item, previous);
+                        if (bufferedBytes > MAX_WATCH_BUFFER_BYTES) {
+                            state.overflow();
+                            return;
+                        }
                         Map<String, Object> row = new LinkedHashMap<>();
                         row.put("eventType", event.getEventType() == WatchEvent.EventType.DELETE ? "delete" : "put");
                         row.put("revision", longString(item.getModRevision()));
                         row.put("key", displayBytes(item.getKey().getBytes()));
                         row.put("keyBytes", bytesObject(item.getKey().getBytes()));
                         row.put("value", event.getEventType() == WatchEvent.EventType.DELETE ? null : valueObject(item.getValue().getBytes()));
-                        KeyValue previous = event.getPrevKV();
                         row.put("previousValue", previous != null && previous.getVersion() > 0 ? valueObject(previous.getValue().getBytes()) : null);
                         row.put("metadata", event.getEventType() == WatchEvent.EventType.DELETE && previous != null ? metadata(previous) : metadata(item));
                         events.add(row);
                     }
-                    state.append(response.getHeader().getRevision(), events);
+                    state.append(response.getHeader().getRevision(), events, bufferedBytes);
                 }
 
                 @Override
@@ -918,6 +930,7 @@ public final class EtcdAgent {
                     state.fail("closed", "watch closed", null);
                 }
             });
+            state.setWatcher(watcher);
             session.watches.put(watchId, state);
         } catch (Exception error) {
             state.close();
@@ -927,10 +940,17 @@ public final class EtcdAgent {
     }
 
     private static Object watchPoll(JsonObject params) throws Exception {
-        String watchId = stringOrEmpty(params, "watchId");
-        EtcdWatchState state = sessionState().watches.get(watchId);
+        return pollWatchState(sessionState(), stringOrEmpty(params, "watchId"));
+    }
+
+    static Map<String, Object> pollWatchState(EtcdSessionState session, String watchId) {
+        EtcdWatchState state = session.watches.get(watchId);
         if (state == null) throw new IllegalStateException("ETCD_WATCH_NOT_FOUND: watch does not exist");
-        return state.poll();
+        Map<String, Object> result = state.poll();
+        if (result.containsKey("terminal") && session.watches.remove(watchId, state)) {
+            state.close();
+        }
+        return result;
     }
 
     private static Object watchStop(JsonObject params) {
@@ -939,49 +959,107 @@ public final class EtcdAgent {
         return Map.of("stopped", true);
     }
 
-    private static Object leaseList() throws Exception {
+    private static Object leaseList(JsonObject params) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(LEASE_LIST_DEADLINE_SECONDS);
+        int limit = Math.min(Math.max(1, intOrDefault(params, "limit", DEFAULT_LEASE_LIST_LIMIT)), MAX_LEASE_LIST_LIMIT);
+        String continuation = stringOrNull(params, "continuation");
+        Long afterLeaseId = continuation == null || continuation.isBlank()
+            ? null
+            : Long.parseUnsignedLong(continuation);
         boolean partial = false;
         List<Long> leaseIds;
         try {
-            leaseIds = clusterLeaseIds();
+            leaseIds = clusterLeaseIds(remainingMillis(deadlineNanos));
             sessionState().knownLeases.addAll(leaseIds);
         } catch (ReflectiveOperationException error) {
             leaseIds = new ArrayList<>(sessionState().knownLeases);
             partial = true;
+        } catch (java.util.concurrent.TimeoutException error) {
+            leaseIds = new ArrayList<>(sessionState().knownLeases);
+            partial = true;
         } catch (StatusRuntimeException error) {
-            if (error.getStatus().getCode() != Status.Code.UNIMPLEMENTED) throw error;
+            if (error.getStatus().getCode() != Status.Code.UNIMPLEMENTED
+                && error.getStatus().getCode() != Status.Code.DEADLINE_EXCEEDED) {
+                throw error;
+            }
             leaseIds = new ArrayList<>(sessionState().knownLeases);
             partial = true;
         }
+        leaseIds = leasePageIds(leaseIds, afterLeaseId, limit + 1);
+        boolean hasMore = leaseIds.size() > limit;
+        List<Long> pageIds = new ArrayList<>(leaseIds.subList(0, Math.min(limit, leaseIds.size())));
 
         List<Map<String, Object>> leases = new ArrayList<>();
-        for (Long id : leaseIds) {
-            try {
-                LeaseTimeToLiveResponse response = requireClient().getLeaseClient().timeToLive(id, LeaseOption.DEFAULT)
-                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", longString(response.getID()));
-                row.put("ttl", response.getTTL());
-                row.put("grantedTtl", response.getGrantedTTL());
-                leases.add(row);
-            } catch (Exception error) {
-                Throwable cause = rootCause(error);
-                if (Status.fromThrowable(cause).getCode() == Status.Code.NOT_FOUND) {
-                    sessionState().knownLeases.remove(id);
-                    continue;
+        Long lastProcessedId = null;
+        boolean deadlineReached = false;
+        outer:
+        for (int offset = 0; offset < pageIds.size(); offset += LEASE_LIST_CONCURRENCY) {
+            List<Long> chunkIds = pageIds.subList(offset, Math.min(offset + LEASE_LIST_CONCURRENCY, pageIds.size()));
+            Map<Long, CompletableFuture<LeaseTimeToLiveResponse>> requests = new LinkedHashMap<>();
+            for (Long id : chunkIds) {
+                requests.put(id, requireClient().getLeaseClient().timeToLive(id, LeaseOption.DEFAULT));
+            }
+            for (Map.Entry<Long, CompletableFuture<LeaseTimeToLiveResponse>> request : requests.entrySet()) {
+                try {
+                    LeaseTimeToLiveResponse response = request.getValue().get(
+                        remainingMillis(deadlineNanos),
+                        TimeUnit.MILLISECONDS
+                    );
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", longString(response.getID()));
+                    row.put("ttl", response.getTTL());
+                    row.put("grantedTtl", response.getGrantedTTL());
+                    leases.add(row);
+                    lastProcessedId = request.getKey();
+                } catch (java.util.concurrent.TimeoutException error) {
+                    requests.values().forEach(future -> future.cancel(true));
+                    partial = true;
+                    deadlineReached = true;
+                    break outer;
+                } catch (Exception error) {
+                    Throwable cause = rootCause(error);
+                    if (Status.fromThrowable(cause).getCode() == Status.Code.NOT_FOUND) {
+                        sessionState().knownLeases.remove(request.getKey());
+                    } else {
+                        partial = true;
+                    }
+                    lastProcessedId = request.getKey();
                 }
-                throw error;
             }
         }
-        return Map.of("leases", leases, "partial", partial);
+        String nextContinuation = null;
+        if (deadlineReached && !pageIds.isEmpty()) {
+            nextContinuation = unsignedLongString(lastProcessedId != null ? lastProcessedId : afterLeaseId != null ? afterLeaseId : 0L);
+        } else if (hasMore && !pageIds.isEmpty()) {
+            nextContinuation = unsignedLongString(pageIds.get(pageIds.size() - 1));
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("leases", leases);
+        result.put("partial", partial);
+        result.put("nextContinuation", nextContinuation);
+        return result;
     }
 
-    private static List<Long> clusterLeaseIds() throws Exception {
+    static List<Long> leasePageIds(List<Long> leaseIds, Long afterLeaseId, int fetchLimit) {
+        return leaseIds.stream()
+            .sorted(Long::compareUnsigned)
+            .filter(id -> afterLeaseId == null || Long.compareUnsigned(id, afterLeaseId) > 0)
+            .limit(Math.max(0, fetchLimit))
+            .toList();
+    }
+
+    private static long remainingMillis(long deadlineNanos) throws java.util.concurrent.TimeoutException {
+        long remaining = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+        if (remaining <= 0) throw new java.util.concurrent.TimeoutException("ETCD_LEASE_LIST_TIMEOUT");
+        return remaining;
+    }
+
+    private static List<Long> clusterLeaseIds(long timeoutMillis) throws Exception {
         VertxLeaseGrpc.LeaseVertxStub stub = leaseStub(requireClient().getLeaseClient());
         byte[] response = ClientCalls.blockingUnaryCall(
             stub.getChannel(),
             LEASES_METHOD,
-            stub.getCallOptions().withDeadlineAfter(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+            stub.getCallOptions().withDeadlineAfter(timeoutMillis, TimeUnit.MILLISECONDS),
             new byte[0]
         );
         return leaseIdsFromResponse(response);
@@ -1179,32 +1257,69 @@ public final class EtcdAgent {
         return value;
     }
 
-    private static final class EtcdWatchState {
+    static long watchEventBufferBytes(KeyValue item, KeyValue previous) {
+        long bytes = 512L + estimatedBufferedBytes(item.getKey().size());
+        bytes += estimatedBufferedBytes(item.getValue().size());
+        if (previous != null && previous.getVersion() > 0) {
+            bytes += estimatedBufferedBytes(previous.getValue().size());
+        }
+        return bytes;
+    }
+
+    static long estimatedBufferedBytes(int sourceBytes) {
+        return Math.max(0L, sourceBytes) * 4L;
+    }
+
+    static final class BufferedWatchBatch {
+        private final Map<String, Object> payload;
+        private final long bufferedBytes;
+
+        private BufferedWatchBatch(Map<String, Object> payload, long bufferedBytes) {
+            this.payload = payload;
+            this.bufferedBytes = bufferedBytes;
+        }
+    }
+
+    static final class EtcdWatchState {
         private final String watchId;
-        private final Deque<Map<String, Object>> batches = new ArrayDeque<>();
+        private final EtcdSessionState session;
+        private final Deque<BufferedWatchBatch> batches = new ArrayDeque<>();
         private int eventCount;
+        private long bufferedBytes;
         private String terminalReason;
         private String terminalMessage;
         private Long compactedRevision;
         private Watch.Watcher watcher;
 
-        private EtcdWatchState(String watchId) {
+        EtcdWatchState(String watchId, EtcdSessionState session) {
             this.watchId = watchId;
+            this.session = session;
         }
 
-        private synchronized void append(long revision, List<Map<String, Object>> events) {
+        synchronized void append(long revision, List<Map<String, Object>> events, long batchBytes) {
             if (terminalReason != null) return;
-            if (batches.size() >= MAX_WATCH_BATCHES || eventCount + events.size() > MAX_WATCH_EVENTS) {
-                terminalReason = "overflow";
-                terminalMessage = "ETCD_WATCH_OVERFLOW: the event buffer reached its limit";
-                closeWatcher();
+            if (batches.size() >= MAX_WATCH_BATCHES
+                || eventCount + events.size() > MAX_WATCH_EVENTS
+                || batchBytes > MAX_WATCH_BUFFER_BYTES
+                || bufferedBytes + batchBytes > MAX_WATCH_BUFFER_BYTES
+                || !session.reserveWatchBuffer(batchBytes)) {
+                overflow();
                 return;
             }
             Map<String, Object> batch = new LinkedHashMap<>();
             batch.put("revision", longString(revision));
             batch.put("events", events);
-            batches.addLast(batch);
+            batches.addLast(new BufferedWatchBatch(batch, batchBytes));
             eventCount += events.size();
+            bufferedBytes += batchBytes;
+        }
+
+        synchronized void overflow() {
+            if (terminalReason != null) return;
+            terminalReason = "overflow";
+            terminalMessage = "ETCD_WATCH_OVERFLOW: the event buffer reached its byte or event limit";
+            clearBuffered();
+            closeWatcher();
         }
 
         private synchronized void fail(String reason, String message, Long compacted) {
@@ -1215,17 +1330,19 @@ public final class EtcdAgent {
             }
         }
 
-        private synchronized Map<String, Object> poll() {
+        synchronized Map<String, Object> poll() {
             List<Map<String, Object>> page = new ArrayList<>();
             while (!batches.isEmpty() && page.size() < 64) {
-                Map<String, Object> batch = batches.removeFirst();
-                eventCount -= ((List<?>) batch.get("events")).size();
-                page.add(batch);
+                BufferedWatchBatch batch = batches.removeFirst();
+                eventCount -= ((List<?>) batch.payload.get("events")).size();
+                bufferedBytes -= batch.bufferedBytes;
+                session.releaseWatchBuffer(batch.bufferedBytes);
+                page.add(batch.payload);
             }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("watchId", watchId);
             result.put("batches", page);
-            if (terminalReason != null) {
+            if (terminalReason != null && batches.isEmpty()) {
                 Map<String, Object> terminal = new LinkedHashMap<>();
                 terminal.put("reason", terminalReason);
                 terminal.put("message", terminalMessage);
@@ -1237,7 +1354,23 @@ public final class EtcdAgent {
 
         private synchronized void close() {
             fail("stopped", "watch stopped", null);
+            clearBuffered();
             closeWatcher();
+        }
+
+        private void clearBuffered() {
+            if (bufferedBytes > 0) session.releaseWatchBuffer(bufferedBytes);
+            batches.clear();
+            eventCount = 0;
+            bufferedBytes = 0;
+        }
+
+        private synchronized void setWatcher(Watch.Watcher createdWatcher) {
+            if (terminalReason != null) {
+                createdWatcher.close();
+            } else {
+                watcher = createdWatcher;
+            }
         }
 
         private void closeWatcher() {
@@ -1265,7 +1398,7 @@ public final class EtcdAgent {
             case AgentProtocol.ETCD_METHOD_WATCH_START -> watchStart(params);
             case AgentProtocol.ETCD_METHOD_WATCH_POLL -> watchPoll(params);
             case AgentProtocol.ETCD_METHOD_WATCH_STOP -> watchStop(params);
-            case AgentProtocol.ETCD_METHOD_LEASE_LIST -> leaseList();
+            case AgentProtocol.ETCD_METHOD_LEASE_LIST -> leaseList(params);
             case AgentProtocol.ETCD_METHOD_LEASE_GET -> leaseGet(params);
             case AgentProtocol.ETCD_METHOD_LEASE_GRANT -> leaseGrant(params);
             case AgentProtocol.ETCD_METHOD_LEASE_KEEPALIVE -> leaseKeepAlive(params);
@@ -1554,12 +1687,35 @@ public final class EtcdAgent {
         }
     }
 
-    private static final class EtcdSessionState {
+    static final class EtcdSessionState {
         private Client client;
         private KV kv;
         private List<String> connectedEndpoints = Collections.emptyList();
         private final Map<String, EtcdWatchState> watches = new ConcurrentHashMap<>();
         private final Set<Long> knownLeases = ConcurrentHashMap.newKeySet();
+        private long watchBufferedBytes;
+
+        private synchronized boolean reserveWatchBuffer(long bytes) {
+            if (bytes < 0 || watchBufferedBytes + bytes > MAX_SESSION_WATCH_BUFFER_BYTES) return false;
+            watchBufferedBytes += bytes;
+            return true;
+        }
+
+        private synchronized void releaseWatchBuffer(long bytes) {
+            watchBufferedBytes = Math.max(0, watchBufferedBytes - Math.max(0, bytes));
+        }
+
+        synchronized long watchBufferedBytes() {
+            return watchBufferedBytes;
+        }
+
+        void addWatch(String watchId, EtcdWatchState watch) {
+            watches.put(watchId, watch);
+        }
+
+        int watchCount() {
+            return watches.size();
+        }
     }
 
     private static final class EtcdSessionHandler implements SessionRpcHandler {

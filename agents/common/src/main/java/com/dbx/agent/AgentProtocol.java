@@ -142,9 +142,11 @@ public final class AgentProtocol {
         CAPABILITY_ETCD_DEFRAG,
         CAPABILITY_ETCD_WATCH,
         CAPABILITY_ETCD_LEASE,
-        CAPABILITY_ETCD_AUTH,
-        CAPABILITY_MULTI_SESSION
+        CAPABILITY_ETCD_AUTH
     ));
+
+    public static final List<String> MULTI_SESSION_CAPABILITIES;
+    public static final List<String> MULTI_SESSION_ALL_CAPABILITIES;
 
     public static final List<String> COMMON_METHODS = Collections.unmodifiableList(Arrays.asList(
         METHOD_HANDSHAKE,
@@ -184,6 +186,14 @@ public final class AgentProtocol {
     public static final List<String> MULTI_SESSION_METHODS;
 
     static {
+        List<String> capabilities = new java.util.ArrayList<>(CAPABILITIES);
+        capabilities.add(CAPABILITY_MULTI_SESSION);
+        MULTI_SESSION_CAPABILITIES = Collections.unmodifiableList(capabilities);
+
+        List<String> allCapabilities = new java.util.ArrayList<>(ALL_CAPABILITIES);
+        allCapabilities.add(CAPABILITY_MULTI_SESSION);
+        MULTI_SESSION_ALL_CAPABILITIES = Collections.unmodifiableList(allCapabilities);
+
         List<String> methods = new java.util.ArrayList<>(COMMON_METHODS);
         int insertAt = methods.indexOf(METHOD_CONNECT) + 1;
         methods.addAll(insertAt, Arrays.asList(
@@ -253,9 +263,11 @@ public final class AgentProtocol {
     }
 
     public static HandshakeResult multiSessionHandshakeResult() {
-        List<String> capabilities = new java.util.ArrayList<>(CAPABILITIES);
-        capabilities.add(CAPABILITY_MULTI_SESSION);
-        return new HandshakeResult(MULTI_SESSION_PROTOCOL_VERSION, MULTI_SESSION_PROTOCOL_VERSION, capabilities);
+        return new HandshakeResult(
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MULTI_SESSION_CAPABILITIES
+        );
     }
 
     public static final class HandshakeResult {

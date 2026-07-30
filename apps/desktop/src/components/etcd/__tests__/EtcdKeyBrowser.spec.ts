@@ -305,10 +305,10 @@ describe("EtcdKeyBrowser byte-identity routing", () => {
     searchSubmit?.click();
     await flushUi();
 
-    const rows = [...root.querySelectorAll("tbody tr")];
-    expect(rows).toHaveLength(2);
-    rows[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    rows[1].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const resultButtons = [...root.querySelectorAll("button")].filter((button) => button.textContent?.includes("[base64:/w==]"));
+    expect(resultButtons).toHaveLength(2);
+    resultButtons[0].click();
+    resultButtons[1].click();
     await flushUi();
 
     expect(backend.selectKeyCalls).toHaveLength(2);

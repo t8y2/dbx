@@ -66,7 +66,26 @@ class CommonJavaCompatibilityTest {
         JsonObject contract = protocolContract("/agent-protocol-v2.json");
 
         assertEquals(AgentProtocol.MULTI_SESSION_PROTOCOL_VERSION, contract.get("protocolVersion").getAsInt());
+        assertEquals(AgentProtocol.METHOD_HANDSHAKE, contract.get("handshakeMethod").getAsString());
+        assertEquals(
+            Arrays.asList("protocolVersion", "agentProtocolVersion", "capabilities"),
+            strings(contract.getAsJsonArray("handshakeResponseFields"))
+        );
+        assertEquals(
+            AgentProtocol.MULTI_SESSION_ALL_CAPABILITIES,
+            strings(contract.getAsJsonArray("allCapabilities"))
+        );
+        assertEquals(
+            AgentProtocol.MULTI_SESSION_CAPABILITIES,
+            strings(contract.getAsJsonArray("capabilities"))
+        );
+        assertEquals(
+            AgentProtocol.MULTI_SESSION_CAPABILITIES,
+            strings(contract.getAsJsonArray("defaultSqlCapabilities"))
+        );
         assertEquals(AgentProtocol.MULTI_SESSION_METHODS, strings(contract.getAsJsonArray("commonMethods")));
+        assertEquals(AgentProtocol.MONGO_LEGACY_METHODS, strings(contract.getAsJsonArray("mongoLegacyMethods")));
+        assertEquals(AgentProtocol.KV_METHODS, strings(contract.getAsJsonArray("kvMethods")));
     }
 
     @Test

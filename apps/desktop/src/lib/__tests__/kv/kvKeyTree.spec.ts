@@ -11,7 +11,7 @@ describe("kv key tree", () => {
     expect(tree).toHaveLength(1);
     expect(tree[0]).toMatchObject({
       kind: "group",
-      label: "app",
+      label: "/app",
       key: "/app",
       modRevision: "2",
       children: [{ kind: "leaf", key: "/app/name" }],
@@ -21,7 +21,7 @@ describe("kv key tree", () => {
   it("keeps root keys as leaf nodes", () => {
     const tree = buildKvKeyTree([{ key: "/plain", version: 2 }, { key: "/" }]);
 
-    expect(tree.map((node) => `${node.kind}:${node.label}`)).toEqual(["leaf:/", "leaf:plain"]);
+    expect(tree.map((node) => `${node.kind}:${node.label}`)).toEqual(["leaf:/", "leaf:/plain"]);
     expect(tree[1]).toMatchObject({ kind: "leaf", key: "/plain", version: 2 });
   });
 

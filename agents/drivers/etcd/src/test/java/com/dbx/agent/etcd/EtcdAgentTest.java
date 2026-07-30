@@ -273,6 +273,89 @@ final class EtcdAgentTest {
         Assertions.assertEquals(List.of(123L, 456L), EtcdAgent.leaseIdsFromResponse(response));
     }
 
+    @Test
+    void leaseListPageUsesAStableCursorAndBoundsTheResult() {
+        List<Long> leaseIds = new ArrayList<>();
+        for (long id = 1000; id >= 1; id--) leaseIds.add(id);
+
+        List<Long> first = EtcdAgent.leasePageIds(leaseIds, null, 101);
+        List<Long> second = EtcdAgent.leasePageIds(leaseIds, first.get(99), 101);
+
+        Assertions.assertEquals(101, first.size());
+        Assertions.assertEquals(1L, first.get(0));
+        Assertions.assertEquals(101L, first.get(100));
+        Assertions.assertEquals(101L, second.get(0));
+        Assertions.assertEquals(201L, second.get(100));
+    }
+
+    @Test
+    void watchBufferRejectsLargeValueAndPreviousValuePayloads() {
+        long payloadBytes = EtcdAgent.estimatedBufferedBytes(2 * 1024 * 1024)
+            + EtcdAgent.estimatedBufferedBytes(2 * 1024 * 1024);
+
+        Assertions.assertTrue(payloadBytes > EtcdAgent.MAX_WATCH_BUFFER_BYTES);
+    }
+
+    @Test
+    void watchOverflowClearsBufferedPayloadAndReportsTerminalState() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        EtcdAgent.EtcdWatchState watch = new EtcdAgent.EtcdWatchState("watch-1", session);
+        List<Map<String, Object>> events = List.of(Map.of("eventType", "put"));
+
+        watch.append(1, events, 4L * 1024 * 1024);
+        Assertions.assertEquals(4L * 1024 * 1024, session.watchBufferedBytes());
+
+        watch.append(2, events, 5L * 1024 * 1024);
+        Map<String, Object> result = watch.poll();
+
+        Assertions.assertEquals(0, session.watchBufferedBytes());
+        Assertions.assertTrue(((List<?>) result.get("batches")).isEmpty());
+        Assertions.assertEquals("overflow", ((Map<?, ?>) result.get("terminal")).get("reason"));
+    }
+
+    @Test
+    void watchPollReleasesTheSessionByteBudget() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        EtcdAgent.EtcdWatchState watch = new EtcdAgent.EtcdWatchState("watch-1", session);
+
+        watch.append(1, List.of(Map.of("eventType", "put")), 1024);
+        Assertions.assertEquals(1024, session.watchBufferedBytes());
+
+        watch.poll();
+
+        Assertions.assertEquals(0, session.watchBufferedBytes());
+    }
+
+    @Test
+    void aggregateSessionBudgetTerminatesOnlyTheWatchThatExceedsIt() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        List<Map<String, Object>> events = List.of(Map.of("eventType", "put"));
+        EtcdAgent.EtcdWatchState first = new EtcdAgent.EtcdWatchState("watch-1", session);
+        EtcdAgent.EtcdWatchState second = new EtcdAgent.EtcdWatchState("watch-2", session);
+        EtcdAgent.EtcdWatchState third = new EtcdAgent.EtcdWatchState("watch-3", session);
+
+        first.append(1, events, EtcdAgent.MAX_WATCH_BUFFER_BYTES);
+        second.append(1, events, EtcdAgent.MAX_WATCH_BUFFER_BYTES);
+        third.append(1, events, 1);
+
+        Assertions.assertEquals(EtcdAgent.MAX_SESSION_WATCH_BUFFER_BYTES, session.watchBufferedBytes());
+        Assertions.assertEquals("overflow", ((Map<?, ?>) third.poll().get("terminal")).get("reason"));
+        Assertions.assertEquals(EtcdAgent.MAX_SESSION_WATCH_BUFFER_BYTES, session.watchBufferedBytes());
+    }
+
+    @Test
+    void terminalPollRemovesTheWatchSlot() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        EtcdAgent.EtcdWatchState watch = new EtcdAgent.EtcdWatchState("watch-1", session);
+        session.addWatch("watch-1", watch);
+        watch.overflow();
+
+        Map<String, Object> result = EtcdAgent.pollWatchState(session, "watch-1");
+
+        Assertions.assertEquals("overflow", ((Map<?, ?>) result.get("terminal")).get("reason"));
+        Assertions.assertEquals(0, session.watchCount());
+    }
+
     private static KV scriptedKv(
         AtomicInteger getCalls,
         AtomicInteger txnCalls,

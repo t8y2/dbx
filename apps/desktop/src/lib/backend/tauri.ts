@@ -2500,6 +2500,7 @@ export interface EtcdWatchPollResponse {
 export interface EtcdLeaseListResponse {
   leases: Array<{ id: KvInt64; ttl: number; grantedTtl?: number }>;
   partial: boolean;
+  nextContinuation?: string | null;
 }
 export interface EtcdLeaseDetail {
   id: KvInt64;
@@ -2634,8 +2635,8 @@ export async function etcdWatchPoll(connectionId: string, watchId: string): Prom
 export async function etcdWatchStop(connectionId: string, watchId: string): Promise<{ stopped: boolean }> {
   return invoke("etcd_watch_stop", { connectionId, watchId });
 }
-export async function etcdLeaseList(connectionId: string): Promise<EtcdLeaseListResponse> {
-  return invoke("etcd_lease_list", { connectionId });
+export async function etcdLeaseList(connectionId: string, limit = 100, continuation?: string | null): Promise<EtcdLeaseListResponse> {
+  return invoke("etcd_lease_list", { connectionId, limit, continuation: continuation ?? null });
 }
 export async function etcdLeaseCall<T = unknown>(connectionId: string, operation: "get" | "grant" | "keepalive" | "revoke", params: Record<string, unknown>, approval?: EtcdDangerousApproval): Promise<T> {
   return invoke("etcd_lease_call", { connectionId, operation, params, ...approval });

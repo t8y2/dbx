@@ -14,7 +14,7 @@ describe("KvKeyBrowser node export", () => {
   it("delegates etcd directory export to a fixed-revision recursive scan", () => {
     expect(etcdBrowserSource).toContain("exportScope: exportEtcdNodeScope");
     expect(etcdBrowserSource).toContain("const scan = await scanConnection(connectionId, request.path)");
-    expect(etcdBrowserSource).toContain("isKeyInKvExportScope(displayKey(keyValue(entry), entry.key), request)");
+    expect(etcdBrowserSource).toContain("isKeyInKvExportScope(displayKey(keyValue(entry)), request)");
     expect(etcdBrowserSource).toContain("const missingValue = entries.find((entry) => !entry.value)");
   });
 

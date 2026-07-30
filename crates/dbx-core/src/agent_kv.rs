@@ -514,6 +514,8 @@ pub struct EtcdLeaseListResponse {
     pub leases: Vec<serde_json::Value>,
     #[serde(default)]
     pub partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_continuation: Option<String>,
 }
 
 /// A short-lived challenge for an irreversible etcd operation. The token is
@@ -778,7 +780,7 @@ pub async fn kv_status_core(state: &AppState, connection_id: &str) -> Result<KvS
     if !status.metrics.as_ref().is_some_and(|metrics| metrics.available) {
         let metrics_options =
             state.configs.read().await.get(connection_id).map(EtcdMetricsConnectionOptions::from).unwrap_or_default();
-        status.metrics = Some(collect_etcd_prometheus_metrics(&status.members, &metrics_options).await);
+        status.metrics = Some(collect_etcd_prometheus_metrics(&metrics_options).await);
     }
     Ok(status)
 }
@@ -852,8 +854,23 @@ pub async fn etcd_watch_stop_core(
     .await
 }
 
-pub async fn etcd_lease_list_core(state: &AppState, connection_id: &str) -> Result<EtcdLeaseListResponse, String> {
-    etcd_call(state, connection_id, AgentKvMethod::LeaseList, serde_json::json!({}), AgentCapability::EtcdLease).await
+pub async fn etcd_lease_list_core(
+    state: &AppState,
+    connection_id: &str,
+    limit: usize,
+    continuation: Option<&str>,
+) -> Result<EtcdLeaseListResponse, String> {
+    etcd_call(
+        state,
+        connection_id,
+        AgentKvMethod::LeaseList,
+        serde_json::json!({
+            "limit": limit.clamp(1, 200),
+            "continuation": continuation,
+        }),
+        AgentCapability::EtcdLease,
+    )
+    .await
 }
 
 pub async fn etcd_lease_call_core(
@@ -1035,6 +1052,7 @@ const ETCD_METRICS_MAX_CANDIDATES: usize = 8;
 
 #[derive(Debug, Clone, Default)]
 struct EtcdMetricsConnectionOptions {
+    endpoints: String,
     url_params: Option<String>,
     username: String,
     password: String,
@@ -1045,7 +1063,27 @@ struct EtcdMetricsConnectionOptions {
 
 impl From<&crate::models::connection::ConnectionConfig> for EtcdMetricsConnectionOptions {
     fn from(config: &crate::models::connection::ConnectionConfig) -> Self {
+        let scheme = if config.ssl { "https" } else { "http" };
+        let configured_endpoints = if config.etcd_endpoints.trim().is_empty() {
+            format!("{scheme}://{}:{}", config.host, config.port)
+        } else {
+            config
+                .etcd_endpoints
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(|endpoint| {
+                    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+                        endpoint.to_string()
+                    } else {
+                        format!("{scheme}://{endpoint}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         Self {
+            endpoints: configured_endpoints,
             url_params: config.url_params.clone(),
             username: config.username.clone(),
             password: config.password.clone(),
@@ -1056,11 +1094,14 @@ impl From<&crate::models::connection::ConnectionConfig> for EtcdMetricsConnectio
     }
 }
 
-async fn collect_etcd_prometheus_metrics(
-    members: &[KvStatusMember],
-    options: &EtcdMetricsConnectionOptions,
-) -> KvPrometheusMetrics {
-    let candidates = etcd_metrics_candidates(members, options.url_params.as_deref());
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EtcdMetricsCandidate {
+    url: String,
+    send_credentials: bool,
+}
+
+async fn collect_etcd_prometheus_metrics(options: &EtcdMetricsConnectionOptions) -> KvPrometheusMetrics {
+    let candidates = etcd_metrics_candidates(options);
     let collected_at_ms = current_time_millis();
     if candidates.is_empty() {
         return KvPrometheusMetrics {
@@ -1071,7 +1112,18 @@ async fn collect_etcd_prometheus_metrics(
         };
     }
 
-    let client = match build_etcd_metrics_client(options).await {
+    let authenticated_client = match build_etcd_metrics_client(options).await {
+        Ok(client) => client,
+        Err(error) => {
+            return KvPrometheusMetrics {
+                available: false,
+                collected_at_ms: Some(collected_at_ms),
+                error: Some(error),
+                ..KvPrometheusMetrics::default()
+            };
+        }
+    };
+    let anonymous_client = match build_etcd_metrics_client_without_identity(options).await {
         Ok(client) => client,
         Err(error) => {
             return KvPrometheusMetrics {
@@ -1085,9 +1137,10 @@ async fn collect_etcd_prometheus_metrics(
 
     let mut errors = Vec::new();
     for candidate in candidates.into_iter().take(ETCD_METRICS_MAX_CANDIDATES) {
-        let display_url = sanitize_metrics_url(&candidate);
-        let mut request = client.get(&candidate).header(reqwest::header::ACCEPT, "text/plain; version=0.0.4");
-        if !options.username.trim().is_empty() {
+        let display_url = sanitize_metrics_url(&candidate.url);
+        let client = if candidate.send_credentials { &authenticated_client } else { &anonymous_client };
+        let mut request = client.get(&candidate.url).header(reqwest::header::ACCEPT, "text/plain; version=0.0.4");
+        if candidate.send_credentials && !options.username.trim().is_empty() {
             request = request.basic_auth(options.username.trim(), Some(options.password.as_str()));
         }
         let response = match request.send().await {
@@ -1105,14 +1158,10 @@ async fn collect_etcd_prometheus_metrics(
             errors.push(format!("{display_url}: response exceeds 4 MiB"));
             continue;
         }
-        let body = match response.bytes().await {
-            Ok(body) if body.len() as u64 <= ETCD_METRICS_MAX_BYTES => body,
-            Ok(_) => {
-                errors.push(format!("{display_url}: response exceeds 4 MiB"));
-                continue;
-            }
+        let body = match read_etcd_metrics_body(response).await {
+            Ok(body) => body,
             Err(error) => {
-                errors.push(format!("{display_url}: {}", error.without_url()));
+                errors.push(format!("{display_url}: {error}"));
                 continue;
             }
         };
@@ -1126,20 +1175,42 @@ async fn collect_etcd_prometheus_metrics(
 
     KvPrometheusMetrics {
         available: false,
-        source_url: etcd_metrics_candidates(members, options.url_params.as_deref())
-            .first()
-            .map(|url| sanitize_metrics_url(url)),
+        source_url: etcd_metrics_candidates(options).first().map(|candidate| sanitize_metrics_url(&candidate.url)),
         collected_at_ms: Some(collected_at_ms),
         error: Some(errors.into_iter().take(3).collect::<Vec<_>>().join("; ")),
         ..KvPrometheusMetrics::default()
     }
 }
 
+async fn read_etcd_metrics_body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.without_url().to_string())? {
+        if chunk.len() as u64 > ETCD_METRICS_MAX_BYTES.saturating_sub(body.len() as u64) {
+            return Err("response exceeds 4 MiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 async fn build_etcd_metrics_client(options: &EtcdMetricsConnectionOptions) -> Result<reqwest::Client, String> {
+    build_etcd_metrics_client_with_identity(options, true).await
+}
+
+async fn build_etcd_metrics_client_without_identity(
+    options: &EtcdMetricsConnectionOptions,
+) -> Result<reqwest::Client, String> {
+    build_etcd_metrics_client_with_identity(options, false).await
+}
+
+async fn build_etcd_metrics_client_with_identity(
+    options: &EtcdMetricsConnectionOptions,
+    include_identity: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(ETCD_METRICS_TIMEOUT)
         .timeout(ETCD_METRICS_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(3));
+        .redirect(reqwest::redirect::Policy::none());
 
     if !options.ca_cert_path.trim().is_empty() {
         let path = expand_tilde(options.ca_cert_path.trim());
@@ -1154,8 +1225,8 @@ async fn build_etcd_metrics_client(options: &EtcdMetricsConnectionOptions) -> Re
         }
     }
 
-    let client_cert = options.client_cert_path.trim();
-    let client_key = options.client_key_path.trim();
+    let client_cert = if include_identity { options.client_cert_path.trim() } else { "" };
+    let client_key = if include_identity { options.client_key_path.trim() } else { "" };
     if client_cert.is_empty() != client_key.is_empty() {
         return Err("Failed to initialize metrics client: etcd client certificate and key must be configured together"
             .to_string());
@@ -1182,16 +1253,54 @@ async fn build_etcd_metrics_client(options: &EtcdMetricsConnectionOptions) -> Re
     builder.build().map_err(|error| format!("Failed to initialize metrics client: {error}"))
 }
 
-fn etcd_metrics_candidates(members: &[KvStatusMember], url_params: Option<&str>) -> Vec<String> {
+fn etcd_metrics_candidates(options: &EtcdMetricsConnectionOptions) -> Vec<EtcdMetricsCandidate> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
-    for configured in configured_etcd_metrics_urls(url_params) {
-        push_metrics_candidate(&mut candidates, &mut seen, &configured);
+    let control_origins = configured_etcd_control_origins(&options.endpoints);
+    let control_hosts = configured_etcd_control_hosts(&options.endpoints);
+    for configured in configured_etcd_metrics_urls(options.url_params.as_deref()) {
+        if !metrics_host(&configured).is_some_and(|host| control_hosts.contains(&host)) {
+            continue;
+        }
+        push_metrics_candidate(
+            &mut candidates,
+            &mut seen,
+            &configured,
+            metrics_origin(&configured).is_some_and(|origin| control_origins.contains(&origin)),
+        );
     }
-    for member in members {
-        push_metrics_candidate(&mut candidates, &mut seen, &member.endpoint);
+    for endpoint in split_etcd_endpoints(&options.endpoints) {
+        push_metrics_candidate(&mut candidates, &mut seen, endpoint, true);
     }
     candidates
+}
+
+fn split_etcd_endpoints(endpoints: &str) -> impl Iterator<Item = &str> {
+    endpoints.split([',', '\n']).map(str::trim).filter(|endpoint| !endpoint.is_empty())
+}
+
+fn configured_etcd_control_origins(endpoints: &str) -> HashSet<String> {
+    split_etcd_endpoints(endpoints).filter_map(metrics_origin).collect()
+}
+
+fn configured_etcd_control_hosts(endpoints: &str) -> HashSet<String> {
+    split_etcd_endpoints(endpoints).filter_map(metrics_host).collect()
+}
+
+fn metrics_origin(endpoint: &str) -> Option<String> {
+    let url = reqwest::Url::parse(endpoint.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
+}
+
+fn metrics_host(endpoint: &str) -> Option<String> {
+    let url = reqwest::Url::parse(endpoint.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    url.host_str().map(|host| host.to_ascii_lowercase())
 }
 
 fn configured_etcd_metrics_urls(url_params: Option<&str>) -> Vec<String> {
@@ -1214,12 +1323,17 @@ fn configured_etcd_metrics_urls(url_params: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-fn push_metrics_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, endpoint: &str) {
+fn push_metrics_candidate(
+    candidates: &mut Vec<EtcdMetricsCandidate>,
+    seen: &mut HashSet<String>,
+    endpoint: &str,
+    send_credentials: bool,
+) {
     let Some(candidate) = metrics_url_for_endpoint(endpoint) else {
         return;
     };
     if seen.insert(candidate.clone()) {
-        candidates.push(candidate);
+        candidates.push(EtcdMetricsCandidate { url: candidate, send_credentials });
     }
 }
 
@@ -1228,6 +1342,8 @@ fn metrics_url_for_endpoint(endpoint: &str) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
         return None;
     }
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
     if url.path().is_empty() || url.path() == "/" {
         url.set_path("/metrics");
     }
@@ -2076,6 +2192,10 @@ mod tests {
             metrics_url_for_endpoint("https://etcd.example.com:2379/"),
             Some("https://etcd.example.com:2379/metrics".to_string())
         );
+        assert_eq!(
+            metrics_url_for_endpoint("https://unexpected:secret@etcd.example.com:2379/"),
+            Some("https://etcd.example.com:2379/metrics".to_string())
+        );
     }
 
     #[test]
@@ -2085,6 +2205,23 @@ mod tests {
                 "metricsUrls=http%3A%2F%2Fmetrics-1%3A2381%2Fmetrics%0Ahttp%3A%2F%2Fmetrics-2%3A2381%2Fmetrics"
             )),
             vec!["http://metrics-1:2381/metrics".to_string(), "http://metrics-2:2381/metrics".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_metrics_urls_on_unrelated_hosts() {
+        let candidates = etcd_metrics_candidates(&EtcdMetricsConnectionOptions {
+            endpoints: "https://etcd.internal:2379".to_string(),
+            url_params: Some("metricsUrl=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data".to_string()),
+            ..EtcdMetricsConnectionOptions::default()
+        });
+
+        assert_eq!(
+            candidates,
+            vec![EtcdMetricsCandidate {
+                url: "https://etcd.internal:2379/metrics".to_string(),
+                send_credentials: true,
+            }]
         );
     }
 
@@ -2136,7 +2273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collects_metrics_directly_from_the_status_member_endpoint() {
+    async fn sends_credentials_only_to_the_configured_etcd_origin() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2160,32 +2297,12 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let members = vec![KvStatusMember {
-            endpoint: format!("http://{address}"),
-            member_id: None,
-            name: None,
-            version: None,
-            leader_id: None,
-            revision: None,
-            raft_term: None,
-            raft_index: None,
-            raft_applied_index: None,
-            db_size: None,
-            db_size_in_use: None,
-            learner: false,
-            reachable: true,
-            latency_ms: None,
-            errors: Vec::new(),
-        }];
-
-        let metrics = collect_etcd_prometheus_metrics(
-            &members,
-            &EtcdMetricsConnectionOptions {
-                username: "dbx".to_string(),
-                password: "secret".to_string(),
-                ..EtcdMetricsConnectionOptions::default()
-            },
-        )
+        let metrics = collect_etcd_prometheus_metrics(&EtcdMetricsConnectionOptions {
+            endpoints: format!("http://{address}"),
+            username: "dbx".to_string(),
+            password: "secret".to_string(),
+            ..EtcdMetricsConnectionOptions::default()
+        })
         .await;
         server.await.unwrap();
 
@@ -2193,6 +2310,115 @@ mod tests {
         assert_eq!(metrics.has_leader, Some(1.0));
         assert_eq!(metrics.resident_memory_bytes, Some(2048.0));
         assert_eq!(metrics.source_url, Some(format!("http://{address}/metrics")));
+    }
+
+    #[tokio::test]
+    async fn omits_credentials_from_an_explicit_cross_origin_metrics_endpoint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let request_size = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..request_size]);
+            assert!(!request.lines().any(|line| line.to_ascii_lowercase().starts_with("authorization:")));
+            let body = "etcd_server_has_leader 1\n";
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let metrics = collect_etcd_prometheus_metrics(&EtcdMetricsConnectionOptions {
+            endpoints: "http://127.0.0.1:1".to_string(),
+            url_params: Some(format!("metricsUrl=http%3A%2F%2F{address}%2Fmetrics")),
+            username: "dbx".to_string(),
+            password: "secret".to_string(),
+            ..EtcdMetricsConnectionOptions::default()
+        })
+        .await;
+        server.await.unwrap();
+
+        assert!(metrics.available);
+        assert_eq!(metrics.source_url, Some(format!("http://{address}/metrics")));
+    }
+
+    #[tokio::test]
+    async fn does_not_follow_metrics_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let redirect_server = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/metrics\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let metrics = collect_etcd_prometheus_metrics(&EtcdMetricsConnectionOptions {
+            endpoints: format!("http://{redirect_address}"),
+            username: "dbx".to_string(),
+            password: "secret".to_string(),
+            ..EtcdMetricsConnectionOptions::default()
+        })
+        .await;
+        redirect_server.await.unwrap();
+
+        assert!(!metrics.available);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), target_listener.accept()).await.is_err(),
+            "redirect target unexpectedly received a request"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_chunked_metrics_response_before_buffering_past_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let oversized = vec![b'x'; ETCD_METRICS_MAX_BYTES as usize + 1];
+            stream.write_all(format!("{:x}\r\n", oversized.len()).as_bytes()).await.unwrap();
+            let _ = stream.write_all(&oversized).await;
+            let _ = stream.write_all(b"\r\n0\r\n\r\n").await;
+        });
+
+        let metrics = collect_etcd_prometheus_metrics(&EtcdMetricsConnectionOptions {
+            endpoints: format!("http://{address}"),
+            ..EtcdMetricsConnectionOptions::default()
+        })
+        .await;
+        server.await.unwrap();
+
+        assert!(!metrics.available);
+        assert!(metrics.error.as_deref().is_some_and(|error| error.contains("response exceeds 4 MiB")));
     }
 
     #[tokio::test]

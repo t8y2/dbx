@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import * as api from "@/lib/backend/api";
+import { releaseEtcdWatch, releaseEtcdWatchBestEffort, releaseEtcdWatchesBestEffort, replaceEtcdWatch } from "@/lib/etcd/watchLifecycle";
 
 type EtcdAdminSection = "maintenance" | "watch" | "lease";
 type WatchEventCategory = "create" | "update" | "delete";
@@ -80,6 +81,8 @@ const leaseGrantTtl = ref("60");
 const leaseGrantId = ref("");
 const leaseGrantBusy = ref(false);
 const leases = ref<api.EtcdLeaseListResponse | null>(null);
+const leaseContinuation = ref<string | null>(null);
+const leasePreviousContinuations = ref<Array<string | null>>([]);
 const selectedLease = ref<api.EtcdLeaseDetail | null>(null);
 const leaseDetailLoading = ref(false);
 const autoKeepalive = ref(false);
@@ -342,7 +345,7 @@ async function saveWatchMonitor() {
   await run(async () => {
     if (editing) {
       const shouldRestart = editing.status === "running";
-      if (shouldRestart) await stopWatchMonitor(editing, false);
+      if (editing.id) await stopWatchMonitor(editing, false);
       editing.key = watchFormKey.value;
       editing.keyBytes = watchFormKeyBytes.value;
       editing.scope = watchFormScope.value;
@@ -399,12 +402,22 @@ async function pollWatchMonitors() {
         }
         monitor.events.splice(500);
         if (response.terminal) {
+          // A terminal poll removes the watch from the Agent. This extra stop is
+          // only a best-effort compatibility cleanup for older Agents.
+          await releaseEtcdWatchBestEffort(props.connectionId, monitor.id, api.etcdWatchStop);
           monitor.status = "error";
           monitor.error = response.terminal.message || `Watch ${response.terminal.reason}`;
         }
       } catch (caught) {
+        let message = caught instanceof Error ? caught.message : String(caught);
+        try {
+          await releaseEtcdWatch(props.connectionId, monitor.id, api.etcdWatchStop);
+        } catch (stopError) {
+          const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
+          message = `${message}; failed to stop watch: ${stopMessage}`;
+        }
         monitor.status = "error";
-        monitor.error = caught instanceof Error ? caught.message : String(caught);
+        monitor.error = message;
       }
     }
   } catch (caught) {
@@ -415,11 +428,14 @@ async function pollWatchMonitors() {
   }
 }
 async function stopWatchMonitor(monitor: WatchMonitor, notify = true) {
-  if (monitor.status === "running") await api.etcdWatchStop(props.connectionId, monitor.id).catch(() => undefined);
+  await releaseEtcdWatch(props.connectionId, monitor.id, api.etcdWatchStop);
   monitor.status = "stopped";
   monitor.error = undefined;
   stopWatchPollerIfIdle();
   if (notify) reset(t("etcd.admin.stopped"));
+}
+function requestStopWatchMonitor(monitor: WatchMonitor) {
+  void run(() => stopWatchMonitor(monitor));
 }
 async function resumeWatchMonitor(monitor: WatchMonitor) {
   if (runningWatchCount.value >= 4) {
@@ -427,7 +443,7 @@ async function resumeWatchMonitor(monitor: WatchMonitor) {
     return;
   }
   await run(async () => {
-    await startWatchMonitor(monitor);
+    await replaceEtcdWatch(props.connectionId, monitor.id, api.etcdWatchStop, () => startWatchMonitor(monitor));
     reset(t("etcd.admin.running"));
   });
 }
@@ -445,7 +461,11 @@ async function stopAllWatchMonitors() {
     clearInterval(watchPoller);
     watchPoller = null;
   }
-  await Promise.all(watchMonitors.value.filter((monitor) => monitor.status === "running").map((monitor) => api.etcdWatchStop(props.connectionId, monitor.id).catch(() => undefined)));
+  await releaseEtcdWatchesBestEffort(
+    props.connectionId,
+    watchMonitors.value.map((monitor) => monitor.id),
+    api.etcdWatchStop,
+  );
 }
 function rememberLeaseTtl(id: string, ttl: number) {
   leaseTtlSnapshots.value = { ...leaseTtlSnapshots.value, [id]: { ttl, observedAt: Date.now() } };
@@ -460,11 +480,32 @@ function applyLeases(response: api.EtcdLeaseListResponse) {
   leases.value = response;
   for (const lease of response.leases) rememberLeaseTtl(String(lease.id), lease.ttl);
 }
-async function fetchLeases() {
-  applyLeases(await api.etcdLeaseList(props.connectionId));
+async function fetchLeases(continuation = leaseContinuation.value) {
+  applyLeases(await api.etcdLeaseList(props.connectionId, 100, continuation));
 }
 async function loadLeases() {
   await run(fetchLeases);
+}
+async function nextLeasePage() {
+  const next = leases.value?.nextContinuation;
+  if (!next) return;
+  const previous = leaseContinuation.value;
+  await run(async () => {
+    const response = await api.etcdLeaseList(props.connectionId, 100, next);
+    leasePreviousContinuations.value.push(previous);
+    leaseContinuation.value = next;
+    applyLeases(response);
+  });
+}
+async function previousLeasePage() {
+  if (!leasePreviousContinuations.value.length) return;
+  const previous = leasePreviousContinuations.value[leasePreviousContinuations.value.length - 1] ?? null;
+  await run(async () => {
+    const response = await api.etcdLeaseList(props.connectionId, 100, previous);
+    leasePreviousContinuations.value.pop();
+    leaseContinuation.value = previous;
+    applyLeases(response);
+  });
 }
 async function openLease(id: string) {
   leaseDetailLoading.value = true;
@@ -672,7 +713,7 @@ onBeforeUnmount(() => {
                 }}</span>
                 <div class="flex justify-end gap-0.5">
                   <Button size="sm" variant="ghost" class="h-7 w-7 p-0" title="编辑监视器" @click="editWatchMonitor(monitor)"><Pencil class="h-3.5 w-3.5" /></Button
-                  ><Button v-if="monitor.status === 'running'" size="sm" variant="ghost" class="h-7 w-7 p-0 text-amber-700 hover:text-amber-700 dark:text-amber-300" title="停止监视器" @click="void stopWatchMonitor(monitor)"><Square class="h-3.5 w-3.5" /></Button
+                  ><Button v-if="monitor.status === 'running'" size="sm" variant="ghost" class="h-7 w-7 p-0 text-amber-700 hover:text-amber-700 dark:text-amber-300" title="停止监视器" @click="requestStopWatchMonitor(monitor)"><Square class="h-3.5 w-3.5" /></Button
                   ><Button v-else size="sm" variant="ghost" class="h-7 w-7 p-0 text-emerald-700 hover:text-emerald-700 dark:text-emerald-300" title="启动监视器" @click="void resumeWatchMonitor(monitor)"><Play class="h-3.5 w-3.5" /></Button
                   ><Button size="sm" variant="ghost" class="h-7 w-7 p-0 text-destructive hover:text-destructive" title="删除监视器" @click="void deleteWatchMonitor(monitor)"><Trash2 class="h-3.5 w-3.5" /></Button>
                 </div>
@@ -726,6 +767,11 @@ onBeforeUnmount(() => {
               ><Button size="sm" variant="ghost" class="shrink-0 text-destructive hover:text-destructive" :disabled="busy" @click.stop="revokeLease(lease.id)">撤销</Button>
             </div>
             <div v-if="!leases?.leases.length" class="rounded border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">{{ t("etcd.admin.noKnownLeases") }}</div>
+            <div v-if="leases && (leasePreviousContinuations.length || leases.nextContinuation)" class="flex items-center justify-between gap-2 pt-1">
+              <Button size="sm" variant="outline" :disabled="busy || !leasePreviousContinuations.length" @click="previousLeasePage">上一页</Button>
+              <span class="text-xs text-muted-foreground">每页最多 100 项</span>
+              <Button size="sm" variant="outline" :disabled="busy || !leases.nextContinuation" @click="nextLeasePage">下一页</Button>
+            </div>
           </div>
           <div class="rounded border p-3">
             <div v-if="leaseDetailLoading" class="flex h-32 items-center justify-center text-xs text-muted-foreground">{{ t("etcd.admin.loadingLease") }}</div>

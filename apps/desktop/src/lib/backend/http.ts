@@ -2544,8 +2544,8 @@ export async function etcdWatchPoll(connectionId: string, watchId: string): Prom
 export async function etcdWatchStop(connectionId: string, watchId: string): Promise<{ stopped: boolean }> {
   return post("/api/etcd/watch/stop", { connectionId, watchId });
 }
-export async function etcdLeaseList(connectionId: string): Promise<EtcdLeaseListResponse> {
-  return post("/api/etcd/lease/list", { connectionId });
+export async function etcdLeaseList(connectionId: string, limit = 100, continuation?: string | null): Promise<EtcdLeaseListResponse> {
+  return post("/api/etcd/lease/list", { connectionId, limit, continuation: continuation ?? null });
 }
 export async function etcdLeaseCall<T = unknown>(connectionId: string, operation: "get" | "grant" | "keepalive" | "revoke", params: Record<string, unknown>, approval?: import("./tauri").EtcdDangerousApproval): Promise<T> {
   return post("/api/etcd/lease/call", { connectionId, operation, params, ...approval });

@@ -103,6 +103,8 @@ Set `DBX_DATA_DIR` to the directory containing `dbx.db`. Do not set it to the fi
 
 PostgreSQL, MySQL, SQLite, compatible SQL databases, standalone Redis, and MongoDB can be queried locally. Some SSH, cluster, vendor-specific, and Agent/JDBC connections require their DBX components to be installed.
 
+DuckDB uses the standalone DBX DuckDB driver. Install it from **DBX Driver Manager** before querying a DuckDB connection through local MCP. The MCP binary includes the sidecar client but does not bundle the DuckDB engine.
+
 ### Agent/JDBC databases
 
 Oracle, KingBase, and XuguDB require their matching native DBX Agent but no JRE. Dameng, DB2, Hive, Trino, Snowflake, SAP HANA, and other JDBC Agent connections require the matching Agent, JDBC driver, and JRE. Install the required component in DBX before using MCP.
@@ -110,6 +112,8 @@ Oracle, KingBase, and XuguDB require their matching native DBX Agent but no JRE.
 ### DBX Web and Docker mode
 
 Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local connections. If the Web login is protected, also set `DBX_WEB_PASSWORD` to the same login password.
+
+DBX Web and Docker require the same standalone DuckDB driver. Install it from Driver Manager after the first launch. Docker stores installed drivers under `/app/data/agents`, so they persist when `/app/data` is mounted as a volume.
 
 ### Desktop UI tools
 
@@ -148,6 +152,7 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
   <Accordion title="dbx.db cannot be found">Set `DBX_DATA_DIR` to the folder containing `dbx.db`. For Windows portable builds, this is normally the `data` folder beside `DBX.exe`.</Accordion>
   <Accordion title="DBX is not running">Only `dbx_open_table` and `dbx_execute_and_show` require the desktop app. Local query tools can run without DBX open.</Accordion>
   <Accordion title="An Agent/JDBC database cannot start">Install or update the matching DBX agent, JDBC driver, and JRE through DBX Driver Manager. Proprietary drivers are not included in the native MCP package.</Accordion>
+  <Accordion title="A DuckDB connection cannot start">Install or update the DuckDB driver through DBX Driver Manager. Local MCP, DBX Web, and Docker use the standalone driver rather than embedding the DuckDB engine.</Accordion>
   <Accordion title="I see a better-sqlite3 or Node ABI error">MCP does not require `better-sqlite3`. Upgrade `@dbx-app/mcp-server`; if the error comes from `@dbx-app/cli`, follow the CLI installation requirements because it is a separate package.</Accordion>
 </Accordions>
 

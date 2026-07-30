@@ -59,6 +59,7 @@ const driverRefMap: Record<string, DriverProfile> = {
   cockroachdb: { dbType: "postgres", profile: "cockroachdb", label: "CockroachDB", port: 26257, user: "root" },
   redshift: { dbType: "redshift", profile: "redshift", label: "Redshift", port: 5439, user: "awsuser" },
   elasticsearch: { dbType: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", port: 9200, user: "" },
+  easysearch: { dbType: "easysearch", profile: "easysearch", label: "Easysearch", port: 9200, user: "" },
   h2: { dbType: "h2", profile: "h2", label: "H2", port: 9092, user: "sa" },
   snowflake: { dbType: "snowflake", profile: "snowflake", label: "Snowflake", port: 443, user: "" },
   kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
@@ -82,6 +83,7 @@ const productMap: Record<string, DriverProfile> = {
   bigquery: { dbType: "bigquery", profile: "bigquery", label: "BigQuery", port: 443, user: "" },
   redshift: { dbType: "redshift", profile: "redshift", label: "Redshift", port: 5439, user: "awsuser" },
   elasticsearch: { dbType: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", port: 9200, user: "" },
+  easysearch: { dbType: "easysearch", profile: "easysearch", label: "Easysearch", port: 9200, user: "" },
   snowflake: { dbType: "snowflake", profile: "snowflake", label: "Snowflake", port: 443, user: "" },
   kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
 };

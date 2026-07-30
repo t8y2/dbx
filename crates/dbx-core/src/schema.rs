@@ -316,7 +316,7 @@ pub async fn list_doris_catalog_databases_core(
             return Ok(vec![]);
         }
     };
-    if catalog == "internal" {
+    if catalog == "internal" || catalog.eq_ignore_ascii_case("default_catalog") {
         return Ok(filter_mysql_system_databases_for_config(databases, db_config.as_ref()));
     }
     Ok(databases)
@@ -460,7 +460,8 @@ pub async fn resolve_external_doris_catalog(
     catalog: Option<&str>,
 ) -> Option<String> {
     let catalog = catalog?.trim();
-    if catalog.is_empty() || catalog == "internal" {
+    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") || catalog.eq_ignore_ascii_case("default_catalog")
+    {
         return None;
     }
     let config = connection_config(state, connection_id).await?;
@@ -1966,6 +1967,10 @@ async fn list_tables_once(
             .map(|names| collection_names_to_tables(names, "COLLECTION"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::Elasticsearch(client) => db::elasticsearch_driver::list_indices(client)
+            .await
+            .map(|names| collection_names_to_tables(names, "INDEX"))
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::Easysearch(client) => db::easysearch_driver::list_indices(client)
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
@@ -4543,6 +4548,9 @@ pub async fn get_columns_core_for_session(
             PoolKind::Elasticsearch(client) => {
                 db::elasticsearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::Easysearch(client) => {
+                db::easysearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::HBase(client) => {
                 db::hbase_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)
             }
@@ -5284,6 +5292,7 @@ fn sqlite_object_type(kind: &db::ObjectSourceKind) -> &'static str {
         | db::ObjectSourceKind::Function
         | db::ObjectSourceKind::Trigger
         | db::ObjectSourceKind::Sequence
+        | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type
@@ -5298,6 +5307,7 @@ fn sqlserver_object_type_filter(kind: &db::ObjectSourceKind) -> &'static str {
         db::ObjectSourceKind::Function => "'FN','IF','TF','FS','FT'",
         db::ObjectSourceKind::Trigger => "'TR'",
         db::ObjectSourceKind::Sequence
+        | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type
@@ -5534,6 +5544,7 @@ fn postgres_object_source_sql_inner(
             )
         }
         db::ObjectSourceKind::Trigger
+        | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type
@@ -5549,6 +5560,7 @@ pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
         db::ObjectSourceKind::Function => "FUNCTION",
         db::ObjectSourceKind::Trigger => "TRIGGER",
         db::ObjectSourceKind::Sequence => "SEQUENCE",
+        db::ObjectSourceKind::Synonym => "SYNONYM",
         db::ObjectSourceKind::Package => "PACKAGE",
         db::ObjectSourceKind::PackageBody => "PACKAGE_BODY",
         db::ObjectSourceKind::Type => "TYPE",
@@ -5604,6 +5616,7 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {qualified_name}"),
         db::ObjectSourceKind::Trigger
         | db::ObjectSourceKind::Sequence
+        | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type
@@ -5637,6 +5650,7 @@ pub(crate) fn mysql_object_source_ddl_column_index(kind: &db::ObjectSourceKind) 
         | db::ObjectSourceKind::Function
         | db::ObjectSourceKind::Trigger
         | db::ObjectSourceKind::Sequence
+        | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type

@@ -70,6 +70,7 @@ import type {
   RedisDatabaseInfo,
   RedisStreamConsumer,
   RedisStreamGroup,
+  RedisStreamPage,
   RedisStreamPendingPage,
   RedisValue,
   RedisScanResult,
@@ -2251,6 +2252,10 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return post("/api/redis/get-value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
+  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {

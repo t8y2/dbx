@@ -569,7 +569,7 @@ async function toggle() {
         await connectionStore.loadZooKeeperRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
-      } else if (config?.db_type === "elasticsearch") {
+      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
         // Expand: list indices (like other db types list databases).
         await connectionStore.loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
@@ -636,18 +636,19 @@ async function toggle() {
       const collectionRef = (node.meta as { collectionId?: string } | undefined)?.collectionId ?? node.label;
       const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "vector");
       queryStore.updateSql(tab, collectionRef);
-      api
-        .vectorGetCollectionDetail(node.connectionId, node.database || "default", collectionRef)
-        .then((info) => {
-          if (info.dimension != null) {
+      if (connectionStore.getConfig(node.connectionId)?.db_type !== "milvus") {
+        api
+          .vectorGetCollectionDetail(node.connectionId, node.database || "default", collectionRef)
+          .then((info) => {
+            if (info.dimension == null) return;
             if (node.meta) {
               (node.meta as Record<string, unknown>).dimension = info.dimension;
             } else {
               node.meta = { dimension: info.dimension } as any;
             }
-          }
-        })
-        .catch(() => {});
+          })
+          .catch(() => {});
+      }
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       if (node.catalog && node.catalog !== "internal") {
         await connectionStore.loadDorisCatalogTables(node);
@@ -1143,7 +1144,7 @@ async function openServerDashboard() {
     connectionStore.activeConnectionId = node.connectionId;
     if (currentDatabaseType() === "nacos") {
       queryStore.openNacosDashboard(node.connectionId);
-    } else if (currentDatabaseType() === "postgres") {
+    } else if (connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId))) {
       queryStore.openPostgresDashboard(node.connectionId);
     } else {
       queryStore.openMysqlDashboard(node.connectionId);
@@ -3180,7 +3181,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(dbType || "");
+  return !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(dbType || "");
 });
 
 const canOpenDiagram = computed(() => {

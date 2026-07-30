@@ -1,7 +1,7 @@
 use std::{ffi::OsString, sync::Arc};
 
 use dbx_core::{models::connection::ConnectionConfig, storage::Storage};
-use dbx_mcp::{DbxMcpServer, LocalBackend, McpScope};
+use dbx_mcp::{DbxBackend, DbxMcpServer, LocalBackend, McpScope};
 use rmcp::{model::CallToolRequestParams, ServiceExt};
 use serde_json::{json, Map, Value};
 use tempfile::tempdir;
@@ -63,6 +63,37 @@ async fn local_backend_reads_dbx_storage_without_desktop_process() {
     assert!(text.text.contains("local-sqlite"));
     client.cancel().await.expect("close client");
     server_task.abort();
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+#[tokio::test]
+async fn local_backend_uses_the_installed_duckdb_sidecar() {
+    let directory = tempdir().expect("temporary data directory");
+    let missing_driver = directory.path().join("missing-duckdb-driver");
+    let _driver_path = EnvVarGuard::set("DBX_DUCKDB_DRIVER_PATH", &missing_driver.to_string_lossy());
+    let db_path = directory.path().join("dbx.db");
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    let connection: ConnectionConfig = serde_json::from_value(json!({
+        "id": "local-duckdb",
+        "name": "local-duckdb",
+        "db_type": "duckdb",
+        "host": ":memory:",
+        "port": 0,
+        "username": "",
+        "password": "",
+        "ssl": false
+    }))
+    .expect("minimal DuckDB connection config");
+    storage.save_connections(std::slice::from_ref(&connection)).await.expect("save connection");
+
+    let backend = LocalBackend::open(&db_path).await.expect("open local backend");
+    let error = backend
+        .execute_query(&connection, "main", "SELECT 1", Some(1), Some(5))
+        .await
+        .expect_err("missing DuckDB driver should fail");
+
+    assert!(error.contains("DBX_DUCKDB_DRIVER_PATH"), "unexpected DuckDB error: {error}");
+    assert!(!error.contains("not compiled"), "DuckDB sidecar feature was not enabled: {error}");
 }
 
 #[tokio::test]

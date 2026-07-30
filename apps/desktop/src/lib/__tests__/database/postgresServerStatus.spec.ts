@@ -7,13 +7,21 @@ import {
   formatBytes,
   formatBytesPerSec,
   formatUptime,
+  isOpenGaussReplayRecordError,
+  isKingbaseStatusCatalogCompatibilityError,
   isPgStatusCompatibilityError,
+  KINGBASE_PG_STATUS_SQL,
+  KINGBASE_STATUS_SQL,
+  KINGBASE_VARIABLES_SQL,
+  OPENGAUSS_STATUS_FALLBACK_SQL,
+  OPENGAUSS_STATUS_SQL,
+  OPENGAUSS_VARIABLES_SQL,
   parsePgStatusRow,
   pgCacheHitRatio,
   PG_STATUS_LEGACY_SQL,
   PG_STATUS_SQL,
+  resolveServerDashboardDriver,
   statusNumber,
-  supportsServerDashboard,
   type StatusSample,
 } from "@/lib/database/postgresServerStatus";
 
@@ -132,6 +140,50 @@ describe("PG_STATUS_LEGACY_SQL", () => {
   });
 });
 
+describe("PostgreSQL-family status drivers", () => {
+  it("uses openGauss's pg catalog with xlog location functions", () => {
+    const driver = resolveServerDashboardDriver("opengauss");
+    expect(driver?.statusSql).toBe(OPENGAUSS_STATUS_SQL);
+    expect(driver?.variablesSql).toBe(OPENGAUSS_VARIABLES_SQL);
+    expect(OPENGAUSS_STATUS_SQL).toContain("FROM pg_catalog.pg_stat_database");
+    expect(OPENGAUSS_STATUS_SQL).toContain("FROM pg_catalog.pg_stat_activity");
+    expect(OPENGAUSS_STATUS_SQL).toContain("pg_current_xlog_location()");
+    expect(OPENGAUSS_STATUS_SQL).toContain("(pg_last_xlog_replay_location()).lsn");
+    expect(OPENGAUSS_STATUS_SQL).not.toContain("pg_xlog_location_diff(pg_last_xlog_replay_location()");
+    expect(OPENGAUSS_STATUS_SQL).not.toContain("pg_current_wal_lsn()");
+    // The record-notation replay form has a scalar-text fallback for builds whose
+    // pg_last_xlog_replay_location() returns text rather than a (term, lsn) record.
+    expect(driver?.fallbackStatusSql).toBe(OPENGAUSS_STATUS_FALLBACK_SQL);
+    expect(driver?.shouldUseFallbackStatusSql?.(new Error('could not identify column "lsn" in record data type'))).toBe(true);
+    expect(OPENGAUSS_STATUS_FALLBACK_SQL).toContain("CAST(pg_last_xlog_replay_location() AS text)");
+    expect(OPENGAUSS_STATUS_FALLBACK_SQL).toContain("pg_current_xlog_location()");
+    expect(OPENGAUSS_STATUS_FALLBACK_SQL).not.toContain(".lsn");
+  });
+
+  it("uses KingbaseES's sys catalog and sys backend functions", () => {
+    const driver = resolveServerDashboardDriver("kingbase");
+    expect(driver?.statusSql).toBe(KINGBASE_STATUS_SQL);
+    expect(driver?.variablesSql).toBe(KINGBASE_VARIABLES_SQL);
+    expect(KINGBASE_STATUS_SQL).toContain("FROM sys_catalog.sys_stat_database");
+    expect(KINGBASE_STATUS_SQL).toContain("FROM sys_catalog.sys_stat_activity");
+    expect(KINGBASE_STATUS_SQL).toContain("sys_backend_pid()");
+    expect(KINGBASE_STATUS_SQL).toContain("sys_current_wal_lsn()");
+    expect(KINGBASE_STATUS_SQL).toContain("extract(epoch FROM CAST(CURRENT_TIMESTAMP AS TIMESTAMP))");
+    expect(KINGBASE_STATUS_SQL).toContain("extract(epoch FROM CAST(sys_postmaster_start_time() AS TIMESTAMP))");
+    expect(KINGBASE_STATUS_SQL).not.toContain("CURRENT_TIMESTAMP - sys_postmaster_start_time()");
+  });
+
+  it("wires each engine-specific status fallback", () => {
+    // PostgreSQL falls back to the pre-PG10 xlog-named query; openGauss falls back
+    // to the scalar-text replay form; Kingbase falls back from sys_catalog/sys_*
+    // to pg_catalog/pg_* when the server only exposes PostgreSQL-compatible names.
+    expect(resolveServerDashboardDriver("postgres")?.fallbackStatusSql).toBe(PG_STATUS_LEGACY_SQL);
+    expect(resolveServerDashboardDriver("opengauss")?.fallbackStatusSql).toBe(OPENGAUSS_STATUS_FALLBACK_SQL);
+    expect(resolveServerDashboardDriver("kingbase")?.fallbackStatusSql).toBe(KINGBASE_PG_STATUS_SQL);
+    expect(resolveServerDashboardDriver("mysql")).toBeNull();
+  });
+});
+
 describe("isPgStatusCompatibilityError", () => {
   it("detects the WAL-function-not-found message on servers without a code field", () => {
     expect(isPgStatusCompatibilityError(new Error("function pg_current_wal_lsn() does not exist"))).toBe(true);
@@ -157,17 +209,49 @@ describe("isPgStatusCompatibilityError", () => {
   });
 });
 
-describe("supportsServerDashboard", () => {
-  it("is true for postgres only", () => {
-    expect(supportsServerDashboard("postgres")).toBe(true);
-    expect(supportsServerDashboard("mysql")).toBe(false);
-    expect(supportsServerDashboard("opengauss")).toBe(false);
-    expect(supportsServerDashboard("kingbase")).toBe(false);
-    expect(supportsServerDashboard(undefined)).toBe(false);
+describe("isOpenGaussReplayRecordError", () => {
+  it("detects the .lsn-on-non-composite failure some openGauss builds raise", () => {
+    expect(isOpenGaussReplayRecordError(new Error('could not identify column "lsn" in record data type'))).toBe(true);
+    expect(isOpenGaussReplayRecordError(new Error("column notation .lsn applied to type text, which is not a composite type"))).toBe(true);
+    expect(isOpenGaussReplayRecordError(Object.assign(new Error("column notation .lsn applied to type text"), { code: "42809" }))).toBe(true);
   });
 
+  it("does not misclassify unrelated errors", () => {
+    expect(isOpenGaussReplayRecordError(new Error("connection refused"))).toBe(false);
+    // Names an LSN function but is the pre-PG10 WAL-rename failure, not the record issue.
+    expect(isOpenGaussReplayRecordError(new Error("function pg_current_wal_lsn() does not exist"))).toBe(false);
+  });
+});
+
+describe("Kingbase catalog compatibility", () => {
+  it("keeps the sys_catalog query primary and provides a pg_catalog fallback", () => {
+    const driver = resolveServerDashboardDriver("kingbase");
+    expect(driver?.statusSql).toBe(KINGBASE_STATUS_SQL);
+    expect(driver?.fallbackStatusSql).toBe(KINGBASE_PG_STATUS_SQL);
+    expect(KINGBASE_STATUS_SQL).toContain("sys_catalog.sys_stat_database");
+    expect(KINGBASE_STATUS_SQL).toContain("sys_backend_pid()");
+    expect(KINGBASE_PG_STATUS_SQL).toContain("pg_catalog.pg_stat_database");
+    expect(KINGBASE_PG_STATUS_SQL).toContain("pg_backend_pid()");
+    expect(KINGBASE_PG_STATUS_SQL).not.toContain("sys_catalog");
+    expect(KINGBASE_PG_STATUS_SQL).not.toMatch(/\bsys_(?:backend|is|wal|last|current|postmaster)/);
+  });
+
+  it("falls back only for missing Kingbase sys catalog objects", () => {
+    expect(isKingbaseStatusCatalogCompatibilityError(Object.assign(new Error('relation "sys_catalog.sys_stat_database" does not exist'), { code: "42P01" }))).toBe(true);
+    expect(isKingbaseStatusCatalogCompatibilityError(new Error("function sys_current_wal_lsn() does not exist (SQLSTATE 42883)"))).toBe(true);
+    expect(isKingbaseStatusCatalogCompatibilityError(Object.assign(new Error("permission denied for relation sys_catalog.sys_stat_database"), { code: "42501" }))).toBe(false);
+    expect(isKingbaseStatusCatalogCompatibilityError(new Error("connection refused"))).toBe(false);
+    expect(isKingbaseStatusCatalogCompatibilityError(Object.assign(new Error('relation "other_table" does not exist'), { code: "42P01" }))).toBe(false);
+  });
+});
+
+describe("connectionSupportsServerDashboard", () => {
   it("gates on the connection's effective db type", () => {
     expect(connectionSupportsServerDashboard({ id: "pg", name: "Postgres", db_type: "postgres" } as any)).toBe(true);
+    expect(connectionSupportsServerDashboard({ id: "og", name: "openGauss", db_type: "opengauss" } as any)).toBe(true);
+    expect(connectionSupportsServerDashboard({ id: "og-import", name: "Imported openGauss", db_type: "gaussdb", driver_profile: "opengauss" } as any)).toBe(true);
+    expect(connectionSupportsServerDashboard({ id: "gauss", name: "GaussDB", db_type: "gaussdb", driver_profile: "gaussdb" } as any)).toBe(false);
+    expect(connectionSupportsServerDashboard({ id: "kb", name: "KingbaseES", db_type: "kingbase" } as any)).toBe(true);
     expect(connectionSupportsServerDashboard({ id: "jdbc-pg", name: "JDBC Postgres", db_type: "jdbc", connection_string: "jdbc:postgresql://localhost/db" } as any)).toBe(true);
     expect(connectionSupportsServerDashboard({ id: "mysql", name: "MySQL", db_type: "mysql" } as any)).toBe(false);
     expect(connectionSupportsServerDashboard(undefined)).toBe(false);

@@ -33,9 +33,13 @@ pub(crate) fn corrected_window_rect(
 pub(crate) fn enforce_main_window_bounds<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         if enforce_window_bounds(&window) {
-            let _ = app.save_window_state(StateFlags::all());
+            let _ = app.save_window_state(persisted_main_window_state_flags());
         }
     }
+}
+
+pub(crate) fn persisted_main_window_state_flags() -> StateFlags {
+    StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED | StateFlags::DECORATIONS | StateFlags::FULLSCREEN
 }
 
 fn enforce_window_bounds<R: Runtime>(window: &WebviewWindow<R>) -> bool {
@@ -94,6 +98,16 @@ fn centered_axis_position(window_start: i32, window_length: u32, monitor_start: 
 #[cfg(test)]
 mod tests {
     use super::{corrected_window_rect, PhysicalMonitorRect, PhysicalWindowRect};
+    use tauri_plugin_window_state::StateFlags;
+
+    #[test]
+    fn persisted_state_excludes_window_visibility() {
+        let flags = super::persisted_main_window_state_flags();
+
+        assert!(flags.contains(StateFlags::SIZE));
+        assert!(flags.contains(StateFlags::POSITION));
+        assert!(!flags.contains(StateFlags::VISIBLE));
+    }
 
     #[test]
     fn moves_window_back_onto_monitor_when_restored_above_screen() {

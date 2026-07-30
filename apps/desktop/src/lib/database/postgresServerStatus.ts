@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { isMissingKingbaseSysFunction, isMissingKingbaseSysRelation } from "@/lib/database/kingbaseCatalogCompatibility";
 import { computeRate, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, statusEntries, statusNumber, type StatusEntry, type StatusMap, type StatusSample } from "@/lib/database/serverMetrics";
 
 /**
@@ -92,11 +93,112 @@ export const PG_STATUS_LEGACY_SQL = PG_STATUS_SQL.replace(/\bpg_current_wal_lsn\
 
 export const PG_VARIABLES_SQL = "SELECT current_setting('max_connections') AS max_connections, current_setting('server_version') AS version";
 
+/**
+ * openGauss keeps the xlog names. Its current-location function returns text,
+ * while the replay-location function returns a `(term, lsn)` record.
+ */
+export const OPENGAUSS_STATUS_SQL = `WITH db_stats AS (
+  SELECT
+    coalesce(sum(xact_commit),0) AS xact_commit,
+    coalesce(sum(xact_rollback),0) AS xact_rollback,
+    coalesce(sum(blks_hit),0) AS blks_hit,
+    coalesce(sum(blks_read),0) AS blks_read,
+    coalesce(sum(tup_returned),0) AS tup_returned,
+    coalesce(sum(tup_fetched),0) AS tup_fetched,
+    coalesce(sum(tup_inserted),0) AS tup_inserted,
+    coalesce(sum(tup_updated),0) AS tup_updated,
+    coalesce(sum(tup_deleted),0) AS tup_deleted,
+    coalesce(sum(deadlocks),0) AS deadlocks,
+    coalesce(sum(temp_files),0) AS temp_files
+  FROM pg_catalog.pg_stat_database
+), activity_stats AS (
+  SELECT
+    coalesce(sum(CASE WHEN state IS NOT NULL THEN 1 ELSE 0 END),0) AS connections,
+    coalesce(sum(CASE WHEN state = 'active' THEN 1 ELSE 0 END),0) AS active_connections,
+    coalesce(sum(CASE WHEN state = 'idle' THEN 1 ELSE 0 END),0) AS idle_connections
+  FROM pg_catalog.pg_stat_activity
+  WHERE pid <> pg_backend_pid()
+)
+SELECT
+  db_stats.*,
+  activity_stats.*,
+  coalesce(CASE WHEN pg_is_in_recovery()
+    THEN pg_xlog_location_diff(CAST((pg_last_xlog_replay_location()).lsn AS text), CAST('0/0' AS text))
+    ELSE pg_xlog_location_diff(CAST(pg_current_xlog_location() AS text), CAST('0/0' AS text))
+  END, 0) AS wal_bytes,
+  CAST(floor(extract(epoch FROM (CURRENT_TIMESTAMP - pg_postmaster_start_time()))) AS BIGINT) AS uptime_seconds
+FROM db_stats
+CROSS JOIN activity_stats`;
+
+/**
+ * Some openGauss builds return `text` (not a `(term, lsn)` record) from
+ * `pg_last_xlog_replay_location()`, which makes the `.lsn` field access in
+ * `OPENGAUSS_STATUS_SQL` fail to *parse* — and both CASE branches are planned,
+ * so it fails even on a primary. This fallback drops the record notation and
+ * reads the replay location as scalar text; the driver retries with it only
+ * after the primary query raises `isOpenGaussReplayRecordError`.
+ */
+export const OPENGAUSS_STATUS_FALLBACK_SQL = OPENGAUSS_STATUS_SQL.replace("(pg_last_xlog_replay_location()).lsn", "pg_last_xlog_replay_location()");
+
+export const OPENGAUSS_VARIABLES_SQL = "SELECT current_setting('max_connections') AS max_connections, version() AS version";
+
+/**
+ * KingbaseES exposes monitoring under sys_* names. Epoch values are subtracted
+ * numerically because MySQL mode types CURRENT_TIMESTAMP as datetime while the
+ * monitoring functions return timestamp with time zone.
+ */
+function buildKingbaseStatusSql(catalog: "sys_catalog" | "pg_catalog", prefix: "sys" | "pg"): string {
+  return `WITH db_stats AS (
+  SELECT
+    coalesce(sum(xact_commit),0) AS xact_commit,
+    coalesce(sum(xact_rollback),0) AS xact_rollback,
+    coalesce(sum(blks_hit),0) AS blks_hit,
+    coalesce(sum(blks_read),0) AS blks_read,
+    coalesce(sum(tup_returned),0) AS tup_returned,
+    coalesce(sum(tup_fetched),0) AS tup_fetched,
+    coalesce(sum(tup_inserted),0) AS tup_inserted,
+    coalesce(sum(tup_updated),0) AS tup_updated,
+    coalesce(sum(tup_deleted),0) AS tup_deleted,
+    coalesce(sum(deadlocks),0) AS deadlocks,
+    coalesce(sum(temp_files),0) AS temp_files
+  FROM ${catalog}.${prefix}_stat_database
+), activity_stats AS (
+  SELECT
+    coalesce(sum(CASE WHEN state IS NOT NULL THEN 1 ELSE 0 END),0) AS connections,
+    coalesce(sum(CASE WHEN state = 'active' THEN 1 ELSE 0 END),0) AS active_connections,
+    coalesce(sum(CASE WHEN state = 'idle' THEN 1 ELSE 0 END),0) AS idle_connections
+  FROM ${catalog}.${prefix}_stat_activity
+  WHERE pid <> ${prefix}_backend_pid()
+)
+SELECT
+  db_stats.*,
+  activity_stats.*,
+  coalesce(CASE WHEN ${prefix}_is_in_recovery()
+    THEN ${prefix}_wal_lsn_diff(${prefix}_last_wal_replay_lsn(), '0/0')
+    ELSE ${prefix}_wal_lsn_diff(${prefix}_current_wal_lsn(), '0/0')
+  END, 0) AS wal_bytes,
+  CAST(floor(
+    extract(epoch FROM CAST(CURRENT_TIMESTAMP AS TIMESTAMP))
+    - extract(epoch FROM CAST(${prefix}_postmaster_start_time() AS TIMESTAMP))
+  ) AS BIGINT) AS uptime_seconds
+FROM db_stats
+CROSS JOIN activity_stats`;
+}
+
+export const KINGBASE_STATUS_SQL = buildKingbaseStatusSql("sys_catalog", "sys");
+export const KINGBASE_PG_STATUS_SQL = buildKingbaseStatusSql("pg_catalog", "pg");
+
+export const KINGBASE_VARIABLES_SQL = "SELECT current_setting('max_connections') AS max_connections, version() AS version";
+
+export interface PgServerStatusDriver {
+  statusSql: string;
+  variablesSql: string;
+  fallbackStatusSql?: string;
+  shouldUseFallbackStatusSql?(error: unknown): boolean;
+}
+
 /** Max samples retained for the live charts (~ a few minutes at 5s cadence). */
 export const MAX_SAMPLES = 60;
-
-/** Engines exposing `pg_stat_database`/`pg_stat_activity` in the shape this dashboard expects. */
-const SERVER_DASHBOARD_DB_TYPES = new Set<DatabaseType>(["postgres"]);
 
 /** Detect the undefined-function failure produced by pre-10 servers lacking `pg_current_wal_lsn`/`pg_last_wal_replay_lsn`/`pg_wal_lsn_diff`. */
 export function isPgStatusCompatibilityError(error: unknown): boolean {
@@ -109,6 +211,61 @@ export function isPgStatusCompatibilityError(error: unknown): boolean {
   if (code !== "" && code !== "42883") return false;
   const message = error instanceof Error ? error.message : String(error);
   return /(?:pg_current_wal_lsn|pg_last_wal_replay_lsn|pg_wal_lsn_diff)/i.test(message) && /does not exist/i.test(message);
+}
+
+/**
+ * Detect the failure raised when an openGauss build's `pg_last_xlog_replay_location()`
+ * returns `text` instead of a `(term, lsn)` record, so the `.lsn` field access in
+ * `OPENGAUSS_STATUS_SQL` is invalid. SQLSTATE 42809 is `wrong_object_type` (column
+ * notation on a non-composite value); some builds report it as 42703 with an
+ * "identify column" message instead. Gates the retry with `OPENGAUSS_STATUS_FALLBACK_SQL`.
+ * NOTE: confirm the exact message/SQLSTATE on the target openGauss build.
+ */
+export function isOpenGaussReplayRecordError(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  if (code === "42809") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /\blsn\b/i.test(message) && /(?:composite|record data type|column notation|identify column)/i.test(message);
+}
+
+export function isKingbaseStatusCatalogCompatibilityError(error: unknown): boolean {
+  return isMissingKingbaseSysRelation(error, ["sys_catalog.sys_stat_database", "sys_catalog.sys_stat_activity"]) || isMissingKingbaseSysFunction(error, ["sys_backend_pid", "sys_is_in_recovery", "sys_wal_lsn_diff", "sys_last_wal_replay_lsn", "sys_current_wal_lsn", "sys_postmaster_start_time"]);
+}
+
+const POSTGRES_STATUS_DRIVER: PgServerStatusDriver = {
+  statusSql: PG_STATUS_SQL,
+  variablesSql: PG_VARIABLES_SQL,
+  fallbackStatusSql: PG_STATUS_LEGACY_SQL,
+  shouldUseFallbackStatusSql: isPgStatusCompatibilityError,
+};
+
+const OPENGAUSS_STATUS_DRIVER: PgServerStatusDriver = {
+  statusSql: OPENGAUSS_STATUS_SQL,
+  variablesSql: OPENGAUSS_VARIABLES_SQL,
+  fallbackStatusSql: OPENGAUSS_STATUS_FALLBACK_SQL,
+  shouldUseFallbackStatusSql: isOpenGaussReplayRecordError,
+};
+
+const KINGBASE_STATUS_DRIVER: PgServerStatusDriver = {
+  statusSql: KINGBASE_STATUS_SQL,
+  variablesSql: KINGBASE_VARIABLES_SQL,
+  fallbackStatusSql: KINGBASE_PG_STATUS_SQL,
+  shouldUseFallbackStatusSql: isKingbaseStatusCatalogCompatibilityError,
+};
+
+/** Resolve the SQL contract used by the shared PostgreSQL-family dashboard. */
+export function resolveServerDashboardDriver(dbType: DatabaseType | undefined): PgServerStatusDriver | null {
+  if (dbType === "postgres") return POSTGRES_STATUS_DRIVER;
+  if (dbType === "opengauss") return OPENGAUSS_STATUS_DRIVER;
+  if (dbType === "kingbase") return KINGBASE_STATUS_DRIVER;
+  return null;
+}
+
+export function resolveServerDashboardDriverForConnection(connection: ConnectionConfig | undefined): PgServerStatusDriver | null {
+  if (!connection) return null;
+  const dbType = effectiveDatabaseTypeForConnection(connection);
+  if (dbType === "gaussdb" && connection.driver_profile?.toLowerCase() === "opengauss") return OPENGAUSS_STATUS_DRIVER;
+  return resolveServerDashboardDriver(dbType);
 }
 
 /** Parse the single-row `PG_STATUS_SQL` / `PG_VARIABLES_SQL` result into a name/value map. */
@@ -142,12 +299,7 @@ export function pgCacheHitRatio(status: StatusMap): number | null {
   return Math.max(0, Math.min(100, ratio));
 }
 
-/** Whether the given database type exposes the Postgres server dashboard. */
-export function supportsServerDashboard(dbType: DatabaseType | undefined): boolean {
-  return !!dbType && SERVER_DASHBOARD_DB_TYPES.has(dbType);
-}
-
 /** Connection-aware gate (mirrors the MySQL server-dashboard gate). */
 export function connectionSupportsServerDashboard(connection: ConnectionConfig | undefined): boolean {
-  return !!connection && supportsServerDashboard(effectiveDatabaseTypeForConnection(connection));
+  return resolveServerDashboardDriverForConnection(connection) !== null;
 }

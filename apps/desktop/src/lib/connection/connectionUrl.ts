@@ -45,6 +45,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   oracle: { type: "oracle", profile: "oracle", label: "Oracle", defaultPort: 1521 },
   elasticsearch: { type: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", defaultPort: 9200 },
+  easysearch: { type: "easysearch", profile: "easysearch", label: "Easysearch", defaultPort: 9200 },
   qdrant: { type: "qdrant", profile: "qdrant", label: "Qdrant", defaultPort: 6333 },
   milvus: { type: "milvus", profile: "milvus", label: "Milvus", defaultPort: 19530 },
   weaviate: { type: "weaviate", profile: "weaviate", label: "Weaviate", defaultPort: 8080 },
@@ -72,6 +73,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
 const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   clickhouse: SCHEME_PROFILES.clickhouse,
   elasticsearch: SCHEME_PROFILES.elasticsearch,
+  easysearch: SCHEME_PROFILES.easysearch,
   qdrant: SCHEME_PROFILES.qdrant,
   milvus: SCHEME_PROFILES.milvus,
   weaviate: SCHEME_PROFILES.weaviate,

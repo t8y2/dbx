@@ -234,7 +234,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   const canConfigureVisibleDatabases = computed(() => {
     if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
     const databaseType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-    return databaseType !== "elasticsearch" && databaseType !== "qdrant" && databaseType !== "milvus" && databaseType !== "weaviate" && databaseType !== "chromadb" && databaseType !== "etcd" && databaseType !== "mq" && databaseType !== "nacos";
+    return databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "qdrant" && databaseType !== "milvus" && databaseType !== "weaviate" && databaseType !== "chromadb" && databaseType !== "etcd" && databaseType !== "mq" && databaseType !== "nacos";
   });
   const canConfigureVisibleSchemas = computed(() => {
     if (!activeNode.value.connectionId) return false;

@@ -11,11 +11,11 @@ function installLocalStorage() {
   });
 }
 
-function esConnection(): ConnectionConfig {
+function esConnection(dbType: "elasticsearch" | "easysearch" = "elasticsearch", id = "es-1"): ConnectionConfig {
   return {
-    id: "es-1",
-    name: "Elasticsearch",
-    db_type: "elasticsearch",
+    id,
+    name: dbType === "easysearch" ? "Easysearch" : "Elasticsearch",
+    db_type: dbType,
     host: "127.0.0.1",
     port: 9200,
     username: "",
@@ -24,11 +24,11 @@ function esConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
-function seedConnectionNode(store: { treeNodes: TreeNode[]; connectedIds: Set<string> }, id = "es-1") {
+function seedConnectionNode(store: { treeNodes: TreeNode[]; connectedIds: Set<string> }, id = "es-1", label = "Elasticsearch") {
   store.connectedIds.add(id);
   store.treeNodes.push({
     id,
-    label: "Elasticsearch",
+    label,
     type: "connection",
     connectionId: id,
     isExpanded: false,
@@ -133,6 +133,37 @@ describe("connectionStore Elasticsearch open/expand", () => {
       node?.children
         ?.filter((c) => c.type === "elasticsearch-index")
         .map((c) => c.label)
+        .sort(),
+    ).toEqual(["orders", "users"]);
+  });
+
+  it("loads Easysearch indices through the Elasticsearch-compatible tree", async () => {
+    const elasticsearchListIndices = vi.fn().mockResolvedValue(["orders", "users"]);
+    const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      elasticsearchListIndices,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.addEphemeralConnection(esConnection("easysearch", "easysearch-1"));
+    seedConnectionNode(store, "easysearch-1", "Easysearch");
+
+    await store.loadElasticsearchIndices("easysearch-1");
+
+    expect(elasticsearchListIndices).toHaveBeenCalledWith("easysearch-1");
+    expect(
+      store.treeNodes
+        .find((node) => node.id === "easysearch-1")
+        ?.children?.map((node) => node.label)
         .sort(),
     ).toEqual(["orders", "users"]);
   });

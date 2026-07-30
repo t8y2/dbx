@@ -7,6 +7,44 @@ export interface DataGridSortState {
   direction: DataGridSortDirection;
 }
 
+interface SimpleDataGridOrderBy {
+  column: string;
+  direction: DataGridSortDirection;
+  quoted: boolean;
+}
+
+function parseSimpleDataGridOrderBy(orderBy: string | undefined): SimpleDataGridOrderBy | undefined {
+  const match = orderBy?.trim().match(/^((?:n\.)?(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])+\]|[A-Za-z_][A-Za-z0-9_$]*))\s+(?:ASC|DESC)$/i);
+  if (!match) return undefined;
+  let identifier = match[1]!;
+  if (/^n\./i.test(identifier)) identifier = identifier.slice(2);
+  const direction = orderBy!.trim().toLocaleLowerCase().endsWith(" desc") ? "desc" : "asc";
+  if (identifier.startsWith('"')) return { column: identifier.slice(1, -1).replace(/""/g, '"'), direction, quoted: true };
+  if (identifier.startsWith("`")) return { column: identifier.slice(1, -1).replace(/``/g, "`"), direction, quoted: true };
+  if (identifier.startsWith("[")) return { column: identifier.slice(1, -1).replace(/\]\]/g, "]"), direction, quoted: true };
+  return { column: identifier, direction, quoted: false };
+}
+
+function simpleDataGridColumnMatches(orderBy: SimpleDataGridOrderBy, column: string): boolean {
+  return orderBy.quoted ? column === orderBy.column : column.toLocaleLowerCase() === orderBy.column.toLocaleLowerCase();
+}
+
+export function simpleDataGridOrderByColumn(orderBy: string | undefined): string | undefined {
+  return parseSimpleDataGridOrderBy(orderBy)?.column;
+}
+
+export function simpleDataGridOrderByReferencesMissingColumn(orderBy: string | undefined, columns: readonly string[]): boolean {
+  const parsed = parseSimpleDataGridOrderBy(orderBy);
+  if (!parsed) return false;
+  return !columns.some((column) => simpleDataGridColumnMatches(parsed, column));
+}
+
+export function simpleDataGridOrderByMatchesSort(orderBy: string | undefined, column: string | null | undefined, direction: DataGridSortDirection | null | undefined): boolean {
+  if (!column || !direction) return false;
+  const parsed = parseSimpleDataGridOrderBy(orderBy);
+  return !!parsed && parsed.direction === direction && simpleDataGridColumnMatches(parsed, column);
+}
+
 export function nextDataGridSortState(current: DataGridSortState, column: string, columnIndex: number): DataGridSortState {
   if (current.column === column && current.columnIndex === columnIndex) {
     if (current.direction === "asc") {

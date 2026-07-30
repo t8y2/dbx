@@ -3068,7 +3068,8 @@ fn build_import_insert_batch_with_plan(
         return Ok(None);
     }
     let mapped_rows = map_import_rows_with_plan(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
-    let sql = generate_insert_typed(&plan.target_columns, &plan.column_types, &mapped_rows, table, schema, db_type);
+    let sql =
+        generate_insert_typed(&plan.target_columns, &plan.column_types, &mapped_rows, table, schema, db_type, None);
     Ok((!sql.trim().is_empty()).then_some(ImportSqlBatch { sql, row_count: rows.len() }))
 }
 
@@ -3093,6 +3094,7 @@ fn build_import_insert_batches_with_plan(
         table,
         schema,
         db_type,
+        None,
         SqlBatchLimits::for_database(db_type, rows.len()).with_hard_sql_bytes(hard_sql_bytes),
     )?;
     Ok(batches.into_iter().map(|(sql, row_count)| ImportSqlBatch { sql, row_count }).collect())
@@ -3359,7 +3361,7 @@ fn build_import_insert_batches_with_format(
 }
 
 pub fn truncate_sql(table: &str, schema: &str, db_type: &DatabaseType) -> String {
-    let full_table = qualified_table(table, schema, db_type);
+    let full_table = qualified_table(table, schema, db_type, None);
     match db_type {
         DatabaseType::Sqlite | DatabaseType::CloudflareD1 => format!("DELETE FROM {full_table}"),
         _ => format!("TRUNCATE TABLE {full_table}"),
@@ -3643,7 +3645,7 @@ pub fn build_import_create_table_plan(
         return Err("No columns mapped for import".to_string());
     }
 
-    let full_table = qualified_table(table.trim(), schema, db_type);
+    let full_table = qualified_table(table.trim(), schema, db_type, None);
     let column_sql = columns
         .iter()
         .map(|column| format!("{} {}", quote_identifier(&column.name, db_type), column.data_type))
@@ -3875,7 +3877,7 @@ fn build_postgres_copy_text_row(
 }
 
 fn postgres_copy_sql(plan: &CompiledImportPlan, table: &str, schema: &str) -> String {
-    let table = qualified_table(table, schema, &DatabaseType::Postgres);
+    let table = qualified_table(table, schema, &DatabaseType::Postgres, None);
     let columns = plan
         .target_columns
         .iter()
@@ -4630,7 +4632,7 @@ fn compile_sqlserver_bulk_import_plan(
         target_types.push(column.column.data_type.clone());
     }
     Ok(SqlServerBulkImportPlan {
-        target_table: qualified_table(table, schema, &DatabaseType::SqlServer),
+        target_table: qualified_table(table, schema, &DatabaseType::SqlServer, None),
         target_columns: import_plan.target_columns.clone(),
         target_types,
         requires_identity_insert,
@@ -5185,6 +5187,7 @@ where
             &request.database,
             &request.schema,
             &request.table,
+            None,
         )
         .await
         .unwrap_or_default()
@@ -5535,6 +5538,7 @@ where
             &request.database,
             &request.schema,
             &request.table,
+            None,
         )
         .await
         .unwrap_or_default()
@@ -6012,6 +6016,7 @@ where
         &request.database,
         &request.schema,
         &request.table,
+        None,
     )
     .await
     .unwrap_or_default()

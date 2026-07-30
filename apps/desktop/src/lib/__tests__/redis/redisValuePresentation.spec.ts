@@ -146,6 +146,38 @@ describe("redisValuePresentation", () => {
 }`);
   });
 
+  it("uses the Stream's Redis length instead of the loaded page size", () => {
+    const value = {
+      key_display: "orders",
+      key_raw: "b3JkZXJz",
+      ttl: -1,
+      redis_type: "stream",
+      data: {
+        kind: "stream" as const,
+        entries: [{ id: "1714470000000-0", fields: [{ field: "event", value: "login" }] }],
+        total: 177,
+        next_cursor: "1714470000000-0",
+      },
+    };
+
+    expect(redisValueSize(value)).toBe(177);
+  });
+
+  it("uses loaded Stream entries when the total is unavailable", () => {
+    const value = {
+      key_display: "orders",
+      key_raw: "b3JkZXJz",
+      ttl: -1,
+      redis_type: "stream",
+      data: {
+        kind: "stream" as const,
+        entries: [{ id: "1714470000000-0", fields: [{ field: "event", value: "login" }] }],
+      },
+    };
+
+    expect(redisValueSize(value)).toBe(1);
+  });
+
   it("labels raw text views by encoding instead of generic raw text", () => {
     expect(formatRedisMemberDetail("plain-text").rawLabel).toBe("ASCII");
     expect(

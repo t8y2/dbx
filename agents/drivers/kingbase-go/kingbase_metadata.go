@@ -478,17 +478,25 @@ func (s *server) queryCatalogColumns(
 	primary map[string]bool,
 	catalog, prefix, expression string,
 ) ([]columnInfo, error) {
+	identityExpression := "a.attidentity"
+	if s.catalogIdentityUnsupported {
+		identityExpression = "CAST(NULL AS varchar(1)) AS attidentity"
+	}
 	query := fmt.Sprintf(`SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
 	%s(ad.adbin, ad.adrelid), col_description(a.attrelid, a.attnum),
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN ((a.atttypmod - 4) >> 16) & 65535 END,
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN (a.atttypmod - 4) & 65535 END,
 	CASE WHEN t.typname IN ('varchar','bpchar') AND a.atttypmod > 0 THEN a.atttypmod - 4 END,
-	a.attidentity
+	%s
 	FROM %s.%s_attribute a JOIN %s.%s_type t ON t.oid = a.atttypid
 	JOIN %s.%s_class c ON c.oid = a.attrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
+	if err != nil && !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity") {
+		s.catalogIdentityUnsupported = true
+		return s.queryCatalogColumns(schema, table, primary, catalog, prefix, expression)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -519,6 +527,14 @@ func isUndefinedFunction(err error, functionName string) bool {
 	normalized := strings.ToLower(err.Error())
 	undefined = undefined || strings.Contains(normalized, "does not exist") || strings.Contains(normalized, "不存在")
 	return undefined && strings.Contains(normalized, strings.ToLower(functionName))
+}
+
+func isUndefinedColumn(err error, columnName string) bool {
+	var driverError *gokb.Error
+	undefined := errors.As(err, &driverError) && string(driverError.Code) == "42703"
+	normalized := strings.ToLower(err.Error())
+	undefined = undefined || strings.Contains(normalized, "does not exist") || strings.Contains(normalized, "不存在")
+	return undefined && strings.Contains(normalized, strings.ToLower(columnName))
 }
 
 func (s *server) informationSchemaColumns(schema, table string, primary map[string]bool) ([]columnInfo, error) {

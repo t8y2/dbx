@@ -382,6 +382,7 @@ function connectionTooltipScheme(config: Pick<ConnectionConfig, "db_type" | "ssl
     case "sqlserver":
       return "mssql";
     case "elasticsearch":
+    case "easysearch":
     case "qdrant":
     case "milvus":
     case "weaviate":
@@ -1166,7 +1167,7 @@ function onKeydown(event: KeyboardEvent) {
               @keydown.escape.prevent="isRenamingGroup = false"
               @click.stop
             />
-            <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+            <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' }]">{{ visibleLabel(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
               type="button"

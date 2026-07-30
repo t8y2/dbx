@@ -37,7 +37,14 @@ pub fn is_single_connection_pool(db_type: &DatabaseType) -> bool {
 }
 
 pub fn is_metadata_connection_scoped(db_type: &DatabaseType) -> bool {
-    matches!(db_type, DatabaseType::Mysql)
+    // MySQL-protocol engines (incl. Doris/StarRocks) must not keep a configured
+    // default database when the caller asks for an unscoped metadata pool.
+    // External-catalog databases do not exist in the default catalog, so leaving
+    // `config.database` in the URL makes handshake/`USE` fail with Unknown database.
+    matches!(
+        db_type,
+        DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
+    )
 }
 
 pub fn skips_tcp_probe(db_type: &DatabaseType) -> bool {

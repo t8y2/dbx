@@ -386,9 +386,28 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
     }
 }
 
-pub(crate) fn qualified_transfer_table(table_name: &str, schema: &str, database_type: &DatabaseType) -> String {
+/// Qualified table name for transfer SQL.
+///
+/// * Without catalog: produces `schema.table` (or just `table` for MySQL family).
+/// * With catalog AND the database type supports external catalogs (Doris/StarRocks):
+///   produces `catalog.schema.table` — the 3-part form those engines require to
+///   address objects in an external (non-internal) catalog.
+pub(crate) fn qualified_transfer_table(
+    table_name: &str,
+    schema: &str,
+    database_type: &DatabaseType,
+    catalog: Option<&str>,
+) -> String {
     let table = quote_transfer_identifier(table_name, database_type);
-    if schema.is_empty() || matches!(database_type, DatabaseType::Mysql | DatabaseType::MongoDb | DatabaseType::Questdb)
+    if let Some(catalog) = catalog {
+        format!(
+            "{}.{}.{}",
+            quote_transfer_identifier(catalog, database_type),
+            quote_transfer_identifier(schema, database_type),
+            table
+        )
+    } else if schema.is_empty()
+        || matches!(database_type, DatabaseType::Mysql | DatabaseType::MongoDb | DatabaseType::Questdb)
     {
         table
     } else {

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { floatingArrowOffset, floatingViewportShift } from "@/lib/common/floatingViewportPosition";
 
 const props = withDefaults(
   defineProps<{
@@ -30,6 +31,7 @@ const tooltipRef = ref<HTMLElement>();
 const show = ref(false);
 const x = ref(0);
 const y = ref(0);
+const arrowOffset = ref<number>();
 let timer: ReturnType<typeof setTimeout> | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressOpenUntil = 0;
@@ -79,6 +81,11 @@ const tooltipSurfaceClass = computed(() => (props.surface === "popover" ? "bg-po
 
 const arrowSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popover border-border" : "bg-foreground border-foreground"));
 
+const arrowStyle = computed(() => {
+  if (arrowOffset.value === undefined) return undefined;
+  return props.side === "left" || props.side === "right" ? { top: `${arrowOffset.value}px` } : { left: `${arrowOffset.value}px` };
+});
+
 function clearTimer() {
   if (!timer) return;
   clearTimeout(timer);
@@ -119,6 +126,7 @@ function isDisabled(): boolean {
 function updatePosition() {
   const el = triggerElement();
   if (!el) return;
+  arrowOffset.value = undefined;
   const rect = el.getBoundingClientRect();
   const offset = props.sideOffset;
   switch (props.side) {
@@ -140,6 +148,16 @@ function updatePosition() {
       y.value = Math.max(8, rect.top - offset);
       break;
   }
+}
+
+function fitPositionToViewport() {
+  const tooltip = tooltipRef.value;
+  if (!tooltip) return;
+  const rect = tooltip.getBoundingClientRect();
+  const shift = floatingViewportShift(rect, { width: window.innerWidth, height: window.innerHeight });
+  x.value += shift.x;
+  y.value += shift.y;
+  arrowOffset.value = props.side === "left" || props.side === "right" ? floatingArrowOffset(rect.height, shift.y) : floatingArrowOffset(rect.width, shift.x);
 }
 
 function close() {
@@ -210,6 +228,7 @@ function open(source: "hover" | "focus") {
   updatePosition();
   openSource = source;
   show.value = true;
+  void nextTick(fitPositionToViewport);
   addGlobalListeners();
 }
 
@@ -234,7 +253,10 @@ watch(
   () => [props.disabled, props.text] as const,
   () => {
     if (isDisabled() || !props.text) close();
-    else if (show.value) updatePosition();
+    else if (show.value) {
+      updatePosition();
+      void nextTick(fitPositionToViewport);
+    }
   },
 );
 </script>
@@ -255,7 +277,7 @@ watch(
       @mouseleave="scheduleClose"
     >
       <slot name="content">{{ text }}</slot>
-      <span :class="[arrowClass, arrowSurfaceClass, 'size-2.5 rotate-45 rounded-[2px]']" aria-hidden="true" />
+      <span :class="[arrowClass, arrowSurfaceClass, 'size-2.5 rotate-45 rounded-[2px]']" :style="arrowStyle" aria-hidden="true" />
     </div>
   </Teleport>
 </template>

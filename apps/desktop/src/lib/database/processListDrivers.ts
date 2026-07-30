@@ -1,7 +1,28 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { buildKillSql as buildMysqlKillSql, mapProcessRows as mapMysqlProcessRows, PROCESS_LIST_SQL as MYSQL_PROCESS_LIST_SQL, supportsProcessList as supportsMysqlProcessList } from "./mysqlProcessList";
-import { buildPgKillSql, isPgProcessListCompatibilityError, mapPgProcessRows, pgKillResultError, PG_OWN_SESSION_SQL, PG_PROCESS_LIST_LEGACY_SQL, PG_PROCESS_LIST_SQL, supportsPgProcessList } from "./postgresProcessList";
+import {
+  buildKingbaseKillSql,
+  buildKingbasePgKillSql,
+  buildPgKillSql,
+  isKingbaseOwnSessionCatalogCompatibilityError,
+  isKingbaseProcessListCatalogCompatibilityError,
+  isKingbaseTerminateCatalogCompatibilityError,
+  isPgProcessListCompatibilityError,
+  kingbaseKillResultError,
+  kingbasePgKillResultError,
+  KINGBASE_OWN_SESSION_SQL,
+  KINGBASE_PG_OWN_SESSION_SQL,
+  KINGBASE_PG_PROCESS_LIST_SQL,
+  KINGBASE_PROCESS_LIST_SQL,
+  mapPgProcessRows,
+  OPENGAUSS_OWN_SESSION_SQL,
+  OPENGAUSS_PROCESS_LIST_SQL,
+  pgKillResultError,
+  PG_OWN_SESSION_SQL,
+  PG_PROCESS_LIST_LEGACY_SQL,
+  PG_PROCESS_LIST_SQL,
+} from "./postgresProcessList";
 
 /**
  * Engine-agnostic process-list model. Each supported engine contributes a driver
@@ -34,6 +55,10 @@ export interface ProcessListDriver {
   shouldUseFallbackListSql?(error: unknown): boolean;
   /** Scalar SQL returning the caller's own session id (nullable path tolerated). */
   ownSessionSql: string;
+  /** Compatibility query used when the primary own-session function is unavailable. */
+  fallbackOwnSessionSql?: string;
+  /** Restrict own-session fallback attempts to known compatibility failures. */
+  shouldUseFallbackOwnSessionSql?(error: unknown): boolean;
   /** Columns to render, in display order. */
   columns: ProcessColumn[];
   /** Column key used for the initial sort. */
@@ -44,8 +69,14 @@ export interface ProcessListDriver {
   mapRows(result: QueryResult | null | undefined): ProcessRow[];
   /** Build the validated statement that kills the given session id. */
   buildKillSql(id: number): string;
+  /** Build the compatibility statement used when the primary kill function is unavailable. */
+  buildFallbackKillSql?(id: number): string;
+  /** Restrict kill fallback attempts to known compatibility failures. */
+  shouldUseFallbackKillSql?(error: unknown): boolean;
   /** Validate any engine-specific success value returned by the kill statement. */
   killResultError?(results: QueryResult[]): string | null;
+  /** Validate the success value returned by the compatibility kill statement. */
+  fallbackKillResultError?(results: QueryResult[]): string | null;
 }
 
 const MYSQL_COLUMNS: ProcessColumn[] = [
@@ -95,10 +126,41 @@ const POSTGRES_DRIVER: ProcessListDriver = {
   killResultError: pgKillResultError,
 };
 
+const OPENGAUSS_DRIVER: ProcessListDriver = {
+  listSql: OPENGAUSS_PROCESS_LIST_SQL,
+  ownSessionSql: OPENGAUSS_OWN_SESSION_SQL,
+  columns: POSTGRES_COLUMNS,
+  defaultSortKey: "time",
+  maxRows: 5000,
+  mapRows: (result) => mapPgProcessRows(result) as unknown as ProcessRow[],
+  buildKillSql: buildPgKillSql,
+  killResultError: pgKillResultError,
+};
+
+const KINGBASE_DRIVER: ProcessListDriver = {
+  listSql: KINGBASE_PROCESS_LIST_SQL,
+  fallbackListSql: KINGBASE_PG_PROCESS_LIST_SQL,
+  shouldUseFallbackListSql: isKingbaseProcessListCatalogCompatibilityError,
+  ownSessionSql: KINGBASE_OWN_SESSION_SQL,
+  fallbackOwnSessionSql: KINGBASE_PG_OWN_SESSION_SQL,
+  shouldUseFallbackOwnSessionSql: isKingbaseOwnSessionCatalogCompatibilityError,
+  columns: POSTGRES_COLUMNS,
+  defaultSortKey: "time",
+  maxRows: 5000,
+  mapRows: (result) => mapPgProcessRows(result) as unknown as ProcessRow[],
+  buildKillSql: buildKingbaseKillSql,
+  buildFallbackKillSql: buildKingbasePgKillSql,
+  shouldUseFallbackKillSql: isKingbaseTerminateCatalogCompatibilityError,
+  killResultError: kingbaseKillResultError,
+  fallbackKillResultError: kingbasePgKillResultError,
+};
+
 /** Resolve the process-list driver for a connection, or null if unsupported. */
 export function resolveProcessListDriver(dbType: DatabaseType | undefined): ProcessListDriver | null {
   if (supportsMysqlProcessList(dbType)) return MYSQL_DRIVER;
-  if (supportsPgProcessList(dbType)) return POSTGRES_DRIVER;
+  if (dbType === "postgres") return POSTGRES_DRIVER;
+  if (dbType === "opengauss") return OPENGAUSS_DRIVER;
+  if (dbType === "kingbase") return KINGBASE_DRIVER;
   return null;
 }
 
@@ -124,7 +186,9 @@ export function resolveProcessListDriverForConnection(connection: ConnectionConf
     const profile = [connection.driver_profile, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? [])].filter(Boolean).join("\n");
     if (MYSQL_LOOKALIKE_JDBC.test(profile)) return null;
   }
-  return resolveProcessListDriver(effectiveDatabaseTypeForConnection(connection));
+  const dbType = effectiveDatabaseTypeForConnection(connection);
+  if (dbType === "gaussdb" && connection.driver_profile?.toLowerCase() === "opengauss") return OPENGAUSS_DRIVER;
+  return resolveProcessListDriver(dbType);
 }
 
 /** Connection-aware process-list gate (mirrors the server-dashboard gate). */

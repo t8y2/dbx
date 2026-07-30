@@ -184,7 +184,7 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
     let safe_limit = options.limit.max(1);
     let safe_offset = options.offset;
 
-    if options.database_type == Some(DatabaseType::Elasticsearch) {
+    if matches!(options.database_type, Some(DatabaseType::Elasticsearch | DatabaseType::Easysearch)) {
         // If the user wrote their own LIMIT, leave the SQL alone — they
         // explicitly bounded the result set and the front-end will paginate
         // client-side. Otherwise wrap with an explicit OFFSET (even when
@@ -226,7 +226,7 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
     }
     // ES SQL can't wrap a SELECT in `SELECT COUNT(*) FROM (...)` — the
     // driver already reports the true match count via affected_rows.
-    if options.database_type == Some(DatabaseType::Elasticsearch) {
+    if matches!(options.database_type, Some(DatabaseType::Elasticsearch | DatabaseType::Easysearch)) {
         return err("unsupported");
     }
     if options.database_type == Some(DatabaseType::SqlServer) && !sql_server_derived_table_projection_safe(&statement) {
@@ -1401,6 +1401,23 @@ fn fallback_alias(index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn easysearch_uses_elasticsearch_sql_pagination_rules() {
+        let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT name FROM products".to_string(),
+            database_type: Some(DatabaseType::Easysearch),
+            limit: 100,
+            offset: 200,
+        });
+        let counted = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT name FROM products".to_string(),
+            database_type: Some(DatabaseType::Easysearch),
+        });
+
+        assert_eq!(paginated.sql.as_deref(), Some("SELECT name FROM products LIMIT 100 OFFSET 200;"));
+        assert_eq!(counted, err("unsupported"));
+    }
 
     #[test]
     fn wraps_single_select_query_with_limit_and_offset() {

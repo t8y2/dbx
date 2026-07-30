@@ -37,6 +37,16 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function dorisConnection(): ConnectionConfig {
+  return {
+    ...mysqlConnection(),
+    id: "doris-1",
+    name: "Doris",
+    db_type: "doris",
+    port: 9030,
+  } as ConnectionConfig;
+}
+
 function oracleConnection(): ConnectionConfig {
   return {
     id: "oracle-1",
@@ -595,6 +605,67 @@ describe("connectionStore metadata loading", () => {
     resolveFirst([{ name: "old_users", table_type: "BASE TABLE", comment: null }]);
     await firstRefresh;
     expect(currentTableGroup().children?.map((node) => node.label)).toEqual(["new_users"]);
+  });
+
+  it("applies include filters to Doris internal table groups", async () => {
+    const listTables = vi.fn().mockResolvedValue([{ name: "ads_pgc_report", table_type: "BASE TABLE", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = dorisConnection();
+    const tableGroup: TreeNode = {
+      id: "doris-1:warehouse:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "warehouse",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "doris-1:warehouse",
+            label: "warehouse",
+            type: "database",
+            connectionId: connection.id,
+            database: "warehouse",
+            isExpanded: true,
+            children: [tableGroup],
+          },
+        ],
+      },
+    ];
+
+    const scopeKey = store.tableNameFilterScopeKey({
+      connectionId: connection.id,
+      database: "warehouse",
+      nodeKind: "group-tables",
+    });
+    const revision = store.setSidebarTableNameFilter(scopeKey, { includePatterns: ["ads_pgc_%"], excludePatterns: [] });
+    await store.refreshTreeNodeForTableNameFilter(tableGroup, scopeKey, revision);
+
+    expect(listTables).toHaveBeenCalledWith(connection.id, "warehouse", "warehouse", undefined, 1001, 0, ["TABLE"], undefined, { includePatterns: ["ads_pgc_%"], excludePatterns: [] });
+    expect(tableGroup.children?.map((node) => node.label)).toEqual(["ads_pgc_report"]);
   });
 
   it("clears a stale connection error after a schema metadata retry succeeds", async () => {

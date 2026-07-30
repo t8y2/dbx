@@ -44,9 +44,9 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
-import { sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
+import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { MAX_RESULT_PAGE_SIZE, normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
+import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -370,14 +370,6 @@ function annotateQueryResultSource(result: QueryResult, sourceStatement: string,
   const label = databaseType ? queryResultSourceLabel(sourceStatement, { database, databaseType }) : undefined;
   if (label) result.sourceLabel = label;
   return result;
-}
-
-const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
-
-function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType) {
-  if (databaseType !== "elasticsearch") return [];
-  const requests = splitSqlStatementRanges(sql, databaseType);
-  return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
 function elasticsearchHttpErrorStatus(result: QueryResult): number | undefined {
@@ -2233,6 +2225,7 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
+    clearInvalidDataTabSortState(tab, tableMeta.columns);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
     const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
     const orderBy = tab.orderByInput?.trim() || sortOrder;
@@ -2605,6 +2598,7 @@ export const useQueryStore = defineStore("query", () => {
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
     tab.connectionId = connectionId;
+    tab.catalog = undefined;
     tab.database = database;
     tab.catalog = undefined;
     tab.objectBrowser = undefined;
@@ -2633,11 +2627,41 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {
+    if (tab.mode !== "data") return false;
+    const hasColumn = (name: string) => columns.some((column) => column.name === name);
+    const structuredSortMissing = !!tab.resultSortColumn && !hasColumn(tab.resultSortColumn);
+    const simpleOrderMissing = simpleDataGridOrderByReferencesMissingColumn(
+      tab.orderByInput,
+      columns.map((column) => column.name),
+    );
+    if (!structuredSortMissing && !simpleOrderMissing) return false;
+    if (structuredSortMissing) {
+      tab.resultSortColumn = undefined;
+      tab.resultSortColumnIndex = undefined;
+      tab.resultSortDirection = undefined;
+      tab.resultSortMode = undefined;
+      tab.resultSortedSql = undefined;
+      tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalMongoDocuments = undefined;
+      tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
+    }
+    if (simpleOrderMissing) tab.orderByInput = undefined;
+    return true;
+  }
+
+  function clearInvalidDataTabSort(id: string): boolean {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.tableMeta?.columns.length) return false;
+    return clearInvalidDataTabSortState(tab, tab.tableMeta.columns);
+  }
+
   function setTableMeta(id: string, meta: NonNullable<QueryTab["tableMeta"]>) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
       tab.tableMeta = meta;
       tab.tableMetaUpdatedAt = Date.now();
+      if (meta.columns.length > 0) clearInvalidDataTabSortState(tab, meta.columns);
       // 只有真实元数据（columns 非空）落地才结束行标识等待；多处调用方会先写
       // columns/primaryKeys 为空的占位身份（如 useNavigationTargets），不得
       // 借此提前解除编辑门控。失败/中止路径不清除——标签页保持只读是安全
@@ -4703,11 +4727,10 @@ export const useQueryStore = defineStore("query", () => {
     tab.querySourceColumns = snapshot.querySourceColumns;
     tab.queryEditabilityReason = snapshot.queryEditabilityReason;
     tab.mongoEditTarget = snapshot.mongoEditTarget;
-    // Data tab 快照可能是延迟元数据期间落盘的空列占位身份：不得用它回滚
-    // 之后已落地的真实元数据（否则 pending 已清除而行标识又变未知，编辑
-    // 门控失效）；若恢复后确实没有真实列，重新挂起编辑门控
-    if (tab.tableMeta?.columns.length && !snapshot.tableMeta?.columns.length) {
-      // 保留当前真实元数据，忽略快照中的占位身份
+    // Data tab 的结果快照可能早于最近一次结构变更。已持有真实元数据时，
+    // 不允许旧快照回滚列名或主键；若恢复后仍没有真实列，重新挂起编辑门控。
+    if (tab.mode === "data" && tab.tableMeta?.columns.length) {
+      // 保留当前真实元数据
     } else {
       tab.tableMeta = snapshot.tableMeta;
     }
@@ -5154,6 +5177,7 @@ export const useQueryStore = defineStore("query", () => {
     updateSchema,
     updateConnection,
     setTableMeta,
+    clearInvalidDataTabSort,
     invalidateTableStructure,
     tableStructureRefreshVersion,
     setObjectSource,

@@ -17,6 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
 utoipa = { version = "5.5", optional = true }
 unicode-width = "0.2"
+unicode-ident = "1"
 serde_yaml_ng = "0.10"
 json5 = "0.4"
 regex = "1"

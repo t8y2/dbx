@@ -1,4 +1,5 @@
-import type { DatabaseType, QueryResult } from "@/types/database";
+import type { QueryResult } from "@/types/database";
+import { isMissingKingbaseSysFunction, isMissingKingbaseSysRelation } from "@/lib/database/kingbaseCatalogCompatibility";
 
 /**
  * PostgreSQL "current activity / process list" helpers. Pure and framework-free
@@ -8,8 +9,6 @@ import type { DatabaseType, QueryResult } from "@/types/database";
  * The MySQL family lives in `./mysqlProcessList`; the generic, engine-agnostic
  * bits (coordinator, interval clamping, session counting) are shared from there.
  */
-
-const PG_PROCESS_LIST_DB_TYPES = new Set<DatabaseType>(["postgres"]);
 
 /**
  * One row per server-side backend. `now() - query_start` gives the age of the
@@ -42,8 +41,45 @@ export const PG_PROCESS_LIST_LEGACY_SQL = `SELECT pid,
 FROM pg_stat_activity
 ORDER BY time DESC NULLS LAST`;
 
+/** openGauss exposes the legacy boolean `waiting` column rather than wait-event detail. */
+export const OPENGAUSS_PROCESS_LIST_SQL = `SELECT pid,
+       usename AS "user",
+       datname AS db,
+       coalesce(host(client_addr), client_hostname, 'local') AS client,
+       application_name AS app,
+       state,
+       CASE WHEN waiting THEN 'Lock' ELSE '' END AS wait,
+       CAST(floor(extract(epoch FROM (CURRENT_TIMESTAMP - coalesce(query_start, xact_start, backend_start)))) AS BIGINT) AS time,
+       query
+FROM pg_catalog.pg_stat_activity
+ORDER BY time DESC NULLS LAST`;
+
+/**
+ * KingbaseES uses sys_catalog. Numeric epoch subtraction works in both MySQL
+ * and Oracle modes despite their different datetime subtraction rules.
+ */
+export const KINGBASE_PROCESS_LIST_SQL = `SELECT pid,
+       usename AS "user",
+       datname AS db,
+       coalesce(CAST(client_addr AS VARCHAR), client_hostname, 'local') AS client,
+       application_name AS app,
+       state,
+       coalesce(nullif(concat_ws(':', wait_event_type, wait_event), ''), '') AS wait,
+       CAST(floor(
+         extract(epoch FROM CAST(CURRENT_TIMESTAMP AS TIMESTAMP))
+         - extract(epoch FROM CAST(coalesce(query_start, xact_start, backend_start) AS TIMESTAMP))
+       ) AS BIGINT) AS time,
+       query
+FROM sys_catalog.sys_stat_activity
+ORDER BY time DESC NULLS LAST`;
+
+export const KINGBASE_PG_PROCESS_LIST_SQL = KINGBASE_PROCESS_LIST_SQL.replace("sys_catalog.sys_stat_activity", "pg_catalog.pg_stat_activity");
+
 /** Scalar query that returns the viewer's own backend pid. */
 export const PG_OWN_SESSION_SQL = "SELECT pg_backend_pid()";
+export const OPENGAUSS_OWN_SESSION_SQL = "SELECT pg_backend_pid()";
+export const KINGBASE_OWN_SESSION_SQL = "SELECT sys_backend_pid()";
+export const KINGBASE_PG_OWN_SESSION_SQL = "SELECT pg_backend_pid()";
 
 export interface PgProcessRow {
   id: number;
@@ -117,19 +153,45 @@ export function mapPgProcessRows(result: QueryResult | null | undefined): PgProc
  * finite positive integer (never interpolated as free text) so there is no
  * injection path.
  */
-export function buildPgKillSql(pid: number): string {
+function validateBackendPid(pid: number): void {
   if (!Number.isInteger(pid) || pid <= 0) {
     throw new Error(`Invalid backend pid: ${pid}`);
   }
+}
+
+export function buildPgKillSql(pid: number): string {
+  validateBackendPid(pid);
+  return `SELECT pg_terminate_backend(${pid})`;
+}
+
+export function buildKingbaseKillSql(pid: number): string {
+  validateBackendPid(pid);
+  return `SELECT sys_terminate_backend(${pid})`;
+}
+
+export function buildKingbasePgKillSql(pid: number): string {
+  validateBackendPid(pid);
   return `SELECT pg_terminate_backend(${pid})`;
 }
 
 /** Return an error when PostgreSQL declines to terminate the target backend. */
 export function pgKillResultError(results: QueryResult[]): string | null {
+  return backendKillResultError(results, "pg_terminate_backend");
+}
+
+export function kingbaseKillResultError(results: QueryResult[]): string | null {
+  return backendKillResultError(results, "sys_terminate_backend");
+}
+
+export function kingbasePgKillResultError(results: QueryResult[]): string | null {
+  return backendKillResultError(results, "pg_terminate_backend");
+}
+
+function backendKillResultError(results: QueryResult[], functionName: string): string | null {
   const result = results.find((item) => item.execution_error !== true);
   const value = result?.rows?.[0]?.[0];
   if (value === true || value === 1 || String(value).toLowerCase() === "t" || String(value).toLowerCase() === "true") return null;
-  return "pg_terminate_backend did not terminate the backend";
+  return `${functionName} did not terminate the backend`;
 }
 
 /** Detect the undefined-column failure produced by pre-9.6 pg_stat_activity. */
@@ -140,7 +202,14 @@ export function isPgProcessListCompatibilityError(error: unknown): boolean {
   return /(?:wait_event_type|wait_event).*(?:does not exist|42703)|(?:does not exist|42703).*(?:wait_event_type|wait_event)/i.test(message);
 }
 
-/** Whether the given database type exposes the Postgres process-list viewer. */
-export function supportsPgProcessList(dbType: DatabaseType | undefined): boolean {
-  return !!dbType && PG_PROCESS_LIST_DB_TYPES.has(dbType);
+export function isKingbaseProcessListCatalogCompatibilityError(error: unknown): boolean {
+  return isMissingKingbaseSysRelation(error, ["sys_catalog.sys_stat_activity"]);
+}
+
+export function isKingbaseOwnSessionCatalogCompatibilityError(error: unknown): boolean {
+  return isMissingKingbaseSysFunction(error, ["sys_backend_pid"]);
+}
+
+export function isKingbaseTerminateCatalogCompatibilityError(error: unknown): boolean {
+  return isMissingKingbaseSysFunction(error, ["sys_terminate_backend"]);
 }

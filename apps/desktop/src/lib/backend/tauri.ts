@@ -1949,6 +1949,11 @@ export interface RedisStreamEntry {
   fields: RedisStreamField[];
 }
 
+export interface RedisStreamPage {
+  entries: RedisStreamEntry[];
+  next_cursor?: string;
+}
+
 // Redis counters above Number.MAX_SAFE_INTEGER are transported as decimal strings.
 export type RedisStreamMetric = number | string;
 
@@ -2002,7 +2007,7 @@ export type RedisValueData =
       total: number;
       scan_cursor?: number;
     }
-  | { kind: "stream"; entries: RedisStreamEntry[] }
+  | { kind: "stream"; entries: RedisStreamEntry[]; total?: number; next_cursor?: string }
   | { kind: "unknown" };
 
 export interface RedisValue {
@@ -2083,6 +2088,10 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return invoke("redis_get_value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
+  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
@@ -3129,6 +3138,8 @@ export interface SqlFileProgress {
   elapsedMs: number;
   statementSummary: string;
   error?: string | null;
+  fileIndex?: number;
+  fileName?: string;
 }
 
 export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> {
@@ -3161,9 +3172,11 @@ export interface TransferRequest {
   sourceConnectionId: string;
   sourceDatabase: string;
   sourceSchema: string;
+  sourceCatalog?: string;
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
+  targetCatalog?: string;
   tables: string[];
   createTable: boolean;
   mode: TransferMode;

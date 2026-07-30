@@ -4,7 +4,8 @@ use tauri::State;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
     classify_command, parse_command_argv, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
-    RedisDatabaseInfo, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPendingPage, RedisValue,
+    RedisDatabaseInfo, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage, RedisStreamPendingPage,
+    RedisValue,
 };
 
 #[tauri::command]
@@ -84,6 +85,17 @@ pub async fn redis_get_value(
     key_raw: String,
 ) -> Result<RedisValue, String> {
     dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_stream_entries(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    cursor: Option<String>,
+) -> Result<RedisStreamPage, String> {
+    dbx_core::redis_ops::redis_stream_entries_in_db_core(&state, &connection_id, db, &key_raw, cursor.as_deref()).await
 }
 
 #[tauri::command]

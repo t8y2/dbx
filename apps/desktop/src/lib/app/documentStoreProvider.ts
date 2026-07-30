@@ -1,6 +1,6 @@
 import type { ComposerTranslation } from "vue-i18n";
 import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
-import type { DatabaseType } from "@/types/database";
+import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
 import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
 
@@ -114,7 +114,7 @@ const elasticsearchDocumentProvider: DocumentStoreProvider = {
 };
 
 export function documentStoreProviderFor(databaseType?: DatabaseType): DocumentStoreProvider {
-  return databaseType === "elasticsearch" ? elasticsearchDocumentProvider : mongoDocumentProvider;
+  return isElasticsearchCompatibleDatabaseType(databaseType) ? elasticsearchDocumentProvider : mongoDocumentProvider;
 }
 
 export function defaultDocumentFilterRule(id: string, fieldName = ""): DocumentFilterRule {

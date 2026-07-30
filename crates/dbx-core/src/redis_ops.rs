@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
     self, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisScanResult,
-    RedisStreamConsumer, RedisStreamGroup, RedisStreamPendingPage, RedisValue,
+    RedisStreamConsumer, RedisStreamGroup, RedisStreamPage, RedisStreamPendingPage, RedisValue,
 };
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -130,6 +130,36 @@ pub async fn redis_get_value_in_db_core(
                     redis_driver::ensure_cluster_db(db)?;
                     let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
                     redis_driver::get_value(&mut con, &key).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_stream_entries_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    cursor: Option<&str>,
+) -> Result<RedisStreamPage, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(connection_id).ok_or("Connection not found")?;
+    match pool {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::get_stream_entries_page(&mut *con, &key, cursor).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::get_stream_entries_page(&mut con, &key, cursor).await
                 }
             }
         }

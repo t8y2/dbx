@@ -648,6 +648,7 @@ fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Turso
                 | DatabaseType::CloudflareD1
                 | DatabaseType::Elasticsearch
+                | DatabaseType::Easysearch
                 | DatabaseType::Qdrant
                 | DatabaseType::Milvus
                 | DatabaseType::Weaviate
@@ -1182,6 +1183,23 @@ pub async fn do_execute(
                 cancel_token,
                 query_timeout,
                 db::elasticsearch_driver::execute_rest_query(&client, &sql),
+            )
+            .await
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            drop(connections);
+            let result = wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::easysearch_driver::execute_rest_query(&client, &sql),
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -2314,6 +2332,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Redis(_)
         | PoolKind::MongoDb(_)
         | PoolKind::Elasticsearch(_)
+        | PoolKind::Easysearch(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::ExternalDriver { .. } => false,
@@ -2509,6 +2528,7 @@ pub async fn execute_statements_in_transaction_on_pool(
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
+            | PoolKind::Easysearch(_)
             | PoolKind::VectorDb(_)
             | PoolKind::InfluxDb(_)
             | PoolKind::ExternalDriver { .. } => TxPath::None,

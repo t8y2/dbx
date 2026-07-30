@@ -215,7 +215,10 @@ const deleteDetails = computed(() => {
   if (pending.kind === "document") {
     const id = documents.value[pending.index]?._id ?? "";
     const displayId = mongoDocumentIdForGrid(id);
-    if (props.databaseType === "elasticsearch") return `Elasticsearch index: ${props.collection}\nDocument _id: ${String(displayId)}`;
+    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
+      const product = props.databaseType === "easysearch" ? "Easysearch" : "Elasticsearch";
+      return `${product} index: ${props.collection}\nDocument _id: ${String(displayId)}`;
+    }
     return t("dangerDialog.mongoDocumentDetails", { collection: props.collection, id: String(displayId) });
   }
   return t("dangerDialog.mongoFieldDetails", { field: pending.name || t("mongo.field") });

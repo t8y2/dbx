@@ -36,6 +36,15 @@ test("classifies Elasticsearch HEAD responses", () => {
   });
 });
 
+test("classifies Easysearch REST responses", () => {
+  const response = jsonResponse({ rows: [[200, '{"status":"green"}']] });
+
+  assert.deepEqual(elasticsearchJsonResponseForResult("easysearch", "GET /_cluster/health", response), {
+    status: 200,
+    body: '{"status":"green"}',
+  });
+});
+
 test("classifies Elasticsearch responses after leading comments", () => {
   const response = jsonResponse();
 

@@ -55,6 +55,7 @@ const databaseSupport = [
   { name: "MongoDB", icon: "/icons/database/mongodb.svg", tone: "#47a248" },
   { name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
+  { name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#231815" },
   { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
   { name: "Weaviate", icon: "/icons/database/weaviate.svg", tone: "#00b894" },

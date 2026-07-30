@@ -347,8 +347,9 @@ test("skips diagnostics for MongoDB connections", () => {
   assert.equal(shouldRunSqlSemanticDiagnostics("db.my_collection.find({})", 0, { databaseType: "mongodb" }), false);
 });
 
-test("skips diagnostics for Elasticsearch connections", () => {
+test("skips diagnostics for Elasticsearch-compatible connections", () => {
   assert.equal(shouldRunSqlSemanticDiagnostics("db.my_collection.find({})", 0, { databaseType: "elasticsearch" }), false);
+  assert.equal(shouldRunSqlSemanticDiagnostics("GET /_cluster/health", 0, { databaseType: "easysearch" }), false);
 });
 
 test("still runs diagnostics for SQL connections", () => {

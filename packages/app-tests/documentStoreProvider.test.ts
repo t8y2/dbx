@@ -31,9 +31,10 @@ function rule(patch: Partial<DocumentFilterRule>): DocumentFilterRule {
   };
 }
 
-test("selects MongoDB and Elasticsearch document store providers", () => {
+test("selects MongoDB and Elasticsearch-compatible document store providers", () => {
   assert.equal(documentStoreProviderFor("mongodb").kind, "mongodb");
   assert.equal(documentStoreProviderFor("elasticsearch").kind, "elasticsearch");
+  assert.equal(documentStoreProviderFor("easysearch").kind, "elasticsearch");
 });
 
 test("providers build store-specific query previews", () => {

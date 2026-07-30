@@ -851,6 +851,9 @@ func TestGetSynonymSourceReconstructsPrivateQuotedDDL(t *testing.T) {
 	if source["schema"] != "SYSDBA" || source["name"] != "dbxSynonymReplayCase" {
 		t.Fatalf("synonym source must preserve catalog spelling: %#v", source)
 	}
+	if source["editable"] != false {
+		t.Fatalf("synonym source must be read-only: %#v", source)
+	}
 
 	ddl, _ := source["source"].(string)
 	want := "CREATE SYNONYM \"SYSDBA\".\"dbxSynonymReplayCase\"\nFOR \"AppSchema\".\"tbUserProfile\";"

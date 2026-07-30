@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use super::{http_client_builder, with_connection_timeout};
 use crate::db::document_result::DocumentQueryResult;
+use crate::types::QueryResult;
 
 const ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -1122,12 +1123,22 @@ fn validate_elasticsearch_ndjson(body: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
-pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate::types::QueryResult, String> {
+pub(crate) type SqlResponseParser = fn(&serde_json::Value, std::time::Instant) -> Option<QueryResult>;
+
+pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<QueryResult, String> {
+    execute_rest_query_with_sql_parser(client, input, parse_sql_response).await
+}
+
+pub(crate) async fn execute_rest_query_with_sql_parser(
+    client: &EsClient,
+    input: &str,
+    sql_response_parser: SqlResponseParser,
+) -> Result<QueryResult, String> {
     let start = std::time::Instant::now();
     let input = strip_leading_elasticsearch_comments(input);
 
     if let Some(search_query) = parse_select_star_search_query(input) {
-        return execute_search_query(client, search_query, start).await;
+        return execute_search_query(client, search_query, start, sql_response_parser).await;
     }
 
     if is_elasticsearch_sql_query(input) {
@@ -1143,13 +1154,13 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
         let adapted_for_translator = adapt_elasticsearch_sql_query(input);
         match crate::db::elasticsearch_sql::translate_select_star(&adapted_for_translator) {
             Ok(Some(translated)) => {
-                return execute_translated_select_star(client, translated, start).await;
+                return execute_translated_select_star(client, translated, start, sql_response_parser).await;
             }
             Ok(None) => {}
             Err(message) => return Err(format!("Elasticsearch SQL error: {message}")),
         }
 
-        return execute_sql_query(client, input, start).await;
+        return execute_sql_query(client, input, start, sql_response_parser).await;
     }
 
     // CAT APIs default to text, so request JSON for an unformatted CAT call.
@@ -1173,7 +1184,7 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
     let status = client.response_status(&resp).as_u16();
     let body = resp.text().await.map_err(|e| format!("Elasticsearch response read failed: {e}"))?;
 
-    parse_elasticsearch_rest_response(status, &body, start)
+    parse_elasticsearch_rest_response_with_sql_parser(status, &body, start, sql_response_parser)
 }
 
 // Size to use when `SELECT *` is run without an explicit LIMIT — large enough
@@ -1197,7 +1208,8 @@ async fn execute_search_query(
     client: &EsClient,
     query: ElasticsearchSearchQuery,
     start: std::time::Instant,
-) -> Result<crate::types::QueryResult, String> {
+    sql_response_parser: SqlResponseParser,
+) -> Result<QueryResult, String> {
     let report_index_total = query.from_plan_pagination;
     let path = elasticsearch_index_path(&query.index, "_search");
     let resp =
@@ -1208,7 +1220,7 @@ async fn execute_search_query(
     // parser — needed below when we report total instead of rows.len().
     let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
 
-    let mut result = parse_elasticsearch_response(status, body, start)?;
+    let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
     if report_index_total {
         if let Some(total) = index_total {
             result.affected_rows = total;
@@ -1217,12 +1229,22 @@ async fn execute_search_query(
     Ok(result)
 }
 
+#[cfg(test)]
 fn parse_elasticsearch_response(
+    status: u16,
+    body: serde_json::Value,
+    start: std::time::Instant,
+) -> Result<QueryResult, String> {
+    parse_elasticsearch_response_with_sql_parser(status, body, start, parse_sql_response)
+}
+
+fn parse_elasticsearch_response_with_sql_parser(
     status: u16,
     mut body: serde_json::Value,
     start: std::time::Instant,
-) -> Result<crate::types::QueryResult, String> {
-    if let Some(result) = parse_sql_response(&body, start) {
+    sql_response_parser: SqlResponseParser,
+) -> Result<QueryResult, String> {
+    if let Some(result) = sql_response_parser(&body, start) {
         Ok(result)
     } else if let Some(aggs) = body.get("aggregations").or_else(|| body.get("aggs")).and_then(|v| v.as_object()) {
         let (columns, rows) = parse_aggregations(aggs);
@@ -1434,11 +1456,21 @@ fn raw_json_response_result(
     }
 }
 
+#[cfg(test)]
 fn parse_elasticsearch_rest_response(
     status: u16,
     body_text: &str,
     start: std::time::Instant,
-) -> Result<crate::types::QueryResult, String> {
+) -> Result<QueryResult, String> {
+    parse_elasticsearch_rest_response_with_sql_parser(status, body_text, start, parse_sql_response)
+}
+
+fn parse_elasticsearch_rest_response_with_sql_parser(
+    status: u16,
+    body_text: &str,
+    start: std::time::Instant,
+    sql_response_parser: SqlResponseParser,
+) -> Result<QueryResult, String> {
     if body_text.trim().is_empty() {
         return Ok(json_response_result(status, &serde_json::Value::Null, start));
     }
@@ -1459,7 +1491,7 @@ fn parse_elasticsearch_rest_response(
         // responses, and aggregations so the desktop data grid can display and
         // copy rows like relational results. Other JSON (mapping, cluster
         // info, …) stays as a lossless status/response panel with the raw body.
-        let mut result = parse_elasticsearch_response(status, body, start)?;
+        let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
         if result.columns == ["status".to_string(), "response".to_string()] {
             return Ok(raw_json_response_result(status, body_text, start));
         }
@@ -1589,7 +1621,8 @@ async fn execute_translated_select_star(
     client: &EsClient,
     translated: crate::db::elasticsearch_sql::TranslatedSelectStar,
     start: std::time::Instant,
-) -> Result<crate::types::QueryResult, String> {
+    sql_response_parser: SqlResponseParser,
+) -> Result<QueryResult, String> {
     let report_index_total = !translated.user_limited;
     let path = elasticsearch_index_path(&translated.index, "_search");
     let resp = client
@@ -1602,7 +1635,7 @@ async fn execute_translated_select_star(
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
     let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
 
-    let mut result = parse_elasticsearch_response(status, body, start)?;
+    let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
     if report_index_total {
         if let Some(total) = index_total {
             result.affected_rows = total;
@@ -1615,7 +1648,8 @@ async fn execute_sql_query(
     client: &EsClient,
     query: &str,
     start: std::time::Instant,
-) -> Result<crate::types::QueryResult, String> {
+    sql_response_parser: SqlResponseParser,
+) -> Result<QueryResult, String> {
     let query = adapt_elasticsearch_sql_query(query);
     let body = serde_json::json!({ "query": query });
     let resp =
@@ -1627,7 +1661,7 @@ async fn execute_sql_query(
         return Err(format_sql_error(status, &response_body));
     }
 
-    parse_sql_response(&response_body, start).ok_or_else(|| {
+    sql_response_parser(&response_body, start).ok_or_else(|| {
         let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_else(|_| response_body.to_string());
         format!("Unexpected Elasticsearch SQL response: {pretty}")
     })
@@ -1878,9 +1912,19 @@ fn next_char_at(query: &str, index: usize) -> Option<char> {
     query.get(index..)?.chars().next()
 }
 
-fn parse_sql_response(body: &serde_json::Value, start: std::time::Instant) -> Option<crate::types::QueryResult> {
-    let columns = body.get("columns")?.as_array()?;
-    let rows = body.get("rows")?.as_array()?;
+fn parse_sql_response(body: &serde_json::Value, start: std::time::Instant) -> Option<QueryResult> {
+    parse_tabular_sql_response(body, start, "columns", "rows", None)
+}
+
+pub(crate) fn parse_tabular_sql_response(
+    body: &serde_json::Value,
+    start: std::time::Instant,
+    columns_key: &str,
+    rows_key: &str,
+    total_key: Option<&str>,
+) -> Option<QueryResult> {
+    let columns = body.get(columns_key)?.as_array()?;
+    let rows = body.get(rows_key)?.as_array()?;
     let column_names: Vec<String> = columns
         .iter()
         .filter_map(|column| column.get("name").and_then(|name| name.as_str()).map(str::to_string))
@@ -1893,12 +1937,15 @@ fn parse_sql_response(body: &serde_json::Value, start: std::time::Instant) -> Op
     let result_rows: Vec<Vec<serde_json::Value>> =
         rows.iter().filter_map(|row| row.as_array().map(|values| values.to_vec())).collect();
 
-    Some(crate::types::QueryResult {
+    Some(QueryResult {
         columns: column_names,
         column_types: Vec::new(),
         column_sortables: vec![],
         rows: result_rows,
-        affected_rows: rows.len() as u64,
+        affected_rows: total_key
+            .and_then(|key| body.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(rows.len() as u64),
         execution_time_ms: start.elapsed().as_millis(),
         truncated: false,
         session_id: body.get("cursor").and_then(|cursor| cursor.as_str()).map(str::to_string),

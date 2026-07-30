@@ -2285,6 +2285,7 @@ func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
 		"object_type": "SYNONYM",
 		"schema":      synonym.Schema,
 		"source":      builder.String(),
+		"editable":    false,
 	}, nil
 }
 

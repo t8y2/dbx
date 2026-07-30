@@ -229,7 +229,7 @@ fn table_cursor_sql(
     col_names: &[String],
     primary_keys: &[String],
 ) -> String {
-    let full_table = qualified_table(&request.table_name, request.schema.as_deref().unwrap_or(""), db_type);
+    let full_table = qualified_table(&request.table_name, request.schema.as_deref().unwrap_or(""), db_type, None);
     let col_list = col_names.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
     let predicate = crate::sql_dialect::normalize_where_input(request.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
@@ -1155,6 +1155,7 @@ async fn export_table_data_core_inner(
             request.schema.as_deref().unwrap_or(""),
             &db_type,
             request.where_input.as_deref(),
+            None,
         );
         match execute_table_export_count(state, &pool_key, request, &count_query, cancel_token.clone()).await {
             Ok(result) => result

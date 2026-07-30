@@ -95,7 +95,25 @@ const terminalError = ref("");
 const refreshedTarget = ref(false);
 const MAX_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
+// Per-file results accumulated from backend file-boundary events during
+// multi-file execution.  Populated only when previews.length > 1.
+interface PerFileSummary {
+  fileName: string;
+  statementIndex: number;
+  successCount: number;
+  failureCount: number;
+  affectedRows: number;
+}
+const perFileResults = ref<PerFileSummary[]>([]);
+const currentFileIndex = ref(-1);
+const currentFileName = ref("");
+function resetPerFileState() {
+  perFileResults.value = [];
+  currentFileIndex.value = -1;
+  currentFileName.value = "";
+}
+
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
 
@@ -201,6 +219,7 @@ function resetExecution() {
   terminalStatus.value = "idle";
   terminalError.value = "";
   refreshedTarget.value = false;
+  resetPerFileState();
 }
 
 function resetState() {
@@ -353,6 +372,8 @@ async function startExecution() {
     if (!confirmed) return;
   }
 
+  resetPerFileState();
+  refreshedTarget.value = false;
   const batchId = uuid();
   executionId.value = batchId;
   running.value = true;
@@ -387,6 +408,35 @@ async function startExecution() {
         terminalStatus.value = next.status;
         terminalError.value = next.error ?? terminalError.value;
         updateSqlFileTask(batchId, next);
+
+        // Detect per-file boundary events from the backend (populated only
+        // during multi-file execution).  The backend emits a file-start
+        // event (status=Running, fileIndex set) and a file-done event
+        // (status=StatementDone, fileIndex set, counters are diff-based).
+        // Resolve user-visible names via displayFileNames (by fileIndex →
+        // previews) so Web mode never shows server temp UUID paths.
+        if (previews.value.length > 1) {
+          const fi = next.fileIndex;
+          if (fi != null) {
+            const preview = previews.value[fi];
+            const displayName = preview ? (displayFileNames.value.get(preview.filePath) ?? next.fileName ?? "") : (next.fileName ?? "");
+            if (next.status === "running") {
+              currentFileIndex.value = fi;
+              currentFileName.value = displayName;
+            } else if (next.status === "statementDone") {
+              perFileResults.value[fi] = {
+                fileName: displayName,
+                statementIndex: next.statementIndex,
+                successCount: next.successCount,
+                failureCount: next.failureCount,
+                affectedRows: next.affectedRows,
+              };
+              currentFileIndex.value = fi;
+              currentFileName.value = displayName;
+            }
+          }
+        }
+
         if (isTerminalProgress(next.status)) {
           resolveTerminalProgress(next);
         }
@@ -639,30 +689,79 @@ watch(
             <div class="h-full rounded-full transition-[width] duration-300" :class="terminalStatus === 'error' ? 'bg-destructive' : terminalStatus === 'cancelled' ? 'bg-yellow-500' : 'bg-primary'" :style="{ width: `${progressPercent}%` }" />
           </div>
 
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-            <div class="border rounded-md px-2 py-1.5 min-w-0">
-              <div class="text-muted-foreground truncate">{{ t("sqlFile.statement") }}</div>
-              <div class="font-medium truncate">{{ progress?.statementIndex ?? 0 }}</div>
-            </div>
-            <div class="border rounded-md px-2 py-1.5 min-w-0">
-              <div class="text-muted-foreground truncate">{{ t("sqlFile.succeeded") }}</div>
-              <div class="font-medium text-green-600 truncate">
-                {{ progress?.successCount ?? 0 }}
-              </div>
-            </div>
-            <div class="border rounded-md px-2 py-1.5 min-w-0">
-              <div class="text-muted-foreground truncate">{{ t("sqlFile.failed") }}</div>
-              <div class="font-medium text-destructive truncate">
-                {{ progress?.failureCount ?? 0 }}
-              </div>
-            </div>
-            <div class="border rounded-md px-2 py-1.5 min-w-0">
-              <div class="text-muted-foreground truncate">{{ t("sqlFile.affectedRows") }}</div>
-              <div class="font-medium truncate">
-                {{ (progress?.affectedRows ?? 0).toLocaleString() }}
-              </div>
-            </div>
+          <div v-if="running && previews.length > 1 && currentFileIndex >= 0" class="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <FileCode class="w-3.5 h-3.5 shrink-0" />
+            <span class="truncate">{{ t("sqlFile.fileProgress", { current: currentFileIndex + 1, total: previews.length }) }} — {{ currentFileName }}</span>
           </div>
+
+          <template v-if="!running && previews.length > 1 && perFileResults.length > 0">
+            <div class="max-h-[min(22vh,200px)] min-w-0 overflow-y-auto rounded-md border text-xs">
+              <!-- Keep aggregate columns readable when a file name is long. -->
+              <table class="w-full table-fixed">
+                <colgroup>
+                  <col />
+                  <col class="w-[4.5rem]" />
+                  <col class="w-[4.5rem]" />
+                  <col class="w-[4.5rem]" />
+                  <col class="w-[5.5rem]" />
+                </colgroup>
+                <thead class="sticky top-0 z-10 border-b border-border bg-muted text-foreground shadow-[0_1px_4px_rgb(0_0_0_/_0.06)]">
+                  <tr>
+                    <th class="px-2.5 py-2 text-left font-semibold">{{ t("sqlFile.fileColumn") }}</th>
+                    <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.statement") }}</th>
+                    <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.succeeded") }}</th>
+                    <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.failed") }}</th>
+                    <th class="px-2.5 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.affectedRows") }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(item, index) in perFileResults" :key="index" class="border-t">
+                    <td class="px-2.5 py-1.5 truncate" :title="item.fileName">{{ item.fileName }}</td>
+                    <td class="px-2 py-1.5 text-right tabular-nums">{{ item.statementIndex }}</td>
+                    <td class="px-2 py-1.5 text-right tabular-nums text-green-600">{{ item.successCount }}</td>
+                    <td class="px-2 py-1.5 text-right tabular-nums" :class="{ 'text-destructive': item.failureCount > 0 }">{{ item.failureCount }}</td>
+                    <td class="px-2.5 py-1.5 text-right tabular-nums">{{ item.affectedRows.toLocaleString() }}</td>
+                  </tr>
+                </tbody>
+                <tfoot class="sticky bottom-0 z-10 border-t-2 border-primary/35 bg-muted font-semibold text-foreground shadow-[0_-2px_6px_rgb(0_0_0_/_0.08)]">
+                  <tr>
+                    <th scope="row" class="px-2.5 py-2 text-left">{{ t("sqlFile.totalFiles", { count: perFileResults.length }) }}</th>
+                    <td class="px-2 py-2 text-right tabular-nums font-bold">{{ progress?.statementIndex ?? 0 }}</td>
+                    <td class="px-2 py-2 text-right tabular-nums font-bold text-green-600">{{ progress?.successCount ?? 0 }}</td>
+                    <td class="px-2 py-2 text-right tabular-nums font-bold" :class="{ 'text-destructive': (progress?.failureCount ?? 0) > 0 }">{{ progress?.failureCount ?? 0 }}</td>
+                    <td class="px-2.5 py-2 text-right tabular-nums font-bold">{{ (progress?.affectedRows ?? 0).toLocaleString() }}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              <div class="border rounded-md px-2 py-1.5 min-w-0">
+                <div class="text-muted-foreground truncate">{{ t("sqlFile.statement") }}</div>
+                <div class="font-medium truncate">{{ progress?.statementIndex ?? 0 }}</div>
+              </div>
+              <div class="border rounded-md px-2 py-1.5 min-w-0">
+                <div class="text-muted-foreground truncate">{{ t("sqlFile.succeeded") }}</div>
+                <div class="font-medium text-green-600 truncate">
+                  {{ progress?.successCount ?? 0 }}
+                </div>
+              </div>
+              <div class="border rounded-md px-2 py-1.5 min-w-0">
+                <div class="text-muted-foreground truncate">{{ t("sqlFile.failed") }}</div>
+                <div class="font-medium text-destructive truncate">
+                  {{ progress?.failureCount ?? 0 }}
+                </div>
+              </div>
+              <div class="border rounded-md px-2 py-1.5 min-w-0">
+                <div class="text-muted-foreground truncate">{{ t("sqlFile.affectedRows") }}</div>
+                <div class="font-medium truncate">
+                  {{ (progress?.affectedRows ?? 0).toLocaleString() }}
+                </div>
+              </div>
+            </div>
+          </template>
 
           <div v-if="progress?.statementSummary" class="space-y-1">
             <Label class="text-xs">{{ t("sqlFile.currentStatement") }}</Label>

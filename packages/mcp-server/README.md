@@ -162,6 +162,8 @@ This is the default. MCP reads DBX connection storage and executes supported con
 
 Common native paths include PostgreSQL, MySQL, SQLite, compatible SQL databases, Redis standalone, and MongoDB. SSH, cluster, vendor-specific, or Agent/JDBC connections may require additional DBX infrastructure.
 
+DuckDB runs through the standalone DBX DuckDB driver. Install it from DBX Driver Manager before using a DuckDB connection through local MCP. The MCP binary includes the sidecar client but does not bundle the DuckDB engine.
+
 DBX connection storage defaults to:
 
 - macOS: `~/Library/Application Support/com.dbx.app/dbx.db`
@@ -195,6 +197,8 @@ Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local desktop sto
 ```
 
 `DBX_WEB_PASSWORD` is the password used on the DBX Web login page. Desktop-local mode does not use it. Desktop UI tools are hidden in Web mode.
+
+Docker and DBX Web also require the standalone DuckDB driver. Install it from Driver Manager after the first launch; when `/app/data` is persisted, the driver is stored under `/app/data/agents` and survives container upgrades.
 
 ### Windows portable DBX
 

@@ -129,17 +129,18 @@ type querySession struct {
 }
 
 type server struct {
-	db                     *sql.DB
-	openDatabase           kingbaseDBOpener
-	params                 connectParams
-	mode                   kingbaseMode
-	usePgDefaultExpression bool
-	currentSchema          string
-	schemaSet              bool
-	sessions               map[string]*querySession
-	nextSessionID          uint64
-	activeCancelMu         sync.Mutex
-	activeCancel           context.CancelFunc
+	db                         *sql.DB
+	openDatabase               kingbaseDBOpener
+	params                     connectParams
+	mode                       kingbaseMode
+	usePgDefaultExpression     bool
+	catalogIdentityUnsupported bool
+	currentSchema              string
+	schemaSet                  bool
+	sessions                   map[string]*querySession
+	nextSessionID              uint64
+	activeCancelMu             sync.Mutex
+	activeCancel               context.CancelFunc
 }
 
 type agentSession struct {
@@ -453,6 +454,7 @@ func (s *server) connect(cp connectParams) error {
 	s.params = cp
 	s.mode = detectKingbaseMode(db, cp.MySQLCompatMode)
 	s.usePgDefaultExpression = false
+	s.catalogIdentityUnsupported = false
 	return nil
 }
 
@@ -513,14 +515,15 @@ func openDBWithSSLMode(cp connectParams, sslMode string) (*sql.DB, error) {
 func (s *server) disconnect() error {
 	s.cancelActiveQuery()
 	s.closeAllQuerySessions()
+	s.usePgDefaultExpression = false
+	s.catalogIdentityUnsupported = false
+	s.currentSchema = ""
+	s.schemaSet = false
 	if s.db == nil {
 		return nil
 	}
 	err := s.db.Close()
 	s.db = nil
-	s.usePgDefaultExpression = false
-	s.currentSchema = ""
-	s.schemaSet = false
 	return err
 }
 

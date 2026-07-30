@@ -188,7 +188,8 @@ export function useDataGridColumnLayoutState(options: {
   function showAllColumns() {
     hiddenColumnIndexes.value = new Set();
     autoHiddenNullColumnIndexes.value = new Set();
-    persistHiddenColumnKeys();
+    persistedHiddenColumnKeys.value = [];
+    schedulePersistColumnLayout();
   }
 
   function invertColumnVisibility() {

@@ -78,5 +78,6 @@ describe("document grid column visibility storage", () => {
       orderKeys: [],
       hiddenKeys: ["goodsList"],
     });
+    expect(storedValues.has(`${STORAGE_PREFIX}${ordersScope}`)).toBe(false);
   });
 });

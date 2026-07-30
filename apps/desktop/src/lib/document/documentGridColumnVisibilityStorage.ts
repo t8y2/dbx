@@ -38,8 +38,13 @@ export function saveDocumentGridHiddenColumnKeys(scopeKey: string, hiddenColumnK
 }
 
 export function migrateDocumentGridColumnVisibilityToLayout(legacyScopeKey: string, layoutScopeKey: string) {
-  if (loadDataGridColumnLayout(layoutScopeKey)) return;
+  const legacyStorageKey = `${STORAGE_PREFIX}${legacyScopeKey}`;
+  if (loadDataGridColumnLayout(layoutScopeKey)) {
+    safeLocalStorageRemove(legacyStorageKey);
+    return;
+  }
   const hiddenKeys = loadDocumentGridHiddenColumnKeys(legacyScopeKey);
   if (hiddenKeys.length === 0) return;
   saveDataGridColumnLayout(layoutScopeKey, { orderKeys: [], hiddenKeys });
+  if (loadDataGridColumnLayout(layoutScopeKey)) safeLocalStorageRemove(legacyStorageKey);
 }

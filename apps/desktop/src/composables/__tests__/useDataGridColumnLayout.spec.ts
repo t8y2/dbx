@@ -3,6 +3,7 @@
 import { effectScope, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dataGridColumnOffsets, dataGridHorizontalColumnWindow, useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
+import { loadDataGridColumnLayout, saveDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 describe("useDataGridColumnLayout", () => {
   beforeEach(() => {
@@ -133,6 +134,32 @@ describe("useDataGridColumnLayout", () => {
     recreatedScope.stop();
 
     expect(JSON.parse(localStorage.getItem("dbx-data-grid-column-layout:visibility-recreated-layout")!)).toMatchObject({ hiddenKeys: [] });
+  });
+
+  it("show all clears hidden keys for fields missing from the current page", () => {
+    const layoutScopeKey = "visibility-missing-field-layout";
+    saveDataGridColumnLayout(layoutScopeKey, {
+      orderKeys: [],
+      hiddenKeys: ["goodsList\0\0"],
+    });
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "status"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map()),
+        displayableColumnIndexes: ref([0, 1]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["id\0\0", "status\0\0"]),
+        layoutScopeKey: ref(layoutScopeKey),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    state.showAllColumns();
+    scope.stop();
+
+    expect(loadDataGridColumnLayout(layoutScopeKey)?.hiddenKeys).toEqual([]);
   });
 
   it("persists a null column when it is manually hidden after showing all columns", () => {

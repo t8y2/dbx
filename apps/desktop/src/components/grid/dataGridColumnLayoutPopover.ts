@@ -3,6 +3,7 @@ import type { DataGridColumnLayoutOption } from "@/composables/useDataGridColumn
 export const DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT = 28;
 export const DATA_GRID_COLUMN_LAYOUT_VIEWPORT_HEIGHT = 288;
 export const DATA_GRID_COLUMN_LAYOUT_VIRTUAL_THRESHOLD = 80;
+export const DATA_GRID_COLUMN_LAYOUT_DRAG_THRESHOLD = 5;
 const DATA_GRID_COLUMN_LAYOUT_BUFFER_ROWS = 6;
 
 export interface DataGridColumnLayoutHandle {
@@ -24,6 +25,25 @@ export interface DataGridColumnLayoutVirtualWindow {
   end: number;
   offsetTop: number;
   totalHeight: number;
+}
+
+export interface DataGridColumnLayoutDropTarget {
+  insertionIndex: number;
+  toDisplayPosition: number;
+}
+
+export function dataGridColumnLayoutDropTarget(options: { clientY: number; listTop: number; scrollTop: number; itemCount: number; fromDisplayPosition: number }): DataGridColumnLayoutDropTarget {
+  const itemCount = Math.max(0, options.itemCount);
+  const totalHeight = itemCount * DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT;
+  const relativeY = Math.min(totalHeight, Math.max(0, options.clientY - options.listTop + options.scrollTop));
+  const rowIndex = Math.min(Math.max(0, itemCount - 1), Math.floor(relativeY / DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT));
+  const offsetInRow = relativeY - rowIndex * DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT;
+  const insertionIndex = relativeY >= totalHeight || offsetInRow >= DATA_GRID_COLUMN_LAYOUT_ROW_HEIGHT / 2 ? Math.min(itemCount, rowIndex + 1) : rowIndex;
+  const targetBeforeRemoval = insertionIndex > options.fromDisplayPosition ? insertionIndex - 1 : insertionIndex;
+  return {
+    insertionIndex,
+    toDisplayPosition: Math.min(Math.max(0, itemCount - 1), Math.max(0, targetBeforeRemoval)),
+  };
 }
 
 export function dataGridColumnLayoutVirtualWindow(options: { itemCount: number; scrollTop: number; viewportHeight?: number }): DataGridColumnLayoutVirtualWindow {

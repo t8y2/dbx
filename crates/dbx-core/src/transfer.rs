@@ -6521,6 +6521,7 @@ mod tests {
             "files",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[files] ([payload], [note]) VALUES\n(0x0001ABff, N'0x0001ABff')");
@@ -6535,6 +6536,7 @@ mod tests {
             "files",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[files] ([payload]) VALUES\n(CONVERT(varbinary(max), N'O''Brien'))");
@@ -7001,6 +7003,7 @@ SELECT 1 FROM dual"#
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -7025,6 +7028,7 @@ SELECT 1 FROM dual"#
             redis_cluster_nodes: String::new(),
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

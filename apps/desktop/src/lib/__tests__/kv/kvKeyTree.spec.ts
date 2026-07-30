@@ -48,7 +48,7 @@ describe("kv key tree", () => {
       { key: "/service/api", modRevision: 6 },
     ]);
 
-    expect(tree.map((node) => node.label)).toEqual(["app", "service", "plain"]);
+    expect(tree.map((node) => node.label)).toEqual(["/app", "/service", "/plain"]);
     const app = tree[0];
     expect(app.kind).toBe("group");
     if (app.kind === "group") {
@@ -59,22 +59,22 @@ describe("kv key tree", () => {
   it("collects stable group ids", () => {
     const tree = buildKvKeyTree([{ key: "/app/config/name" }, { key: "/service/api" }]);
 
-    expect([...collectKvGroupIds(tree)].sort()).toEqual(["group:app", "group:app\u0000config", "group:service"]);
+    expect([...collectKvGroupIds(tree)].sort()).toEqual(["group:/app", "group:/app\u0000config", "group:/service"]);
   });
 
   it("flattens only expanded groups", () => {
     const tree = buildKvKeyTree([{ key: "/app/config/name" }, { key: "/plain" }]);
-    const rows = flattenVisibleKvKeyTree(tree, new Set(["group:app"]));
+    const rows = flattenVisibleKvKeyTree(tree, new Set(["group:/app"]));
 
-    expect(rows.map((row) => `${row.depth}:${row.node.label}`)).toEqual(["0:app", "1:config", "0:plain"]);
+    expect(rows.map((row) => `${row.depth}:${row.node.label}`)).toEqual(["0:/app", "1:config", "0:/plain"]);
   });
 
   it("preserves only expanded groups still present after reload", () => {
     const tree = buildKvKeyTree([{ key: "/app/config/name" }, { key: "/service/api" }]);
-    const next = preserveKvExpandedGroupIds(tree, new Set(["group:app", "group:missing"]));
+    const next = preserveKvExpandedGroupIds(tree, new Set(["group:/app", "group:missing"]));
 
-    expect([...next]).toEqual(["group:app"]);
-    expect([...preserveKvExpandedGroupIds(tree, new Set(), true)].sort()).toEqual(["group:app", "group:app\u0000config", "group:service"]);
+    expect([...next]).toEqual(["group:/app"]);
+    expect([...preserveKvExpandedGroupIds(tree, new Set(), true)].sort()).toEqual(["group:/app", "group:/app\u0000config", "group:/service"]);
   });
 
   it("preserves whether a virtual directory has a leading slash", () => {

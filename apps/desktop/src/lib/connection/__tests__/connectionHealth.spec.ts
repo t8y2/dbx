@@ -12,4 +12,10 @@ describe("connectionHealth", () => {
     expect(shouldMarkDisconnected("syntax error at or near SELECT")).toBe(false);
     expect(shouldMarkDisconnected("Access denied for user root")).toBe(false);
   });
+
+  it("marks transient etcd gRPC failures as disconnected", () => {
+    expect(shouldMarkDisconnected("ETCD_CONNECTION_UNAVAILABLE: etcd is temporarily unavailable")).toBe(true);
+    expect(shouldMarkDisconnected("io.grpc.StatusRuntimeException: DEADLINE_EXCEEDED")).toBe(true);
+    expect(shouldMarkDisconnected("ETCD_PERMISSION_DENIED: not authorized")).toBe(false);
+  });
 });

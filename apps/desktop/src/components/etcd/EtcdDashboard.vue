@@ -216,12 +216,12 @@ defineExpose({ refresh });
 </script>
 
 <template>
-  <div class="h-full overflow-auto bg-background p-4">
-    <div class="mb-4 flex items-start justify-between gap-4">
-      <div>
-        <h2 class="text-lg font-semibold">{{ t("etcd.dashboard.title") }}</h2>
-        <p class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.description") }}</p>
-      </div>
+  <div class="flex h-full min-h-0 flex-col bg-background">
+    <header class="flex h-14 shrink-0 items-center gap-3 border-b px-4">
+      <h2 class="shrink-0 text-sm font-semibold">{{ t("etcd.dashboard.title") }}</h2>
+      <div class="hidden h-5 w-px bg-border sm:block" />
+      <p class="hidden truncate text-xs text-muted-foreground sm:block">{{ t("etcd.dashboard.description") }}</p>
+      <div class="flex-1" />
       <div class="flex items-center gap-2">
         <select v-model.number="refreshSeconds" class="h-8 rounded-md border bg-background px-2 text-xs">
           <option :value="0">{{ t("etcd.dashboard.autoRefreshOff") }}</option>
@@ -236,349 +236,350 @@ defineExpose({ refresh });
           {{ t("etcd.dashboard.refresh") }}
         </Button>
       </div>
-    </div>
+    </header>
 
-    <div v-if="unsupported" class="mx-auto mt-[12vh] max-w-2xl rounded-xl border bg-muted/20 p-6 shadow-sm">
-      <div class="flex items-start gap-4">
-        <div class="rounded-full bg-amber-500/10 p-2.5 text-amber-600 dark:text-amber-400">
-          <AlertTriangle class="h-5 w-5" />
-        </div>
-        <div class="min-w-0 flex-1">
-          <h3 class="font-semibold">{{ t("etcd.dashboard.agentUpgradeTitle") }}</h3>
-          <p class="mt-2 text-sm leading-6 text-muted-foreground">{{ t("etcd.dashboard.agentUpgradeDescription") }}</p>
-          <div class="mt-4 rounded-md border bg-background px-3 py-2.5 text-xs leading-5 text-muted-foreground">
-            {{ t("etcd.dashboard.agentUpgradeSteps") }}
+    <div class="min-h-0 flex-1 overflow-auto p-4">
+      <div v-if="unsupported" class="mx-auto mt-[12vh] max-w-2xl rounded-xl border bg-muted/20 p-6 shadow-sm">
+        <div class="flex items-start gap-4">
+          <div class="rounded-full bg-amber-500/10 p-2.5 text-amber-600 dark:text-amber-400">
+            <AlertTriangle class="h-5 w-5" />
           </div>
-          <Button class="mt-4" size="sm" variant="outline" :disabled="loading" @click="load">
-            <Loader2 v-if="loading" class="mr-2 h-3.5 w-3.5 animate-spin" />
-            <RefreshCw v-else class="mr-2 h-3.5 w-3.5" />
-            {{ t("etcd.dashboard.retry") }}
-          </Button>
+          <div class="min-w-0 flex-1">
+            <h3 class="font-semibold">{{ t("etcd.dashboard.agentUpgradeTitle") }}</h3>
+            <p class="mt-2 text-sm leading-6 text-muted-foreground">{{ t("etcd.dashboard.agentUpgradeDescription") }}</p>
+            <div class="mt-4 rounded-md border bg-background px-3 py-2.5 text-xs leading-5 text-muted-foreground">
+              {{ t("etcd.dashboard.agentUpgradeSteps") }}
+            </div>
+            <Button class="mt-4" size="sm" variant="outline" :disabled="loading" @click="load">
+              <Loader2 v-if="loading" class="mr-2 h-3.5 w-3.5 animate-spin" />
+              <RefreshCw v-else class="mr-2 h-3.5 w-3.5" />
+              {{ t("etcd.dashboard.retry") }}
+            </Button>
+          </div>
         </div>
       </div>
-    </div>
-    <div v-else-if="error" class="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
-      <div class="flex items-start gap-3">
-        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-        <div class="min-w-0">
-          <div class="text-sm font-medium text-destructive">{{ t("etcd.dashboard.loadFailed") }}</div>
-          <div class="mt-1 break-words text-xs leading-5 text-muted-foreground">{{ error }}</div>
-        </div>
-      </div>
-    </div>
-    <div v-if="status" class="grid gap-3">
-      <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        <div class="rounded-lg border p-4">
-          <div class="flex items-center gap-2 text-xs text-muted-foreground"><Gauge class="h-4 w-4" /> {{ t("etcd.dashboard.observedHealth") }}</div>
-          <div class="mt-3 flex items-center gap-2 text-xl font-semibold">
-            <CheckCircle2 v-if="health === 'healthy'" class="h-5 w-5 text-emerald-500" />
-            <AlertTriangle v-else class="h-5 w-5 text-amber-500" />
-            {{ t(`etcd.dashboard.health.${health}`) }}
-          </div>
-        </div>
-        <div class="rounded-lg border p-4">
-          <div class="flex items-center gap-2 text-xs text-muted-foreground"><Server class="h-4 w-4" /> {{ t("etcd.dashboard.reachableMembers") }}</div>
-          <div class="mt-3 text-xl font-semibold">{{ reachable }} / {{ status.members.length }}</div>
-        </div>
-        <div class="rounded-lg border p-4">
-          <div class="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound class="h-4 w-4" /> {{ t("etcd.dashboard.keyCount") }}</div>
-          <div class="mt-3 text-xl font-semibold">{{ status.keyCount ?? "-" }}</div>
-        </div>
-        <div class="rounded-lg border p-4">
-          <div class="flex items-center gap-2 text-xs text-muted-foreground"><Database class="h-4 w-4" /> {{ t("etcd.dashboard.backendSize") }}</div>
-          <div class="mt-3 text-xl font-semibold">{{ formatBytes(totalDbSize) }}</div>
-        </div>
-        <div class="rounded-lg border p-4">
-          <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.fragmentation") }}</div>
-          <div class="mt-3 text-xl font-semibold">{{ (fragmentation * 100).toFixed(1) }}%</div>
-        </div>
-      </div>
-
-      <div class="flex flex-wrap gap-2 rounded-lg border p-3 text-xs">
-        <Badge variant="outline">{{ t("etcd.dashboard.cluster") }} {{ status.clusterId ?? "-" }}</Badge>
-        <Badge variant="outline">{{ t("etcd.dashboard.revision") }} {{ status.revision ?? "-" }}</Badge>
-        <Badge variant="outline">{{ t("etcd.dashboard.leader") }} {{ status.leaderId ?? "-" }}</Badge>
-        <Badge v-for="alarm in status.alarms" :key="alarm" variant="destructive">{{ alarm }}</Badge>
-        <Badge v-if="status.alarms.length === 0" variant="secondary">{{ t("etcd.dashboard.noAlarms") }}</Badge>
-      </div>
-
-      <section v-if="metrics?.available" class="rounded-lg border">
-        <div class="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-3">
-          <div>
-            <div class="flex items-center gap-2 text-sm font-medium">
-              <Activity class="h-4 w-4 text-emerald-500" />
-              {{ t("etcd.dashboard.prometheusMetrics") }}
-            </div>
-            <p class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.prometheusDescription") }}</p>
-          </div>
-          <div class="min-w-0 text-right text-xs text-muted-foreground">
-            <div class="max-w-[420px] truncate font-mono">{{ metrics.sourceUrl }}</div>
-            <div>{{ t("etcd.dashboard.collectedAt") }} {{ formatCollectedAt(metrics.collectedAtMs) }}</div>
-          </div>
-        </div>
-
-        <div class="grid gap-px bg-border sm:grid-cols-2 xl:grid-cols-4">
-          <div class="bg-background p-4">
-            <div class="flex items-center gap-2 text-xs text-muted-foreground"><Activity class="h-4 w-4" /> {{ t("etcd.dashboard.requests") }}</div>
-            <div class="mt-2 text-xl font-semibold">{{ formatRate(requestRate) }}</div>
-            <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.requestFailureRate") }} {{ formatPercent(requestFailurePercent) }}</div>
-          </div>
-          <div class="bg-background p-4">
-            <div class="flex items-center gap-2 text-xs text-muted-foreground"><Gauge class="h-4 w-4" /> {{ t("etcd.dashboard.proposals") }}</div>
-            <div class="mt-2 text-xl font-semibold">{{ proposalLag ?? "-" }}</div>
-            <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.proposalLag") }} · {{ t("etcd.dashboard.pending") }} {{ formatCount(metrics.proposalsPending) }}</div>
-          </div>
-          <div class="bg-background p-4">
-            <div class="flex items-center gap-2 text-xs text-muted-foreground"><Database class="h-4 w-4" /> {{ t("etcd.dashboard.storageQuota") }}</div>
-            <div class="mt-2 text-xl font-semibold">{{ formatPercent(quotaPercent) }}</div>
-            <div class="mt-1 text-xs text-muted-foreground">{{ formatBytes(metrics.dbSizeMetricBytes ?? Number.NaN) }} / {{ formatBytes(metrics.quotaBackendBytes ?? Number.NaN) }}</div>
-          </div>
-          <div class="bg-background p-4">
-            <div class="flex items-center gap-2 text-xs text-muted-foreground"><Clock3 class="h-4 w-4" /> {{ t("etcd.dashboard.uptime") }}</div>
-            <div class="mt-2 text-xl font-semibold">{{ formatDuration(uptimeSeconds) }}</div>
-            <div class="mt-1 text-xs text-muted-foreground">etcd {{ metrics.serverVersion ?? "-" }} · {{ metrics.goVersion ?? "-" }}</div>
-          </div>
-        </div>
-
-        <div class="border-t px-4 py-3">
-          <div class="flex items-center gap-2 text-sm font-medium"><Gauge class="h-4 w-4 text-sky-500" /> {{ t("etcd.dashboard.consensusReliability") }}</div>
-          <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-md border bg-muted/10 p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.leadership") }}</div>
-              <div class="mt-2 text-base font-semibold">{{ metrics.isLeader === 1 ? t("etcd.dashboard.leader") : t("etcd.dashboard.follower") }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.leaderChanges") }} {{ formatCount(metrics.leaderChangesTotal) }} · {{ t("etcd.dashboard.knownPeers") }} {{ formatCount(metrics.knownPeers) }}</div>
-            </div>
-            <div class="rounded-md border bg-muted/10 p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.proposalState") }}</div>
-              <div class="mt-2 text-base font-semibold">{{ t("etcd.dashboard.pending") }} {{ formatCount(metrics.proposalsPending) }} · Lag {{ proposalLag ?? "-" }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.failedProposals") }} {{ formatCount(metrics.proposalsFailedTotal) }} · {{ formatRate(proposalFailureRate) }}</div>
-            </div>
-            <div class="rounded-md border bg-muted/10 p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.raftFailures") }}</div>
-              <div class="mt-2 text-base font-semibold">Heartbeat {{ formatCount(metrics.heartbeatSendFailuresTotal) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">Read index {{ formatCount(metrics.readIndexesFailedTotal) }} · Slow {{ formatCount(metrics.slowReadIndexesTotal) }}</div>
-            </div>
-            <div class="rounded-md border bg-muted/10 p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.revisionState") }}</div>
-              <div class="mt-2 text-base font-semibold">{{ formatCount(metrics.mvccCurrentRevision) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.compactRevision") }} {{ formatCount(metrics.mvccCompactRevision) }} · Slow apply {{ formatCount(metrics.slowApplyTotal) }}</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="border-t px-4 py-3">
-          <div class="flex items-center gap-2 text-sm font-medium"><Activity class="h-4 w-4 text-violet-500" /> {{ t("etcd.dashboard.requestLoad") }}</div>
-          <div class="mt-3 grid gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(300px,1fr)]">
-            <div class="overflow-auto rounded-md border">
-              <table class="w-full min-w-[620px] text-left text-xs">
-                <thead class="bg-muted/60 text-muted-foreground">
-                  <tr>
-                    <th class="px-3 py-2">{{ t("etcd.dashboard.grpcMethod") }}</th>
-                    <th class="px-3 py-2">{{ t("etcd.dashboard.total") }}</th>
-                    <th class="px-3 py-2">{{ t("etcd.dashboard.rate") }}</th>
-                    <th class="px-3 py-2">{{ t("etcd.dashboard.failures") }}</th>
-                    <th class="px-3 py-2">{{ t("etcd.dashboard.avgLatency") }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="row in grpcMethodRows" :key="row.method" class="border-t">
-                    <td class="px-3 py-2 font-medium">{{ row.method }}</td>
-                    <td class="px-3 py-2 tabular-nums">{{ formatCount(row.total) }}</td>
-                    <td class="px-3 py-2 tabular-nums">{{ formatRate(row.rate) }}</td>
-                    <td class="px-3 py-2 tabular-nums">
-                      {{ formatCount(row.failures) }} <span v-if="row.failureRate != null" class="text-muted-foreground">({{ formatRate(row.failureRate) }})</span>
-                    </td>
-                    <td class="px-3 py-2 tabular-nums">{{ formatMilliseconds(row.latencyMs) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="grid grid-cols-2 gap-2">
-              <div class="rounded-md border p-3">
-                <div class="text-xs text-muted-foreground">Range</div>
-                <div class="mt-1 font-semibold">{{ formatRate(mvccRangeRate) }}</div>
-                <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccRangeTotal) }}</div>
-              </div>
-              <div class="rounded-md border p-3">
-                <div class="text-xs text-muted-foreground">Put</div>
-                <div class="mt-1 font-semibold">{{ formatRate(mvccPutRate) }}</div>
-                <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccPutTotal) }}</div>
-              </div>
-              <div class="rounded-md border p-3">
-                <div class="text-xs text-muted-foreground">Delete</div>
-                <div class="mt-1 font-semibold">{{ formatRate(mvccDeleteRate) }}</div>
-                <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccDeleteTotal) }}</div>
-              </div>
-              <div class="rounded-md border p-3">
-                <div class="text-xs text-muted-foreground">Txn</div>
-                <div class="mt-1 font-semibold">{{ formatRate(mvccTxnRate) }}</div>
-                <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccTxnTotal) }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="border-t px-4 py-3">
-          <div class="flex items-center gap-2 text-sm font-medium"><HardDrive class="h-4 w-4 text-amber-500" /> {{ t("etcd.dashboard.storageDisk") }}</div>
-          <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.diskLatency") }}</div>
-              <div class="mt-2 font-semibold">WAL fsync {{ formatMilliseconds(walFsyncMs) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">WAL write {{ formatMilliseconds(walWriteMs) }} · {{ formatByteRate(walWriteRate) }}</div>
-            </div>
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">Backend</div>
-              <div class="mt-2 font-semibold">Commit {{ formatMilliseconds(backendCommitMs) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">Snapshot {{ formatMilliseconds(backendSnapshotMs) }} · Defrag {{ formatMilliseconds(backendDefragMs) }}</div>
-            </div>
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.databaseState") }}</div>
-              <div class="mt-2 font-semibold">{{ formatBytes(metrics.dbSizeInUseMetricBytes ?? Number.NaN) }} {{ t("etcd.dashboard.inUse") }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.openReadTransactions") }} {{ formatCount(metrics.openReadTransactions) }} · Put bytes {{ formatBytes(metrics.mvccTotalPutSizeBytes ?? Number.NaN) }}</div>
-            </div>
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.backgroundTasks") }}</div>
-              <div class="mt-2 font-semibold">Defrag {{ formatCount(metrics.diskDefragInflight) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">Snapshot apply {{ formatCount(metrics.snapshotApplyInProgress) }}</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="grid border-t xl:grid-cols-2 xl:divide-x">
-          <div class="px-4 py-3">
-            <div class="flex items-center gap-2 text-sm font-medium"><Eye class="h-4 w-4 text-cyan-500" /> {{ t("etcd.dashboard.watchState") }}</div>
-            <div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.watchers") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ formatCount(metrics.mvccWatcherTotal) }}</div>
-              </div>
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.watchStreams") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ formatCount(metrics.mvccWatchStreamTotal) }}</div>
-              </div>
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.events") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ formatRate(mvccEventRate) }}</div>
-              </div>
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.slowPending") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ formatCount(metrics.mvccSlowWatcherTotal) }} / {{ formatCount(metrics.mvccPendingEventsTotal) }}</div>
-              </div>
-            </div>
-          </div>
-          <div class="border-t px-4 py-3 xl:border-t-0">
-            <div class="flex items-center gap-2 text-sm font-medium"><Radio class="h-4 w-4 text-emerald-500" /> {{ t("etcd.dashboard.leaseState") }}</div>
-            <div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.granted") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ formatRate(leaseGrantedRate) }}</div>
-              </div>
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.renewed") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ formatRate(leaseRenewedRate) }}</div>
-              </div>
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.revokedExpired") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ formatRate(leaseRevokedRate) }} / {{ formatRate(leaseExpiredRate) }}</div>
-              </div>
-              <div>
-                <div class="text-muted-foreground">{{ t("etcd.dashboard.averageTtl") }}</div>
-                <div class="mt-1 text-base font-semibold">{{ averageLeaseTtl == null ? "-" : `${averageLeaseTtl.toFixed(1)}s` }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="border-t px-4 py-3">
-          <div class="flex items-center gap-2 text-sm font-medium"><Cpu class="h-4 w-4 text-rose-500" /> {{ t("etcd.dashboard.runtimeResources") }}</div>
-          <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.memory") }}</div>
-              <div class="mt-2 font-semibold">RSS {{ formatBytes(metrics.residentMemoryBytes ?? Number.NaN) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">Heap {{ formatBytes(metrics.goHeapAllocBytes ?? Number.NaN) }} / {{ formatBytes(metrics.goHeapSysBytes ?? Number.NaN) }}</div>
-            </div>
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.runtime") }}</div>
-              <div class="mt-2 font-semibold">{{ formatCount(metrics.goroutines) }} goroutines</div>
-              <div class="mt-1 text-xs text-muted-foreground">{{ formatCount(metrics.goThreads) }} threads · GOMAXPROCS {{ formatCount(metrics.goMaxProcs) }}</div>
-            </div>
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.processResources") }}</div>
-              <div class="mt-2 font-semibold">CPU {{ formatPercent(cpuPercent) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">FD {{ formatCount(metrics.openFds) }} / {{ formatCount(metrics.maxFds) }} · {{ formatPercent(fdPercent) }}</div>
-            </div>
-            <div class="rounded-md border p-3">
-              <div class="flex items-center gap-1.5 text-xs text-muted-foreground"><Network class="h-3.5 w-3.5" /> {{ t("etcd.dashboard.networkTraffic") }}</div>
-              <div class="mt-2 font-semibold">↓ {{ formatByteRate(clientReceivedRate) }} · ↑ {{ formatByteRate(clientSentRate) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">Peer ↓ {{ formatByteRate(peerReceivedRate) }} · ↑ {{ formatByteRate(peerSentRate) }}</div>
-            </div>
-            <div class="rounded-md border p-3">
-              <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.processNetworkGc") }}</div>
-              <div class="mt-2 font-semibold">↓ {{ formatByteRate(processReceivedRate) }} · ↑ {{ formatByteRate(processTransmittedRate) }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">GC {{ formatMilliseconds(goGcMs) }} · {{ formatCount(metrics.goHeapObjects) }} objects</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-2 border-t px-4 py-3 text-xs">
-          <Badge variant="outline">etcd {{ metrics.serverVersion ?? "-" }}</Badge>
-          <Badge variant="outline">Cluster {{ metrics.clusterVersion ?? "-" }}</Badge>
-          <Badge variant="outline">Auth revision {{ formatCount(metrics.authRevision) }}</Badge>
-          <Badge variant="outline">Keys {{ formatCount(metrics.mvccKeysTotal) }}</Badge>
-          <Badge variant="outline">Health {{ formatCount(metrics.healthSuccessTotal) }} / {{ formatCount(metrics.healthFailuresTotal) }}</Badge>
-          <span v-if="requestRate == null" class="text-muted-foreground">{{ t("etcd.dashboard.rateNeedsRefresh") }}</span>
-        </div>
-      </section>
-      <section v-else-if="metrics && !metrics.available" class="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+      <div v-else-if="error" class="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
         <div class="flex items-start gap-3">
-          <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
           <div class="min-w-0">
-            <div class="text-sm font-medium">{{ t("etcd.dashboard.metricsUnavailable") }}</div>
-            <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("etcd.dashboard.metricsUnavailableHint") }}</p>
-            <p v-if="metrics.error" class="mt-2 break-words font-mono text-xs text-muted-foreground">{{ metrics.error }}</p>
+            <div class="text-sm font-medium text-destructive">{{ t("etcd.dashboard.loadFailed") }}</div>
+            <div class="mt-1 break-words text-xs leading-5 text-muted-foreground">{{ error }}</div>
           </div>
         </div>
-      </section>
-
-      <div class="overflow-auto rounded-lg border">
-        <table class="w-full min-w-[1050px] text-left text-sm">
-          <thead class="bg-muted/70 text-xs text-muted-foreground">
-            <tr>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.endpointMember") }}</th>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.role") }}</th>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.version") }}</th>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.revision") }}</th>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.raftTermApplied") }}</th>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.dbSizeInUse") }}</th>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.latency") }}</th>
-              <th class="px-3 py-2">{{ t("etcd.dashboard.status") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="member in status.members" :key="member.endpoint" class="border-t">
-              <td class="px-3 py-2">
-                <div class="font-medium">{{ member.name || member.endpoint }}</div>
-                <div class="max-w-72 truncate font-mono text-xs text-muted-foreground">{{ member.endpoint }} · {{ member.memberId || "-" }}</div>
-              </td>
-              <td class="px-3 py-2">{{ member.learner ? t("etcd.dashboard.learner") : member.memberId === status.leaderId ? t("etcd.dashboard.leader") : t("etcd.dashboard.follower") }}</td>
-              <td class="px-3 py-2">{{ member.version || "-" }}</td>
-              <td class="px-3 py-2 font-mono text-xs">{{ member.revision || "-" }}</td>
-              <td class="px-3 py-2 font-mono text-xs">{{ member.raftTerm || "-" }} / {{ member.raftAppliedIndex || "-" }}</td>
-              <td class="px-3 py-2">{{ formatBytes(Number(member.dbSize || 0)) }} / {{ formatBytes(Number(member.dbSizeInUse || 0)) }}</td>
-              <td class="px-3 py-2">{{ member.latencyMs == null ? "-" : `${member.latencyMs} ms` }}</td>
-              <td class="px-3 py-2">
-                <Badge :variant="member.reachable && member.errors.length === 0 ? 'secondary' : 'destructive'">
-                  {{ member.reachable ? member.errors[0] || t("etcd.dashboard.reachable") : member.errors[0] || t("etcd.dashboard.unreachable") }}
-                </Badge>
-              </td>
-            </tr>
-          </tbody>
-        </table>
       </div>
-    </div>
-    <div v-else-if="loading" class="flex h-64 items-center justify-center text-sm text-muted-foreground">
-      <Loader2 class="mr-2 h-4 w-4 animate-spin" />
-      {{ t("etcd.dashboard.loading") }}
+      <div v-if="status" class="grid gap-3">
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <div class="rounded-lg border p-4">
+            <div class="flex items-center gap-2 text-xs text-muted-foreground"><Gauge class="h-4 w-4" /> {{ t("etcd.dashboard.observedHealth") }}</div>
+            <div class="mt-3 flex items-center gap-2 text-xl font-semibold">
+              <CheckCircle2 v-if="health === 'healthy'" class="h-5 w-5 text-emerald-500" />
+              <AlertTriangle v-else class="h-5 w-5 text-amber-500" />
+              {{ t(`etcd.dashboard.health.${health}`) }}
+            </div>
+          </div>
+          <div class="rounded-lg border p-4">
+            <div class="flex items-center gap-2 text-xs text-muted-foreground"><Server class="h-4 w-4" /> {{ t("etcd.dashboard.reachableMembers") }}</div>
+            <div class="mt-3 text-xl font-semibold">{{ reachable }} / {{ status.members.length }}</div>
+          </div>
+          <div class="rounded-lg border p-4">
+            <div class="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound class="h-4 w-4" /> {{ t("etcd.dashboard.keyCount") }}</div>
+            <div class="mt-3 text-xl font-semibold">{{ status.keyCount ?? "-" }}</div>
+          </div>
+          <div class="rounded-lg border p-4">
+            <div class="flex items-center gap-2 text-xs text-muted-foreground"><Database class="h-4 w-4" /> {{ t("etcd.dashboard.backendSize") }}</div>
+            <div class="mt-3 text-xl font-semibold">{{ formatBytes(totalDbSize) }}</div>
+          </div>
+          <div class="rounded-lg border p-4">
+            <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.fragmentation") }}</div>
+            <div class="mt-3 text-xl font-semibold">{{ (fragmentation * 100).toFixed(1) }}%</div>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap gap-2 rounded-lg border p-3 text-xs">
+          <Badge variant="outline">{{ t("etcd.dashboard.cluster") }} {{ status.clusterId ?? "-" }}</Badge>
+          <Badge variant="outline">{{ t("etcd.dashboard.revision") }} {{ status.revision ?? "-" }}</Badge>
+          <Badge variant="outline">{{ t("etcd.dashboard.leader") }} {{ status.leaderId ?? "-" }}</Badge>
+          <Badge v-for="alarm in status.alarms" :key="alarm" variant="destructive">{{ alarm }}</Badge>
+          <Badge v-if="status.alarms.length === 0" variant="secondary">{{ t("etcd.dashboard.noAlarms") }}</Badge>
+        </div>
+
+        <section v-if="metrics?.available" class="rounded-lg border">
+          <div class="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-3">
+            <div>
+              <div class="flex items-center gap-2 text-sm font-medium">
+                <Activity class="h-4 w-4 text-emerald-500" />
+                {{ t("etcd.dashboard.prometheusMetrics") }}
+              </div>
+              <p class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.prometheusDescription") }}</p>
+            </div>
+            <div class="min-w-0 text-right text-xs text-muted-foreground">
+              <div class="max-w-[420px] truncate font-mono">{{ metrics.sourceUrl }}</div>
+              <div>{{ t("etcd.dashboard.collectedAt") }} {{ formatCollectedAt(metrics.collectedAtMs) }}</div>
+            </div>
+          </div>
+
+          <div class="grid gap-px bg-border sm:grid-cols-2 xl:grid-cols-4">
+            <div class="bg-background p-4">
+              <div class="flex items-center gap-2 text-xs text-muted-foreground"><Activity class="h-4 w-4" /> {{ t("etcd.dashboard.requests") }}</div>
+              <div class="mt-2 text-xl font-semibold">{{ formatRate(requestRate) }}</div>
+              <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.requestFailureRate") }} {{ formatPercent(requestFailurePercent) }}</div>
+            </div>
+            <div class="bg-background p-4">
+              <div class="flex items-center gap-2 text-xs text-muted-foreground"><Gauge class="h-4 w-4" /> {{ t("etcd.dashboard.proposals") }}</div>
+              <div class="mt-2 text-xl font-semibold">{{ proposalLag ?? "-" }}</div>
+              <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.proposalLag") }} · {{ t("etcd.dashboard.pending") }} {{ formatCount(metrics.proposalsPending) }}</div>
+            </div>
+            <div class="bg-background p-4">
+              <div class="flex items-center gap-2 text-xs text-muted-foreground"><Database class="h-4 w-4" /> {{ t("etcd.dashboard.storageQuota") }}</div>
+              <div class="mt-2 text-xl font-semibold">{{ formatPercent(quotaPercent) }}</div>
+              <div class="mt-1 text-xs text-muted-foreground">{{ formatBytes(metrics.dbSizeMetricBytes ?? Number.NaN) }} / {{ formatBytes(metrics.quotaBackendBytes ?? Number.NaN) }}</div>
+            </div>
+            <div class="bg-background p-4">
+              <div class="flex items-center gap-2 text-xs text-muted-foreground"><Clock3 class="h-4 w-4" /> {{ t("etcd.dashboard.uptime") }}</div>
+              <div class="mt-2 text-xl font-semibold">{{ formatDuration(uptimeSeconds) }}</div>
+              <div class="mt-1 text-xs text-muted-foreground">etcd {{ metrics.serverVersion ?? "-" }} · {{ metrics.goVersion ?? "-" }}</div>
+            </div>
+          </div>
+
+          <div class="border-t px-4 py-3">
+            <div class="flex items-center gap-2 text-sm font-medium"><Gauge class="h-4 w-4 text-sky-500" /> {{ t("etcd.dashboard.consensusReliability") }}</div>
+            <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div class="rounded-md border bg-muted/10 p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.leadership") }}</div>
+                <div class="mt-2 text-base font-semibold">{{ metrics.isLeader === 1 ? t("etcd.dashboard.leader") : t("etcd.dashboard.follower") }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.leaderChanges") }} {{ formatCount(metrics.leaderChangesTotal) }} · {{ t("etcd.dashboard.knownPeers") }} {{ formatCount(metrics.knownPeers) }}</div>
+              </div>
+              <div class="rounded-md border bg-muted/10 p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.proposalState") }}</div>
+                <div class="mt-2 text-base font-semibold">{{ t("etcd.dashboard.pending") }} {{ formatCount(metrics.proposalsPending) }} · {{ t("etcd.dashboard.lag") }} {{ proposalLag ?? "-" }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.failedProposals") }} {{ formatCount(metrics.proposalsFailedTotal) }} · {{ formatRate(proposalFailureRate) }}</div>
+              </div>
+              <div class="rounded-md border bg-muted/10 p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.raftFailures") }}</div>
+                <div class="mt-2 text-base font-semibold">Heartbeat {{ formatCount(metrics.heartbeatSendFailuresTotal) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">Read index {{ formatCount(metrics.readIndexesFailedTotal) }} · Slow {{ formatCount(metrics.slowReadIndexesTotal) }}</div>
+              </div>
+              <div class="rounded-md border bg-muted/10 p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.revisionState") }}</div>
+                <div class="mt-2 text-base font-semibold">{{ formatCount(metrics.mvccCurrentRevision) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.compactRevision") }} {{ formatCount(metrics.mvccCompactRevision) }} · {{ t("etcd.dashboard.slowApply") }} {{ formatCount(metrics.slowApplyTotal) }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="border-t px-4 py-3">
+            <div class="flex items-center gap-2 text-sm font-medium"><Activity class="h-4 w-4 text-violet-500" /> {{ t("etcd.dashboard.requestLoad") }}</div>
+            <div class="mt-3 grid gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(300px,1fr)]">
+              <div class="overflow-auto rounded-md border">
+                <table class="w-full min-w-[620px] text-left text-xs">
+                  <thead class="bg-muted/60 text-muted-foreground">
+                    <tr>
+                      <th class="px-3 py-2">{{ t("etcd.dashboard.grpcMethod") }}</th>
+                      <th class="px-3 py-2">{{ t("etcd.dashboard.total") }}</th>
+                      <th class="px-3 py-2">{{ t("etcd.dashboard.rate") }}</th>
+                      <th class="px-3 py-2">{{ t("etcd.dashboard.failures") }}</th>
+                      <th class="px-3 py-2">{{ t("etcd.dashboard.avgLatency") }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in grpcMethodRows" :key="row.method" class="border-t">
+                      <td class="px-3 py-2 font-medium">{{ row.method }}</td>
+                      <td class="px-3 py-2 tabular-nums">{{ formatCount(row.total) }}</td>
+                      <td class="px-3 py-2 tabular-nums">{{ formatRate(row.rate) }}</td>
+                      <td class="px-3 py-2 tabular-nums">
+                        {{ formatCount(row.failures) }} <span v-if="row.failureRate != null" class="text-muted-foreground">({{ formatRate(row.failureRate) }})</span>
+                      </td>
+                      <td class="px-3 py-2 tabular-nums">{{ formatMilliseconds(row.latencyMs) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div class="rounded-md border p-3">
+                  <div class="text-xs text-muted-foreground">Range</div>
+                  <div class="mt-1 font-semibold">{{ formatRate(mvccRangeRate) }}</div>
+                  <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccRangeTotal) }}</div>
+                </div>
+                <div class="rounded-md border p-3">
+                  <div class="text-xs text-muted-foreground">Put</div>
+                  <div class="mt-1 font-semibold">{{ formatRate(mvccPutRate) }}</div>
+                  <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccPutTotal) }}</div>
+                </div>
+                <div class="rounded-md border p-3">
+                  <div class="text-xs text-muted-foreground">Delete</div>
+                  <div class="mt-1 font-semibold">{{ formatRate(mvccDeleteRate) }}</div>
+                  <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccDeleteTotal) }}</div>
+                </div>
+                <div class="rounded-md border p-3">
+                  <div class="text-xs text-muted-foreground">Txn</div>
+                  <div class="mt-1 font-semibold">{{ formatRate(mvccTxnRate) }}</div>
+                  <div class="text-xs text-muted-foreground">{{ formatCount(metrics.mvccTxnTotal) }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="border-t px-4 py-3">
+            <div class="flex items-center gap-2 text-sm font-medium"><HardDrive class="h-4 w-4 text-amber-500" /> {{ t("etcd.dashboard.storageDisk") }}</div>
+            <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.diskLatency") }}</div>
+                <div class="mt-2 font-semibold">WAL fsync {{ formatMilliseconds(walFsyncMs) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">WAL write {{ formatMilliseconds(walWriteMs) }} · {{ formatByteRate(walWriteRate) }}</div>
+              </div>
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">Backend</div>
+                <div class="mt-2 font-semibold">Commit {{ formatMilliseconds(backendCommitMs) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">Snapshot {{ formatMilliseconds(backendSnapshotMs) }} · Defrag {{ formatMilliseconds(backendDefragMs) }}</div>
+              </div>
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.databaseState") }}</div>
+                <div class="mt-2 font-semibold">{{ formatBytes(metrics.dbSizeInUseMetricBytes ?? Number.NaN) }} {{ t("etcd.dashboard.inUse") }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">{{ t("etcd.dashboard.openReadTransactions") }} {{ formatCount(metrics.openReadTransactions) }} · {{ t("etcd.dashboard.putBytes") }} {{ formatBytes(metrics.mvccTotalPutSizeBytes ?? Number.NaN) }}</div>
+              </div>
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.backgroundTasks") }}</div>
+                <div class="mt-2 font-semibold">Defrag {{ formatCount(metrics.diskDefragInflight) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">Snapshot apply {{ formatCount(metrics.snapshotApplyInProgress) }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid border-t xl:grid-cols-2 xl:divide-x">
+            <div class="px-4 py-3">
+              <div class="flex items-center gap-2 text-sm font-medium"><Eye class="h-4 w-4 text-cyan-500" /> {{ t("etcd.dashboard.watchState") }}</div>
+              <div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.watchers") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ formatCount(metrics.mvccWatcherTotal) }}</div>
+                </div>
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.watchStreams") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ formatCount(metrics.mvccWatchStreamTotal) }}</div>
+                </div>
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.events") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ formatRate(mvccEventRate) }}</div>
+                </div>
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.slowPending") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ formatCount(metrics.mvccSlowWatcherTotal) }} / {{ formatCount(metrics.mvccPendingEventsTotal) }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="border-t px-4 py-3 xl:border-t-0">
+              <div class="flex items-center gap-2 text-sm font-medium"><Radio class="h-4 w-4 text-emerald-500" /> {{ t("etcd.dashboard.leaseState") }}</div>
+              <div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.granted") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ formatRate(leaseGrantedRate) }}</div>
+                </div>
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.renewed") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ formatRate(leaseRenewedRate) }}</div>
+                </div>
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.revokedExpired") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ formatRate(leaseRevokedRate) }} / {{ formatRate(leaseExpiredRate) }}</div>
+                </div>
+                <div>
+                  <div class="text-muted-foreground">{{ t("etcd.dashboard.averageTtl") }}</div>
+                  <div class="mt-1 text-base font-semibold">{{ averageLeaseTtl == null ? "-" : `${averageLeaseTtl.toFixed(1)}s` }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="border-t px-4 py-3">
+            <div class="flex items-center gap-2 text-sm font-medium"><Cpu class="h-4 w-4 text-rose-500" /> {{ t("etcd.dashboard.runtimeResources") }}</div>
+            <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.memory") }}</div>
+                <div class="mt-2 font-semibold">RSS {{ formatBytes(metrics.residentMemoryBytes ?? Number.NaN) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">Heap {{ formatBytes(metrics.goHeapAllocBytes ?? Number.NaN) }} / {{ formatBytes(metrics.goHeapSysBytes ?? Number.NaN) }}</div>
+              </div>
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.runtime") }}</div>
+                <div class="mt-2 font-semibold">{{ formatCount(metrics.goroutines) }} goroutines</div>
+                <div class="mt-1 text-xs text-muted-foreground">{{ formatCount(metrics.goThreads) }} threads · GOMAXPROCS {{ formatCount(metrics.goMaxProcs) }}</div>
+              </div>
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.processResources") }}</div>
+                <div class="mt-2 font-semibold">CPU {{ formatPercent(cpuPercent) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">FD {{ formatCount(metrics.openFds) }} / {{ formatCount(metrics.maxFds) }} · {{ formatPercent(fdPercent) }}</div>
+              </div>
+              <div class="rounded-md border p-3">
+                <div class="flex items-center gap-1.5 text-xs text-muted-foreground"><Network class="h-3.5 w-3.5" /> {{ t("etcd.dashboard.networkTraffic") }}</div>
+                <div class="mt-2 font-semibold">↓ {{ formatByteRate(clientReceivedRate) }} · ↑ {{ formatByteRate(clientSentRate) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">Peer ↓ {{ formatByteRate(peerReceivedRate) }} · ↑ {{ formatByteRate(peerSentRate) }}</div>
+              </div>
+              <div class="rounded-md border p-3">
+                <div class="text-xs text-muted-foreground">{{ t("etcd.dashboard.processNetworkGc") }}</div>
+                <div class="mt-2 font-semibold">↓ {{ formatByteRate(processReceivedRate) }} · ↑ {{ formatByteRate(processTransmittedRate) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">GC {{ formatMilliseconds(goGcMs) }} · {{ formatCount(metrics.goHeapObjects) }} objects</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2 border-t px-4 py-3 text-xs">
+            <Badge variant="outline">etcd {{ metrics.serverVersion ?? "-" }}</Badge>
+            <Badge variant="outline">Cluster {{ metrics.clusterVersion ?? "-" }}</Badge>
+            <Badge variant="outline">Auth revision {{ formatCount(metrics.authRevision) }}</Badge>
+            <Badge variant="outline">Keys {{ formatCount(metrics.mvccKeysTotal) }}</Badge>
+            <Badge variant="outline">Health {{ formatCount(metrics.healthSuccessTotal) }} / {{ formatCount(metrics.healthFailuresTotal) }}</Badge>
+            <span v-if="requestRate == null" class="text-muted-foreground">{{ t("etcd.dashboard.rateNeedsRefresh") }}</span>
+          </div>
+        </section>
+        <section v-else-if="metrics && !metrics.available" class="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+          <div class="flex items-start gap-3">
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div class="min-w-0">
+              <div class="text-sm font-medium">{{ t("etcd.dashboard.metricsUnavailable") }}</div>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("etcd.dashboard.metricsUnavailableHint") }}</p>
+              <p v-if="metrics.error" class="mt-2 break-words font-mono text-xs text-muted-foreground">{{ metrics.error }}</p>
+            </div>
+          </div>
+        </section>
+        <div class="overflow-auto rounded-lg border">
+          <table class="w-full min-w-[1050px] text-left text-sm">
+            <thead class="bg-muted/70 text-xs text-muted-foreground">
+              <tr>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.endpointMember") }}</th>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.role") }}</th>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.version") }}</th>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.revision") }}</th>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.raftTermApplied") }}</th>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.dbSizeInUse") }}</th>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.latency") }}</th>
+                <th class="px-3 py-2">{{ t("etcd.dashboard.status") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="member in status.members" :key="member.endpoint" class="border-t">
+                <td class="px-3 py-2">
+                  <div class="font-medium">{{ member.name || member.endpoint }}</div>
+                  <div class="max-w-72 truncate font-mono text-xs text-muted-foreground">{{ member.endpoint }} · {{ member.memberId || "-" }}</div>
+                </td>
+                <td class="px-3 py-2">{{ member.learner ? t("etcd.dashboard.learner") : member.memberId === status.leaderId ? t("etcd.dashboard.leader") : t("etcd.dashboard.follower") }}</td>
+                <td class="px-3 py-2">{{ member.version || "-" }}</td>
+                <td class="px-3 py-2 font-mono text-xs">{{ member.revision || "-" }}</td>
+                <td class="px-3 py-2 font-mono text-xs">{{ member.raftTerm || "-" }} / {{ member.raftAppliedIndex || "-" }}</td>
+                <td class="px-3 py-2">{{ formatBytes(Number(member.dbSize || 0)) }} / {{ formatBytes(Number(member.dbSizeInUse || 0)) }}</td>
+                <td class="px-3 py-2">{{ member.latencyMs == null ? "-" : `${member.latencyMs} ms` }}</td>
+                <td class="px-3 py-2">
+                  <Badge :variant="member.reachable && member.errors.length === 0 ? 'secondary' : 'destructive'">
+                    {{ member.reachable ? member.errors[0] || t("etcd.dashboard.reachable") : member.errors[0] || t("etcd.dashboard.unreachable") }}
+                  </Badge>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div v-else-if="loading" class="flex h-64 items-center justify-center text-sm text-muted-foreground">
+        <Loader2 class="mr-2 h-4 w-4 animate-spin" />
+        {{ t("etcd.dashboard.loading") }}
+      </div>
     </div>
   </div>
 </template>

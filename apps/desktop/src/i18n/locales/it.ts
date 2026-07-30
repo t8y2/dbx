@@ -864,6 +864,7 @@ export default withEnglishFallback({
     openDataTabs: "Tabelle aperte",
     gridfs: "GridFS",
     etcdDashboard: "etcd dashboard",
+    etcdAccessControl: "controllo accessi etcd",
   },
   executionSummary: {
     empty: "Nessun riepilogo",
@@ -2596,6 +2597,7 @@ export default withEnglishFallback({
     searchPlaceholder: "Cerca nel contenuto di chiavi o valori",
     searchProgress: "Analizzate {scanned} chiavi, {matched} corrispondenze",
     exportResults: "Esporta risultati",
+    clearSearchResults: "Cancella risultati",
     exported: "Esportate {count} chiavi",
     importPreview: "Anteprima importazione",
     syncPreview: "Anteprima sincronizzazione",

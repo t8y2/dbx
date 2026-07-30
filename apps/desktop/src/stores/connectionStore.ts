@@ -3082,8 +3082,17 @@ export const useConnectionStore = defineStore("connection", () => {
               children: [],
             },
             {
+              id: `${connectionId}:etcd-access-control`,
+              label: "用户和角色",
+              type: "etcd-access-control" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
+            {
               id: `${connectionId}:etcd-dashboard`,
-              label: "Dashboard",
+              label: "服务仪表盘",
               type: "etcd-dashboard" as const,
               connectionId,
               database: "",

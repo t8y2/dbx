@@ -865,6 +865,7 @@ export default withEnglishFallback({
     vector: "ベクター",
     gridfs: "GridFS",
     etcdDashboard: "etcd ダッシュボード",
+    etcdAccessControl: "etcd アクセス制御",
   },
   executionSummary: {
     empty: "サマリーはありません",
@@ -2631,6 +2632,7 @@ export default withEnglishFallback({
     searchPlaceholder: "キーまたは値の内容を検索",
     searchProgress: "{scanned} 件のキーを走査、{matched} 件一致",
     exportResults: "結果をエクスポート",
+    clearSearchResults: "検索結果をクリア",
     exported: "{count} 件のキーをエクスポートしました",
     importPreview: "インポートのプレビュー",
     syncPreview: "同期のプレビュー",

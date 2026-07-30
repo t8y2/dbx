@@ -15,9 +15,11 @@ import io.etcd.jetcd.kv.TxnResponse;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -34,13 +36,19 @@ final class EtcdAgentTest {
 
         JsonObject result = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("result");
 
-        Assertions.assertEquals(1, result.get("protocolVersion").getAsInt());
+        Assertions.assertEquals(2, result.get("protocolVersion").getAsInt());
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_ttl\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_cas\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_list_values\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_status\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_history\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_compaction\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_defrag\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_watch\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_lease\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_auth\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"multi_session\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"connect\"")));
     }
 
@@ -63,6 +71,34 @@ final class EtcdAgentTest {
         ).getAsJsonObject();
 
         Assertions.assertEquals(List.of("http://127.0.0.1:2379"), EtcdAgent.endpoints(connection));
+    }
+
+    @Test
+    void connectTimeoutUsesConfiguredValueAndSafeBounds() {
+        Assertions.assertEquals(
+            45,
+            EtcdAgent.connectTimeoutSeconds(JsonParser.parseString("{\"connect_timeout_secs\":45}").getAsJsonObject())
+        );
+        Assertions.assertEquals(
+            1,
+            EtcdAgent.connectTimeoutSeconds(JsonParser.parseString("{\"connect_timeout_secs\":0}").getAsJsonObject())
+        );
+        Assertions.assertEquals(
+            300,
+            EtcdAgent.connectTimeoutSeconds(JsonParser.parseString("{\"connect_timeout_secs\":999}").getAsJsonObject())
+        );
+    }
+
+    @Test
+    void validateConnectionRequiresAnActiveSession() {
+        String response = EtcdAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"validate_connection\",\"params\":{}}"
+        );
+
+        JsonObject error = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
+
+        Assertions.assertEquals(-1, error.get("code").getAsInt());
+        Assertions.assertEquals("Not connected", error.get("message").getAsString());
     }
 
     @Test
@@ -208,6 +244,33 @@ final class EtcdAgentTest {
         Assertions.assertEquals("write timed out", error.getMessage());
         Assertions.assertEquals(1, revokeCalls.get());
         Assertions.assertEquals(123, revokedLeaseId.get());
+    }
+
+    @Test
+    void defragFailureMarksEveryRemainingEndpointAsNotExecuted() {
+        List<Map<String, Object>> members = new ArrayList<>();
+
+        EtcdAgent.appendUnexecutedDefragMembers(
+            members,
+            List.of("http://follower-2:2379", "http://follower-3:2379", "http://leader:2379"),
+            "http://follower-2:2379"
+        );
+
+        Assertions.assertEquals(
+            List.of("http://follower-3:2379", "http://leader:2379"),
+            members.stream().map(member -> member.get("endpoint")).toList()
+        );
+        Assertions.assertTrue(members.stream().allMatch(member -> "not_executed".equals(member.get("status"))));
+    }
+
+    @Test
+    void leaseListResponseParserReadsEveryLeaseId() throws Exception {
+        byte[] response = new byte[] {
+            0x12, 0x02, 0x08, 0x7b,
+            0x12, 0x03, 0x08, (byte) 0xc8, 0x03
+        };
+
+        Assertions.assertEquals(List.of(123L, 456L), EtcdAgent.leaseIdsFromResponse(response));
     }
 
     private static KV scriptedKv(

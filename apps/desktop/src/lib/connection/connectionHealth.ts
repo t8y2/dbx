@@ -32,6 +32,10 @@ const CONNECTION_ERROR_PATTERNS = [
   "sqltransientconnectionexception",
   "i/o error",
   "no route to host",
+  "etcd_connection_unavailable",
+  "etcd_connection_timeout",
+  "statusruntimeexception: unavailable",
+  "deadline_exceeded",
 ];
 
 export function staleConnectionMessage(error: unknown): string {

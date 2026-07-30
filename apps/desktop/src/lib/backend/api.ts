@@ -417,6 +417,15 @@ export const etcdDelete = forward("etcdDelete");
 export const etcdRename = forward("etcdRename");
 export const etcdHistory = forward("etcdHistory");
 export const etcdStatus = forward("etcdStatus");
+export const etcdPreflight = forward("etcdPreflight");
+export const etcdCompact = forward("etcdCompact");
+export const etcdDefrag = forward("etcdDefrag");
+export const etcdWatchStart = forward("etcdWatchStart");
+export const etcdWatchPoll = forward("etcdWatchPoll");
+export const etcdWatchStop = forward("etcdWatchStop");
+export const etcdLeaseList = forward("etcdLeaseList");
+export const etcdLeaseCall = forward("etcdLeaseCall");
+export const etcdAuthCall = forward("etcdAuthCall");
 
 // ZooKeeper
 export const zookeeperListPrefix = forward("zookeeperListPrefix");
@@ -645,6 +654,20 @@ export type {
   KvStatusMember,
   KvPrometheusMetrics,
   KvStatusResponse,
+  EtcdDefragResponse,
+  EtcdDefragMemberResult,
+  EtcdWatchStartRequest,
+  EtcdWatchStartResponse,
+  EtcdWatchPollResponse,
+  EtcdLeaseListResponse,
+  EtcdLeaseDetail,
+  EtcdAuthUserListResponse,
+  EtcdAuthUserDetail,
+  EtcdAuthPermission,
+  EtcdAuthRoleListResponse,
+  EtcdAuthRoleDetail,
+  EtcdPreflightResponse,
+  EtcdDangerousApproval,
   DocumentQueryResult,
   MongoDocumentResult,
   HistoryEntry,

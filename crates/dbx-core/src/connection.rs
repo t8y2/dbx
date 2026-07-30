@@ -1040,11 +1040,13 @@ impl AppState {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
-                            pool_activity.write().await.remove(&key);
-                            cancel_contexts.write().await.remove(&key);
-                            let removed = connections.write().await.remove(&key);
+                            let removed = remove_keepalive_pool_if_current(&connections, &key, target).await;
                             if let Some(pool) = removed {
+                                pool_activity.write().await.remove(&key);
+                                cancel_contexts.write().await.remove(&key);
                                 close_pool_kind_with_timeout(key, pool).await;
+                            } else {
+                                log::debug!("Skipping stale keepalive result for replaced pool '{key}'");
                             }
                             break;
                         }
@@ -1053,11 +1055,13 @@ impl AppState {
                                 "Connection keepalive timed out for '{key}' after {}s; invalidating pool",
                                 timeout.as_secs()
                             );
-                            pool_activity.write().await.remove(&key);
-                            cancel_contexts.write().await.remove(&key);
-                            let removed = connections.write().await.remove(&key);
+                            let removed = remove_keepalive_pool_if_current(&connections, &key, target).await;
                             if let Some(pool) = removed {
+                                pool_activity.write().await.remove(&key);
+                                cancel_contexts.write().await.remove(&key);
                                 close_pool_kind_with_timeout(key, pool).await;
+                            } else {
+                                log::debug!("Skipping stale keepalive timeout for replaced pool '{key}'");
                             }
                             break;
                         }
@@ -1429,7 +1433,7 @@ impl AppState {
             agent_connection_pool_database_type!() => {
                 let connect_params =
                     agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""));
-                if db_config.db_type != DatabaseType::Etcd && db_config.db_type != DatabaseType::ZooKeeper {
+                if db_config.db_type != DatabaseType::ZooKeeper {
                     let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
                     let mut initial_result = self
                         .agent_manager
@@ -1548,7 +1552,7 @@ impl AppState {
                     };
                     PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client)))
                 } else {
-                    // Kerberos JVM properties are connection-scoped; shared agent daemons must not inherit them.
+                    // ZooKeeper JVM properties are connection-scoped; shared agent daemons must not inherit them.
                     let mut client = self
                         .agent_manager
                         .spawn_with_extra_java_args(
@@ -2917,7 +2921,7 @@ impl AppState {
             (checks, redis_keys)
         };
 
-        let mut dead_keys = Vec::new();
+        let mut dead_pools = Vec::new();
         let timeout = crate::db::connection_timeout();
 
         // Check cloned pools (async I/O, no lock held)
@@ -3023,9 +3027,18 @@ impl AppState {
                     }
                 }
                 PoolKind::Agent(client) => {
-                    let mut agent = client.lock().await;
-                    match agent.test_connection(serde_json::json!({})).await {
+                    let Ok(mut agent) = client.try_lock() else {
+                        log::debug!("Agent connection pool '{key}' is busy; skipping resume health probe");
+                        continue;
+                    };
+                    match agent.validate_connection(Some(timeout)).await {
                         Ok(_) => true,
+                        Err(err) if is_agent_validate_connection_unsupported(&err) => {
+                            log::debug!(
+                                "Agent connection pool '{key}' does not support validate_connection; keeping pool"
+                            );
+                            true
+                        }
                         Err(e) => {
                             log::warn!("Agent connection pool '{key}' is unhealthy: {e}");
                             false
@@ -3042,7 +3055,7 @@ impl AppState {
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy {
-                dead_keys.push(key.clone());
+                dead_pools.push((key.clone(), agent_pool_identity(pool)));
             }
         }
 
@@ -3055,7 +3068,7 @@ impl AppState {
                         Ok(()) => {}
                         Err(e) => {
                             log::warn!("Redis connection pool '{key}' is unhealthy: {e}");
-                            dead_keys.push(key.clone());
+                            dead_pools.push((key.clone(), None));
                         }
                     }
                 }
@@ -3063,22 +3076,35 @@ impl AppState {
         }
 
         // Remove dead pools
-        if !dead_keys.is_empty() {
-            self.stop_keepalive_tasks(&dead_keys).await;
-            {
-                let mut activity = self.pool_activity.write().await;
-                for key in &dead_keys {
-                    activity.remove(key);
-                }
-            }
+        if !dead_pools.is_empty() {
             let mut conns = self.connections.write().await;
-            let mut removed = Vec::with_capacity(dead_keys.len());
-            for key in &dead_keys {
-                if let Some(pool) = conns.remove(key) {
-                    removed.push((key.clone(), pool));
+            let mut removed = Vec::with_capacity(dead_pools.len());
+            for (key, expected_agent) in &dead_pools {
+                let still_checked_pool = match expected_agent {
+                    Some(expected) => matches!(
+                        conns.get(key),
+                        Some(PoolKind::Agent(current)) if Arc::ptr_eq(current, expected)
+                    ),
+                    None => true,
+                };
+                if still_checked_pool {
+                    if let Some(pool) = conns.remove(key) {
+                        removed.push((key.clone(), pool));
+                    }
+                } else {
+                    log::debug!("Skipping stale Agent health result for replaced pool '{key}'");
                 }
             }
             drop(conns);
+
+            let removed_keys: Vec<String> = removed.iter().map(|(key, _)| key.clone()).collect();
+            self.stop_keepalive_tasks(&removed_keys).await;
+            {
+                let mut activity = self.pool_activity.write().await;
+                for key in &removed_keys {
+                    activity.remove(key);
+                }
+            }
             close_removed_pools(removed).await;
         }
 
@@ -3101,6 +3127,33 @@ impl AppState {
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
         let removed = self.drain_connection_pools(connection_id).await;
         close_removed_pools_in_background(&self.task_supervisor, removed);
+    }
+
+    pub async fn invalidate_agent_pool_if_current(
+        &self,
+        pool_key: &str,
+        expected: &Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    ) -> bool {
+        let removed = {
+            let mut pools = self.connections.write().await;
+            let is_current = matches!(
+                pools.get(pool_key),
+                Some(PoolKind::Agent(current)) if Arc::ptr_eq(current, expected)
+            );
+            if is_current {
+                self.task_supervisor.stop(&format!("keepalive:{pool_key}"));
+                pools.remove(pool_key)
+            } else {
+                None
+            }
+        };
+        let Some(pool) = removed else {
+            return false;
+        };
+        self.pool_activity.write().await.remove(pool_key);
+        self.postgres_cancel_contexts.write().await.remove(pool_key);
+        close_removed_pools_in_background(&self.task_supervisor, vec![(pool_key.to_string(), pool)]);
+        true
     }
 
     #[cfg(feature = "duckdb-bundled")]
@@ -3229,6 +3282,32 @@ enum KeepaliveTarget {
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
+}
+
+impl KeepaliveTarget {
+    fn matches_pool(&self, pool: &PoolKind) -> bool {
+        match (self, pool) {
+            (Self::Agent(expected), PoolKind::Agent(current)) => Arc::ptr_eq(expected, current),
+            (Self::SqlServer(expected), PoolKind::SqlServer(current)) => Arc::ptr_eq(expected, current),
+            (Self::Agent(_), _) | (_, PoolKind::Agent(_)) | (Self::SqlServer(_), _) | (_, PoolKind::SqlServer(_)) => {
+                false
+            }
+            _ => true,
+        }
+    }
+}
+
+async fn remove_keepalive_pool_if_current(
+    connections: &Arc<RwLock<HashMap<String, PoolKind>>>,
+    pool_key: &str,
+    target: &KeepaliveTarget,
+) -> Option<PoolKind> {
+    let mut pools = connections.write().await;
+    if pools.get(pool_key).is_some_and(|pool| target.matches_pool(pool)) {
+        pools.remove(pool_key)
+    } else {
+        None
+    }
 }
 
 fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Option<KeepaliveTarget> {
@@ -3648,7 +3727,14 @@ fn should_validate_existing_pool_before_reuse(db_type: DatabaseType) -> bool {
     // PostgreSQL uses deadpool's Fast recycling and the query executor's
     // ReconnectAndRetry path. An eager SELECT 1 here would add a network
     // round-trip before every query without improving recovery behavior.
-    !matches!(db_type, DatabaseType::Postgres)
+    !matches!(db_type, DatabaseType::Postgres | DatabaseType::Etcd)
+}
+
+fn agent_pool_identity(pool: &PoolKind) -> Option<Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>> {
+    match pool {
+        PoolKind::Agent(client) => Some(client.clone()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -4032,8 +4118,9 @@ mod tests {
     }
 
     #[test]
-    fn postgres_pool_reuse_skips_eager_validation_query() {
+    fn drivers_with_internal_recovery_skip_eager_pool_validation() {
         assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Postgres));
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Etcd));
         assert!(super::should_validate_existing_pool_before_reuse(DatabaseType::Mysql));
     }
 

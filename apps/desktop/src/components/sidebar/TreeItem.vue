@@ -29,6 +29,7 @@ import {
   UsersRound,
   CalendarClock,
   Gauge,
+  ShieldCheck,
   Lock,
   Archive,
   Square,
@@ -248,6 +249,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Database, colorClass: "text-sky-500" };
     case "etcd-dashboard":
       return { icon: Gauge, colorClass: "text-sky-500" };
+    case "etcd-access-control":
+      return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "mongo-db":

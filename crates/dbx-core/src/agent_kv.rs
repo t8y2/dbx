@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::{AgentCapability, AgentKvMethod};
@@ -462,6 +465,94 @@ pub struct KvStatusResponse {
     pub metrics: Option<KvPrometheusMetrics>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdDefragMemberResult {
+    pub endpoint: String,
+    pub status: String,
+    pub duration_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdDefragResponse {
+    pub members: Vec<EtcdDefragMemberResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdWatchStartRequest {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_revision: Option<KvInt64>,
+    pub include_prev_kv: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdWatchStartResponse {
+    pub watch_id: String,
+    pub started_revision: KvInt64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdWatchPollResponse {
+    pub watch_id: String,
+    pub batches: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdLeaseListResponse {
+    pub leases: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub partial: bool,
+}
+
+/// A short-lived challenge for an irreversible etcd operation. The token is
+/// opaque; the registry stores only a request digest, never the request body
+/// (which may include an Auth password).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdPreflightRequest {
+    pub action: String,
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdPreflightResponse {
+    pub token: String,
+    pub action: String,
+    pub confirmation_text: String,
+    pub expires_at_ms: u64,
+    pub cluster_id: Option<KvInt64>,
+}
+
+#[derive(Debug, Clone)]
+struct EtcdPreflightToken {
+    connection_id: String,
+    action: String,
+    params_digest: String,
+    confirmation_text: String,
+    expires_at_ms: u64,
+    cluster_id: Option<String>,
+}
+
+const ETCD_PREFLIGHT_TTL: Duration = Duration::from_secs(5 * 60);
+
+fn etcd_preflight_tokens() -> &'static Mutex<HashMap<String, EtcdPreflightToken>> {
+    static TOKENS: OnceLock<Mutex<HashMap<String, EtcdPreflightToken>>> = OnceLock::new();
+    TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn kv_list_prefix_params(prefix: &str, limit: usize, continuation: Option<&str>) -> serde_json::Value {
     kv_list_prefix_params_with_options(prefix, limit, continuation, None)
 }
@@ -690,6 +781,252 @@ pub async fn kv_status_core(state: &AppState, connection_id: &str) -> Result<KvS
         status.metrics = Some(collect_etcd_prometheus_metrics(&status.members, &metrics_options).await);
     }
     Ok(status)
+}
+
+pub async fn etcd_compact_core(
+    state: &AppState,
+    connection_id: &str,
+    revision: KvInt64,
+) -> Result<serde_json::Value, String> {
+    etcd_call(
+        state,
+        connection_id,
+        AgentKvMethod::Compact,
+        serde_json::json!({ "revision": revision }),
+        AgentCapability::EtcdCompaction,
+    )
+    .await
+}
+
+pub async fn etcd_defrag_core(
+    state: &AppState,
+    connection_id: &str,
+    endpoints: Vec<String>,
+) -> Result<EtcdDefragResponse, String> {
+    etcd_call(
+        state,
+        connection_id,
+        AgentKvMethod::Defrag,
+        serde_json::json!({ "endpoints": endpoints }),
+        AgentCapability::EtcdDefrag,
+    )
+    .await
+}
+
+pub async fn etcd_watch_start_core(
+    state: &AppState,
+    connection_id: &str,
+    request: EtcdWatchStartRequest,
+) -> Result<EtcdWatchStartResponse, String> {
+    let params = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    etcd_call(state, connection_id, AgentKvMethod::WatchStart, params, AgentCapability::EtcdWatch).await
+}
+
+pub async fn etcd_watch_poll_core(
+    state: &AppState,
+    connection_id: &str,
+    watch_id: &str,
+) -> Result<EtcdWatchPollResponse, String> {
+    etcd_call(
+        state,
+        connection_id,
+        AgentKvMethod::WatchPoll,
+        serde_json::json!({ "watchId": watch_id }),
+        AgentCapability::EtcdWatch,
+    )
+    .await
+}
+
+pub async fn etcd_watch_stop_core(
+    state: &AppState,
+    connection_id: &str,
+    watch_id: &str,
+) -> Result<serde_json::Value, String> {
+    etcd_call(
+        state,
+        connection_id,
+        AgentKvMethod::WatchStop,
+        serde_json::json!({ "watchId": watch_id }),
+        AgentCapability::EtcdWatch,
+    )
+    .await
+}
+
+pub async fn etcd_lease_list_core(state: &AppState, connection_id: &str) -> Result<EtcdLeaseListResponse, String> {
+    etcd_call(state, connection_id, AgentKvMethod::LeaseList, serde_json::json!({}), AgentCapability::EtcdLease).await
+}
+
+pub async fn etcd_lease_call_core(
+    state: &AppState,
+    connection_id: &str,
+    method: AgentKvMethod,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    etcd_call(state, connection_id, method, params, AgentCapability::EtcdLease).await
+}
+
+pub async fn etcd_auth_call_core(
+    state: &AppState,
+    connection_id: &str,
+    method: AgentKvMethod,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    etcd_call(state, connection_id, method, params, AgentCapability::EtcdAuth).await
+}
+
+/// Creates a single-use confirmation token bound to the connection, action,
+/// canonical request payload, and current etcd cluster identity.
+pub async fn etcd_preflight_core(
+    state: &AppState,
+    connection_id: &str,
+    request: EtcdPreflightRequest,
+) -> Result<EtcdPreflightResponse, String> {
+    let action = normalize_etcd_dangerous_action(&request.action)?;
+    ensure_etcd_dangerous_action_capability(state, connection_id, &action).await?;
+    let status = kv_status_core(state, connection_id).await?;
+    let now = current_time_millis();
+    let expires_at_ms = now.saturating_add(ETCD_PREFLIGHT_TTL.as_millis().min(u64::MAX as u128) as u64);
+    let cluster_id = status.cluster_id.as_ref().map(|value| value.0.clone());
+    let confirmation_text = etcd_confirmation_text(&action, &request.params);
+    let token = Uuid::new_v4().to_string();
+    let entry = EtcdPreflightToken {
+        connection_id: connection_id.to_string(),
+        action: action.clone(),
+        params_digest: etcd_params_digest(&request.params),
+        confirmation_text: confirmation_text.clone(),
+        expires_at_ms,
+        cluster_id: cluster_id.clone(),
+    };
+    let mut tokens = etcd_preflight_tokens().lock().map_err(|_| "ETCD_PREFLIGHT_UNAVAILABLE")?;
+    tokens.retain(|_, value| value.expires_at_ms > now);
+    tokens.insert(token.clone(), entry);
+    Ok(EtcdPreflightResponse { token, action, confirmation_text, expires_at_ms, cluster_id: cluster_id.map(KvInt64) })
+}
+
+/// Validates and consumes a token immediately before a dangerous mutation.
+/// Keeping this in Core makes the rule identical for Tauri and HTTP callers.
+pub async fn etcd_consume_preflight_core(
+    state: &AppState,
+    connection_id: &str,
+    action: &str,
+    params: &serde_json::Value,
+    token: &str,
+    confirmation_text: &str,
+) -> Result<(), String> {
+    let action = normalize_etcd_dangerous_action(action)?;
+    let now = current_time_millis();
+    let entry = etcd_preflight_tokens()
+        .lock()
+        .map_err(|_| "ETCD_PREFLIGHT_UNAVAILABLE")?
+        .remove(token)
+        .ok_or("ETCD_PREFLIGHT_INVALID: Request a new preflight confirmation")?;
+    if entry.expires_at_ms <= now {
+        return Err("ETCD_PREFLIGHT_EXPIRED: Request a new preflight confirmation".to_string());
+    }
+    if entry.connection_id != connection_id
+        || entry.action != action
+        || entry.params_digest != etcd_params_digest(params)
+        || entry.confirmation_text != confirmation_text
+    {
+        return Err("ETCD_PREFLIGHT_MISMATCH: Request a new preflight confirmation".to_string());
+    }
+    let current_cluster = kv_status_core(state, connection_id).await?.cluster_id.map(|value| value.0);
+    if current_cluster != entry.cluster_id {
+        return Err("ETCD_PREFLIGHT_CLUSTER_CHANGED: Request a new preflight confirmation".to_string());
+    }
+    Ok(())
+}
+
+pub fn etcd_is_dangerous_action(action: &str) -> bool {
+    normalize_etcd_dangerous_action(action).is_ok()
+}
+
+/// The preflight token binds the connection, action, canonical request, and
+/// cluster. Keep the operator interaction deliberately simple and consistent.
+fn etcd_confirmation_text(_action: &str, _params: &serde_json::Value) -> String {
+    "确认".to_string()
+}
+
+fn normalize_etcd_dangerous_action(action: &str) -> Result<String, String> {
+    match action {
+        "compact"
+        | "defrag"
+        | "lease_revoke"
+        | "auth_user_add"
+        | "auth_user_delete"
+        | "auth_user_change_password"
+        | "auth_user_grant_role"
+        | "auth_user_revoke_role"
+        | "auth_role_add"
+        | "auth_role_delete"
+        | "auth_role_grant_permission"
+        | "auth_role_revoke_permission" => Ok(action.to_string()),
+        _ => {
+            Err("ETCD_PREFLIGHT_ACTION_INVALID: This action does not support a destructive-operation preflight"
+                .to_string())
+        }
+    }
+}
+
+async fn ensure_etcd_dangerous_action_capability(
+    state: &AppState,
+    connection_id: &str,
+    action: &str,
+) -> Result<(), String> {
+    let capability = match action {
+        "compact" => AgentCapability::EtcdCompaction,
+        "defrag" => AgentCapability::EtcdDefrag,
+        "lease_revoke" => AgentCapability::EtcdLease,
+        _ => AgentCapability::EtcdAuth,
+    };
+    ensure_agent_kv_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    let PoolKind::Agent(client) = connections.get(connection_id).ok_or("Connection not found")? else {
+        return Err("Not an agent key-value connection".to_string());
+    };
+    if !client.lock().await.supports_capability(capability) {
+        return Err(format!(
+            "ETCD_CAPABILITY_UNSUPPORTED: Installed etcd Agent does not support {}. Update the etcd driver and reconnect.",
+            capability.as_str()
+        ));
+    }
+    Ok(())
+}
+
+fn etcd_params_digest(params: &serde_json::Value) -> String {
+    let canonical = canonical_json(params);
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            let body = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    format!("{}:{}", serde_json::to_string(key).unwrap_or_default(), canonical_json(value))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{body}}}")
+        }
+        serde_json::Value::Array(values) => {
+            format!("[{}]", values.iter().map(canonical_json).collect::<Vec<_>>().join(","))
+        }
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+async fn etcd_call<T: serde::de::DeserializeOwned + Send + 'static>(
+    state: &AppState,
+    connection_id: &str,
+    method: AgentKvMethod,
+    params: serde_json::Value,
+    capability: AgentCapability,
+) -> Result<T, String> {
+    call_agent_kv(state, connection_id, method, params, vec![capability]).await
 }
 
 const ETCD_METRICS_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1261,18 +1598,23 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
             .is_some_and(|value| value.as_str() == Some("0") || value.as_i64() == Some(0));
     ensure_agent_kv_pool(state, connection_id).await?;
 
-    let connections = state.connections.read().await;
-    let pool = connections.get(connection_id).ok_or("Connection not found")?;
-    match pool {
-        PoolKind::Agent(client) => {
-            let mut client = client.lock().await;
-            if !client.supports_capability(AgentCapability::Kv) {
-                return Err("Agent does not support key-value operations".to_string());
-            }
-            if let Some(capability) =
-                required_capabilities.into_iter().find(|capability| !client.supports_capability(*capability))
-            {
-                return Err(match capability {
+    let client = {
+        let connections = state.connections.read().await;
+        match connections.get(connection_id) {
+            Some(PoolKind::Agent(client)) => client.clone(),
+            Some(_) => return Err("Not an agent key-value connection".to_string()),
+            None => return Err("Connection not found".to_string()),
+        }
+    };
+    let result = {
+        let mut agent = client.lock().await;
+        if !agent.supports_capability(AgentCapability::Kv) {
+            return Err("Agent does not support key-value operations".to_string());
+        }
+        if let Some(capability) =
+            required_capabilities.into_iter().find(|capability| !agent.supports_capability(*capability))
+        {
+            return Err(match capability {
                     AgentCapability::KvTtl => {
                         "Installed etcd Agent does not support TTL. Update the etcd driver and reconnect.".to_string()
                     }
@@ -1292,15 +1634,31 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
                         "ETCD_HISTORY_UNSUPPORTED: Installed etcd Agent does not support key history. Update the etcd driver and reconnect."
                             .to_string()
                     }
+                    AgentCapability::EtcdCompaction
+                    | AgentCapability::EtcdDefrag
+                    | AgentCapability::EtcdWatch
+                    | AgentCapability::EtcdLease
+                    | AgentCapability::EtcdAuth => {
+                        format!(
+                            "ETCD_CAPABILITY_UNSUPPORTED: Installed etcd Agent does not support {}. Update the etcd driver and reconnect.",
+                            capability.as_str()
+                        )
+                    }
                     _ => format!("Agent does not support required capability: {}", capability.as_str()),
                 });
-            }
-            client
-                .call_kv_method(method, params)
-                .await
-                .map_err(|error| normalize_agent_kv_error(&error, method, create_only_write))
         }
-        _ => Err("Not an agent key-value connection".to_string()),
+        agent.call_kv_method(method, params).await
+    };
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let transient = is_transient_etcd_connection_error(&error);
+            let normalized = normalize_agent_kv_error(&error, method, create_only_write);
+            if transient && state.invalidate_agent_pool_if_current(connection_id, &client).await {
+                log::warn!("Invalidated etcd Agent pool '{connection_id}' after transient {} failure", method.as_str());
+            }
+            Err(normalized)
+        }
     }
 }
 
@@ -1319,7 +1677,71 @@ fn normalize_agent_kv_error(error: &str, method: AgentKvMethod, create_only_writ
             _ => "ETCD_CAS_CONFLICT: The Key changed after it was loaded".to_string(),
         };
     }
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("unauthenticated") {
+        return "ETCD_UNAUTHENTICATED: etcd rejected the configured credentials".to_string();
+    }
+    if lower.contains("permission_denied") || lower.contains("permission denied") {
+        return "ETCD_PERMISSION_DENIED: The current etcd user is not authorized for this operation".to_string();
+    }
+    if lower.contains("deadline_exceeded") || lower.contains("deadline exceeded") || lower.contains("timed out") {
+        if is_mutating_etcd_method(method) {
+            return "ETCD_OPERATION_RESULT_UNKNOWN: The request timed out. Refresh the relevant data before retrying because the operation may have completed on etcd."
+                .to_string();
+        }
+        return "ETCD_CONNECTION_TIMEOUT: etcd did not respond in time. The connection will be re-established on the next operation."
+            .to_string();
+    }
+    if is_interrupted_etcd_connection_error(&lower) {
+        if is_mutating_etcd_method(method) {
+            return "ETCD_OPERATION_RESULT_UNKNOWN: The connection was interrupted. Refresh the relevant data before retrying because the operation may have completed on etcd."
+                .to_string();
+        }
+        return "ETCD_CONNECTION_UNAVAILABLE: etcd is temporarily unavailable. The connection will be re-established on the next operation."
+            .to_string();
+    }
     message.to_string()
+}
+
+fn is_transient_etcd_connection_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    is_interrupted_etcd_connection_error(&lower)
+        || lower.contains("deadline_exceeded")
+        || lower.contains("deadline exceeded")
+        || lower.contains("timed out")
+}
+
+fn is_interrupted_etcd_connection_error(lower: &str) -> bool {
+    lower.contains("unavailable")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("connection closed")
+        || lower.contains("transport closed")
+        || lower.contains("no route to host")
+        || lower.contains("broken pipe")
+}
+
+fn is_mutating_etcd_method(method: AgentKvMethod) -> bool {
+    matches!(
+        method,
+        AgentKvMethod::Put
+            | AgentKvMethod::Delete
+            | AgentKvMethod::Rename
+            | AgentKvMethod::Compact
+            | AgentKvMethod::Defrag
+            | AgentKvMethod::LeaseGrant
+            | AgentKvMethod::LeaseKeepalive
+            | AgentKvMethod::LeaseRevoke
+            | AgentKvMethod::AuthUserAdd
+            | AgentKvMethod::AuthUserDelete
+            | AgentKvMethod::AuthUserChangePassword
+            | AgentKvMethod::AuthUserGrantRole
+            | AgentKvMethod::AuthUserRevokeRole
+            | AgentKvMethod::AuthRoleAdd
+            | AgentKvMethod::AuthRoleDelete
+            | AgentKvMethod::AuthRoleGrantPermission
+            | AgentKvMethod::AuthRoleRevokePermission
+    )
 }
 
 fn strip_recent_agent_stderr(error: &str) -> &str {
@@ -1370,6 +1792,44 @@ mod tests {
     }
 
     #[test]
+    fn maps_grpc_connection_failures_to_stable_etcd_errors() {
+        assert_eq!(
+            normalize_agent_kv_error(
+                "Agent RPC error (-1): io.grpc.StatusRuntimeException: UNAVAILABLE: io exception",
+                AgentKvMethod::Get,
+                false,
+            ),
+            "ETCD_CONNECTION_UNAVAILABLE: etcd is temporarily unavailable. The connection will be re-established on the next operation."
+        );
+        assert_eq!(
+            normalize_agent_kv_error(
+                "Agent RPC error (-1): io.grpc.StatusRuntimeException: DEADLINE_EXCEEDED",
+                AgentKvMethod::Put,
+                false,
+            ),
+            "ETCD_OPERATION_RESULT_UNKNOWN: The request timed out. Refresh the relevant data before retrying because the operation may have completed on etcd."
+        );
+        assert_eq!(
+            normalize_agent_kv_error(
+                "Agent RPC error (-1): io.grpc.StatusRuntimeException: UNAVAILABLE: connection reset",
+                AgentKvMethod::Put,
+                false,
+            ),
+            "ETCD_OPERATION_RESULT_UNKNOWN: The connection was interrupted. Refresh the relevant data before retrying because the operation may have completed on etcd."
+        );
+        assert_eq!(
+            normalize_agent_kv_error(
+                "Agent RPC error (-1): transport closed",
+                AgentKvMethod::Put,
+                false,
+            ),
+            "ETCD_OPERATION_RESULT_UNKNOWN: The connection was interrupted. Refresh the relevant data before retrying because the operation may have completed on etcd."
+        );
+        assert!(is_transient_etcd_connection_error("io.grpc.StatusRuntimeException: UNAVAILABLE: connection closed"));
+        assert!(!is_transient_etcd_connection_error("io.grpc.StatusRuntimeException: PERMISSION_DENIED"));
+    }
+
+    #[test]
     fn keeps_non_create_cas_conflicts_distinct_and_sanitizes_other_rpc_errors() {
         assert_eq!(
             normalize_agent_kv_error(
@@ -1385,7 +1845,7 @@ mod tests {
                 AgentKvMethod::Get,
                 false,
             ),
-            "etcdserver: request timed out"
+            "ETCD_CONNECTION_TIMEOUT: etcd did not respond in time. The connection will be re-established on the next operation."
         );
     }
 
@@ -1745,5 +2205,22 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("certificate and key must be configured together"));
+    }
+
+    #[test]
+    fn preflight_digest_is_stable_for_reordered_json_objects() {
+        let first = serde_json::json!({ "user": "admin", "role": "ops", "nested": { "b": 2, "a": 1 } });
+        let second = serde_json::json!({ "nested": { "a": 1, "b": 2 }, "role": "ops", "user": "admin" });
+        assert_eq!(etcd_params_digest(&first), etcd_params_digest(&second));
+    }
+
+    #[test]
+    fn etcd_auth_mutations_require_preflight() {
+        assert!(etcd_is_dangerous_action("compact"));
+        assert!(etcd_is_dangerous_action("lease_revoke"));
+        assert!(etcd_is_dangerous_action("auth_role_grant_permission"));
+        assert!(etcd_is_dangerous_action("auth_user_add"));
+        assert!(etcd_is_dangerous_action("auth_role_add"));
+        assert!(!etcd_is_dangerous_action("lease_grant"));
     }
 }

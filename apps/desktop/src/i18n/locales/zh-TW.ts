@@ -865,6 +865,7 @@ export default withEnglishFallback({
     openDataTabs: "已開啟的資料表",
     gridfs: "GridFS",
     etcdDashboard: "etcd 儀表板",
+    etcdAccessControl: "etcd 存取控制",
   },
   executionSummary: {
     empty: "無摘要",
@@ -4613,6 +4614,7 @@ export default withEnglishFallback({
     searchPlaceholder: "搜尋 Key 或值內容",
     searchProgress: "已掃描 {scanned} 個 Key，符合 {matched} 個",
     exportResults: "匯出結果",
+    clearSearchResults: "清空結果",
     exported: "已匯出 {count} 個 Key",
     importPreview: "匯入預覽",
     syncPreview: "同步預覽",

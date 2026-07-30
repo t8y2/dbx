@@ -31,16 +31,6 @@ export function computeAutoRefreshTick(enabled: boolean, countdownTtl: number): 
 }
 
 /**
- * Determine whether auto-refresh should be automatically disabled
- * after a server load completes (e.g. key expired or deleted).
- *
- * @param ttl  The TTL value returned by the server (seconds, -1 = no expiry).
- */
-export function shouldStopAutoRefresh(ttl: number): boolean {
-  return ttl <= 0;
-}
-
-/**
  * Compute the TTL value that should be displayed in the badge.
  *
  * When auto-refresh is active, the live countdown value is shown. The

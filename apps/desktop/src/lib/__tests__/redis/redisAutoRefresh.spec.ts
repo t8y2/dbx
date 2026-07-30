@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
+import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
 
 describe("computeAutoRefreshTick", () => {
   it("returns idle when auto-refresh is disabled", () => {
@@ -26,22 +26,6 @@ describe("normalizeRedisAutoRefreshInterval", () => {
     expect(normalizeRedisAutoRefreshInterval(0)).toBe(1);
     expect(normalizeRedisAutoRefreshInterval(1.9)).toBe(1);
     expect(normalizeRedisAutoRefreshInterval(9_999)).toBe(3600);
-  });
-});
-
-describe("shouldStopAutoRefresh", () => {
-  it("returns true when TTL is zero (key expired)", () => {
-    expect(shouldStopAutoRefresh(0)).toBe(true);
-  });
-
-  it("returns true when TTL is negative (no expiry or key deleted)", () => {
-    expect(shouldStopAutoRefresh(-1)).toBe(true);
-    expect(shouldStopAutoRefresh(-2)).toBe(true);
-  });
-
-  it("returns false when TTL is positive (key still alive)", () => {
-    expect(shouldStopAutoRefresh(1)).toBe(false);
-    expect(shouldStopAutoRefresh(3600)).toBe(false);
   });
 });
 

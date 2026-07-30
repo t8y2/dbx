@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
+import { computed, ref, shallowRef, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, watch } from "vue";
 import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
@@ -25,7 +25,7 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { createShikiJsonHighlighter, type JsonHighlighter } from "@/lib/common/shikiJsonHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
-import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
+import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
@@ -174,6 +174,11 @@ const refreshingTtl = ref(false);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
 let ttlRefreshRequestId = 0;
+let redisValueViewerIsActive = true;
+
+function canRunAutoRefresh(): boolean {
+  return redisValueViewerIsActive && document.visibilityState !== "hidden";
+}
 
 function disableAutoRefresh() {
   autoRefreshEnabled.value = false;
@@ -193,13 +198,7 @@ function selectAutoRefreshInterval(interval: number) {
 
 function startAutoRefresh() {
   stopAutoRefresh();
-  if (!autoRefreshEnabled.value || !data.value) return;
-  if (shouldStopAutoRefresh(data.value.ttl)) {
-    // A non-expiring or missing key has no TTL to poll. Keep the persisted
-    // preference, but make the visible state match the stopped timers.
-    autoRefreshEnabled.value = false;
-    return;
-  }
+  if (!autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
 
   countdownTtl.value = data.value.ttl;
   countdownTimer = setInterval(() => {
@@ -213,7 +212,7 @@ function startAutoRefresh() {
 }
 
 async function refreshTtl() {
-  if (refreshingTtl.value || loading.value || editingTtl.value || savingTtl.value || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value) return;
+  if (refreshingTtl.value || loading.value || editingTtl.value || savingTtl.value || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
 
   const requestId = ++ttlRefreshRequestId;
   refreshingTtl.value = true;
@@ -221,7 +220,7 @@ async function refreshTtl() {
     const ttl = await api.redisGetTtl(props.connectionId, props.db, props.keyRaw);
     // A draft may be created while the request is in flight. Never apply even
     // a missing-key response after the user has started editing.
-    if (requestId !== ttlRefreshRequestId || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value) return;
+    if (requestId !== ttlRefreshRequestId || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
 
     if (ttl === -2) {
       data.value = null;
@@ -236,15 +235,6 @@ async function refreshTtl() {
 
     const refreshedValue = { ...data.value, ttl };
     data.value = refreshedValue;
-    emit("loaded", refreshedValue);
-    if (shouldStopAutoRefresh(ttl)) {
-      stopAutoRefresh();
-      // An external PERSIST makes this key non-expiring. As with a polling
-      // error, do not overwrite the user's saved preference, but do not show
-      // auto-refresh as active after its timers have stopped.
-      autoRefreshEnabled.value = false;
-      return;
-    }
     countdownTtl.value = ttl;
   } catch {
     // A failed background read must not retry in a tight loop. Manual refresh
@@ -272,6 +262,14 @@ function stopAutoRefresh() {
     clearInterval(countdownTimer);
     countdownTimer = null;
   }
+}
+
+function handleDocumentVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    stopAutoRefresh();
+    return;
+  }
+  startAutoRefresh();
 }
 
 const hashSortBy = ref<"field" | "value" | null>(null);
@@ -1103,7 +1101,7 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
   } finally {
     if (requestId === loadRequestId) {
       loading.value = false;
-      if (autoRefreshEnabled.value && data.value && data.value.ttl > 0) {
+      if (autoRefreshEnabled.value && data.value) {
         startAutoRefresh();
       }
     }
@@ -1944,6 +1942,7 @@ watch(showMemberDetail, (open) => {
 
 onMounted(() => {
   window.addEventListener("pointerdown", handleValueViewerPointerDown, true);
+  document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
   void load();
   void createShikiJsonHighlighter({
     appearance: () => redisJsonAppearance.value,
@@ -1955,8 +1954,18 @@ onMounted(() => {
       redisJsonHighlighter.value = undefined;
     });
 });
+onActivated(() => {
+  redisValueViewerIsActive = true;
+  startAutoRefresh();
+});
+onDeactivated(() => {
+  redisValueViewerIsActive = false;
+  stopAutoRefresh();
+});
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleValueViewerPointerDown, true);
+  document.removeEventListener("visibilitychange", handleDocumentVisibilityChange);
+  redisValueViewerIsActive = false;
   stopAutoRefresh();
   stopResizeHashColumns();
   stopResizeZsetColumns();

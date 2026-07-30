@@ -3873,6 +3873,9 @@ export default withEnglishFallback({
       error: "오류",
       cancelled: "취소됨",
     },
+    fileProgress: "파일 {current}/{total}",
+    fileColumn: "파일",
+    totalFiles: "{count}개 파일",
   },
   sqlFileTree: {
     title: "SQL 파일",

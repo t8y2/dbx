@@ -411,23 +411,26 @@ async function startExecution() {
         // during multi-file execution).  The backend emits a file-start
         // event (status=Running, fileIndex set) and a file-done event
         // (status=StatementDone, fileIndex set, counters are diff-based).
+        // Resolve user-visible names via displayFileNames (by fileIndex →
+        // previews) so Web mode never shows server temp UUID paths.
         if (previews.value.length > 1) {
-          const fi = (next as Record<string, unknown>).fileIndex as number | undefined;
-          const fn = (next as Record<string, unknown>).fileName as string | undefined;
+          const fi = next.fileIndex;
           if (fi != null) {
+            const preview = previews.value[fi];
+            const displayName = preview ? (displayFileNames.value.get(preview.filePath) ?? next.fileName ?? "") : (next.fileName ?? "");
             if (next.status === "running") {
               currentFileIndex.value = fi;
-              currentFileName.value = fn ?? "";
+              currentFileName.value = displayName;
             } else if (next.status === "statementDone") {
               perFileResults.value[fi] = {
-                fileName: fn ?? "",
+                fileName: displayName,
                 statementIndex: next.statementIndex,
                 successCount: next.successCount,
                 failureCount: next.failureCount,
                 affectedRows: next.affectedRows,
               };
               currentFileIndex.value = fi;
-              currentFileName.value = fn ?? "";
+              currentFileName.value = displayName;
             }
           }
         }

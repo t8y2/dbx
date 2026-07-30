@@ -2467,6 +2467,8 @@ export interface SqlFileProgress {
   elapsedMs: number;
   statementSummary: string;
   error?: string | null;
+  fileIndex?: number;
+  fileName?: string;
 }
 
 export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> {

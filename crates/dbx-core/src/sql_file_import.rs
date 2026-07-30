@@ -62,8 +62,11 @@ where
     }
 
     pub fn emit(&mut self, progress: SqlFileProgress) {
-        if sql_file_progress_is_immediate(progress.status) {
-            // Preserve ordering and final counters before terminal or failure events.
+        if sql_file_progress_is_immediate(progress.status) || progress.file_index.is_some() {
+            // Preserve ordering and final counters before terminal or failure
+            // events.  File-boundary events (file_index is Some) are also
+            // emitted immediately so rapid multi-file runs don't lose per-file
+            // summaries through throttling.
             self.flush_pending();
             (self.emit)(progress);
             return;
@@ -800,6 +803,8 @@ pub fn sql_file_progress(
         elapsed_ms: started_at.elapsed().as_millis(),
         statement_summary: statement_summary.to_string(),
         error,
+        file_index: None,
+        file_name: None,
     }
 }
 
@@ -1462,6 +1467,21 @@ mod tests {
             elapsed_ms: statement_index as u128,
             statement_summary: format!("statement {statement_index}"),
             error: None,
+            file_index: None,
+            file_name: None,
+        }
+    }
+
+    fn test_file_progress(
+        status: SqlFileStatus,
+        statement_index: usize,
+        file_index: usize,
+        file_name: &str,
+    ) -> SqlFileProgress {
+        SqlFileProgress {
+            file_index: Some(file_index),
+            file_name: Some(file_name.to_string()),
+            ..test_progress(status, statement_index)
         }
     }
 
@@ -1806,5 +1826,52 @@ mod tests {
         assert_eq!(mysql_use_database_target("SELECT 1"), None);
         assert_eq!(mysql_use_database_target("USE"), None);
         assert_eq!(mysql_use_database_target("USE app_db SELECT 1"), None);
+    }
+
+    #[test]
+    fn file_boundary_events_bypass_throttling_and_retain_order() {
+        // Regression: rapid multi-file runs must not lose per-file boundary
+        // events through the progress emitter's 100 ms throttle window.
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut emitted = Vec::new();
+        {
+            let mut emitter =
+                SqlFileProgressEmitter::with_clock(|progress| emitted.push(progress), || base + elapsed.get());
+
+            // Simulate two small files executing within the same throttle window.
+            for statement_index in 1..=3 {
+                emitter.emit(test_progress(SqlFileStatus::StatementDone, statement_index));
+            }
+            // File 0 start + done.
+            emitter.emit(test_file_progress(SqlFileStatus::Running, 3, 0, "a.sql"));
+            emitter.emit(test_file_progress(SqlFileStatus::StatementDone, 3, 0, "a.sql"));
+
+            for statement_index in 4..=6 {
+                emitter.emit(test_progress(SqlFileStatus::StatementDone, statement_index));
+            }
+            // File 1 start + done — still within the same throttle window.
+            emitter.emit(test_file_progress(SqlFileStatus::Running, 6, 1, "b.sql"));
+            emitter.emit(test_file_progress(SqlFileStatus::StatementDone, 6, 1, "b.sql"));
+
+            emitter.emit(test_progress(SqlFileStatus::Done, 6));
+        }
+
+        let file_boundary_events: Vec<_> = emitted
+            .iter()
+            .filter(|p| p.file_index.is_some())
+            .map(|p| (p.status, p.file_index, p.file_name.clone()))
+            .collect();
+        assert_eq!(
+            file_boundary_events,
+            vec![
+                (SqlFileStatus::Running, Some(0), Some("a.sql".to_string())),
+                (SqlFileStatus::StatementDone, Some(0), Some("a.sql".to_string())),
+                (SqlFileStatus::Running, Some(1), Some("b.sql".to_string())),
+                (SqlFileStatus::StatementDone, Some(1), Some("b.sql".to_string())),
+            ],
+            "file-boundary events must be emitted immediately, in order, without being dropped by throttling"
+        );
+        assert_eq!(emitted.last().unwrap().status, SqlFileStatus::Done);
     }
 }

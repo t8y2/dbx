@@ -871,7 +871,9 @@ fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &
         return;
     }
 
-    if matches!(config.provider, AiProvider::Ollama) {
+    if matches!(config.provider, AiProvider::MiniMax) {
+        body["thinking"] = json!({ "type": "disabled" });
+    } else if matches!(config.provider, AiProvider::Ollama) {
         // Ollama's OpenAI-compatible API uses reasoning_effort instead of
         // forwarding provider-specific chat template arguments.
         body["reasoning_effort"] = json!("none");
@@ -1047,7 +1049,11 @@ fn emit_responses_function_call_item(
 fn provider_requires_api_key(provider: &AiProvider) -> bool {
     matches!(
         provider,
-        AiProvider::Claude | AiProvider::Openai | AiProvider::Gemini | AiProvider::Deepseek | AiProvider::Qwen
+        AiProvider::Claude
+            | AiProvider::Openai
+            | AiProvider::Gemini
+            | AiProvider::Deepseek
+            | AiProvider::Qwen
             | AiProvider::MiniMax
     )
 }
@@ -1463,10 +1469,11 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                     let models = list_openai_compatible_models(&client, config).await?;
                     retain_ollama_completion_models(&client, config, models).await
                 }
-                AiProvider::Openai | AiProvider::Deepseek | AiProvider::Qwen | AiProvider::MiniMax
-                | AiProvider::OpenaiCompatible => {
-                    list_openai_compatible_models(&client, config).await?
-                }
+                AiProvider::Openai
+                | AiProvider::Deepseek
+                | AiProvider::Qwen
+                | AiProvider::MiniMax
+                | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await?,
                 AiProvider::Custom => {
                     if uses_anthropic_messages_api(config) {
                         list_claude_models(&client, config).await?
@@ -3810,8 +3817,8 @@ mod tests {
         gemini_text, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after,
         measure_first_stream_chunk, merge_global_max_retries, ollama_selected_model_tool_support, openai_response_text,
         openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
-        parse_model_list_response, parse_retry_after, parse_retry_after_secs, resolve_endpoint,
-        resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
+        parse_model_list_response, parse_retry_after, parse_retry_after_secs, provider_requires_api_key,
+        resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
         resolve_ollama_show_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
         responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
         set_chat_completion_token_limit, stream, stream_claude, stream_claude_with_tools, stream_data_payload,
@@ -4701,9 +4708,14 @@ mod tests {
             assert!(maybe_bearer_headers(&config).unwrap().get(AUTHORIZATION).is_none());
         }
 
-        for provider in
-            [AiProvider::Claude, AiProvider::Openai, AiProvider::Gemini, AiProvider::Deepseek, AiProvider::Qwen, AiProvider::MiniMax]
-        {
+        for provider in [
+            AiProvider::Claude,
+            AiProvider::Openai,
+            AiProvider::Gemini,
+            AiProvider::Deepseek,
+            AiProvider::Qwen,
+            AiProvider::MiniMax,
+        ] {
             let config = AiConfig { provider, ..base.clone() };
             assert_eq!(validate_config(&config).unwrap_err(), "API key is required");
             assert_eq!(validate_model_list_config(&config).unwrap_err(), "API key is required");
@@ -5791,6 +5803,39 @@ mod tests {
                 "chat_template_kwargs": { "enable_thinking": false }
             }))
         );
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn minimax_uses_native_thinking_toggle() {
+        let config = AiConfig {
+            provider: AiProvider::MiniMax,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.minimax.io/v1".to_string(),
+            model: "MiniMax-M3".to_string(),
+            models: vec![],
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
+            context_window: None,
+            max_retries: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
+        };
+        let mut body = serde_json::json!({ "model": &config.model });
+
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("extra_body").is_none());
         assert!(body.get("reasoning_effort").is_none());
     }
 

@@ -282,6 +282,27 @@ describe("normalizeEditorSettings - continueOnErrorOnBatch", () => {
   });
 });
 
+describe("normalizeEditorSettings - clickTableNavigationTarget", () => {
+  it("defaults clickTableNavigationTarget to 'data'", () => {
+    expect(normalizeEditorSettings({}).clickTableNavigationTarget).toBe("data");
+  });
+
+  it("preserves explicit 'ddl' value", () => {
+    expect(normalizeEditorSettings({ clickTableNavigationTarget: "ddl" }).clickTableNavigationTarget).toBe("ddl");
+  });
+
+  it("preserves explicit 'data' value", () => {
+    expect(normalizeEditorSettings({ clickTableNavigationTarget: "data" }).clickTableNavigationTarget).toBe("data");
+  });
+
+  it("falls back to 'data' for invalid values", () => {
+    expect(normalizeEditorSettings({ clickTableNavigationTarget: "invalid" } as any).clickTableNavigationTarget).toBe("data");
+    expect(normalizeEditorSettings({ clickTableNavigationTarget: undefined } as any).clickTableNavigationTarget).toBe("data");
+    expect(normalizeEditorSettings({ clickTableNavigationTarget: null } as any).clickTableNavigationTarget).toBe("data");
+    expect(normalizeEditorSettings({ clickTableNavigationTarget: 123 } as any).clickTableNavigationTarget).toBe("data");
+  });
+});
+
 describe("normalizeEditorSettings - tabLayout", () => {
   it("defaults tabLayout to scroll", () => {
     expect(normalizeEditorSettings({}).tabLayout).toBe("scroll");

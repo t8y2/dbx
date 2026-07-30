@@ -1433,6 +1433,10 @@ async function onClickTable(table: SqlObjectNavigationTarget) {
     showQueryEditorDdlDialog.value = true;
     return;
   }
+  if (settingsStore.editorSettings.clickTableNavigationTarget === "ddl") {
+    queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, "ddl", undefined, target.catalog);
+    return;
+  }
   try {
     await openTableTarget(target, { tableInfoTab: "ddl" });
   } catch (e: any) {

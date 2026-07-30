@@ -4601,6 +4601,8 @@ export default withEnglishFallback({
     confirmUnsavedSqlCloseDescription: "关闭后，有未保存内容的 SQL 标签页会直接关闭或退出，不再弹出保存确认。",
     prefillNewQueryWithSelect: "新建查询时预填充 SELECT 语句",
     prefillNewQueryWithSelectDescription: "新建查询时，根据当前激活的数据表标签页或侧边栏选中的表，自动在编辑器中填充 SELECT * FROM <表名>。",
+    clickTableNavigationTarget: "Ctrl+点击表名打开 DDL",
+    clickTableNavigationTargetDescription: "开启后，Ctrl/Cmd+点击表名将打开表结构编辑器（DDL）；关闭则打开表数据视图。",
     sqlVariableSyntax: "SQL 变量与占位符替换",
     sqlVariableSyntaxDescription: "按数据库类型选择执行 SQL 前替换哪些变量与占位符语法，默认全部开启。",
     sqlVariableSyntax_positional: "位置占位符",

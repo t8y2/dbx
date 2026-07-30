@@ -4352,6 +4352,8 @@ export default withEnglishFallback({
     confirmUnsavedSqlCloseDescription: "無効時、未保存の編集があるSQLタブは保存確認ダイアログなしで閉じるか終了します。",
     prefillNewQueryWithSelect: "新規クエリに SELECT を自動入力",
     prefillNewQueryWithSelectDescription: "新規クエリ作成時、アクティブなテーブルタブまたはサイドバーで選択したテーブルに基づき、エディタに SELECT * FROM <テーブル名> を自動入力します。",
+    clickTableNavigationTarget: "Ctrl+クリックでテーブル構造を開く",
+    clickTableNavigationTargetDescription: "有効にすると、Ctrl/Cmd+クリックでテーブル構造エディタ（DDL）を開きます。無効の場合はテーブルデータビューを開きます。",
     sqlVariableSyntax: "SQL 変数・プレースホルダー置換",
     sqlVariableSyntaxDescription: "SQL 実行前に置換する変数・プレースホルダー構文をデータベース種別ごとに選択します。既定ではすべて有効です。",
     sqlVariableSyntax_positional: "位置プレースホルダー",

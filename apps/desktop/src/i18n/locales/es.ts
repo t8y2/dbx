@@ -4363,6 +4363,8 @@ export default withEnglishFallback({
     confirmUnsavedSqlCloseDescription: "Cuando se desactiva, las pestañas SQL con ediciones sin guardar se cierran o salen sin el diálogo de confirmación de guardado.",
     prefillNewQueryWithSelect: "Rellenar nueva consulta con SELECT *",
     prefillNewQueryWithSelectDescription: "Al crear una nueva consulta, rellena el editor con SELECT * FROM <tabla> según la pestaña de tabla activa o la tabla seleccionada en la barra lateral.",
+    clickTableNavigationTarget: "Ctrl+Clic abre DDL de tabla",
+    clickTableNavigationTargetDescription: "Cuando está activado, Ctrl/Cmd+clic en el nombre de la tabla abre el editor de estructura (DDL). Cuando está desactivado, abre la vista de datos.",
     sqlVariableSyntax: "Sustitución de variables y marcadores SQL",
     sqlVariableSyntaxDescription: "Elige qué sintaxis de variables y marcadores sustituye DBX antes de ejecutar SQL, por tipo de base de datos. Todas están habilitadas de forma predeterminada.",
     sqlVariableSyntax_positional: "Marcador posicional",

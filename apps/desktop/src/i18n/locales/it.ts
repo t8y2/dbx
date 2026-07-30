@@ -4361,6 +4361,8 @@ export default withEnglishFallback({
     confirmUnsavedSqlCloseDescription: "Se disattivato, le schede SQL con modifiche non salvate verranno chiuse o usciranno senza la finestra di conferma di salvataggio.",
     prefillNewQueryWithSelect: "Precompila nuova query con SELECT *",
     prefillNewQueryWithSelectDescription: "Alla creazione di una nuova query, precompila l'editor con SELECT * FROM <tabella> in base alla scheda tabella attiva o alla tabella selezionata nella barra laterale.",
+    clickTableNavigationTarget: "Ctrl+Clic apre DDL tabella",
+    clickTableNavigationTargetDescription: "Quando attivato, Ctrl/Cmd+clic sul nome della tabella apre l'editor di struttura (DDL). Quando disattivato, apre la vista dati.",
     sqlVariableSyntax: "Sostituzione di variabili e segnaposto SQL",
     sqlVariableSyntaxDescription: "Scegli quali sintassi di variabili e segnaposto DBX sostituisce prima di eseguire SQL, per tipo di database. Tutte abilitate per impostazione predefinita.",
     sqlVariableSyntax_positional: "Segnaposto posizionale",

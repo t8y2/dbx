@@ -4363,6 +4363,8 @@ export default withEnglishFallback({
     confirmUnsavedSqlCloseDescription: "Quando desativado, abas SQL com edições não salvas são fechadas ou o app é encerrado sem a caixa de diálogo de confirmação de salvamento.",
     prefillNewQueryWithSelect: "Preencher nova consulta com SELECT *",
     prefillNewQueryWithSelectDescription: "Ao criar uma nova consulta, preenche o editor com SELECT * FROM <tabela> com base na aba de tabela ativa ou na tabela selecionada na barra lateral.",
+    clickTableNavigationTarget: "Ctrl+Clique abre DDL da tabela",
+    clickTableNavigationTargetDescription: "Quando ativado, Ctrl/Cmd+clicar no nome da tabela abre o editor de estrutura (DDL). Quando desativado, abre a visualização de dados.",
     sqlVariableSyntax: "Substituição de variáveis e espaços reservados SQL",
     sqlVariableSyntaxDescription: "Escolha quais sintaxes de variáveis e espaços reservados o DBX substitui antes de executar SQL, por tipo de banco de dados. Todas ativadas por padrão.",
     sqlVariableSyntax_positional: "Espaço reservado posicional",

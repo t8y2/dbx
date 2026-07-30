@@ -1186,6 +1186,8 @@ export default withEnglishFallback({
     localFilterMoreValues: " 외 {count}개",
     columnVisibility: "컬럼",
     columnVisibilityHint: "최소 한 개의 컬럼은 표시 상태를 유지합니다.",
+    columnReorderHint: "드래그하여 컬럼 순서를 변경합니다.",
+    columnReorderSearchHint: "컬럼 순서를 변경하려면 검색을 지우세요.",
     searchColumns: "컬럼 검색...",
     dragColumnToReorder: "컬럼 머리글을 드래그하여 순서 변경",
     invertColumnVisibility: "반전",

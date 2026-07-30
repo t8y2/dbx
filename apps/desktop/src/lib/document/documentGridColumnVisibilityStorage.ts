@@ -1,4 +1,5 @@
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { loadDataGridColumnLayout, saveDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 const STORAGE_PREFIX = "dbx-document-grid-column-visibility:v1:";
 
@@ -34,4 +35,11 @@ export function saveDocumentGridHiddenColumnKeys(scopeKey: string, hiddenColumnK
     return;
   }
   safeLocalStorageSet(`${STORAGE_PREFIX}${scopeKey}`, JSON.stringify(normalizedKeys));
+}
+
+export function migrateDocumentGridColumnVisibilityToLayout(legacyScopeKey: string, layoutScopeKey: string) {
+  if (loadDataGridColumnLayout(layoutScopeKey)) return;
+  const hiddenKeys = loadDocumentGridHiddenColumnKeys(legacyScopeKey);
+  if (hiddenKeys.length === 0) return;
+  saveDataGridColumnLayout(layoutScopeKey, { orderKeys: [], hiddenKeys });
 }

@@ -47,10 +47,21 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         result: { type: Object, required: true },
         connectionId: { type: String, default: "" },
         database: { type: String, default: "" },
+        columnLayoutScopeKey: { type: String, default: "" },
       },
-      emits: ["hidden-column-keys-change"],
-      setup(props, { emit, expose, slots }) {
+      setup(props, { expose, slots }) {
         expose({
+          visibleColumnCount: 2,
+          displayableColumnCount: 2,
+          hiddenColumnCount: 0,
+          orderedColumnLayoutOptions: [],
+          filteredColumnLayoutOptions: () => [],
+          toggleColumnVisibility: vi.fn(),
+          showAllColumns: vi.fn(),
+          invertColumnVisibility: vi.fn(),
+          hasCustomColumnOrder: false,
+          moveDisplayableColumn: vi.fn(),
+          resetColumnOrder: vi.fn(),
           nullColumnsHidden: false,
           canToggleAllNullColumns: false,
           allNullColumnCount: 0,
@@ -63,7 +74,8 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
               "data-testid": "data-grid",
               "data-connection-id": props.connectionId,
               "data-database": props.database,
-              "data-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
+              "data-column-layout-scope-key": props.columnLayoutScopeKey,
+              "data-result-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
             },
             [
               slots["search-bar"]?.({
@@ -72,7 +84,6 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
                 localFilterSummaries: [],
                 clearLocalFilter: vi.fn(),
               }),
-              h("button", { "data-testid": "change-hidden-columns", onClick: () => emit("hidden-column-keys-change", ["_id", "_id"]) }),
             ],
           );
       },
@@ -159,6 +170,7 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import DocumentBrowser from "@/components/document/DocumentBrowser.vue";
+import { documentDataGridColumnLayoutScopeKey, loadDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { documentGridColumnVisibilityScopeKey } from "@/lib/document/documentGridColumnVisibilityStorage";
 
 let app: App<Element> | null = null;
@@ -246,16 +258,21 @@ afterEach(() => {
 });
 
 describe("DocumentBrowser Elasticsearch field search", () => {
-  it("restores and persists hidden columns for the current index", async () => {
+  it("migrates hidden columns and passes a stable index layout scope without changing the query result", async () => {
     app?.unmount();
-    const scopeKey = documentGridColumnVisibilityScopeKey({
+    const legacyScopeKey = documentGridColumnVisibilityScopeKey({
       databaseType: "elasticsearch",
       connectionId: "connection-1",
       database: "",
       collection: "orders",
     });
-    const storageKey = `dbx-document-grid-column-visibility:v1:${scopeKey}`;
-    storedValues.set(storageKey, JSON.stringify(["title"]));
+    const layoutScopeKey = documentDataGridColumnLayoutScopeKey({
+      databaseType: "elasticsearch",
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+    });
+    storedValues.set(`dbx-document-grid-column-visibility:v1:${legacyScopeKey}`, JSON.stringify(["title"]));
 
     app = createApp(DocumentBrowser, {
       connectionId: "connection-1",
@@ -269,13 +286,9 @@ describe("DocumentBrowser Elasticsearch field search", () => {
     const dataGrid = root!.querySelector<HTMLElement>('[data-testid="data-grid"]')!;
     expect(dataGrid.dataset.connectionId).toBe("connection-1");
     expect(dataGrid.dataset.database).toBe("");
-    expect(dataGrid.dataset.hiddenColumnKeys).toBe(JSON.stringify(["title"]));
-
-    dataGrid.querySelector<HTMLButtonElement>('[data-testid="change-hidden-columns"]')!.click();
-    await flushUi();
-
-    expect(dataGrid.dataset.hiddenColumnKeys).toBe(JSON.stringify(["_id"]));
-    expect(storedValues.get(storageKey)).toBe(JSON.stringify(["_id"]));
+    expect(dataGrid.dataset.columnLayoutScopeKey).toBe(layoutScopeKey);
+    expect(dataGrid.dataset.resultHiddenColumnKeys).toBe("[]");
+    expect(loadDataGridColumnLayout(layoutScopeKey)).toEqual({ orderKeys: [], hiddenKeys: ["title"] });
   });
 
   it("searches, selects, updates the query type, and clears the search when closed", async () => {

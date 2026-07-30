@@ -1101,6 +1101,8 @@ export default withEnglishFallback({
     localFilterMoreValues: " +{count} más",
     columnVisibility: "Columnas",
     columnVisibilityHint: "Al menos una columna permanece visible.",
+    columnReorderHint: "Arrastra para reordenar las columnas.",
+    columnReorderSearchHint: "Borra la búsqueda para reordenar las columnas.",
     searchColumns: "Buscar columnas...",
     dragColumnToReorder: "Arrastra el encabezado para reordenar",
     invertColumnVisibility: "Invertir",

@@ -1201,6 +1201,8 @@ export default {
     localFilterMoreValues: " +{count} more",
     columnVisibility: "Columns",
     columnVisibilityHint: "At least one column stays visible.",
+    columnReorderHint: "Drag to reorder columns.",
+    columnReorderSearchHint: "Clear the search to reorder columns.",
     searchColumns: "Search columns...",
     dragColumnToReorder: "Drag column header to reorder",
     invertColumnVisibility: "Invert",

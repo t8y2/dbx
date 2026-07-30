@@ -274,6 +274,7 @@ interface DataGridProps {
   database?: string;
   executionDatabase?: string;
   schema?: string;
+  columnLayoutScopeKey?: string;
   context?: "results" | "table-data";
   autoTransposeSingleRow?: boolean;
   sourceColumns?: Array<string | undefined>;
@@ -350,7 +351,6 @@ const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
-  "hidden-column-keys-change": [value: string[]];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({ canRefresh: computed(() => !isSaving.value && !props.loading), refresh: onToolbarRefresh });
@@ -1687,18 +1687,20 @@ let highlightedColumnTimer = 0;
 const goToColumnOpen = ref(false);
 const goToColumnSearch = ref("");
 const columnOrderKeys = computed(() => uniqueDataGridColumnOrderKeys(props.result.columns, props.sourceColumns));
-const columnLayoutScopeKey = computed(() =>
-  dataGridColumnLayoutScopeKey({
-    connectionId: props.connectionId,
-    database: props.database,
-    schema: props.schema,
-    context: props.context,
-    tableSchema: props.tableMeta?.schema,
-    tableName: props.tableMeta?.tableName,
-    sql: props.sql,
-    columns: props.result.columns,
-    sourceColumns: props.sourceColumns,
-  }),
+const resolvedColumnLayoutScopeKey = computed(
+  () =>
+    props.columnLayoutScopeKey ??
+    dataGridColumnLayoutScopeKey({
+      connectionId: props.connectionId,
+      database: props.database,
+      schema: props.schema,
+      context: props.context,
+      tableSchema: props.tableMeta?.schema,
+      tableName: props.tableMeta?.tableName,
+      sql: props.sql,
+      columns: props.result.columns,
+      sourceColumns: props.sourceColumns,
+    }),
 );
 const tableColumnOrderScopeKey = computed(() => {
   if (props.context !== "table-data" || !props.connectionId || !props.database || !props.tableMeta?.tableName) return "";
@@ -1726,13 +1728,15 @@ const {
   allNullColumnCount,
   hasCustomColumnOrder,
   canToggleAllNullColumns,
-  filteredColumnVisibilityOptions,
+  orderedColumnLayoutOptions,
+  filteredColumnLayoutOptions,
   isColumnVisible,
   toggleColumnVisibility,
   showAllColumns,
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
+  moveDisplayableColumn,
   resetColumnOrder,
   toggleAllNullColumns,
   resetColumnVisibility,
@@ -1748,13 +1752,13 @@ const {
   displayableColumnIndexes,
   allNullColumnIndexes: allNullColumnIndexesForResult,
   columnOrderKeys,
-  layoutScopeKey: columnLayoutScopeKey,
+  layoutScopeKey: resolvedColumnLayoutScopeKey,
   tableScopeKey: tableColumnOrderScopeKey,
+  // Existing tab snapshots may still carry this field; new changes persist in the internal layout store.
   initialHiddenColumnKeys: computed(() => props.result.local_hidden_column_keys),
   hideNullColumns,
-  onHiddenColumnKeysChange: (keys) => emit("hidden-column-keys-change", keys),
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
-  onRefreshMetrics: refreshGridScrollerMetrics,
+  onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
 const goToColumnItems = computed(() =>
   buildDataGridColumnLookupItems({
@@ -1934,7 +1938,7 @@ const {
   onResizeStart,
   onCanvasMouseLeave,
   onCanvasDrawSchedule: scheduleCanvasDraw,
-  onRefreshMetrics: () => nextTick(refreshGridScrollerMetrics),
+  onRefreshMetrics: scheduleColumnLayoutRefresh,
   onPersistColumnOrder: persistColumnOrder,
   frozenColumnCount,
 });
@@ -2248,6 +2252,19 @@ function refreshGridScrollerMetrics() {
   observeGridHorizontalScrollbarScroller();
 }
 
+let columnLayoutRefreshFrame = 0;
+function scheduleColumnLayoutRefresh() {
+  if (columnLayoutRefreshFrame) return;
+  columnLayoutRefreshFrame = requestAnimationFrame(() => {
+    try {
+      initColumnWidths();
+      refreshGridScrollerMetrics();
+    } finally {
+      columnLayoutRefreshFrame = 0;
+    }
+  });
+}
+
 function syncHeaderScroll(e: Event) {
   const target = e.target as HTMLElement;
   updateGridScrollbarGutter(target);
@@ -2320,16 +2337,7 @@ watch(isScrolling, (scrolling) => {
 });
 
 initColumnWidths();
-watch(
-  () => visibleColumns.value.length,
-  () => initColumnWidths(),
-);
-watch(
-  () => [visibleColumnCount.value, renderedColumnWidths.value.length],
-  () => {
-    nextTick(refreshGridScrollerMetrics);
-  },
-);
+watch([visibleColumnIndexes, () => renderedColumnWidths.value.length], () => scheduleColumnLayoutRefresh());
 const localFilterScopeKey = computed(() =>
   [
     props.connectionId ?? "",
@@ -2347,7 +2355,7 @@ watch(
   () => localFilterScopeKey.value,
   () => {
     localColumnFilters.value = {};
-    resetColumnVisibility(props.result.local_hidden_column_keys);
+    resetColumnVisibility();
     closeLocalFilter();
   },
 );
@@ -5139,6 +5147,8 @@ onUnmounted(() => {
   disconnectCellEditResizeObserver();
   stopGridHorizontalScrollbarDrag();
   stopGridVerticalScrollbarDrag();
+  if (columnLayoutRefreshFrame) cancelAnimationFrame(columnLayoutRefreshFrame);
+  columnLayoutRefreshFrame = 0;
   if (typeof window === "undefined") return;
   window.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
   window.visualViewport?.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
@@ -7580,12 +7590,14 @@ defineExpose({
   visibleColumnCount,
   displayableColumnCount,
   hiddenColumnCount,
-  filteredColumnVisibilityOptions,
+  orderedColumnLayoutOptions,
+  filteredColumnLayoutOptions,
   isColumnVisible,
   toggleColumnVisibility,
   showAllColumns,
   invertColumnVisibility,
   hasCustomColumnOrder,
+  moveDisplayableColumn,
   resetColumnOrder,
   nullColumnsHidden,
   allNullColumnCount,

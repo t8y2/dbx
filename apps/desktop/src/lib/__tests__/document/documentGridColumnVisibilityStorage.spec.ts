@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { documentGridColumnVisibilityScopeKey, loadDocumentGridHiddenColumnKeys, saveDocumentGridHiddenColumnKeys } from "@/lib/document/documentGridColumnVisibilityStorage";
+import { loadDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import { documentGridColumnVisibilityScopeKey, loadDocumentGridHiddenColumnKeys, migrateDocumentGridColumnVisibilityToLayout, saveDocumentGridHiddenColumnKeys } from "@/lib/document/documentGridColumnVisibilityStorage";
 
 const STORAGE_PREFIX = "dbx-document-grid-column-visibility:v1:";
 let storedValues: Map<string, string>;
@@ -64,5 +65,18 @@ describe("document grid column visibility storage", () => {
 
     expect(loadDocumentGridHiddenColumnKeys(ordersScope)).toEqual([]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("[DBX][document-grid-column-visibility:parse]"), expect.any(SyntaxError));
+  });
+
+  it("migrates legacy hidden fields into the unified layout once", () => {
+    const ordersScope = scopeKey("orders");
+    saveDocumentGridHiddenColumnKeys(ordersScope, ["goodsList"]);
+
+    migrateDocumentGridColumnVisibilityToLayout(ordersScope, "document-layout");
+    migrateDocumentGridColumnVisibilityToLayout(ordersScope, "document-layout");
+
+    expect(loadDataGridColumnLayout("document-layout")).toEqual({
+      orderKeys: [],
+      hiddenKeys: ["goodsList"],
+    });
   });
 });

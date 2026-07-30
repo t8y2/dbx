@@ -1100,6 +1100,8 @@ export default withEnglishFallback({
     localFilterMoreValues: "，還有 {count} 個",
     columnVisibility: "欄位篩選",
     columnVisibilityHint: "至少保留一欄可見。",
+    columnReorderHint: "拖曳可調整欄位順序。",
+    columnReorderSearchHint: "清除搜尋後可調整欄位順序。",
     searchColumns: "搜尋欄位……",
     dragColumnToReorder: "拖曳欄位標題調整順序",
     invertColumnVisibility: "反選",

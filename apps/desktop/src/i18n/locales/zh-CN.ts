@@ -1202,6 +1202,8 @@ export default withEnglishFallback({
     localFilterMoreValues: "，还有 {count} 个",
     columnVisibility: "字段筛选",
     columnVisibilityHint: "至少保留一列可见。",
+    columnReorderHint: "拖动可调整字段顺序。",
+    columnReorderSearchHint: "清除搜索后可调整字段顺序。",
     searchColumns: "搜索字段...",
     dragColumnToReorder: "拖拽列头调整顺序",
     invertColumnVisibility: "反选",

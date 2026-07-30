@@ -5,7 +5,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
+import { Check, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,8 @@ import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
+import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
+import type { DataGridColumnLayoutHandle } from "@/components/grid/dataGridColumnLayoutPopover";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
 let dataGridComponentPromise: Promise<typeof import("@/components/grid/DataGrid.vue")> | undefined;
 function loadDataGridComponent() {
@@ -94,20 +96,10 @@ import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 
-type DataGridHandle = {
+type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: () => boolean;
   openCellDetailSearch: () => boolean;
-  visibleColumnCount: number;
-  displayableColumnCount: number;
-  hiddenColumnCount: number;
-  filteredColumnVisibilityOptions: (search: string) => Array<{ index: number; column: string; comment?: string }>;
-  isColumnVisible: (columnIndex: number) => boolean;
-  toggleColumnVisibility: (columnIndex: number) => void;
-  showAllColumns: () => void;
-  invertColumnVisibility: () => void;
-  hasCustomColumnOrder: boolean;
-  resetColumnOrder: () => void;
   nullColumnsHidden: boolean;
   allNullColumnCount: number;
   canToggleAllNullColumns: boolean;
@@ -210,8 +202,6 @@ const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
-const columnVisibilitySearch = ref("");
-const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const resultRunDisplayMode = computed(() => settingsStore.editorSettings.resultRunDisplayMode);
@@ -1430,7 +1420,6 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :export-file-base-name="activeTab.title"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
                 @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
-                @hidden-column-keys-change="(keys: string[]) => queryStore.updateDataGridHiddenColumnKeys(activeTab.id, keys)"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
@@ -1506,55 +1495,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           </span>
           <span v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }} </span>
           <span class="ml-auto" />
-          <Popover v-if="activeTab.result?.columns.length">
-            <PopoverTrigger as-child>
-              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent text-foreground': (dataGridRef?.hiddenColumnCount ?? 0) > 0 }">
-                <Columns3 class="h-3.5 w-3.5" />
-                {{ t("grid.columnVisibility") }}
-                <span v-if="(dataGridRef?.hiddenColumnCount ?? 0) > 0" class="tabular-nums"> {{ dataGridRef?.visibleColumnCount }}/{{ dataGridRef?.displayableColumnCount }} </span>
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" class="w-64 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
-              <div class="border-b bg-muted/40 px-2 py-1.5">
-                <div class="flex items-center justify-between gap-2">
-                  <div class="text-xs font-semibold">{{ t("grid.columnVisibility") }}</div>
-                  <div class="text-[10px] text-muted-foreground tabular-nums">{{ dataGridRef?.visibleColumnCount ?? 0 }}/{{ dataGridRef?.displayableColumnCount ?? 0 }}</div>
-                </div>
-              </div>
-              <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
-                <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <input v-model="columnVisibilitySearch" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-6 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('grid.searchColumns')" />
-              </div>
-              <div class="max-h-72 overflow-auto py-0.5">
-                <button v-for="option in columnVisibilityOptions" :key="`${option.index}:${option.column}`" type="button" class="grid w-full grid-cols-[1.5rem_minmax(0,1fr)] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="dataGridRef?.toggleColumnVisibility(option.index)">
-                  <span class="flex h-4 w-4 items-center justify-center rounded border" :class="dataGridRef?.isColumnVisible(option.index) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'">
-                    <Check class="h-3 w-3 stroke-[3]" />
-                  </span>
-                  <span class="min-w-0">
-                    <span class="block truncate font-mono text-xs" :title="option.column">{{ option.column }}</span>
-                    <span v-if="option.comment" class="block truncate text-[11px] leading-4 text-muted-foreground" :title="option.comment">{{ option.comment }}</span>
-                  </span>
-                </button>
-                <div v-if="columnVisibilityOptions.length === 0" class="px-2 py-6 text-center text-xs text-muted-foreground">
-                  {{ t("grid.noSearchResults") }}
-                </div>
-              </div>
-              <div class="flex flex-col gap-1 border-t bg-muted/30 px-2 py-1.5">
-                <span class="text-[11px] leading-4 text-muted-foreground">{{ t("grid.columnVisibilityHint") }}</span>
-                <div class="flex items-center justify-end gap-1">
-                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="(dataGridRef?.displayableColumnCount ?? 0) <= 1" @click="dataGridRef?.invertColumnVisibility()">
-                    {{ t("grid.invertColumnVisibility") }}
-                  </Button>
-                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="!dataGridRef?.hasCustomColumnOrder" @click="dataGridRef?.resetColumnOrder()">
-                    {{ t("grid.resetColumnOrder") }}
-                  </Button>
-                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="(dataGridRef?.hiddenColumnCount ?? 0) === 0" @click="dataGridRef?.showAllColumns()">
-                    {{ t("grid.showAllColumns") }}
-                  </Button>
-                </div>
-              </div>
-            </PopoverContent>
-          </Popover>
+          <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
           <Button v-if="activeTab.result && activeTab.tableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" @click="dataGridRef?.toggleDdl()"
             ><TableProperties class="h-3.5 w-3.5" />{{ t("grid.tableInfo") }}</Button
           >
@@ -1795,7 +1736,6 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           @update:where-input="(v: string) => (activeTab.whereInput = v)"
           @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
           @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
-          @hidden-column-keys-change="(keys: string[]) => queryStore.updateDataGridHiddenColumnKeys(activeTab.id, keys)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"

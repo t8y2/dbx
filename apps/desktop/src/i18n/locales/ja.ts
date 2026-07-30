@@ -1096,6 +1096,8 @@ export default withEnglishFallback({
     localFilterMoreValues: " +{count}件以上",
     columnVisibility: "列",
     columnVisibilityHint: "少なくとも1列は表示されます。",
+    columnReorderHint: "ドラッグして列の順序を変更します。",
+    columnReorderSearchHint: "列の順序を変更するには検索をクリアしてください。",
     searchColumns: "列を検索...",
     dragColumnToReorder: "列ヘッダーをドラッグして並べ替え",
     invertColumnVisibility: "反転",

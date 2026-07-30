@@ -46,7 +46,7 @@ export function buildDataGridColumnLookupItems(options: DataGridColumnLookupOpti
   });
 }
 
-export function filterDataGridColumnLookupItems(items: readonly DataGridColumnLookupItem[], query: string): DataGridColumnLookupItem[] {
+export function filterDataGridColumnLookupItems<ColumnLookupItem extends DataGridColumnLookupItem>(items: readonly ColumnLookupItem[], query: string): ColumnLookupItem[] {
   const normalizedQuery = normalizedSearchText(query);
   if (!normalizedQuery) return [...items];
   return items.filter((item) => [item.name, item.sourceName, item.comment].filter((value): value is string => !!value).some((value) => value.toLocaleLowerCase().includes(normalizedQuery)));

@@ -1,0 +1,50 @@
+[workspace]
+
+[package]
+name = "dbx-duckdb-driver"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "duckdb-worker-hanging-connect-test-host"
+path = "tests/support/duckdb_worker_hanging_connect_test_host.rs"
+test = false
+
+[[bin]]
+name = "duckdb-worker-pid-test-host"
+path = "tests/support/duckdb_worker_pid_test_host.rs"
+test = false
+
+[[bin]]
+name = "duckdb-worker-file-lock-owner"
+path = "tests/support/duckdb_worker_file_lock_owner.rs"
+test = false
+
+[dependencies]
+chrono = "0.4"
+duckdb = { version = "1.3.2", features = ["bundled", "parquet"] }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+dbx-core = { path = "../../../crates/dbx-core", default-features = false, features = ["duckdb-sidecar"] }
+sysinfo = "0.32"
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+
+[patch.crates-io]
+tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
+postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
+postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
+mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec" }
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"

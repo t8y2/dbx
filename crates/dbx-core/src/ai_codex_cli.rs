@@ -1,21 +1,73 @@
 use crate::agent_events::AgentEvent;
-use crate::ai::{AiConfig, AiModelInfo, AiTestConnectionResult};
+use crate::ai::{
+    AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiModelInfo, AiReasoningLevel,
+    AiTestConnectionResult,
+};
 use crate::ai_cli_agent::{
     append_config_overrides, build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env,
     model_infos, parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
     CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
-use tokio::sync::Notify;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{Mutex, Notify};
 
 const DEFAULT_CODEX_MODELS: &[&str] = &["default", "gpt-5.5", "gpt-5.4-mini"];
+const CODEX_MODEL_SUCCESS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const CODEX_MODEL_COMPATIBILITY_CACHE_TTL: Duration = Duration::from_secs(30);
+const CODEX_MODEL_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(10);
+const CODEX_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+const CODEX_MODEL_COMPATIBILITY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(windows))]
 const CODEX_PATH_MARKER: &str = "__DBX_CODEX_PATH__";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum CodexModelCacheClass {
+    StaticFallback,
+    CompatibilityFallback,
+    Capability,
+}
+
+impl CodexModelCacheClass {
+    fn ttl(self) -> Duration {
+        match self {
+            Self::Capability => CODEX_MODEL_SUCCESS_CACHE_TTL,
+            Self::CompatibilityFallback => CODEX_MODEL_COMPATIBILITY_CACHE_TTL,
+            Self::StaticFallback => CODEX_MODEL_NEGATIVE_CACHE_TTL,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CodexModelDiscovery {
+    class: CodexModelCacheClass,
+    models: Vec<AiModelInfo>,
+}
+
+#[derive(Clone)]
+struct CachedCodexModels {
+    key: u64,
+    loaded_at: Instant,
+    class: CodexModelCacheClass,
+    models: Vec<AiModelInfo>,
+}
+
+impl CachedCodexModels {
+    fn is_fresh(&self, key: u64, now: Instant) -> bool {
+        self.key == key && now.saturating_duration_since(self.loaded_at) < self.class.ttl()
+    }
+}
+
+static CODEX_MODEL_CACHE: LazyLock<Mutex<Option<CachedCodexModels>>> = LazyLock::new(|| Mutex::new(None));
 
 pub type CodexRunOptions = CliAgentRunOptions;
 pub type CodexCommandSpec = CliAgentCommandSpec;
@@ -67,12 +119,39 @@ fn windows_npm_codex_shim_command(program: &str) -> Option<CodexCommandSpec> {
 }
 
 fn codex_process_env(config: &AiConfig, command: &CodexCommandSpec) -> Result<Vec<(String, String)>, String> {
+    let inherited_env_keys = env::vars_os().map(|(key, _)| key.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    codex_process_env_with_system_proxy(
+        config,
+        command,
+        crate::update::system_proxy_url().as_deref(),
+        &inherited_env_keys,
+    )
+}
+
+fn codex_process_env_with_system_proxy(
+    config: &AiConfig,
+    command: &CodexCommandSpec,
+    system_proxy: Option<&str>,
+    inherited_env_keys: &[String],
+) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::from_iter(codex_cli_env(config)?);
+    if let Some(proxy) = system_proxy.filter(|proxy| !proxy.trim().is_empty()) {
+        insert_env_if_absent(&mut env, inherited_env_keys, "HTTP_PROXY", proxy);
+        insert_env_if_absent(&mut env, inherited_env_keys, "HTTPS_PROXY", proxy);
+    }
     if let Some(dir) = command.parent_dir() {
         let user_path = env.get("PATH").map(String::as_str);
         env.insert("PATH".to_string(), merged_path_with_dir(&dir, user_path));
     }
     Ok(env.into_iter().collect())
+}
+
+fn insert_env_if_absent(env: &mut BTreeMap<String, String>, inherited_env_keys: &[String], key: &str, value: &str) {
+    // Child processes inherit the parent environment, so an inherited lowercase proxy must also block uppercase injection.
+    let is_present = env.keys().chain(inherited_env_keys).any(|existing| existing.eq_ignore_ascii_case(key));
+    if !is_present {
+        env.insert(key.to_string(), value.to_string());
+    }
 }
 
 trait CommandParentDir {
@@ -417,8 +496,12 @@ pub fn build_codex_exec_command(config: &AiConfig, _prompt: &str, options: &Code
         "read-only".to_string(),
     ];
     let mut config_overrides = vec!["features.shell_tool=false".to_string(), "web_search=\"disabled\"".to_string()];
-    if let Some(reasoning_effort) = config.reasoning_level.as_codex_effort() {
-        config_overrides.push(format!("model_reasoning_effort={}", toml_string(reasoning_effort)));
+    let reasoning_effort = match config.runtime_effort.as_ref() {
+        Some(effort) => effort.cli_value(),
+        None => config.reasoning_level.as_codex_effort().map(ToString::to_string),
+    };
+    if let Some(reasoning_effort) = reasoning_effort {
+        config_overrides.push(format!("model_reasoning_effort={}", toml_string(&reasoning_effort)));
     }
     append_config_overrides(&mut args, config_overrides.into_iter().chain(codex_mcp_config_overrides(options)));
 
@@ -440,22 +523,283 @@ pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     validate_codex_program(config)?;
     let command = resolve_codex_command(config).await;
-    let output = cli_command(&command.program)
-        .args(command.args.iter().map(String::as_str))
-        .args(["debug", "models"])
-        .envs(codex_process_env(config, &command)?.iter().map(|(key, value)| (key.as_str(), value.as_str())))
-        .output()
-        .await;
+    let process_env = codex_process_env(config, &command)?;
+    let cache_key = codex_model_cache_key(&command, &process_env);
+    Ok(list_codex_models_cached(&CODEX_MODEL_CACHE, cache_key, || async {
+        list_codex_models_uncached(&command, &process_env).await
+    })
+    .await)
+}
 
-    let Ok(output) = output else {
-        return Ok(model_infos(DEFAULT_CODEX_MODELS));
-    };
-    if !output.status.success() {
-        return Ok(model_infos(DEFAULT_CODEX_MODELS));
+async fn list_codex_models_cached<F, Fut>(
+    cache: &Mutex<Option<CachedCodexModels>>,
+    cache_key: u64,
+    discover: F,
+) -> Vec<AiModelInfo>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = CodexModelDiscovery>,
+{
+    let now = Instant::now();
+    if let Some(models) = {
+        let cache = cache.lock().await;
+        cache.as_ref().filter(|entry| entry.is_fresh(cache_key, now)).map(|entry| entry.models.clone())
+    } {
+        return models;
     }
 
-    Ok(parse_codex_models(&String::from_utf8_lossy(&output.stdout))
-        .unwrap_or_else(|| model_infos(DEFAULT_CODEX_MODELS)))
+    let discovery = discover().await;
+    let loaded_at = Instant::now();
+    let mut cache = cache.lock().await;
+    if let Some(entry) = cache.as_ref().filter(|entry| entry.is_fresh(cache_key, loaded_at)) {
+        if entry.class >= discovery.class {
+            return entry.models.clone();
+        }
+    }
+    *cache =
+        Some(CachedCodexModels { key: cache_key, loaded_at, class: discovery.class, models: discovery.models.clone() });
+    discovery.models
+}
+
+fn codex_model_cache_key(command: &CodexCommandSpec, process_env: &[(String, String)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    command.program.hash(&mut hasher);
+    command.args.hash(&mut hasher);
+    process_env.hash(&mut hasher);
+    for name in [
+        "CODEX_HOME",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_ORGANIZATION",
+        "OPENAI_PROJECT",
+        "HOME",
+        "USERPROFILE",
+        "PATH",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ] {
+        name.hash(&mut hasher);
+        env::var_os(name).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+async fn list_codex_models_uncached(
+    command: &CodexCommandSpec,
+    process_env: &[(String, String)],
+) -> CodexModelDiscovery {
+    if let Ok(models) = list_codex_models_via_app_server(command, process_env).await {
+        return CodexModelDiscovery { class: CodexModelCacheClass::Capability, models };
+    }
+
+    let mut compatibility_command = cli_command(&command.program);
+    compatibility_command
+        .args(command.args.iter().map(String::as_str))
+        .args(["debug", "models"])
+        .envs(process_env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+        .kill_on_drop(true);
+    let output = with_codex_model_discovery_timeout(CODEX_MODEL_COMPATIBILITY_TIMEOUT, async move {
+        compatibility_command.output().await.map_err(|error| error.to_string())
+    })
+    .await;
+
+    let Ok(output) = output else {
+        return CodexModelDiscovery {
+            class: CodexModelCacheClass::StaticFallback,
+            models: model_infos(DEFAULT_CODEX_MODELS),
+        };
+    };
+    if !output.status.success() {
+        return CodexModelDiscovery {
+            class: CodexModelCacheClass::StaticFallback,
+            models: model_infos(DEFAULT_CODEX_MODELS),
+        };
+    }
+
+    match parse_codex_models(&String::from_utf8_lossy(&output.stdout)) {
+        Some(models) => CodexModelDiscovery { class: CodexModelCacheClass::CompatibilityFallback, models },
+        None => CodexModelDiscovery {
+            class: CodexModelCacheClass::StaticFallback,
+            models: model_infos(DEFAULT_CODEX_MODELS),
+        },
+    }
+}
+
+async fn list_codex_models_via_app_server(
+    command: &CodexCommandSpec,
+    process_env: &[(String, String)],
+) -> Result<Vec<AiModelInfo>, String> {
+    with_codex_model_discovery_timeout(
+        CODEX_MODEL_DISCOVERY_TIMEOUT,
+        list_codex_models_via_app_server_inner(command, process_env),
+    )
+    .await
+}
+
+async fn with_codex_model_discovery_timeout<T, F>(timeout: Duration, discovery: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    tokio::time::timeout(timeout, discovery).await.map_err(|_| "Codex model discovery timed out".to_string())?
+}
+
+async fn list_codex_models_via_app_server_inner(
+    command: &CodexCommandSpec,
+    process_env: &[(String, String)],
+) -> Result<Vec<AiModelInfo>, String> {
+    let mut process = cli_command(&command.program);
+    process
+        .args(command.args.iter().map(String::as_str))
+        .arg("app-server")
+        .envs(process_env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = process.spawn().map_err(|error| error.to_string())?;
+    let mut stdin = child.stdin.take().ok_or_else(|| "Codex app-server stdin is unavailable".to_string())?;
+    let stdout = child.stdout.take().ok_or_else(|| "Codex app-server stdout is unavailable".to_string())?;
+    let mut lines = BufReader::new(stdout).lines();
+    let mut model_values = Vec::new();
+    let mut model_list_request_id = 2;
+
+    write_codex_app_server_message(
+        &mut stdin,
+        &json!({
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "clientInfo": {
+                    "name": "dbx",
+                    "title": "DBX",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }),
+    )
+    .await?;
+
+    while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match message.get("id").and_then(Value::as_u64) {
+            Some(1) => {
+                if let Some(error) = message.get("error") {
+                    return Err(format!("Codex app-server initialization failed: {error}"));
+                }
+                write_codex_app_server_message(&mut stdin, &json!({ "method": "initialized" })).await?;
+                write_codex_model_list_request(&mut stdin, model_list_request_id, None).await?;
+            }
+            Some(id) if id == model_list_request_id => {
+                if let Some(error) = message.get("error") {
+                    return Err(format!("Codex model/list failed: {error}"));
+                }
+                let page = message
+                    .pointer("/result/data")
+                    .or_else(|| message.pointer("/result/models"))
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "Codex model/list returned an invalid response".to_string())?;
+                model_values.extend(page.iter().cloned());
+                let next_cursor = message
+                    .pointer("/result/nextCursor")
+                    .or_else(|| message.pointer("/result/next_cursor"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|cursor| !cursor.is_empty());
+                if let Some(next_cursor) = next_cursor {
+                    model_list_request_id += 1;
+                    write_codex_model_list_request(&mut stdin, model_list_request_id, Some(next_cursor)).await?;
+                    continue;
+                }
+                return parse_codex_app_server_models(&json!({ "result": { "data": model_values } }))
+                    .ok_or_else(|| "Codex model/list returned no models".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    Err("Codex app-server exited before model/list completed".to_string())
+}
+
+async fn write_codex_app_server_message(stdin: &mut tokio::process::ChildStdin, message: &Value) -> Result<(), String> {
+    let mut payload = serde_json::to_vec(message).map_err(|error| error.to_string())?;
+    payload.push(b'\n');
+    stdin.write_all(&payload).await.map_err(|error| error.to_string())?;
+    stdin.flush().await.map_err(|error| error.to_string())
+}
+
+async fn write_codex_model_list_request(
+    stdin: &mut tokio::process::ChildStdin,
+    request_id: u64,
+    cursor: Option<&str>,
+) -> Result<(), String> {
+    let params = cursor.map_or_else(|| json!({}), |cursor| json!({ "cursor": cursor }));
+    write_codex_app_server_message(stdin, &json!({ "method": "model/list", "id": request_id, "params": params })).await
+}
+
+fn parse_codex_app_server_models(message: &Value) -> Option<Vec<AiModelInfo>> {
+    let models =
+        message.pointer("/result/data").or_else(|| message.pointer("/result/models")).and_then(Value::as_array)?;
+    let mut default_capability = None;
+    let mut concrete_models = Vec::new();
+
+    for model in models {
+        let Some(id) = model
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| model.get("model").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        if concrete_models.iter().any(|existing: &AiModelInfo| existing.id == id) {
+            continue;
+        }
+        let display_name = model
+            .get("displayName")
+            .or_else(|| model.get("display_name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToString::to_string);
+        let levels = model
+            .get("supportedReasoningEfforts")
+            .or_else(|| model.get("supported_reasoning_efforts"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|level| {
+                level
+                    .as_str()
+                    .or_else(|| level.get("reasoningEffort").and_then(Value::as_str))
+                    .or_else(|| level.get("reasoning_effort").and_then(Value::as_str))
+                    .or_else(|| level.get("effort").and_then(Value::as_str))
+            });
+        let capability = crate::ai_effort::dynamic_enum_capability(levels, AiCapabilitySource::LocalCli);
+        if model.get("isDefault").or_else(|| model.get("is_default")).and_then(Value::as_bool).unwrap_or(false) {
+            default_capability = capability.clone();
+        }
+        let mut info = AiModelInfo::new(id, display_name);
+        info.effort_capability = capability;
+        concrete_models.push(info);
+    }
+
+    if concrete_models.is_empty() {
+        return None;
+    }
+    let mut default_model = AiModelInfo::new("default", Some("Default".to_string()));
+    default_model.effort_capability = default_capability;
+    let mut result = Vec::with_capacity(concrete_models.len() + 1);
+    result.push(default_model);
+    result.extend(concrete_models);
+    Some(result)
 }
 
 fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
@@ -483,10 +827,67 @@ fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(ToString::to_string);
-        result.push(AiModelInfo::new(id, display_name));
+        let mut info = AiModelInfo::new(id, display_name);
+        let levels = model
+            .get("supported_reasoning_levels")
+            .or_else(|| model.get("supportedReasoningLevels"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|level| {
+                level
+                    .as_str()
+                    .or_else(|| level.get("effort").and_then(Value::as_str))
+                    .or_else(|| level.get("value").and_then(Value::as_str))
+            });
+        info.effort_capability = crate::ai_effort::dynamic_enum_capability(levels, AiCapabilitySource::LocalCli);
+        result.push(info);
     }
 
     (result.len() > 1).then_some(result)
+}
+
+fn capability_supports_effort(capability: &AiEffortCapability, effort: &str) -> bool {
+    let AiEffortCapability::Enum { options, .. } = capability else {
+        return false;
+    };
+    options.iter().any(|option| option.selection.explicit_string() == Some(effort))
+}
+
+fn legacy_minimal_effort(capability: Option<&AiEffortCapability>) -> &'static str {
+    let Some(capability) = capability else {
+        return "minimal";
+    };
+    if capability_supports_effort(capability, "minimal") {
+        "minimal"
+    } else if capability_supports_effort(capability, "low") {
+        "low"
+    } else {
+        "minimal"
+    }
+}
+
+async fn capability_aware_codex_config(config: &AiConfig) -> AiConfig {
+    if config.runtime_effort.is_some() || config.reasoning_level != AiReasoningLevel::Minimal {
+        return config.clone();
+    }
+
+    let mut effective = config.clone();
+    let selected_model = config.model.trim();
+    let selected_model = if selected_model.is_empty() || selected_model.eq_ignore_ascii_case("default") {
+        "default"
+    } else {
+        selected_model
+    };
+    let capability = list_codex_models(config)
+        .await
+        .ok()
+        .and_then(|models| models.into_iter().find(|model| model.id == selected_model))
+        .and_then(|model| model.effort_capability);
+    if legacy_minimal_effort(capability.as_ref()) == "low" {
+        effective.runtime_effort = Some(AiEffortSelection::Enum("low".to_string()));
+    }
+    effective
 }
 
 pub async fn test_codex_connection(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
@@ -559,7 +960,8 @@ pub async fn run_codex_agent(
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
     validate_codex_program(config)?;
-    let mut command = build_codex_exec_command(config, prompt, &options);
+    let effective_config = capability_aware_codex_config(config).await;
+    let mut command = build_codex_exec_command(&effective_config, prompt, &options);
     let resolved_command = resolve_codex_command(config).await;
     command.program = resolved_command.program;
     command.args.splice(0..0, resolved_command.args);
@@ -585,19 +987,32 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        build_codex_exec_command, classify_codex_spawn_error, codex_cli_env, codex_enabled_tools, is_path_like_program,
-        parse_codex_jsonl_event, parse_codex_models, validate_codex_program, CodexRunOptions, DEFAULT_CODEX_MODELS,
+        build_codex_exec_command, classify_codex_spawn_error, codex_cli_env, codex_enabled_tools,
+        codex_model_cache_key, is_path_like_program, legacy_minimal_effort, list_codex_models_cached,
+        parse_codex_app_server_models, parse_codex_jsonl_event, parse_codex_models, validate_codex_program,
+        with_codex_model_discovery_timeout, CachedCodexModels, CodexModelCacheClass, CodexModelDiscovery,
+        CodexRunOptions, CODEX_MODEL_COMPATIBILITY_CACHE_TTL, CODEX_MODEL_COMPATIBILITY_TIMEOUT,
+        CODEX_MODEL_DISCOVERY_TIMEOUT, CODEX_MODEL_NEGATIVE_CACHE_TTL, CODEX_MODEL_SUCCESS_CACHE_TTL,
+        DEFAULT_CODEX_MODELS,
     };
     #[cfg(not(windows))]
-    use super::{codex_process_env, common_executable_dirs, merged_path_with_dir};
+    use super::{codex_process_env, codex_process_env_with_system_proxy, common_executable_dirs, merged_path_with_dir};
     #[cfg(windows)]
     use super::{
         direct_program_path, first_windows_program_path, program_path_candidates, resolve_codex_command,
         windows_npm_codex_shim_command,
     };
     use crate::agent_events::AgentEvent;
-    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
+    use crate::ai::{
+        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiProvider,
+        AiReasoningLevel,
+    };
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::{Barrier, Mutex, Notify};
 
     fn codex_config(model: &str) -> AiConfig {
         AiConfig {
@@ -612,11 +1027,15 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         }
     }
 
@@ -631,6 +1050,10 @@ mod tests {
             confirmed_write_sql: None,
             mcp_server_command: None,
         }
+    }
+
+    fn model_discovery(class: CodexModelCacheClass, ids: &[&str]) -> CodexModelDiscovery {
+        CodexModelDiscovery { class, models: model_infos(ids) }
     }
 
     #[test]
@@ -685,6 +1108,32 @@ mod tests {
 
         assert!(!spec.args.contains(&"--reasoning-effort".to_string()));
         assert!(spec.args.contains(&"model_reasoning_effort=\"high\"".to_string()));
+    }
+
+    #[test]
+    fn keeps_minimal_reasoning_literal_without_capability_fallback() {
+        let mut config = codex_config("default");
+        config.reasoning_level = AiReasoningLevel::Minimal;
+
+        let spec = build_codex_exec_command(&config, "hello", &run_options());
+
+        assert!(spec.args.contains(&"model_reasoning_effort=\"minimal\"".to_string()));
+        assert!(!spec.args.contains(&"model_reasoning_effort=\"low\"".to_string()));
+    }
+
+    #[test]
+    fn runtime_effort_takes_priority_over_legacy_reasoning_level() {
+        let mut config = codex_config("default");
+        config.reasoning_level = AiReasoningLevel::High;
+        config.runtime_effort = Some(AiEffortSelection::ProviderDefault);
+
+        let spec = build_codex_exec_command(&config, "hello", &run_options());
+
+        assert!(!spec.args.iter().any(|arg| arg.starts_with("model_reasoning_effort=")));
+
+        config.runtime_effort = Some(AiEffortSelection::Enum("xhigh".to_string()));
+        let spec = build_codex_exec_command(&config, "hello", &run_options());
+        assert!(spec.args.contains(&"model_reasoning_effort=\"xhigh\"".to_string()));
     }
 
     #[test]
@@ -872,6 +1321,45 @@ mod tests {
     }
 
     #[test]
+    fn codex_process_env_uses_system_proxy_when_not_configured() {
+        let config = codex_config("default");
+        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
+
+        let env = codex_process_env_with_system_proxy(&config, &command, Some("http://127.0.0.1:7897"), &[]).unwrap();
+
+        assert!(env.contains(&("HTTP_PROXY".to_string(), "http://127.0.0.1:7897".to_string())));
+        assert!(env.contains(&("HTTPS_PROXY".to_string(), "http://127.0.0.1:7897".to_string())));
+    }
+
+    #[test]
+    fn explicit_codex_proxy_env_overrides_system_proxy() {
+        let mut config = codex_config("default");
+        config.codex_cli_env.insert("http_proxy".to_string(), "http://manual-http:9800".to_string());
+        config.codex_cli_env.insert("HTTPS_PROXY".to_string(), "http://manual-https:9801".to_string());
+        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
+
+        let env = codex_process_env_with_system_proxy(&config, &command, Some("http://127.0.0.1:7897"), &[]).unwrap();
+
+        assert!(env.contains(&("http_proxy".to_string(), "http://manual-http:9800".to_string())));
+        assert!(env.contains(&("HTTPS_PROXY".to_string(), "http://manual-https:9801".to_string())));
+        assert!(!env.iter().any(|(_, value)| value == "http://127.0.0.1:7897"));
+    }
+
+    #[test]
+    fn inherited_proxy_env_overrides_system_proxy() {
+        let config = codex_config("default");
+        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
+        let inherited_env_keys = vec!["https_proxy".to_string()];
+
+        let env =
+            codex_process_env_with_system_proxy(&config, &command, Some("http://127.0.0.1:7897"), &inherited_env_keys)
+                .unwrap();
+
+        assert!(env.contains(&("HTTP_PROXY".to_string(), "http://127.0.0.1:7897".to_string())));
+        assert!(!env.iter().any(|(key, _)| key.eq_ignore_ascii_case("HTTPS_PROXY")));
+    }
+
+    #[test]
     #[cfg(not(windows))]
     fn shell_quote_handles_codex_program_names() {
         assert_eq!(shell_quote("codex"), "'codex'");
@@ -958,6 +1446,204 @@ mod tests {
         );
         assert_eq!(models[1].display_name.as_deref(), Some("GPT-5.5"));
         assert!(!models.iter().any(|model| model.id == "priority" || model.id == "Priority"));
+    }
+
+    #[test]
+    fn app_server_default_inherits_selected_model_effort_capability() {
+        let models = parse_codex_app_server_models(&json!({
+            "id": 2,
+            "result": {
+                "data": [
+                    {
+                        "id": "gpt-low-only",
+                        "displayName": "GPT low only",
+                        "isDefault": true,
+                        "supportedReasoningEfforts": [
+                            { "reasoningEffort": "low" },
+                            { "reasoningEffort": "medium" },
+                            { "reasoningEffort": "high" }
+                        ]
+                    },
+                    {
+                        "id": "gpt-minimal",
+                        "displayName": "GPT minimal",
+                        "isDefault": false,
+                        "supportedReasoningEfforts": [
+                            { "reasoningEffort": "minimal" },
+                            { "reasoningEffort": "low" }
+                        ]
+                    }
+                ],
+                "nextCursor": null
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "gpt-low-only", "gpt-minimal"]
+        );
+        assert_eq!(legacy_minimal_effort(models[0].effort_capability.as_ref()), "low");
+        assert_eq!(legacy_minimal_effort(models[1].effort_capability.as_ref()), "low");
+        assert_eq!(legacy_minimal_effort(models[2].effort_capability.as_ref()), "minimal");
+    }
+
+    #[test]
+    fn legacy_minimal_preserves_unknown_or_non_enum_capabilities() {
+        assert_eq!(legacy_minimal_effort(None), "minimal");
+        assert_eq!(legacy_minimal_effort(Some(&AiEffortCapability::Unsupported)), "minimal");
+        assert_eq!(
+            legacy_minimal_effort(Some(&AiEffortCapability::FreeText {
+                placeholder: None,
+                source: AiCapabilitySource::LocalCli,
+            })),
+            "minimal"
+        );
+    }
+
+    #[test]
+    fn model_cache_uses_bounded_success_fallback_and_negative_ttls() {
+        assert_eq!(CODEX_MODEL_DISCOVERY_TIMEOUT, Duration::from_secs(3));
+        assert_eq!(CODEX_MODEL_COMPATIBILITY_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(CODEX_MODEL_SUCCESS_CACHE_TTL, Duration::from_secs(5 * 60));
+        assert_eq!(CODEX_MODEL_COMPATIBILITY_CACHE_TTL, Duration::from_secs(30));
+        assert_eq!(CODEX_MODEL_NEGATIVE_CACHE_TTL, Duration::from_secs(10));
+
+        let loaded_at = Instant::now();
+        for class in [
+            CodexModelCacheClass::Capability,
+            CodexModelCacheClass::CompatibilityFallback,
+            CodexModelCacheClass::StaticFallback,
+        ] {
+            let entry = CachedCodexModels { key: 7, loaded_at, class, models: Vec::new() };
+            assert!(entry.is_fresh(7, loaded_at + class.ttl() - Duration::from_millis(1)));
+            assert!(!entry.is_fresh(7, loaded_at + class.ttl()));
+            assert!(!entry.is_fresh(8, loaded_at));
+        }
+    }
+
+    #[test]
+    fn model_cache_key_tracks_resolved_command_and_process_env() {
+        let command =
+            CliAgentCommandSpec { program: "/opt/codex/bin/codex".to_string(), args: vec!["shim.js".to_string()] };
+        let process_env = vec![("CODEX_HOME".to_string(), "/tmp/codex-a".to_string())];
+
+        let key = codex_model_cache_key(&command, &process_env);
+
+        assert_eq!(key, codex_model_cache_key(&command, &process_env));
+        assert_ne!(
+            key,
+            codex_model_cache_key(
+                &CliAgentCommandSpec { program: "/usr/local/bin/codex".to_string(), args: command.args.clone() },
+                &process_env,
+            )
+        );
+        assert_ne!(key, codex_model_cache_key(&command, &[("CODEX_HOME".to_string(), "/tmp/codex-b".to_string())],));
+    }
+
+    #[tokio::test]
+    async fn concurrent_cache_misses_do_not_hold_the_mutex_during_discovery() {
+        let cache = Arc::new(Mutex::new(None));
+        let barrier = Arc::new(Barrier::new(2));
+        let probes = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for _ in 0..2 {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            let probes = probes.clone();
+            tasks.push(tokio::spawn(async move {
+                list_codex_models_cached(cache.as_ref(), 7, || async move {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait().await;
+                    model_discovery(CodexModelCacheClass::Capability, &["default", "gpt-minimal"])
+                })
+                .await
+            }));
+        }
+
+        let (first, second) = tokio::time::timeout(Duration::from_millis(500), async {
+            tokio::try_join!(tasks.remove(0), tasks.remove(0))
+        })
+        .await
+        .expect("concurrent discovery should not serialize behind the cache mutex")
+        .unwrap();
+
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+        assert_eq!(first, model_infos(&["default", "gpt-minimal"]));
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn slower_fallback_does_not_replace_a_fresh_capability_result() {
+        let cache = Arc::new(Mutex::new(None));
+        let fallback_started = Arc::new(Notify::new());
+        let release_fallback = Arc::new(Notify::new());
+        let fallback_task = {
+            let cache = cache.clone();
+            let fallback_started = fallback_started.clone();
+            let release_fallback = release_fallback.clone();
+            tokio::spawn(async move {
+                list_codex_models_cached(cache.as_ref(), 9, || async move {
+                    fallback_started.notify_one();
+                    release_fallback.notified().await;
+                    model_discovery(CodexModelCacheClass::StaticFallback, &["default", "fallback"])
+                })
+                .await
+            })
+        };
+
+        fallback_started.notified().await;
+        let capability = list_codex_models_cached(cache.as_ref(), 9, || async {
+            model_discovery(CodexModelCacheClass::Capability, &["default", "gpt-minimal"])
+        })
+        .await;
+        release_fallback.notify_one();
+        let fallback_result = tokio::time::timeout(Duration::from_millis(500), fallback_task)
+            .await
+            .expect("fallback discovery should finish after release")
+            .unwrap();
+
+        assert_eq!(capability, model_infos(&["default", "gpt-minimal"]));
+        assert_eq!(fallback_result, capability);
+        assert_eq!(cache.lock().await.as_ref().unwrap().class, CodexModelCacheClass::Capability);
+    }
+
+    #[tokio::test]
+    async fn compatibility_and_static_fallbacks_are_cached_briefly() {
+        for (key, class) in
+            [(11, CodexModelCacheClass::CompatibilityFallback), (12, CodexModelCacheClass::StaticFallback)]
+        {
+            let cache = Mutex::new(None);
+            let probes = Arc::new(AtomicUsize::new(0));
+            let first_probes = probes.clone();
+            let first = list_codex_models_cached(&cache, key, || async move {
+                first_probes.fetch_add(1, Ordering::SeqCst);
+                model_discovery(class, &["default", "fallback"])
+            })
+            .await;
+            let second_probes = probes.clone();
+            let second = list_codex_models_cached(&cache, key, || async move {
+                second_probes.fetch_add(1, Ordering::SeqCst);
+                model_discovery(CodexModelCacheClass::Capability, &["default", "unexpected"])
+            })
+            .await;
+
+            assert_eq!(probes.load(Ordering::SeqCst), 1);
+            assert_eq!(first, model_infos(&["default", "fallback"]));
+            assert_eq!(second, first);
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_timeout_can_be_tested_without_a_real_slow_process() {
+        let result = with_codex_model_discovery_timeout(
+            Duration::from_millis(5),
+            std::future::pending::<Result<Vec<crate::ai::AiModelInfo>, String>>(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), "Codex model discovery timed out");
     }
 
     #[test]

@@ -34,10 +34,12 @@ import {
   documentFilterModeOptions,
   documentStoreProviderFor,
   elasticsearchBoolClauseOptions,
+  elasticsearchFieldPathTreeFromFieldNames,
   elasticsearchQueryTypeNeedsValue,
   elasticsearchQueryTypeOptions,
   elasticsearchStructuredFilter,
   formatDocumentQueryInput,
+  searchElasticsearchFieldPathTree,
   type DocumentFieldPathNode,
   type DocumentFilterMode,
   type DocumentFilterRule,
@@ -254,7 +256,15 @@ const gridResult = computed<QueryResult>(() => {
   return { columns, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
+const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
+const elasticsearchFilterFieldNames = computed(() => {
+  const names = [...elasticsearchMappingFields.value.map((field) => field.name), ...gridResult.value.columns, "_id", "_routing"];
+  return [...new Set(names.filter(Boolean))];
+});
 const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    return elasticsearchFieldPathTreeFromFieldNames(elasticsearchFilterFieldNames.value, elasticsearchFieldTypes.value);
+  }
   const tree = documentFieldPathTreeFromDocuments(documents.value);
   if (tree.length > 0) return tree;
   return gridResult.value.columns.map((column) => ({
@@ -269,15 +279,15 @@ const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
 });
 const documentFilterFieldOptions = computed(() => {
   if (documentStoreProvider.value.kind === "elasticsearch") {
-    const names = [...elasticsearchMappingFields.value.map((field) => field.name), ...gridResult.value.columns, "_id", "_routing"];
-    return [...new Set(names.filter(Boolean))];
+    return flattenDocumentFieldPathTree(documentFilterFieldTree.value)
+      .filter((field) => field.selectable)
+      .map((field) => field.path);
   }
   const nestedFields = documentFieldPathOptionsFromDocuments(documents.value);
   return nestedFields.length > 0 ? nestedFields : gridResult.value.columns;
 });
 const documentFilterFieldRows = computed<DocumentFilterFieldTreeRow[]>(() => visibleDocumentFilterFieldRows(documentFilterFieldTree.value));
 const documentFilterFieldByPath = computed(() => new Map(flattenDocumentFieldPathTree(documentFilterFieldTree.value).map((node) => [node.path, node])));
-const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
 const documentStructuredFilterCount = computed(() => {
   if (!appliedDocumentFilter.value) return 0;
   if (documentStoreProvider.value.kind !== "elasticsearch") return 1;
@@ -336,11 +346,18 @@ function setDocumentFilterFieldPopoverOpen(ruleId: string, open: boolean) {
   if (open) next[ruleId] = true;
   else delete next[ruleId];
   documentFilterFieldPopoverOpen.value = next;
+  if (open) {
+    void nextTick(() => document.getElementById(documentFilterFieldSearchInputId(ruleId))?.focus());
+  }
   if (!open) {
     const search = { ...documentFilterFieldSearch.value };
     delete search[ruleId];
     documentFilterFieldSearch.value = search;
   }
+}
+
+function documentFilterFieldSearchInputId(ruleId: string): string {
+  return `document-filter-field-search-${ruleId}`;
 }
 
 function documentFilterFieldSearchActive(ruleId: string): boolean {
@@ -350,7 +367,8 @@ function documentFilterFieldSearchActive(ruleId: string): boolean {
 function documentFilterFieldRowsForRule(ruleId: string): DocumentFilterFieldTreeRow[] {
   const query = documentFilterFieldSearch.value[ruleId] ?? "";
   if (!query.trim()) return documentFilterFieldRows.value;
-  return searchDocumentFieldPathTree(documentFilterFieldTree.value, query).map((node) => ({ ...node, depth: 0 }));
+  const matchingFields = documentStoreProvider.value.kind === "elasticsearch" ? searchElasticsearchFieldPathTree(documentFilterFieldTree.value, query) : searchDocumentFieldPathTree(documentFilterFieldTree.value, query);
+  return matchingFields.map((node) => ({ ...node, depth: 0 }));
 }
 
 function selectDocumentFilterField(ruleId: string, fieldName: string) {
@@ -359,7 +377,11 @@ function selectDocumentFilterField(ruleId: string, fieldName: string) {
 }
 
 function documentFilterFieldLabel(path: string): string {
-  return documentFilterFieldByPath.value.get(path)?.displayPath ?? path;
+  if (documentStoreProvider.value.kind !== "elasticsearch") {
+    return documentFilterFieldByPath.value.get(path)?.displayPath ?? path;
+  }
+  const fieldType = elasticsearchFieldTypes.value.get(path);
+  return fieldType ? `${path} (${fieldType})` : path;
 }
 
 function documentFilterFieldKindLabel(kind: DocumentFieldPathNode["kind"]): string {
@@ -1684,7 +1706,7 @@ defineExpose({ focusSearch });
                         </SelectContent>
                       </Select>
 
-                      <Popover v-if="documentStoreProvider.kind !== 'elasticsearch'" :open="!!documentFilterFieldPopoverOpen[rule.id]" @update:open="(open) => setDocumentFilterFieldPopoverOpen(rule.id, open)">
+                      <Popover :open="!!documentFilterFieldPopoverOpen[rule.id]" @update:open="(open) => setDocumentFilterFieldPopoverOpen(rule.id, open)">
                         <PopoverTrigger as-child>
                           <button type="button" class="flex h-8 w-full min-w-0 items-center justify-between gap-1 rounded-md border bg-background px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
                             <span class="min-w-0 truncate font-mono" :title="documentFilterFieldLabel(rule.fieldName)">{{ documentFilterFieldLabel(rule.fieldName) || t("grid.filterBuilderColumn") }}</span>
@@ -1695,7 +1717,7 @@ defineExpose({ focusSearch });
                           <div class="border-b bg-muted/40 px-2 py-1.5 text-xs font-medium text-foreground">{{ t("grid.filterBuilderColumn") }}</div>
                           <div class="relative border-b p-2">
                             <Search class="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                            <Input v-model="documentFilterFieldSearch[rule.id]" autofocus class="h-7 pl-7 text-xs" :placeholder="t('grid.filterBuilderSearchColumns')" />
+                            <Input :id="documentFilterFieldSearchInputId(rule.id)" v-model="documentFilterFieldSearch[rule.id]" autofocus class="h-7 pl-7 text-xs" :placeholder="t('grid.filterBuilderSearchColumns')" />
                           </div>
                           <div class="max-h-72 overflow-auto py-1">
                             <div v-for="field in documentFilterFieldRowsForRule(rule.id)" :key="field.path" class="flex items-center gap-1 px-1.5">
@@ -1709,9 +1731,20 @@ defineExpose({ focusSearch });
                                 <ChevronRight v-if="!expandedDocumentFilterFieldPaths.has(field.path)" class="h-3.5 w-3.5" />
                                 <ChevronDown v-else class="h-3.5 w-3.5" />
                               </button>
-                              <button type="button" class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 text-left text-xs hover:bg-accent" :class="rule.fieldName === field.path ? 'bg-accent text-foreground' : ''" @click="selectDocumentFilterField(rule.id, field.path)">
-                                <span class="min-w-0 flex-1 truncate font-mono" :title="field.displayPath">{{ documentFilterFieldSearchActive(rule.id) ? field.displayPath : field.label }}</span>
-                                <span v-if="field.kind !== 'scalar'" class="shrink-0 rounded border px-1 py-0 text-[10px] leading-4 text-muted-foreground">{{ documentFilterFieldKindLabel(field.kind) }}</span>
+                              <button
+                                type="button"
+                                class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 text-left text-xs hover:bg-accent disabled:cursor-default disabled:text-muted-foreground disabled:hover:bg-transparent"
+                                :class="rule.fieldName === field.path ? 'bg-accent text-foreground' : ''"
+                                :disabled="!field.selectable"
+                                @click="selectDocumentFilterField(rule.id, field.path)"
+                              >
+                                <span class="min-w-0 flex-1 truncate font-mono" :title="documentStoreProvider.kind === 'elasticsearch' ? field.path : field.displayPath">
+                                  {{ documentFilterFieldSearchActive(rule.id) ? (documentStoreProvider.kind === "elasticsearch" ? field.path : field.displayPath) : field.label }}
+                                </span>
+                                <span v-if="documentStoreProvider.kind === 'elasticsearch' && field.selectable && elasticsearchFieldTypes.get(field.path)" class="shrink-0 text-[10px] text-muted-foreground"> ({{ elasticsearchFieldTypes.get(field.path) }}) </span>
+                                <span v-else-if="documentStoreProvider.kind !== 'elasticsearch' && field.kind !== 'scalar'" class="shrink-0 rounded border px-1 py-0 text-[10px] leading-4 text-muted-foreground">
+                                  {{ documentFilterFieldKindLabel(field.kind) }}
+                                </span>
                               </button>
                             </div>
                             <div v-if="documentFilterFieldRowsForRule(rule.id).length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">
@@ -1720,20 +1753,6 @@ defineExpose({ focusSearch });
                           </div>
                         </PopoverContent>
                       </Popover>
-
-                      <Select v-if="documentStoreProvider.kind === 'elasticsearch'" :model-value="rule.fieldName" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { fieldName: String(value) })">
-                        <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
-                          <SelectValue :placeholder="t('grid.filterBuilderColumn')"> {{ rule.fieldName }}{{ elasticsearchFieldTypes.get(rule.fieldName) ? ` (${elasticsearchFieldTypes.get(rule.fieldName)})` : "" }} </SelectValue>
-                        </SelectTrigger>
-                        <SelectContent position="popper">
-                          <SelectItem v-for="fieldName in documentFilterFieldOptions" :key="fieldName" :value="fieldName">
-                            <span class="flex min-w-0 items-center gap-2">
-                              <span class="truncate">{{ fieldName }}</span>
-                              <span v-if="elasticsearchFieldTypes.get(fieldName)" class="shrink-0 text-[10px] text-muted-foreground">({{ elasticsearchFieldTypes.get(fieldName) }})</span>
-                            </span>
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
 
                       <Select v-if="documentStoreProvider.kind === 'elasticsearch'" :model-value="rule.elasticsearchQueryType || elasticsearchRuleQueryTypes(rule)[0]" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { elasticsearchQueryType: value as ElasticsearchQueryType })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">

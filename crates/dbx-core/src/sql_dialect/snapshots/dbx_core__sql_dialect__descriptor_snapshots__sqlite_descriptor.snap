@@ -1,0 +1,30 @@
+---
+source: crates/dbx-core/src/sql_dialect/descriptor_snapshots.rs
+assertion_line: 19
+expression: desc
+---
+{
+  "dialect": "sqlite",
+  "flags": 1157597639,
+  "max_identifier_length": 255,
+  "supports_schemas": false,
+  "supports_catalogs": false,
+  "max_columns_per_table": 2000,
+  "max_indexes_per_table": 200,
+  "max_query_size_bytes": 0,
+  "supports_full_text_index": true,
+  "supports_spatial_index": false,
+  "supports_partitioning": false,
+  "supports_table_sampling": false,
+  "max_foreign_key_name_length": 255,
+  "supports_on_update_cascade": true,
+  "supports_on_delete_set_null": true,
+  "supports_deferrable_constraints": false,
+  "supports_array_type": false,
+  "supports_json_type": false,
+  "supports_enum_type": false,
+  "supports_uuid_type": false,
+  "supports_identity_columns": false,
+  "supports_auto_increment": true,
+  "supports_sequences": false
+}

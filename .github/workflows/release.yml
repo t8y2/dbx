@@ -15,7 +15,7 @@ env:
 
 jobs:
   release-ready:
-    name: Verify Agent-created draft release
+    name: Verify draft release
     runs-on: ubuntu-latest
     steps:
       - name: Wait for the draft release
@@ -503,7 +503,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo zigbuild --release -p dbx-web --target ${{ matrix.target }} \
-            --no-default-features --features "duckdb-bundled,mq-admin"
+            --no-default-features --features "duckdb-sidecar,mq-admin"
 
       - name: Package static browser runtime
         env:

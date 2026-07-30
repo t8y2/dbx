@@ -206,13 +206,58 @@ describe("data transfer failure details", () => {
 
     expect(task.transferFailuresOmitted).toBe(150);
     expect(task.transferFailures?.[0]).toEqual({ table: "table_0", error: "updated retained failure" });
+  });
 
-    tracker.updateDataTransferTask(task.exportId, {
-      ...transferProgress(task.exportId, "done"),
-      transferFailuresOmitted: 12,
-    });
+  it("counts omitted failures once for an online subscription", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("online-failures", "many tables", 250);
 
-    expect(task.transferFailuresOmitted).toBe(162);
+    for (let index = 0; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "done"));
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
+  });
+
+  it("combines pre-subscription and local omissions for a mid-transfer subscription", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("mid-transfer-failures", "many tables", 250);
+
+    for (let index = 12; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+        ...(index === 249 ? { transferFailuresOmitted: 12 } : {}),
+      });
+    }
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "done"));
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
+  });
+
+  it("combines replay and local omissions for a delayed subscription", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("delayed-failures", "many tables", 250);
+
+    for (let index = 12; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "done"), transferFailuresOmitted: 12 });
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
   });
 
   it("limits individual and total UTF-8 error detail bytes without splitting characters", () => {

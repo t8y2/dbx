@@ -1,0 +1,115 @@
+dialect:
+  name: "Exasol"
+  display_name: "Exasol"
+  versions:
+    - version: "8"
+      status: "RECOMMENDED"
+
+types:
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INTEGER"
+    category: "INTEGER"
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "DOUBLE PRECISION"
+    category: "FLOAT"
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["NUMERIC"]
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+    max_precision: 2000000
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+    max_precision: 2000
+  - name: "BOOLEAN"
+    category: "BOOLEAN"
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "TIMESTAMP WITH LOCAL TIME ZONE"
+    category: "DATETIME"
+    semantic_fidelity_base: 0.9
+  - name: "INTERVAL YEAR TO MONTH"
+    category: "INTERVAL"
+  - name: "INTERVAL DAY TO SECOND"
+    category: "INTERVAL"
+  - name: "GEOMETRY"
+    category: "SPATIAL"
+  - name: "HASHTYPE"
+    category: "SYSTEM"
+    semantic_fidelity_base: 0.1
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  comment: true
+  create_index: true
+  drop_index: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_function: true
+  drop_function: true
+  create_sequence: true
+  drop_sequence: true
+  grant_revoke: true
+  if_not_exists: true
+  transactional_ddl: true
+  identity_columns: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} MODIFY COLUMN {column} {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+
+online_safety:
+  add_column:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 100000
+  max_indexes_per_table: 100
+  max_query_size_bytes: 268435456
+  supports_partitioning: true
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 128
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT TABLE_NAME FROM EXA_ALL_TABLES WHERE TABLE_SCHEMA = '{schema}'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM EXA_ALL_COLUMNS WHERE COLUMN_SCHEMA = '{schema}' AND COLUMN_TABLE = '{table}' ORDER BY COLUMN_ORDINAL_POSITION"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT TABLE_NAME FROM EXA_ALL_TABLES WHERE TABLE_SCHEMA = '{schema}'"
+    depth_support: 1
+    performance_profile: "MEDIUM"

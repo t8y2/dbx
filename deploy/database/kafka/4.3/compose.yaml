@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/kafka:4.3.1
     container_name: dbx-kafka-4.3
+    restart: always
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-9093}:9092"
     environment:

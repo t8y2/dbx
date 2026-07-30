@@ -288,6 +288,11 @@ test("defaults sidebar table search to disabled and preserves saved booleans", (
   assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: true }).sidebarTableSearchEnabled, true);
   assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: false }).sidebarTableSearchEnabled, false);
   assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: "yes" as any }).sidebarTableSearchEnabled, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal, true);
+  assert.equal(normalizeEditorSettings({}).sidebarTableSearchLocal, true);
+  assert.equal(normalizeEditorSettings({ sidebarTableSearchLocal: false }).sidebarTableSearchLocal, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal, false);
+  assert.equal(normalizeEditorSettings({ sidebarGlobalSearchLocal: true }).sidebarGlobalSearchLocal, true);
 });
 
 test("defaults shortcut settings", () => {
@@ -502,13 +507,23 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS.ollama.endpoint, "http://localhost:11434/v1");
   assert.equal(AI_PROVIDER_PRESETS.ollama.requiresApiKey, false);
   assert.equal(AI_PROVIDER_PRESETS.claude.authMethod, "api-key");
+  assert.equal(AI_PROVIDER_PRESETS["anthropic-compatible"].apiStyle, "anthropic-messages");
+  assert.equal(AI_PROVIDER_PRESETS["anthropic-compatible"].authMethod, "bearer");
+  assert.equal(AI_PROVIDER_PRESETS["anthropic-compatible"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["anthropic-compatible"].iconSlug, "anthropic");
   assert.equal(AI_PROVIDER_PRESETS.openai.authMethod, "bearer");
   assert.equal(AI_PROVIDER_PRESETS.openai.iconSlug, "openai");
   assert.equal(AI_PROVIDER_PRESETS.deepseek.iconSlug, "deepseek");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].iconSlug, "claudecode");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].iconSlug, "pi");
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].requiresApiKey, false);
+  assert.equal(Object.keys(AI_PROVIDER_PRESETS).indexOf("anthropic-compatible") + 1, Object.keys(AI_PROVIDER_PRESETS).indexOf("openai-compatible"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
 
 test("normalizes legacy AI config and fills provider defaults", () => {
@@ -558,6 +573,15 @@ test("normalizes legacy AI config and fills provider defaults", () => {
   ]);
   assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "max" } as any).reasoningLevel, "max");
   assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "future" } as any).reasoningLevel, "default");
+
+  const piAgent = normalizeAiConfig({
+    provider: "pi-agent-cli",
+    piAgentCliPath: " /opt/homebrew/bin/pi ",
+    piAgentCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  } as any);
+  assert.equal(piAgent.piAgentCliPath, "/opt/homebrew/bin/pi");
+  assert.deepEqual(piAgent.piAgentCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(piAgent.model, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {
@@ -591,6 +615,16 @@ test("shows persisted UI scales that are not available as presets", () => {
   const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
 
   assert.match(source, /<SelectValue>\{\{ Math\.round\(editUiScale \* 100\) \}\}%<\/SelectValue>/);
+});
+
+test("settings page resets content scroll when switching categories", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+
+  assert.match(source, /const settingsContentScrollRef = ref<HTMLElement \| null>\(null\)/);
+  assert.match(source, /function resetSettingsContentScroll\(\)/);
+  assert.match(source, /if \(scroller\) scroller\.scrollTop = 0/);
+  assert.match(source, /watch\(activeSettingsTab, async \(tab\) => \{\s+void resetSettingsContentScroll\(\);/);
+  assert.match(source, /ref="settingsContentScrollRef" class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden/);
 });
 
 test("defaults SQL formatter settings", () => {

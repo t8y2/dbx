@@ -153,7 +153,7 @@ make
 
 `make` installs dependencies from the lockfile and starts the Tauri desktop development environment. The first Rust build can take a while; later starts are much faster.
 
-If your change does not involve DuckDB, skip the DuckDB source build:
+For a lightweight desktop build, keep DuckDB sidecar support while skipping the other default Rust features:
 
 ```bash
 make dev-fast
@@ -172,10 +172,10 @@ pnpm install --frozen-lockfile
 pnpm dev:tauri
 ```
 
-To skip DuckDB:
+For the same lightweight build:
 
 ```powershell
-pnpm tauri dev -- --no-default-features
+pnpm tauri dev -- --no-default-features --features duckdb-sidecar
 ```
 
 ### Confirm the Environment Works
@@ -451,7 +451,7 @@ git push --force-with-lease
 
 ### The First Rust Build Is Slow
 
-This is expected. Use `make dev-fast`, `make cargo-check-fast`, and `make cargo-test-fast` when DuckDB is not part of the change.
+This is expected. Use `make dev-fast` for a lightweight desktop build that still supports DuckDB. `make cargo-check-fast` and `make cargo-test-fast` skip all optional default features, so they do not validate DuckDB-specific paths.
 
 ### pnpm Reports the Wrong Version
 

@@ -141,9 +141,10 @@ jobs:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
-      # The fast lane skips only bundled DuckDB while retaining the other default capabilities.
+      # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
-      RUST_FAST_FEATURES: dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FAST_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FULL_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx/system-fonts,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-core/system-fonts,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher,dbx-web/system-fonts
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -203,7 +204,7 @@ jobs:
           if [ "$RUST_FEATURE_MODE" = "fast" ]; then
             cargo clippy --workspace --locked --all-targets --no-default-features --features "$RUST_FAST_FEATURES" -- -D warnings
           else
-            cargo clippy --workspace --locked --all-targets -- -D warnings
+            cargo clippy --workspace --locked --all-targets --no-default-features --features "$RUST_FULL_FEATURES" -- -D warnings
           fi
 
       - name: Show sccache stats
@@ -219,9 +220,10 @@ jobs:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
-      # The fast lane skips only bundled DuckDB while retaining the other default capabilities.
+      # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
-      RUST_FAST_FEATURES: dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FAST_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
+      RUST_FULL_FEATURES: dbx/duckdb-sidecar,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx/system-fonts,dbx-core/duckdb-sidecar,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-core/system-fonts,dbx-web/duckdb-sidecar,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher,dbx-web/system-fonts
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -278,7 +280,7 @@ jobs:
           if [ "$RUST_FEATURE_MODE" = "fast" ]; then
             cargo test --workspace --locked --no-default-features --features "$RUST_FAST_FEATURES"
           else
-            cargo test --workspace --locked
+            cargo test --workspace --locked --no-default-features --features "$RUST_FULL_FEATURES"
           fi
 
       - name: Show sccache stats
@@ -395,6 +397,12 @@ jobs:
               - 'plugins/jdbc/**'
             agents:
               - 'agents/**'
+              - 'crates/dbx-core/Cargo.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/scripts/bump-agent-versions.mjs'
+              - '.github/scripts/bump-agent-versions.test.mjs'
+              - '.github/workflows/agents-release.yml'
             nix:
               # This fast check validates only the fixed-output pnpm dependency closure.
               - 'package.json'
@@ -441,13 +449,6 @@ jobs:
                   ;;
               esac
 
-              # Feature-gated DuckDB code must keep the full default-feature checks on its PR.
-              if echo "$file" | grep -Eqi 'duckdb' \
-                || { [ -f "$file" ] && grep -Eqi 'duckdb-bundled|cfg[^[:cntrl:]]*duckdb|feature[^[:cntrl:]]*duckdb' "$file"; } \
-                || git diff "$BASE_SHA" HEAD -- "$file" | grep -Eqi 'duckdb-bundled|cfg[^[:cntrl:]]*duckdb|feature[^[:cntrl:]]*duckdb'; then
-                full=true
-                break
-              fi
             done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri .github/workflows/ci.yml)
           fi
 
@@ -476,11 +477,25 @@ jobs:
         with:
           go-version: "1.22.x"
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
       - name: Agent script tests
-        run: python3 -m unittest discover -s scripts -p '*_test.py'
+        run: |
+          python3 -m unittest discover -s scripts -p '*_test.py'
+          node --test ../.github/scripts/bump-agent-versions.test.mjs
+
+      - name: DuckDB driver tests
+        working-directory: ..
+        run: cargo test --manifest-path agents/drivers/duckdb/Cargo.toml --locked
 
       - name: Agent validation
         run: python3 scripts/validate_agents.py

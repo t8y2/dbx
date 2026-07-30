@@ -41,6 +41,7 @@ import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarge
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
+  canEditStructuredTriggerDraft,
   canEditManticoreColumnProperties,
   combineDataTypeForDatabase,
   combineDataTypeForDatabaseWithLengthUnit,
@@ -2158,7 +2159,7 @@ function toggleDropTrigger(trigger: EditableStructureTrigger) {
 }
 
 function canEditTriggerDraft(trigger: EditableStructureTrigger): boolean {
-  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop;
+  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop && canEditStructuredTriggerDraft(databaseType.value, trigger);
 }
 
 function primarySqlOperation(sql: string): string {

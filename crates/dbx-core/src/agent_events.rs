@@ -36,6 +36,10 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Opaque provider response data required to replay this tool call in a
+    /// follow-up request (for example, Gemini thought signatures).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_payload: Option<serde_json::Value>,
 }
 
 /// Result of executing a tool.

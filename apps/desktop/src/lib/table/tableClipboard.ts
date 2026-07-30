@@ -8,6 +8,12 @@ export interface TableClipboardContext {
   schema?: string | null;
 }
 
+export interface TableClipboardTableContext extends TableClipboardContext {
+  tableName: string;
+}
+
+export type TableClipboardMenuState = "copy" | "paste" | "copy-and-paste";
+
 export interface TableDataCopyColumnOptions {
   columns: string[];
   postgresOverridingSystemValue: boolean;
@@ -24,6 +30,29 @@ export function tableClipboardEntryMatchesTarget(entry: TableClipboardContext, t
 
 export function tableClipboardMatchesTarget(entries: TableClipboardContext[], target: TableClipboardContext | null): boolean {
   return !!target && entries.length > 0 && entries.every((entry) => tableClipboardEntryMatchesTarget(entry, target));
+}
+
+/**
+ * Returns the common source context for a copied table collection. Cross-database
+ * transfer can only use one source connection/database/schema per request.
+ */
+export function tableClipboardSourceContext(entries: TableClipboardContext[]): TableClipboardContext | null {
+  const source = entries[0];
+  if (!source || !entries.every((entry) => tableClipboardEntryMatchesTarget(entry, source))) return null;
+  return {
+    connectionId: source.connectionId,
+    database: source.database,
+    schema: source.schema,
+  };
+}
+
+export function tableClipboardMatchesSingleSource(entries: TableClipboardTableContext[], source: TableClipboardTableContext): boolean {
+  return entries.length === 1 && tableClipboardEntryMatchesTarget(entries[0]!, source) && entries[0]!.tableName === source.tableName;
+}
+
+export function tableClipboardMenuState(entries: TableClipboardTableContext[], target: TableClipboardTableContext, canPasteAcrossContext = false): TableClipboardMenuState {
+  if (!tableClipboardMatchesTarget(entries, target)) return canPasteAcrossContext && entries.length > 0 ? "copy-and-paste" : "copy";
+  return tableClipboardMatchesSingleSource(entries, target) ? "paste" : "copy-and-paste";
 }
 
 export function supportsWholeRowTableDataCopy(databaseType: DatabaseType | undefined): boolean {

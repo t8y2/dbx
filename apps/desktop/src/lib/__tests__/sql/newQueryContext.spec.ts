@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildSelectAllSql, isNewQueryPrefillSupported, resolveNewQueryInitialSql, resolveNewQueryTable, type ResolveNewQueryTableInput } from "@/lib/sql/newQueryContext";
+import { buildSelectAllSql, isNewQueryPrefillSupported, resolveNewQueryInitialSql, resolveNewQueryTable, resolveNewQueryTarget } from "@/lib/sql/newQueryContext";
+import type { ResolveNewQueryTableInput } from "@/lib/sql/newQueryContext";
 import type { QueryTab, TreeNode } from "@/types/database";
 
 function dataTab(overrides: Partial<Pick<QueryTab, "mode" | "connectionId" | "database" | "schema" | "tableMeta" | "structureTableName" | "title">> = {}): ResolveNewQueryTableInput["activeTab"] {
@@ -17,6 +18,76 @@ function dataTab(overrides: Partial<Pick<QueryTab, "mode" | "connectionId" | "da
 function tableNode(overrides: Partial<Pick<TreeNode, "type" | "connectionId" | "database" | "schema" | "catalog" | "tableName" | "label">> = {}): ResolveNewQueryTableInput["selectedTreeNode"] {
   return { type: "table", connectionId: "conn-1", database: "app_db", schema: "public", tableName: "orders", label: "orders", ...overrides };
 }
+
+describe("resolveNewQueryTarget", () => {
+  it("inherits an external catalog from the active object browser", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeTab: {
+          connectionId: "conn-1",
+          database: "bi",
+          objectBrowser: { catalog: "paimon_catalog" },
+        },
+        connections: [{ id: "conn-1", host: "localhost", database: "", db_type: "starrocks" }],
+        preferredSource: "tab",
+      }),
+    ).toEqual({
+      connectionId: "conn-1",
+      database: "bi",
+      schema: undefined,
+      catalog: "paimon_catalog",
+      shouldRefreshDefaultDatabase: false,
+    });
+  });
+
+  it("inherits an external catalog from active table metadata", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeTab: {
+          connectionId: "conn-1",
+          database: "bi",
+          tableMeta: {
+            catalog: "paimon_catalog",
+            tableName: "events",
+            columns: [],
+            primaryKeys: [],
+          },
+        },
+        connections: [{ id: "conn-1", host: "localhost", database: "", db_type: "starrocks" }],
+      })?.catalog,
+    ).toBe("paimon_catalog");
+  });
+
+  it("repairs a stale SQLite file path inherited from an active tab", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeTab: {
+          connectionId: "conn-sqlite",
+          database: "/tmp/stale.sqlite",
+        },
+        connections: [{ id: "conn-sqlite", host: "/tmp/stale.sqlite", database: "/tmp/stale.sqlite", db_type: "sqlite" }],
+      }),
+    ).toEqual({
+      connectionId: "conn-sqlite",
+      database: "main",
+      schema: undefined,
+      catalog: undefined,
+      shouldRefreshDefaultDatabase: false,
+    });
+  });
+
+  it("preserves an attached SQLite database alias inherited from an active tab", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeTab: {
+          connectionId: "conn-sqlite",
+          database: "analytics.db",
+        },
+        connections: [{ id: "conn-sqlite", host: "primary.db", database: undefined, db_type: "sqlite" }],
+      })?.database,
+    ).toBe("analytics.db");
+  });
+});
 
 describe("resolveNewQueryTable", () => {
   it("resolves the table from an active data tab", () => {
@@ -118,6 +189,9 @@ describe("buildSelectAllSql", () => {
   it("escapes embedded quote characters", () => {
     expect(buildSelectAllSql("mysql", { tableName: "a`b" })).toBe("SELECT * FROM `a``b`");
     expect(buildSelectAllSql("postgres", { tableName: 'a"b' })).toBe('SELECT * FROM "a""b"');
+  });
+  it("qualifies a StarRocks external-catalog table with catalog and database", () => {
+    expect(buildSelectAllSql("starrocks", { catalog: "paimon_catalog", database: "bi", tableName: "events" })).toBe("SELECT * FROM `paimon_catalog`.`bi`.`events`");
   });
 });
 

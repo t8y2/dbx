@@ -63,7 +63,7 @@ pub enum DatabaseCreationTarget {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg(feature = "duckdb-bundled")]
+#[cfg(feature = "duckdb-sidecar")]
 pub struct DuckDbAttachDatabaseSqlOptions {
     pub path: String,
     pub name: String,
@@ -312,7 +312,7 @@ pub fn supports_database_property_comment(database_type: Option<DatabaseType>) -
     )
 }
 
-#[cfg(feature = "duckdb-bundled")]
+#[cfg(feature = "duckdb-sidecar")]
 pub fn build_duckdb_attach_database_sql(options: DuckDbAttachDatabaseSqlOptions) -> String {
     format!(
         "ATTACH {} AS {};",
@@ -1096,7 +1096,7 @@ mod tests {
         assert!(!supports_create_database_charset(Some(DatabaseType::Postgres), None));
     }
 
-    #[cfg(feature = "duckdb-bundled")]
+    #[cfg(feature = "duckdb-sidecar")]
     #[test]
     fn builds_duckdb_attach_sql() {
         assert_eq!(

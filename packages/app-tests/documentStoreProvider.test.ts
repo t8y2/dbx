@@ -9,12 +9,14 @@ import {
   documentFieldPathOptionsFromDocuments,
   documentFieldPathTreeFromDocuments,
   documentStoreProviderFor,
+  elasticsearchFieldPathTreeFromFieldNames,
   elasticsearchQueryTypeOptions,
   elasticsearchSearchBodyFromDocumentQuery,
   elasticsearchStructuredFilter,
   flattenDocumentFieldPathTree,
   formatDocumentQueryInput,
   searchDocumentFieldPathTree,
+  searchElasticsearchFieldPathTree,
   type DocumentFilterRule,
 } from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
 
@@ -190,6 +192,70 @@ test("searches nested document field paths", () => {
     searchDocumentFieldPathTree(tree, "orders[] > sku").map((node) => node.path),
     ["orders.sku"],
   );
+});
+
+test("builds searchable Elasticsearch mapping field paths", () => {
+  const deepValuePath = "deep_nested_example.level_1.level_2.level_3.level_4.level_5.level_6.value";
+  const deepKeywordPath = `${deepValuePath}.keyword`;
+  const fieldNames = ["amount", "buyer.contact.email", "buyer.contact.email.keyword", "deep_nested_example.level_1.level_2.level_3.level_4.level_5.level_6.sequence", deepValuePath, deepKeywordPath, "is_priority", "_id", "_routing"];
+  const originalFieldNames = [...fieldNames];
+  const tree = elasticsearchFieldPathTreeFromFieldNames(fieldNames);
+  const buyer = tree.find((node) => node.path === "buyer");
+  const contact = buyer?.children.find((node) => node.path === "buyer.contact");
+  const email = contact?.children.find((node) => node.path === "buyer.contact.email");
+  const keyword = email?.children.find((node) => node.path === "buyer.contact.email.keyword");
+  const deepKeyword = flattenDocumentFieldPathTree(tree).find((node) => node.path === deepKeywordPath);
+
+  assert.ok(buyer);
+  assert.ok(contact);
+  assert.ok(email);
+  assert.ok(keyword);
+  assert.ok(deepKeyword);
+  assert.deepEqual(
+    tree.map((node) => node.path),
+    ["amount", "buyer", "deep_nested_example", "is_priority", "_id", "_routing"],
+  );
+  assert.equal(buyer.selectable, false);
+  assert.equal(contact.selectable, false);
+  assert.equal(email.selectable, true);
+  assert.equal(keyword.selectable, true);
+  assert.deepEqual(
+    buyer.children.map((node) => node.path),
+    ["buyer.contact"],
+  );
+  assert.equal(keyword.displayPath, "buyer > contact > email > keyword");
+  assert.equal(deepKeyword.displayPath, "deep_nested_example > level_1 > level_2 > level_3 > level_4 > level_5 > level_6 > value > keyword");
+  assert.deepEqual(
+    searchElasticsearchFieldPathTree(tree, " EMAIL ").map((node) => node.path),
+    ["buyer.contact.email", "buyer.contact.email.keyword"],
+  );
+  assert.deepEqual(searchElasticsearchFieldPathTree(tree, "text"), []);
+  assert.deepEqual(fieldNames, originalFieldNames);
+});
+
+test("keeps Elasticsearch object and nested mapping fields expandable but not selectable", () => {
+  const mappingFields = [
+    { name: "buyers", type: "nested" },
+    { name: "buyers.email", type: "keyword" },
+    { name: "profile", type: "object" },
+    { name: "profile.city", type: "text" },
+    { name: "title", type: "text" },
+    { name: "title.keyword", type: "keyword" },
+  ];
+  const fieldTypes = new Map(mappingFields.map((field) => [field.name, field.type]));
+  const tree = elasticsearchFieldPathTreeFromFieldNames(
+    mappingFields.map((field) => field.name),
+    fieldTypes,
+  );
+  const fieldsByPath = new Map(flattenDocumentFieldPathTree(tree).map((field) => [field.path, field]));
+
+  assert.equal(fieldsByPath.get("buyers")?.selectable, false);
+  assert.equal(fieldsByPath.get("buyers")?.children.length, 1);
+  assert.equal(fieldsByPath.get("buyers.email")?.selectable, true);
+  assert.equal(fieldsByPath.get("profile")?.selectable, false);
+  assert.equal(fieldsByPath.get("profile.city")?.selectable, true);
+  assert.equal(fieldsByPath.get("title")?.selectable, true);
+  assert.equal(fieldsByPath.get("title.keyword")?.selectable, true);
 });
 
 test("uses elemMatch only for AND conditions on the same array object", () => {

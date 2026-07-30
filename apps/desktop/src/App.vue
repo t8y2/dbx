@@ -41,17 +41,18 @@ import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
+import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
 import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
+import { resolveHistorySqlRestoreTarget } from "@/lib/history/historyRestoreTarget";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
@@ -255,11 +256,14 @@ function restoreHistorySql(sql: string, entry: HistoryEntry) {
     return;
   }
 
-  const connectionId = entry.connection_id || tab?.connectionId || connectionStore.connections[0]?.id;
-  if (!connectionId) return;
-  const config = connectionStore.getConfig(connectionId);
-  const database = entry.database || tab?.database || (config ? resolveDefaultDatabase(config, []) : "");
-  const tabId = queryStore.createTab(connectionId, database || "", t("tabs.sql"));
+  const target = resolveHistorySqlRestoreTarget({
+    entry,
+    activeTab: tab,
+    firstConnectionId: connectionStore.connections[0]?.id,
+    getConfig: (connectionId) => connectionStore.getConfig(connectionId),
+  });
+  if (!target) return;
+  const tabId = queryStore.createTab(target.connectionId, target.database, t("tabs.sql"), "query", target.schema);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -675,7 +679,8 @@ function analyzeHistoryWithAi(entry: HistoryEntry) {
   }
 
   openAiPanel();
-  const database = entry.database || activeTab.value?.database || resolveDefaultDatabase(config, []);
+  const storedDatabase = entry.database || activeTab.value?.database || resolveDefaultDatabase(config, []);
+  const database = config.db_type === "sqlite" ? normalizeSqliteNamespace(storedDatabase, config) : storedDatabase;
   const title = t("history.aiAnalysisTab");
   const tabId = queryStore.createTab(connectionId, database || "", title, "query");
   queryStore.updateSql(tabId, entry.sql);
@@ -1085,21 +1090,19 @@ async function openSqlFile() {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = ".sql";
-      input.onchange = () => {
+      input.onchange = async () => {
         const file = input.files?.[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (typeof reader.result === "string") {
-            queryStore.updateSql(tab.id, reader.result);
-          }
-        };
-        reader.readAsText(file);
+        try {
+          queryStore.updateSql(tab.id, await readBrowserSqlFile(file));
+        } catch (e: any) {
+          toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+        }
       };
       input.click();
     }
   } catch (e: any) {
-    toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
 }
 
@@ -1132,7 +1135,7 @@ async function openSqlFilePath(path: string) {
     const database = activeTab.value?.database || (connection ? resolveDefaultDatabase(connection, []) : "");
     queryStore.openExternalSqlFile(connectionId, database, path, content);
   } catch (e: any) {
-    toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
 }
 
@@ -1524,9 +1527,14 @@ function changeActiveDatabase(database: string) {
   }
 }
 
+function changeActiveCatalog(catalog: string | undefined, database: string) {
+  const tab = activeTab.value;
+  if (tab) queryStore.updateCatalog(tab.id, catalog, database);
+}
+
 async function setActiveDatabaseAsDefault() {
   const tab = activeTab.value;
-  if (!tab || !tab.connectionId || !tab.database) return;
+  if (!tab || !tab.connectionId || !tab.database || tab.catalog) return;
   await connectionStore.setDefaultDatabase(tab.connectionId, tab.database);
 }
 
@@ -1541,29 +1549,6 @@ function changeActiveSchema(schema: string | undefined) {
   if (tab) queryStore.updateSchema(tab.id, schema);
 }
 
-function changeActiveCatalog(catalog: string | undefined) {
-  const tab = activeTab.value;
-  if (tab) {
-    queryStore.updateCatalog(tab.id, catalog);
-    // Refresh the database options from the selected catalog so the
-    // EditorToolbar dropdown shows the correct databases immediately.
-    if (tab.connectionId) {
-      const connection = connectionStore.getConfig(tab.connectionId);
-      if (connection && catalog && isDorisFamilyCatalogCapable(connection?.db_type, connection?.driver_profile)) {
-        import("@/lib/backend/api").then((api) => {
-          api
-            .listDorisCatalogDatabases(tab.connectionId!, catalog)
-            .then((dbs) => {
-              tab.database = dbs.length === 1 ? dbs[0].name : "";
-            })
-            .catch(() => {});
-        });
-      } else {
-        getDatabaseOptions(tab.connectionId).catch(() => {});
-      }
-    }
-  }
-}
 function openGitHub() {
   openUrl("https://github.com/t8y2/dbx");
 }
@@ -1580,8 +1565,11 @@ function ensureQueryTab(): string {
   const tab = activeTab.value;
   if (tab && tab.mode === "query") return tab.id;
   const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-  const db = tab?.connectionId === connId ? tab.database : connectionStore.getConfig(connId)?.database || "";
-  return queryStore.createTab(connId, db, undefined, "query");
+  const sameConnectionTab = tab?.connectionId === connId ? tab : undefined;
+  const db = sameConnectionTab?.database || connectionStore.getConfig(connId)?.database || "";
+  const schema = sameConnectionTab?.schema ?? sameConnectionTab?.objectBrowser?.schema ?? sameConnectionTab?.tableMeta?.schema;
+  const catalog = sameConnectionTab?.catalog ?? sameConnectionTab?.objectBrowser?.catalog ?? sameConnectionTab?.tableMeta?.catalog;
+  return queryStore.createTab(connId, db, undefined, "query", schema, undefined, catalog);
 }
 
 function routeAiRedisCommand(command: string, execute: boolean): boolean {
@@ -1675,7 +1663,10 @@ async function handleQuickOpenSelect(item: any) {
       const database = connection ? resolveDefaultDatabase(connection, []) : "";
       queryStore.openExternalSqlFile(connectionId, database, item.filePath, content);
     } catch (e: any) {
-      toast(e?.message || String(e), 5000);
+      toast(
+        externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)),
+        5000,
+      );
     }
     return;
   }
@@ -2000,7 +1991,9 @@ async function initApp() {
   try {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
-    await queryStore.initOpenTabs();
+    await connectionStore.initFromDisk();
+    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
+    await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
     await settingsStore.initDesktopSettings().catch(() => {});
 
@@ -2015,8 +2008,6 @@ async function initApp() {
         toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
       });
 
-    await connectionStore.initFromDisk();
-    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     restoreActiveConnectionContext();
   } catch (e: any) {
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
@@ -2205,7 +2196,17 @@ onUnmounted(() => {
         />
 
         <div :class="isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
-          <AppSidebar v-show="sidebarOpen" ref="appSidebarRef" :sidebar-width="sidebarWidth" :classic-layout="isClassicLayout" @import="dialogs.onImportClick" @export="dialogs.onExportClick" @start-resize="startSidebarResize" @collapse="setSidebarOpen(false)" />
+          <AppSidebar
+            v-show="sidebarOpen"
+            ref="appSidebarRef"
+            :sidebar-width="sidebarWidth"
+            :classic-layout="isClassicLayout"
+            @import="dialogs.onImportClick"
+            @export="dialogs.onExportClick"
+            @start-resize="startSidebarResize"
+            @collapse="setSidebarOpen(false)"
+            @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
+          />
           <div v-show="!sidebarOpen" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
             <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('sidebar.expand')" :aria-label="t('sidebar.expand')" @click="setSidebarOpen(true)">
               <ChevronsRight class="h-4 w-4" />
@@ -2282,8 +2283,8 @@ onUnmounted(() => {
                   @paste-sql-in-condition="pasteClipboardAsSqlInCondition"
                   @change-connection="changeActiveConnection"
                   @change-database="changeActiveDatabase"
-                  @change-schema="changeActiveSchema"
                   @change-catalog="changeActiveCatalog"
+                  @change-schema="changeActiveSchema"
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"
                 />

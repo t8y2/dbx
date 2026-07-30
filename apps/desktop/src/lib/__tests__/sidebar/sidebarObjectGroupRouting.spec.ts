@@ -25,10 +25,10 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
-function objectGroup(type: "group-triggers" | "group-types", id: string): TreeNode {
+function objectGroup(type: "group-triggers" | "group-synonyms" | "group-types", id: string): TreeNode {
   return {
     id,
-    label: type === "group-triggers" ? "tree.triggers" : "tree.types",
+    label: type === "group-triggers" ? "tree.triggers" : type === "group-synonyms" ? "tree.synonyms" : "tree.types",
     type,
     connectionId: "mysql-1",
     database: "app",
@@ -70,23 +70,28 @@ describe("sidebar object-group routing", () => {
     setActivePinia(createPinia());
   });
 
-  it("uses listObjects for schema-level trigger and type groups, including empty results", async () => {
+  it("uses listObjects for schema-level trigger, synonym, and type groups, including empty results", async () => {
     const listObjects = vi.fn<() => Promise<ObjectInfo[]>>().mockResolvedValue([]);
     const listTriggers = vi.fn<() => Promise<never[]>>().mockResolvedValue([]);
     const { connection, store } = await createStore({ listObjects, listTriggers });
     const triggerGroup = objectGroup("group-triggers", `${connection.id}:app:app:__triggers`);
+    const synonymGroup = objectGroup("group-synonyms", `${connection.id}:app:app:__synonyms`);
     const typeGroup = objectGroup("group-types", `${connection.id}:app:app:__types`);
-    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [triggerGroup, typeGroup] }];
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [triggerGroup, synonymGroup, typeGroup] }];
     const storedTriggerGroup = store.treeNodes[0].children![0];
-    const storedTypeGroup = store.treeNodes[0].children![1];
+    const storedSynonymGroup = store.treeNodes[0].children![1];
+    const storedTypeGroup = store.treeNodes[0].children![2];
 
     await loadSidebarObjectGroup(storedTriggerGroup, store);
+    await loadSidebarObjectGroup(storedSynonymGroup, store);
     await loadSidebarObjectGroup(storedTypeGroup, store);
 
     expect(listObjects).toHaveBeenNthCalledWith(1, connection.id, "app", "app", ["TRIGGER"], undefined, 11, 0);
-    expect(listObjects).toHaveBeenNthCalledWith(2, connection.id, "app", "app", ["TYPE", "TYPE_BODY"], undefined, 11, 0);
+    expect(listObjects).toHaveBeenNthCalledWith(2, connection.id, "app", "app", ["SYNONYM"], undefined, 11, 0);
+    expect(listObjects).toHaveBeenNthCalledWith(3, connection.id, "app", "app", ["TYPE", "TYPE_BODY"], undefined, 11, 0);
     expect(listTriggers).not.toHaveBeenCalled();
     expect(storedTriggerGroup).toMatchObject({ isExpanded: true, isLoading: false, children: [] });
+    expect(storedSynonymGroup).toMatchObject({ isExpanded: true, isLoading: false, children: [] });
     expect(storedTypeGroup).toMatchObject({ isExpanded: true, isLoading: false, children: [] });
   });
 

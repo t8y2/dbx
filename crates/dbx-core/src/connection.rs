@@ -4,8 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex, RwLock};
-#[cfg(feature = "duckdb-bundled")]
-use tokio::task::JoinHandle;
 
 use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
@@ -42,21 +40,16 @@ const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
 const HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
 
-#[cfg(feature = "duckdb-bundled")]
 mod duckdb_types {
+    #[cfg(feature = "duckdb-sidecar")]
     use std::sync::Arc;
-    pub type DuckDbHandle = Arc<crate::db::duckdb_driver::DuckDbConnection>;
+    #[cfg(feature = "duckdb-sidecar")]
     pub type DuckDbWorkerHandle = Arc<crate::db::duckdb_worker_process::DuckDbWorkerClient>;
-    pub type ExternalTabularHandle = Arc<crate::external::ExternalPool>;
-}
-#[cfg(not(feature = "duckdb-bundled"))]
-mod duckdb_types {
-    pub type DuckDbHandle = ();
+    #[cfg(not(feature = "duckdb-sidecar"))]
     pub type DuckDbWorkerHandle = ();
-    pub type ExternalTabularHandle = ();
 }
 
-use duckdb_types::{DuckDbHandle, DuckDbWorkerHandle, ExternalTabularHandle};
+use duckdb_types::DuckDbWorkerHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MysqlMode {
@@ -82,6 +75,16 @@ fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
     oceanbase_mysql_query_timeout_sql(config, config.query_timeout_secs).into_iter().collect()
 }
 
+fn mysql_pool_setup_queries(config: &ConnectionConfig, url: &str) -> Vec<String> {
+    let mut queries = oceanbase_mysql_setup_queries(config);
+    if let Some(dialect) = db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()) {
+        if let Some(query) = db::mysql::catalog_setup_query_for_url(dialect, url) {
+            queries.push(query);
+        }
+    }
+    queries
+}
+
 pub enum PoolKind {
     Mysql(db::mysql::MySqlPool, MysqlMode),
     Postgres(deadpool_postgres::Pool),
@@ -90,7 +93,6 @@ pub enum PoolKind {
     Turso(db::turso_driver::TursoClient),
     CloudflareD1(db::cloudflare_d1_driver::CloudflareD1Client),
     Redis(db::redis_driver::RedisConnection),
-    DuckDb(DuckDbHandle),
     DuckDbWorker(DuckDbWorkerHandle),
     MongoDb(mongodb::Client),
     ClickHouse(db::clickhouse_driver::ChClient),
@@ -100,7 +102,6 @@ pub enum PoolKind {
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
-    ExternalTabular(ExternalTabularHandle),
     ExternalDriver {
         driver_id: String,
         config: Arc<ConnectionConfig>,
@@ -400,7 +401,7 @@ pub async fn connect_mysql_metadata_pool(
 ) -> Result<(db::mysql::MySqlPool, MysqlMode), String> {
     let url = connection_url_for_endpoint(db_config, host, port);
     let idle_timeout_secs = Some(db_config.idle_timeout_secs);
-    let extra_setup_queries = oceanbase_mysql_setup_queries(db_config);
+    let extra_setup_queries = mysql_pool_setup_queries(db_config, &url);
     if db_config.needs_bare_mysql() {
         return match connect_bare_mysql_pool_with_setup(
             db_config,
@@ -512,7 +513,7 @@ pub async fn connect_bare_metadata_pool(
     max_connections: usize,
 ) -> Result<db::mysql::MySqlPool, String> {
     let url = connection_url_for_endpoint(db_config, host, port);
-    let extra_setup_queries = oceanbase_mysql_setup_queries(db_config);
+    let extra_setup_queries = mysql_pool_setup_queries(db_config, &url);
     if db_config.effective_database().is_none() {
         return connect_bare_mysql_pool_with_setup(
             db_config,
@@ -717,41 +718,44 @@ impl AppState {
         }
     }
 
-    #[cfg(feature = "duckdb-bundled")]
-    async fn create_duckdb_pool(&self, config: &ConnectionConfig) -> Result<PoolKind, String> {
-        if self.duckdb_worker_process_isolation.load(Ordering::Relaxed) {
-            let attached_databases = config
-                .attached_databases
-                .iter()
-                .map(|attached| crate::models::connection::AttachedDatabaseConfig {
-                    name: attached.name.clone(),
-                    path: expand_tilde(&attached.path),
-                })
-                .collect();
-            let client = db::duckdb_worker_process::DuckDbWorkerClient::open_with_process_limit(
-                expand_tilde(&config.host),
+    #[cfg(feature = "duckdb-sidecar")]
+    pub async fn create_duckdb_pool(&self, config: &ConnectionConfig) -> Result<PoolKind, String> {
+        let attached_databases = config
+            .attached_databases
+            .iter()
+            .map(|attached| crate::models::connection::AttachedDatabaseConfig {
+                name: attached.name.clone(),
+                path: expand_tilde(&attached.path),
+            })
+            .collect();
+        let path = expand_tilde(&config.host);
+        let init_script = config.init_script.clone();
+        let process_limit = self.duckdb_worker_max_processes.load(Ordering::Relaxed);
+        let installed_driver = self.agent_manager.driver_native_path("duckdb");
+        let has_driver_override =
+            std::env::var_os(db::duckdb_worker_process::DUCKDB_DRIVER_PATH_ENV).is_some_and(|value| !value.is_empty());
+        let client = if installed_driver.is_file() && !has_driver_override {
+            db::duckdb_worker_process::DuckDbWorkerClient::open_with_executable_and_process_limit(
+                installed_driver,
+                path,
                 attached_databases,
-                config.init_script.clone(),
-                self.duckdb_worker_max_processes.load(Ordering::Relaxed),
+                init_script,
+                process_limit,
             )
-            .await?;
-            Ok(PoolKind::DuckDbWorker(Arc::new(client)))
+            .await?
         } else {
-            let con = db::duckdb_driver::connect_path(&expand_tilde(&config.host))?;
-            {
-                let locked = con.lock().map_err(|e| e.to_string())?;
-                for attached in &config.attached_databases {
-                    crate::schema::duckdb_attach_database(&locked, &attached.name, &expand_tilde(&attached.path))?;
-                }
-                if let Some(script) = config.init_script.as_deref() {
-                    db::duckdb_driver::run_init_script(&locked, script)?;
-                }
-            }
-            Ok(PoolKind::DuckDb(con))
-        }
+            db::duckdb_worker_process::DuckDbWorkerClient::open_with_process_limit(
+                path,
+                attached_databases,
+                init_script,
+                process_limit,
+            )
+            .await?
+        };
+        Ok(PoolKind::DuckDbWorker(Arc::new(client)))
     }
 
-    #[cfg(feature = "duckdb-bundled")]
+    #[cfg(feature = "duckdb-sidecar")]
     pub async fn test_duckdb_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
         // Test the submitted form as a fresh session so unsaved ATTACH/init
         // changes cannot be masked by a pool created from older settings.
@@ -1142,9 +1146,24 @@ impl AppState {
         }
     }
 
-    pub async fn shutdown_background_tasks(&self, deadline: Duration) {
+    pub async fn shutdown(&self, deadline: Duration) {
         self.running_queries.cancel_all();
-        self.task_supervisor.shutdown(deadline).await;
+        let removed_pools = self.drain_all_connection_pools().await;
+        self.transaction_sessions.write().await.clear();
+
+        let shutdown = async {
+            tokio::join!(
+                self.task_supervisor.shutdown(deadline),
+                close_removed_pools(removed_pools),
+                self.tunnels.stop_all_tunnels(),
+                self.proxy_tunnels.stop_all_tunnels(),
+                self.http_tunnels.stop_all_tunnels(),
+                self.agent_manager.stop_daemons(),
+            );
+        };
+        if tokio::time::timeout(deadline, shutdown).await.is_err() {
+            log::warn!("Timed out shutting down DBX runtime resources after {}ms", deadline.as_millis());
+        }
     }
 
     #[cfg(test)]
@@ -1278,7 +1297,7 @@ impl AppState {
                         &url,
                         connect_timeout,
                         mysql_pool_max_connections,
-                        &oceanbase_mysql_setup_queries(&db_config),
+                        &mysql_pool_setup_queries(&db_config, &url),
                     )
                     .await?
                 };
@@ -1363,11 +1382,11 @@ impl AppState {
                 };
                 PoolKind::Redis(con)
             }
-            #[cfg(feature = "duckdb-bundled")]
+            #[cfg(feature = "duckdb-sidecar")]
             DatabaseType::DuckDb => self.create_duckdb_pool(&db_config).await?,
-            #[cfg(not(feature = "duckdb-bundled"))]
+            #[cfg(not(feature = "duckdb-sidecar"))]
             DatabaseType::DuckDb => {
-                return Err("DuckDB support is not compiled in this build. Rebuild with default features.".to_string());
+                return Err("DuckDB support is not compiled in this build.".to_string());
             }
             DatabaseType::MongoDb => {
                 if mongo_uses_legacy_driver(&db_config) {
@@ -1820,6 +1839,8 @@ impl AppState {
                     .tunnels
                     .start_tunnel(
                         &probe_id,
+                        &ssh.host,
+                        ssh.port,
                         &ssh.host,
                         ssh.port,
                         &ssh.user,
@@ -2388,9 +2409,7 @@ impl AppState {
                     }
                 }
                 PoolKind::Sqlite(_)
-                | PoolKind::DuckDb(_)
                 | PoolKind::DuckDbWorker(_)
-                | PoolKind::ExternalTabular(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos => false,
@@ -2624,121 +2643,8 @@ impl AppState {
         }
     }
 
-    #[cfg(feature = "duckdb-bundled")]
-    async fn remove_pool_by_key_detached(&self, pool_key: &str) -> bool {
-        self.stop_keepalive_task(pool_key).await;
-        self.pool_activity.write().await.remove(pool_key);
-        self.postgres_cancel_contexts.write().await.remove(pool_key);
-        let removed = self.connections.write().await.remove(pool_key);
-        if let Some(pool) = removed {
-            close_removed_pools_in_background(&self.task_supervisor, vec![(pool_key.to_string(), pool)]);
-            true
-        } else {
-            false
-        }
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    async fn remove_pool_if_duckdb_isolation_mismatch(&self, pool_key: &str) -> bool {
-        let isolation_enabled = self.duckdb_worker_process_isolation.load(Ordering::Relaxed);
-        let mismatch = {
-            let connections = self.connections.read().await;
-            match connections.get(pool_key) {
-                Some(PoolKind::DuckDb(_)) => isolation_enabled,
-                Some(PoolKind::DuckDbWorker(_)) => !isolation_enabled,
-                _ => false,
-            }
-        };
-        if mismatch {
-            self.remove_pool_by_key_detached(pool_key).await
-        } else {
-            false
-        }
-    }
-
-    #[cfg(not(feature = "duckdb-bundled"))]
     async fn remove_pool_if_duckdb_isolation_mismatch(&self, _pool_key: &str) -> bool {
         false
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    pub fn spawn_duckdb_pool_cleanup(&self, pool_key: String, con: DuckDbHandle) {
-        let connections = self.connections.clone();
-        let supervisor = self.task_supervisor.clone();
-        let pool_activity = self.pool_activity.clone();
-        let postgres_cancel_contexts = self.postgres_cancel_contexts.clone();
-        let task_key = format!("duckdb-cleanup:{pool_key}");
-        supervisor.clone().spawn_replace(task_key, move |shutdown| async move {
-            while Arc::strong_count(&con) > 2 {
-                tokio::select! {
-                    _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-                }
-            }
-            supervisor.stop(&format!("keepalive:{pool_key}"));
-            pool_activity.write().await.remove(&pool_key);
-            postgres_cancel_contexts.write().await.remove(&pool_key);
-            let removed = {
-                let mut conns = connections.write().await;
-                match conns.get(&pool_key) {
-                    Some(PoolKind::DuckDb(current)) if Arc::ptr_eq(current, &con) => conns.remove(&pool_key),
-                    _ => None,
-                }
-            };
-            if let Some(pool) = removed {
-                // Keep the old DuckDB pool marked as draining until it is no longer
-                // visible in the pool map, otherwise a concurrent query could reuse it.
-                con.clear_draining();
-                drop(con);
-                close_pool_kind_with_timeout(pool_key, pool).await;
-            }
-        });
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    pub fn spawn_duckdb_draining_cleanup(
-        &self,
-        pool_key: String,
-        con: DuckDbHandle,
-        mut task: JoinHandle<Result<db::QueryResult, String>>,
-    ) {
-        let connections = self.connections.clone();
-        let supervisor = self.task_supervisor.clone();
-        let pool_activity = self.pool_activity.clone();
-        let postgres_cancel_contexts = self.postgres_cancel_contexts.clone();
-        let task_key = format!("duckdb-draining:{pool_key}");
-        supervisor.clone().spawn_replace(task_key, move |shutdown| async move {
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    task.abort();
-                    return;
-                }
-                _ = &mut task => {}
-            }
-            while Arc::strong_count(&con) > 2 {
-                tokio::select! {
-                    _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-                }
-            }
-            supervisor.stop(&format!("keepalive:{pool_key}"));
-            pool_activity.write().await.remove(&pool_key);
-            postgres_cancel_contexts.write().await.remove(&pool_key);
-            let removed = {
-                let mut conns = connections.write().await;
-                match conns.get(&pool_key) {
-                    Some(PoolKind::DuckDb(current)) if Arc::ptr_eq(current, &con) => conns.remove(&pool_key),
-                    _ => None,
-                }
-            };
-            if let Some(pool) = removed {
-                // Keep the old DuckDB pool marked as draining until it is no longer
-                // visible in the pool map, otherwise a concurrent query could reuse it.
-                con.clear_draining();
-                drop(con);
-                close_pool_kind_with_timeout(pool_key, pool).await;
-            }
-        });
     }
 
     pub async fn close_database_pool(&self, connection_id: &str, database: Option<&str>) -> Result<bool, String> {
@@ -2789,6 +2695,11 @@ impl AppState {
         let mut keys = HashSet::new();
 
         for (pool_key, pool) in connections.iter() {
+            #[cfg(feature = "duckdb-sidecar")]
+            if matches!(pool, PoolKind::DuckDbWorker(_)) {
+                keys.insert("duckdb".to_string());
+                continue;
+            }
             if !matches!(pool, PoolKind::Agent(_)) {
                 continue;
             }
@@ -2842,6 +2753,17 @@ impl AppState {
             .get(connection_id)
             .cloned()
             .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+        if config.db_type == DatabaseType::Gaussdb {
+            let pool_key = self.get_or_create_pool(connection_id, database).await?;
+            let pool = {
+                let connections = self.connections.read().await;
+                match connections.get(&pool_key) {
+                    Some(PoolKind::Postgres(pool)) => pool.clone(),
+                    _ => return Ok(None),
+                }
+            };
+            return Ok(db::postgres::gaussdb_identifier_quote(&pool).await);
+        }
         if !database_capabilities::is_agent_type(&config.db_type) {
             return Ok(None);
         }
@@ -3138,9 +3060,7 @@ impl AppState {
                     }
                 }
                 PoolKind::Sqlite(_)
-                | PoolKind::DuckDb(_)
                 | PoolKind::DuckDbWorker(_)
-                | PoolKind::ExternalTabular(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos => true,
@@ -3208,13 +3128,22 @@ impl AppState {
         close_removed_pools_in_background(&self.task_supervisor, removed);
     }
 
-    #[cfg(feature = "duckdb-bundled")]
+    async fn drain_all_connection_pools(&self) -> Vec<(String, PoolKind)> {
+        let pool_keys = self.connections.read().await.keys().cloned().collect::<Vec<_>>();
+        self.stop_keepalive_tasks(&pool_keys).await;
+        self.pool_activity.write().await.clear();
+        self.postgres_cancel_contexts.write().await.clear();
+        self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
+        self.connections.write().await.drain().collect()
+    }
+
+    #[cfg(feature = "duckdb-sidecar")]
     async fn remove_duckdb_pools_detached(&self) {
         let removed = self.drain_duckdb_pools().await;
         close_removed_pools_in_background(&self.task_supervisor, removed);
     }
 
-    #[cfg(not(feature = "duckdb-bundled"))]
+    #[cfg(not(feature = "duckdb-sidecar"))]
     async fn remove_duckdb_pools_detached(&self) {}
 
     pub async fn remove_external_driver_pools(&self, driver_id: &str) {
@@ -3255,16 +3184,16 @@ impl AppState {
         removed
     }
 
-    #[cfg(feature = "duckdb-bundled")]
+    #[cfg(feature = "duckdb-sidecar")]
     async fn drain_duckdb_pools(&self) -> Vec<(String, PoolKind)> {
         let keys_to_remove: Vec<String> = self
             .connections
             .read()
             .await
             .iter()
-            .filter_map(|(key, pool)| match pool {
-                PoolKind::DuckDb(_) | PoolKind::DuckDbWorker(_) => Some(key.clone()),
-                _ => None,
+            .filter_map(|(key, pool)| {
+                let is_duckdb = matches!(pool, PoolKind::DuckDbWorker(_));
+                is_duckdb.then(|| key.clone())
             })
             .collect();
         self.stop_keepalive_tasks(&keys_to_remove).await;
@@ -3562,13 +3491,9 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Rqlite(client) => PoolKind::Rqlite(client.clone()),
         PoolKind::Turso(client) => PoolKind::Turso(client.clone()),
         PoolKind::CloudflareD1(client) => PoolKind::CloudflareD1(client.clone()),
-        #[cfg(feature = "duckdb-bundled")]
-        PoolKind::DuckDb(con) => PoolKind::DuckDb(con.clone()),
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => PoolKind::DuckDbWorker(client.clone()),
-        #[cfg(not(feature = "duckdb-bundled"))]
-        PoolKind::DuckDb(_) => PoolKind::DuckDb(()),
-        #[cfg(not(feature = "duckdb-bundled"))]
+        #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => PoolKind::DuckDbWorker(()),
         PoolKind::MongoDb(client) => PoolKind::MongoDb(client.clone()),
         PoolKind::ClickHouse(client) => PoolKind::ClickHouse(client.clone()),
@@ -3578,10 +3503,6 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
-        #[cfg(feature = "duckdb-bundled")]
-        PoolKind::ExternalTabular(ext) => PoolKind::ExternalTabular(ext.clone()),
-        #[cfg(not(feature = "duckdb-bundled"))]
-        PoolKind::ExternalTabular(_) => PoolKind::ExternalTabular(()),
         PoolKind::ExternalDriver { driver_id, config, session } => {
             PoolKind::ExternalDriver { driver_id: driver_id.clone(), config: config.clone(), session: session.clone() }
         }
@@ -3604,17 +3525,11 @@ pub async fn close_pool_kind(pool: PoolKind) {
         PoolKind::Redis(conn) => {
             drop(conn);
         }
-        #[cfg(feature = "duckdb-bundled")]
-        PoolKind::DuckDb(con) => {
-            crate::db::duckdb_driver::close_connection(con);
-        }
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             client.shutdown().await;
         }
-        #[cfg(not(feature = "duckdb-bundled"))]
-        PoolKind::DuckDb(_) => {}
-        #[cfg(not(feature = "duckdb-bundled"))]
+        #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => {}
         PoolKind::MongoDb(client) => {
             drop(client);
@@ -3641,7 +3556,6 @@ pub async fn close_pool_kind(pool: PoolKind) {
             let mut client = client.lock().await;
             let _ = client.disconnect().await;
         }
-        PoolKind::ExternalTabular(_) => {}
         PoolKind::ExternalDriver { session, .. } => {
             session.shutdown().await;
         }
@@ -3954,11 +3868,11 @@ mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
         database_connection_config_with_catalog, metadata_connection_config, mysql_metadata_fallback_url,
-        oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries,
+        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
+        sqlserver_uses_legacy_driver, task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
         PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -3994,6 +3908,7 @@ mod tests {
             database: database.map(str::to_string),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -4018,6 +3933,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -4295,6 +4211,28 @@ mod tests {
     }
 
     #[test]
+    fn doris_pool_setup_uses_switch_for_configured_catalog() {
+        let mut config = mysql_config(Some("bi"));
+        config.db_type = DatabaseType::Doris;
+
+        assert_eq!(
+            mysql_pool_setup_queries(&config, "mysql://root:secret@localhost:9030/bi?catalog=paimon%5Fcatalog"),
+            vec!["SWITCH `paimon_catalog`"]
+        );
+    }
+
+    #[test]
+    fn starrocks_pool_setup_uses_set_catalog_for_configured_catalog() {
+        let mut config = mysql_config(Some("bi"));
+        config.db_type = DatabaseType::StarRocks;
+
+        assert_eq!(
+            mysql_pool_setup_queries(&config, "mysql://root:secret@localhost:9030/bi?catalog=paimon%5Fcatalog"),
+            vec!["SET CATALOG `paimon_catalog`"]
+        );
+    }
+
+    #[test]
     fn mongo_legacy_retry_covers_old_server_handshake_eof() {
         let err = r#"MongoDB connection failed: Kind: Server selection timeout: No available servers. Topology: { Type: Unknown, Servers: [ { Address: db.example.com:27017, Type: Unknown, Error: Kind: I/O error: unexpected end of file } ] }"#;
 
@@ -4463,6 +4401,25 @@ mod tests {
         PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::db::agent_driver::AgentDriverClient::test_stub(),
         )))
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_connection_pools_and_agent_daemons() {
+        let (state, dir) = test_app_state().await;
+        state.connections.write().await.insert("conn".to_string(), agent_pool_stub());
+        state
+            .agent_manager
+            .daemons
+            .lock()
+            .await
+            .insert("dameng".to_string(), crate::db::agent_driver::AgentDriverClient::test_stub());
+
+        state.shutdown(Duration::from_secs(1)).await;
+
+        assert!(state.connections.read().await.is_empty());
+        assert!(state.agent_manager.active_daemon_keys().await.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -5177,51 +5134,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(feature = "duckdb-bundled")]
-    #[tokio::test]
-    async fn duckdb_connection_test_does_not_reuse_stale_pool_config() {
-        let (state, dir) = test_app_state().await;
-        let db_path = dir.join("app.duckdb");
-        duckdb::Connection::open(&db_path).unwrap();
-        let mut config = mysql_config(None);
-        config.id = "duckdb-conn".to_string();
-        config.name = "DuckDB".to_string();
-        config.db_type = DatabaseType::DuckDb;
-        config.host = db_path.to_string_lossy().to_string();
-        config.port = 0;
-
-        state.configs.write().await.insert(config.id.clone(), config.clone());
-        state.get_or_create_pool("duckdb-conn", None).await.unwrap();
-
-        config.init_script = Some("SELECT definitely_invalid_syntax(".to_string());
-        let error = state.test_duckdb_connection_config(&config).await.expect_err("invalid submitted script must fail");
-
-        assert!(error.contains("Connection init script statement 1 failed"));
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[tokio::test]
-    async fn duckdb_connection_test_validates_attached_databases() {
-        let (state, dir) = test_app_state().await;
-        let mut config = mysql_config(None);
-        config.id = "duckdb-conn".to_string();
-        config.name = "DuckDB".to_string();
-        config.db_type = DatabaseType::DuckDb;
-        config.host = ":memory:".to_string();
-        config.port = 0;
-        config.attached_databases.push(AttachedDatabaseConfig {
-            name: "missing".to_string(),
-            path: dir.join("missing-parent").join("missing.duckdb").to_string_lossy().to_string(),
-        });
-
-        let error = state.test_duckdb_connection_config(&config).await.expect_err("invalid attach must fail");
-
-        assert!(error.to_ascii_lowercase().contains("attach"));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     #[tokio::test]
     async fn sqlite_connection_restores_attached_databases() {
         let (state, dir) = test_app_state().await;
@@ -5255,72 +5167,6 @@ mod tests {
         assert!(tables.iter().any(|table| table.name == "events"));
 
         state.connections.write().await.clear();
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[tokio::test]
-    async fn duckdb_connection_test_supports_memory_bootstrap() {
-        let (state, dir) = test_app_state().await;
-        let mut config = mysql_config(None);
-        config.id = "duckdb-memory".to_string();
-        config.name = "DuckDB memory".to_string();
-        config.db_type = DatabaseType::DuckDb;
-        config.host = ":memory:".to_string();
-        config.port = 0;
-        config.init_script = Some(r#"CREATE TABLE probe AS SELECT E'it\'s;ok' AS value;"#.to_string());
-
-        state.test_duckdb_connection_config(&config).await.expect("memory bootstrap succeeds");
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[tokio::test]
-    async fn applying_duckdb_worker_isolation_drops_existing_duckdb_pools() {
-        let (state, dir) = test_app_state().await;
-        let db_path = dir.join("app.duckdb");
-        duckdb::Connection::open(&db_path).unwrap();
-        let mut config = mysql_config(None);
-        config.id = "duckdb-conn".to_string();
-        config.name = "DuckDB".to_string();
-        config.db_type = DatabaseType::DuckDb;
-        config.host = db_path.to_string_lossy().to_string();
-        config.port = 0;
-
-        state.configs.write().await.insert(config.id.clone(), config);
-        state.get_or_create_pool("duckdb-conn", None).await.unwrap();
-        assert!(matches!(state.connections.read().await.get("duckdb-conn"), Some(PoolKind::DuckDb(_))));
-
-        state.apply_duckdb_worker_process_isolation(true).await;
-
-        assert!(!state.connections.read().await.contains_key("duckdb-conn"));
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[tokio::test]
-    async fn duckdb_pool_mode_mismatch_removes_existing_pool() {
-        let (state, dir) = test_app_state().await;
-        let db_path = dir.join("app.duckdb");
-        duckdb::Connection::open(&db_path).unwrap();
-        let mut config = mysql_config(None);
-        config.id = "duckdb-conn".to_string();
-        config.name = "DuckDB".to_string();
-        config.db_type = DatabaseType::DuckDb;
-        config.host = db_path.to_string_lossy().to_string();
-        config.port = 0;
-
-        state.configs.write().await.insert(config.id.clone(), config);
-        state.get_or_create_pool("duckdb-conn", None).await.unwrap();
-        assert!(matches!(state.connections.read().await.get("duckdb-conn"), Some(PoolKind::DuckDb(_))));
-
-        state.set_duckdb_worker_process_isolation_enabled(true);
-
-        assert!(state.remove_pool_if_duckdb_isolation_mismatch("duckdb-conn").await);
-        assert!(!state.connections.read().await.contains_key("duckdb-conn"));
-
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5586,33 +5432,6 @@ for line in sys.stdin:
         ));
         assert!(!super::is_agent_validate_connection_unsupported("Agent RPC error (-1): Connection timed out"));
         assert!(!super::is_agent_validate_connection_unsupported("Agent RPC error (-1): Unknown method: kv_put"));
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[tokio::test]
-    async fn duckdb_client_session_reuses_base_pool_to_avoid_file_locks() {
-        let (state, dir) = test_app_state().await;
-        let db_path = dir.join("session.duckdb");
-        duckdb::Connection::open(&db_path).unwrap();
-        let mut config = mysql_config(None);
-        config.id = "duckdb-conn".to_string();
-        config.name = "DuckDB".to_string();
-        config.db_type = DatabaseType::DuckDb;
-        config.host = db_path.to_string_lossy().to_string();
-        config.port = 0;
-
-        state.configs.write().await.insert(config.id.clone(), config.clone());
-        let base_pool_key = state.get_or_create_pool("duckdb-conn", None).await.unwrap();
-        let pool_key = state.get_or_create_pool_for_session("duckdb-conn", Some("main"), Some("tab-1")).await.unwrap();
-        assert_eq!(pool_key, base_pool_key);
-
-        assert!(!state.close_client_session_pool("duckdb-conn", Some("main"), "tab-1").await.unwrap());
-
-        let conns = state.connections.read().await;
-        assert!(conns.contains_key("duckdb-conn"));
-        assert!(!conns.contains_key("duckdb-conn:session:tab-1"));
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

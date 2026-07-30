@@ -344,6 +344,7 @@ pub async fn ensure_sql(
     connection_id: &str,
     database: &str,
     sql: &str,
+    allow_database_switch: bool,
 ) -> Result<(), AppError> {
     if !is_mcp_request(headers) {
         return Ok(());
@@ -351,7 +352,7 @@ pub async fn ensure_sql(
     let policy = load_policy(state).await?;
     ensure_allowed(&policy, connection_id)?;
     let config = load_connection(state, connection_id).await?;
-    if dbx_core::sql_risk::mcp_sql_has_forbidden_database_switch(sql, config.db_type) {
+    if !allow_database_switch && dbx_core::sql_risk::mcp_sql_has_forbidden_database_switch(sql, config.db_type) {
         return Err(AppError::from(
             "SQL_BLOCKED: MCP does not allow USE or persistent database switching.".to_string(),
         ));

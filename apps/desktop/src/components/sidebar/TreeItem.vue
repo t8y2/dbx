@@ -14,6 +14,7 @@ import {
   TableProperties,
   Key,
   Link,
+  Link2,
   Zap,
   ListTree,
   FileCode,
@@ -33,6 +34,7 @@ import {
   Archive,
   Square,
   X,
+  RefreshCw,
 } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -43,8 +45,9 @@ import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorInd
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
@@ -64,6 +67,7 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
+import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 
 const { t } = useI18n();
 
@@ -226,6 +230,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Link, colorClass: "text-blue-400" };
     case "group-triggers":
       return { icon: Zap, colorClass: "text-orange-400" };
+    case "group-constraints":
+      return { icon: Key, colorClass: "text-amber-500" };
+    case "group-table-partitions":
+    case "group-table-subpartitions":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "object-browser":
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
@@ -269,6 +278,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Braces, colorClass: "text-amber-500" };
     case "sequence":
       return { icon: ListTree, colorClass: "text-emerald-500" };
+    case "synonym":
+      return { icon: Link2, colorClass: "text-sky-500" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
@@ -289,6 +300,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Braces, colorClass: "text-amber-500" };
     case "group-sequences":
       return { icon: ListTree, colorClass: "text-emerald-500" };
+    case "group-synonyms":
+      return { icon: Link2, colorClass: "text-sky-500" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
@@ -306,25 +319,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set([
-  "group-columns",
-  "group-indexes",
-  "group-fkeys",
-  "group-triggers",
-  "group-tables",
-  "group-views",
-  "group-materialized-views",
-  "group-procedures",
-  "group-functions",
-  "group-sequences",
-  "group-packages",
-  "group-types",
-  "group-partitions",
-  "group-extensions",
-]);
-
 function isGroupLabel(node: TreeNode): boolean {
-  return groupTypes.has(node.type);
+  return isTreeGroupNodeType(node.type);
 }
 
 function displayLabel(node: TreeNode): string {
@@ -724,11 +720,21 @@ function updateTableSearchQuery(value: string | number) {
   if (!parentId) return;
   const query = String(value);
   if (sidebarTreeContext?.setTableSearchQuery) {
-    sidebarTreeContext.setTableSearchQuery(parentId, query);
+    sidebarTreeContext.setTableSearchQuery(parentId, query, settingsStore.editorSettings.sidebarTableSearchLocal);
     return;
   }
   connectionStore.setSidebarTableSearchQuery(parentId, query);
-  void connectionStore.refreshSidebarTableSearch(parentId);
+  if (!settingsStore.editorSettings.sidebarTableSearchLocal) void connectionStore.refreshSidebarTableSearch(parentId);
+}
+
+function updateTableSearchLocal(value: boolean) {
+  settingsStore.updateEditorSettings({ sidebarTableSearchLocal: value });
+  updateTableSearchQuery(tableSearchValue.value);
+}
+
+function refreshTableSearchIndex() {
+  const parentId = tableSearchParentId.value;
+  if (parentId) sidebarTreeContext?.refreshTableSearchIndex?.(parentId);
 }
 
 function clearTableSearchQuery() {
@@ -1072,8 +1078,8 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" class="tree-table-search-control flex h-7 items-center py-0.5 pr-2" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown.stop>
-    <div class="relative w-full min-w-0">
+  <div v-if="node.type === 'table-search-control'" class="tree-table-search-control flex h-7 items-center gap-1.5 py-0.5 pr-2" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown.stop>
+    <div class="relative min-w-0 flex-1">
       <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
       <Input
         :model-value="tableSearchValue"
@@ -1091,6 +1097,14 @@ function onKeydown(event: KeyboardEvent) {
         <X class="h-3 w-3" />
       </button>
     </div>
+    <LightTooltip :text="t('sidebar.localTableSearchTooltip')" side="top" :delay="300">
+      <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarTableSearchLocal" :aria-label="t('sidebar.localTableSearch')" @update:model-value="updateTableSearchLocal(Boolean($event))" />
+    </LightTooltip>
+    <LightTooltip v-if="settingsStore.editorSettings.sidebarTableSearchLocal" :text="t('sidebar.refreshLocalTableSearchIndex')" side="top" :delay="300">
+      <button type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('sidebar.refreshLocalTableSearchIndex')" @click.stop="refreshTableSearchIndex">
+        <RefreshCw class="h-3 w-3" />
+      </button>
+    </LightTooltip>
   </div>
 
   <div v-else @contextmenu="onTreeItemContextMenu">
@@ -1169,7 +1183,15 @@ function onKeydown(event: KeyboardEvent) {
             <ProductionContextBadge v-if="showProductionBadge" compact />
             <span
               v-if="
-                (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&
+                (node.type === 'group-tables' ||
+                  node.type === 'group-views' ||
+                  node.type === 'group-materialized-views' ||
+                  node.type === 'group-procedures' ||
+                  node.type === 'group-functions' ||
+                  node.type === 'group-sequences' ||
+                  node.type === 'group-synonyms' ||
+                  node.type === 'group-packages' ||
+                  node.type === 'group-partitions') &&
                 node.objectCount != null
               "
               class="text-muted-foreground text-[10px] shrink-0"

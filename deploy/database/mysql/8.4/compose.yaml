@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/mysql:8.4.6
     container_name: dbx-mysql-8.4
+    restart: always
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-3307}:3306"
     environment:

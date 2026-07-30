@@ -6,6 +6,7 @@ export interface XlsxWorksheetData {
   sheetName?: string;
   columns: readonly string[];
   columnTypes?: readonly string[];
+  columnComments?: readonly (string | null)[] | undefined;
   rows: readonly (readonly XlsxCellValue[])[];
   numericColumnRightAlign?: boolean;
 }
@@ -99,10 +100,11 @@ function normalizeUniqueSheetNames(sheets: readonly XlsxWorksheetData[]): string
   return names;
 }
 
-function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[]): number[] {
+function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], columnComments?: readonly (string | null)[]): number[] {
   return columns.map((column, colIndex) => {
+    const headerText = columnComments?.[colIndex] || column;
     const values = rows.slice(0, 100).map((row) => row[colIndex]);
-    const maxLen = [column, ...values.map((value) => (value == null ? "" : String(value)))].map((value) => Math.min(value.length, 60)).reduce((max, length) => Math.max(max, length), 8);
+    const maxLen = [headerText, ...values.map((value) => (value == null ? "" : String(value)))].map((value) => Math.min(value.length, 60)).reduce((max, length) => Math.max(max, length), 8);
     return Math.max(10, Math.min(60, maxLen + 2));
   });
 }
@@ -146,10 +148,10 @@ function worksheetXml(data: XlsxWorksheetData): string {
   const rows = data.rows;
   const totalRows = rows.length + 1;
   const range = sheetRange(columns.length, totalRows);
-  const widths = estimateColumnWidths(columns, rows);
+  const widths = estimateColumnWidths(columns, rows, data.columnComments);
   const rightAlignEnabled = data.numericColumnRightAlign !== false;
   const colsXml = widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join("");
-  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(column, 0, index, 1)).join("")}</row>`;
+  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(data.columnComments?.[index] || column, 0, index, 1)).join("")}</row>`;
   const bodyXml = rows
     .map((row, rowIndex) => {
       const excelRowIndex = rowIndex + 2;

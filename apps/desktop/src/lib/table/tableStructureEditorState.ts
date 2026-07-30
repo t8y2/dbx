@@ -816,6 +816,10 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
   }));
 }
 
+export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
+  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+}
+
 export function toColumnNames(columns: string[]): string {
   return columns.join(", ");
 }

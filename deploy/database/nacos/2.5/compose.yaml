@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/nacos-server:v2.5.2
     container_name: dbx-nacos-2.5
+    restart: always
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8849}:8848"
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_GRPC_PORT:-9849}:9848"

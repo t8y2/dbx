@@ -4,7 +4,7 @@ import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { executableStatementRanges, splitSqlStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
-import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
+import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
 export type OutputView = "result" | "summary" | "explain" | "chart";
@@ -203,13 +203,14 @@ export function resultSourceRange(editorSql: string, result: Pick<QueryResult, "
   return { from: match.from, to: match.to, sql: match.sql };
 }
 
-export type StatementExecutionMarkerStatus = "success" | "error";
+export type StatementExecutionMarkerStatus = "running" | "success" | "error";
 
 export interface StatementExecutionMarker {
   from: number;
   status: StatementExecutionMarkerStatus;
   successCount: number;
   errorCount: number;
+  runningCount?: number;
 }
 
 function lineStartOffset(sql: string, from: number): number {
@@ -222,7 +223,30 @@ function statementRanges(sql: string, databaseType?: DatabaseType): SqlTextRange
   return splitSqlStatementRanges(sql, databaseType);
 }
 
-export function statementExecutionMarkers(editorSql: string, results: QueryResult[] | undefined, databaseType?: DatabaseType, submittedSql = editorSql, executionEditorFingerprint = sqlTextFingerprint(editorSql)): StatementExecutionMarker[] {
+function liveStatementExecutionMarkers(editorSql: string, batch: BatchSqlExecution): StatementExecutionMarker[] {
+  if (sqlTextFingerprint(editorSql) !== batch.editorFingerprint || batch.total === 0) return [];
+  const byLine = new Map<number, { success: number; error: number; running: number }>();
+  for (const item of batch.items) {
+    if (item.status !== "running" && item.status !== "success" && item.status !== "error") continue;
+    if (editorSql.slice(item.from, item.to) !== item.sql) continue;
+    const from = lineStartOffset(editorSql, item.from);
+    const current = byLine.get(from) ?? { success: 0, error: 0, running: 0 };
+    current[item.status] += 1;
+    byLine.set(from, current);
+  }
+  return [...byLine.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([from, counts]) => ({
+      from,
+      status: counts.error > 0 ? "error" : counts.running > 0 ? "running" : "success",
+      successCount: counts.success,
+      errorCount: counts.error,
+      ...(counts.running > 0 ? { runningCount: counts.running } : {}),
+    }));
+}
+
+export function statementExecutionMarkers(editorSql: string, results: QueryResult[] | undefined, databaseType?: DatabaseType, submittedSql = editorSql, executionEditorFingerprint = sqlTextFingerprint(editorSql), batch?: BatchSqlExecution): StatementExecutionMarker[] {
+  if (batch?.items.length) return liveStatementExecutionMarkers(editorSql, batch);
   if (!results?.length || sqlTextFingerprint(editorSql) !== executionEditorFingerprint) return [];
   const submittedStatements = statementRanges(submittedSql, databaseType);
   if (submittedStatements.length <= 1) return [];
@@ -310,8 +334,14 @@ export function nextExecutionSummaryView(currentView: OutputView, canShowResult:
 }
 
 export interface ExecutionSummaryItem {
-  result: QueryResult;
+  result?: QueryResult;
   index: number;
+  statementIndex: number;
+  sql?: string;
+  sourceFrom?: number;
+  sourceTo?: number;
+  status: "pending" | "running" | "success" | "error" | "skipped" | "cancelled";
+  error?: string;
   returnedColumns: number;
   returnedRows: number;
   affectedRows: number;
@@ -320,18 +350,48 @@ export interface ExecutionSummaryItem {
   isError: boolean;
 }
 
-export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results">): ExecutionSummaryItem[] {
+export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" | "batchSqlExecution">): ExecutionSummaryItem[] {
   const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
-  return results.map((result, index) => ({
-    result,
-    index,
-    returnedColumns: result.columns.length,
-    returnedRows: result.rows.length,
-    affectedRows: result.affected_rows,
-    executionTimeMs: result.execution_time_ms,
-    hasTabularResult: result.columns.length > 0,
-    isError: result.columns.includes("Error"),
-  }));
+  if (tab.batchSqlExecution?.items.length) {
+    return tab.batchSqlExecution.items.map((item, index) => {
+      const result = results.find((candidate, resultIndex) => (candidate.statement_index ?? resultIndex) === item.statementIndex);
+      return {
+        result,
+        index,
+        statementIndex: item.statementIndex,
+        sql: item.sql,
+        sourceFrom: item.from,
+        sourceTo: item.to,
+        status: item.status,
+        error: item.error,
+        returnedColumns: result?.columns.length ?? 0,
+        returnedRows: result?.rows.length ?? 0,
+        affectedRows: item.affectedRows ?? result?.affected_rows ?? 0,
+        executionTimeMs: item.executionTimeMs ?? result?.execution_time_ms ?? 0,
+        hasTabularResult: (result?.columns.length ?? 0) > 0,
+        isError: item.status === "error",
+      };
+    });
+  }
+  return results.map((result, index) => {
+    const isError = result.execution_error === true || result.columns.includes("Error");
+    return {
+      result,
+      index,
+      statementIndex: result.statement_index ?? index,
+      sql: result.sourceStatement,
+      sourceFrom: result.sourceFrom,
+      sourceTo: result.sourceTo,
+      status: isError ? "error" : "success",
+      error: isError ? String(result.rows[0]?.[0] ?? "") : undefined,
+      returnedColumns: result.columns.length,
+      returnedRows: result.rows.length,
+      affectedRows: result.affected_rows,
+      executionTimeMs: result.execution_time_ms,
+      hasTabularResult: result.columns.length > 0,
+      isError,
+    };
+  });
 }
 
 export function tabModeLabel(tab: QueryTab, t: Translate): string {

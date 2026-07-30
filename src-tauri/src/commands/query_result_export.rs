@@ -1,6 +1,5 @@
-use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
 
@@ -10,6 +9,7 @@ use crate::commands::connection::AppState;
 
 use dbx_core::query_cancel::RunningTaskMetadata;
 pub use dbx_core::query_result_export::QueryResultExportRequest;
+use dbx_core::query_result_export::StagedExportTarget;
 use dbx_core::table_export::ExportStatus;
 pub use dbx_core::table_export::TableExportProgress;
 
@@ -17,120 +17,244 @@ fn emit_progress(app: &AppHandle, progress: TableExportProgress) {
     let _ = app.emit("query-result-export-progress", progress);
 }
 
+#[derive(Default)]
+struct RoutedExportProgress {
+    terminal: Mutex<Option<TableExportProgress>>,
+    rows_exported: AtomicU64,
+}
+
+impl RoutedExportProgress {
+    fn take_terminal(&self) -> Option<TableExportProgress> {
+        self.terminal.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+    }
+
+    fn rows_exported(&self) -> u64 {
+        self.rows_exported.load(Ordering::SeqCst)
+    }
+}
+
 fn route_core_progress(
     progress: TableExportProgress,
-    deferred_done: &Mutex<Option<TableExportProgress>>,
-    cancelled: &AtomicBool,
+    routed: &RoutedExportProgress,
     emit: impl FnOnce(TableExportProgress),
 ) {
+    routed.rows_exported.store(progress.rows_exported, Ordering::SeqCst);
     match progress.status {
         ExportStatus::Done => {
-            *deferred_done.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(progress);
+            let mut terminal = routed.terminal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled)) {
+                *terminal = Some(progress);
+            }
         }
         ExportStatus::Cancelled => {
-            cancelled.store(true, Ordering::SeqCst);
-            emit(progress);
+            *routed.terminal.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(progress);
         }
         _ => emit(progress),
     }
 }
 
-/// Build a temp-file path alongside the target path.
-/// The temp file has a `.dbx-export-tmp` suffix so it's never confused with the
-/// user's chosen file. On success the temp file is renamed atomically onto the
-/// target; on error/cancel only the temp file is cleaned up, leaving the user's
-/// chosen path untouched.
-fn temp_file_path(target: &str) -> (PathBuf, PathBuf) {
-    let target_path = PathBuf::from(target);
-    let mut temp_path = target_path.clone();
-    let mut temp_name =
-        target_path.file_name().map(|name| name.to_os_string()).unwrap_or_else(|| std::ffi::OsString::from("export"));
-    temp_name.push(".dbx-export-tmp");
-    temp_path.set_file_name(temp_name);
-    (target_path, temp_path)
+fn export_error_progress(export_id: &str, rows_exported: u64, error: String) -> TableExportProgress {
+    TableExportProgress {
+        export_id: export_id.to_string(),
+        table_name: String::new(),
+        rows_exported,
+        total_rows: None,
+        status: ExportStatus::Error,
+        error_message: Some(error),
+    }
+}
+
+fn finalize_staged_export(
+    target: StagedExportTarget,
+    export_id: &str,
+    result: Result<(), String>,
+    terminal: Option<TableExportProgress>,
+    cancellation_requested: bool,
+    rows_exported: u64,
+    emit: impl Fn(TableExportProgress),
+) {
+    if cancellation_requested
+        || terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled))
+    {
+        drop(target);
+        let cancelled =
+            terminal.filter(|progress| matches!(progress.status, ExportStatus::Cancelled)).unwrap_or_else(|| {
+                TableExportProgress {
+                    export_id: export_id.to_string(),
+                    table_name: String::new(),
+                    rows_exported,
+                    total_rows: None,
+                    status: ExportStatus::Cancelled,
+                    error_message: Some("Export cancelled".to_string()),
+                }
+            });
+        emit(cancelled);
+        return;
+    }
+
+    if let Err(error) = result {
+        drop(target);
+        emit(export_error_progress(export_id, rows_exported, error));
+        return;
+    }
+
+    let Some(done) = terminal.filter(|progress| matches!(progress.status, ExportStatus::Done)) else {
+        drop(target);
+        emit(export_error_progress(
+            export_id,
+            rows_exported,
+            "Export finished without a completion status".to_string(),
+        ));
+        return;
+    };
+
+    match target.commit() {
+        Ok(()) => emit(done),
+        Err(error) => emit(export_error_progress(export_id, rows_exported, error)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
-    #[test]
-    fn temp_file_path_adds_suffix_to_simple_filename() {
-        let (target, temp) = temp_file_path("C:\\exports\\backup.sql");
-        assert_eq!(target, PathBuf::from("C:\\exports\\backup.sql"));
-        assert_eq!(temp, PathBuf::from("C:\\exports\\backup.sql.dbx-export-tmp"));
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "dbx-query-result-export-{}-{}",
+                std::process::id(),
+                NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&path).expect("create test dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
     }
 
-    #[test]
-    fn temp_file_path_adds_suffix_to_filename_with_multiple_extensions() {
-        let (target, temp) = temp_file_path("/home/user/query-result.xlsx");
-        assert_eq!(target, PathBuf::from("/home/user/query-result.xlsx"));
-        assert_eq!(temp, PathBuf::from("/home/user/query-result.xlsx.dbx-export-tmp"));
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
-    #[test]
-    fn temp_file_path_handles_filename_without_extension() {
-        let (target, temp) = temp_file_path("/tmp/export");
-        assert_eq!(target, PathBuf::from("/tmp/export"));
-        assert_eq!(temp, PathBuf::from("/tmp/export.dbx-export-tmp"));
-    }
-
-    #[test]
-    fn temp_file_path_uses_export_fallback_for_empty_target() {
-        let (target, temp) = temp_file_path("");
-        assert_eq!(target, PathBuf::from(""));
-        // file_name() on a path without a filename returns None, so we fall
-        // back to "export" as the base name.
-        assert!(temp.to_string_lossy().ends_with("export.dbx-export-tmp"));
-    }
-
-    #[test]
-    fn route_core_progress_defers_done_until_finalization() {
-        let deferred_done = Mutex::new(None);
-        let cancelled = AtomicBool::new(false);
-        let emitted = Mutex::new(Vec::new());
-        let done = TableExportProgress {
+    fn terminal_progress(status: ExportStatus, rows_exported: u64) -> TableExportProgress {
+        TableExportProgress {
             export_id: "export-1".to_string(),
             table_name: String::new(),
-            rows_exported: 42,
-            total_rows: Some(42),
-            status: ExportStatus::Done,
+            rows_exported,
+            total_rows: Some(rows_exported),
+            status,
             error_message: None,
-        };
-
-        route_core_progress(done, &deferred_done, &cancelled, |progress| {
-            emitted.lock().unwrap().push(progress);
-        });
-
-        assert!(emitted.lock().unwrap().is_empty());
-        assert_eq!(deferred_done.lock().unwrap().as_ref().map(|progress| progress.rows_exported), Some(42));
-        assert!(!cancelled.load(Ordering::SeqCst));
+        }
     }
 
     #[test]
-    fn route_core_progress_keeps_cancelled_terminal_state() {
-        let deferred_done = Mutex::new(None);
-        let cancelled = AtomicBool::new(false);
+    fn route_core_progress_buffers_terminal_status_until_finalization() {
+        let routed = RoutedExportProgress::default();
         let emitted = Mutex::new(Vec::new());
-        let progress = TableExportProgress {
-            export_id: "export-1".to_string(),
-            table_name: String::new(),
-            rows_exported: 7,
-            total_rows: None,
-            status: ExportStatus::Cancelled,
-            error_message: Some("Export cancelled".to_string()),
-        };
-
-        route_core_progress(progress, &deferred_done, &cancelled, |progress| {
-            emitted.lock().unwrap().push(progress);
+        route_core_progress(terminal_progress(ExportStatus::Done, 42), &routed, |progress| {
+            emitted.lock().expect("emitted lock").push(progress);
         });
 
-        assert!(deferred_done.lock().unwrap().is_none());
-        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(emitted.lock().expect("emitted lock").is_empty());
+        assert_eq!(routed.rows_exported(), 42);
+        assert!(matches!(routed.take_terminal(), Some(TableExportProgress { status: ExportStatus::Done, .. })));
+    }
+
+    fn assert_native_stream_cancellation_emits_one_cancelled_terminal() {
+        let dir = TestDir::new();
+        let destination = dir.path().join("result.csv");
+        std::fs::write(&destination, "original").expect("write destination");
+        let target = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("target");
+        std::fs::write(target.path(), "partial").expect("write partial export");
+        let routed = RoutedExportProgress::default();
+        let emitted = Mutex::new(Vec::new());
+        route_core_progress(terminal_progress(ExportStatus::Cancelled, 7), &routed, |progress| {
+            emitted.lock().expect("emitted lock").push(progress);
+        });
+        route_core_progress(terminal_progress(ExportStatus::Done, 7), &routed, |progress| {
+            emitted.lock().expect("emitted lock").push(progress);
+        });
+        finalize_staged_export(
+            target,
+            "export-1",
+            Err("native stream cancelled".to_string()),
+            routed.take_terminal(),
+            true,
+            routed.rows_exported(),
+            |progress| emitted.lock().expect("emitted lock").push(progress),
+        );
+
         assert!(matches!(
-            emitted.lock().unwrap().as_slice(),
+            emitted.lock().expect("emitted lock").as_slice(),
             [TableExportProgress { status: ExportStatus::Cancelled, .. }]
         ));
+        assert_eq!(std::fs::read_to_string(destination).expect("read destination"), "original");
+    }
+
+    #[test]
+    fn postgres_native_stream_cancellation_emits_one_cancelled_terminal() {
+        assert_native_stream_cancellation_emits_one_cancelled_terminal();
+    }
+
+    #[test]
+    fn sqlserver_native_stream_cancellation_emits_one_cancelled_terminal() {
+        assert_native_stream_cancellation_emits_one_cancelled_terminal();
+    }
+
+    #[test]
+    fn export_failure_preserves_existing_destination_and_emits_one_error() {
+        let dir = TestDir::new();
+        let destination = dir.path().join("result.csv");
+        std::fs::write(&destination, "original").expect("write destination");
+        let target = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("target");
+        std::fs::write(target.path(), "partial").expect("write partial export");
+        let emitted = Mutex::new(Vec::new());
+
+        finalize_staged_export(target, "export-1", Err("write failed".to_string()), None, false, 3, |progress| {
+            emitted.lock().expect("emitted lock").push(progress);
+        });
+
+        assert!(matches!(
+            emitted.lock().expect("emitted lock").as_slice(),
+            [TableExportProgress { status: ExportStatus::Error, .. }]
+        ));
+        assert_eq!(std::fs::read_to_string(destination).expect("read destination"), "original");
+    }
+
+    #[test]
+    fn replace_failure_preserves_existing_destination_and_suppresses_done() {
+        let dir = TestDir::new();
+        let destination = dir.path().join("result.csv");
+        std::fs::write(&destination, "original").expect("write destination");
+        let target = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("target");
+        std::fs::write(target.path(), "replacement").expect("write replacement");
+        std::fs::remove_file(target.path()).expect("remove staged path");
+        let emitted = Mutex::new(Vec::new());
+
+        finalize_staged_export(
+            target,
+            "export-1",
+            Ok(()),
+            Some(terminal_progress(ExportStatus::Done, 4)),
+            false,
+            4,
+            |progress| emitted.lock().expect("emitted lock").push(progress),
+        );
+
+        assert!(matches!(
+            emitted.lock().expect("emitted lock").as_slice(),
+            [TableExportProgress { status: ExportStatus::Error, .. }]
+        ));
+        assert_eq!(std::fs::read_to_string(destination).expect("read destination"), "original");
     }
 }
 
@@ -142,12 +266,8 @@ pub async fn start_query_result_export(
 ) -> Result<(), String> {
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
-
-    // Redirect file I/O to a temp file so the user's chosen path is never
-    // truncated before the query completes. On success the temp file is
-    // renamed onto the target; on error/cancel only the temp file is removed.
-    let (target_path, temp_path) = temp_file_path(&request.file_path);
-    request.file_path = temp_path.to_string_lossy().to_string();
+    let target = StagedExportTarget::new(&request.file_path)?;
+    request.file_path = target.path_string()?;
 
     tokio::spawn(async move {
         let execution_id = request.execution_id.clone().filter(|id| !id.trim().is_empty());
@@ -162,68 +282,34 @@ pub async fn start_query_result_export(
             )
         });
         let cancel_token = registered_query.as_ref().map(|query| query.token());
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancelled_progress = cancelled.clone();
-        let deferred_done = Arc::new(Mutex::new(None));
-        let deferred_done_progress = deferred_done.clone();
-        let result =
-            dbx_core::query_result_export::export_query_result_core(&state, &request, cancel_token, |progress| {
-                route_core_progress(progress, &deferred_done_progress, &cancelled_progress, |progress| {
+        let routed_progress = Arc::new(RoutedExportProgress::default());
+        let routed_progress_handler = routed_progress.clone();
+        let result = dbx_core::query_result_export::export_query_result_core(
+            &state,
+            &request,
+            cancel_token.clone(),
+            |progress| {
+                route_core_progress(progress, &routed_progress_handler, |progress| {
                     emit_progress(&app, progress);
                 });
-            })
-            .await;
+            },
+        )
+        .await;
         drop(registered_query);
-        let completed_progress = deferred_done.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
-
-        if let Err(e) = result {
-            let _ = tokio::fs::remove_file(&request.file_path).await;
-            emit_progress(
-                &app,
-                TableExportProgress {
-                    export_id: export_id.clone(),
-                    table_name: String::new(),
-                    rows_exported: 0,
-                    total_rows: None,
-                    status: ExportStatus::Error,
-                    error_message: Some(e),
-                },
-            );
-        } else if cancelled.load(Ordering::SeqCst) {
-            let _ = tokio::fs::remove_file(&request.file_path).await;
-        } else if let Some(progress) = completed_progress {
-            // Success: atomically rename temp → target so the user's chosen
-            // file is only created/replaced when the export fully completes.
-            if let Err(e) = std::fs::rename(&request.file_path, &target_path) {
-                let _ = tokio::fs::remove_file(&request.file_path).await;
-                emit_progress(
-                    &app,
-                    TableExportProgress {
-                        export_id: export_id.clone(),
-                        table_name: String::new(),
-                        rows_exported: 0,
-                        total_rows: None,
-                        status: ExportStatus::Error,
-                        error_message: Some(format!("Failed to finalize export file: {e}")),
-                    },
-                );
-            } else {
-                emit_progress(&app, progress);
-            }
-        } else {
-            let _ = tokio::fs::remove_file(&request.file_path).await;
-            emit_progress(
-                &app,
-                TableExportProgress {
-                    export_id: export_id.clone(),
-                    table_name: String::new(),
-                    rows_exported: 0,
-                    total_rows: None,
-                    status: ExportStatus::Error,
-                    error_message: Some("Export finished without a completion status".to_string()),
-                },
-            );
-        }
+        let terminal = routed_progress.take_terminal();
+        let cancellation_requested =
+            terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled))
+                || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
+                || dbx_core::database_export::is_export_cancelled(&export_id).await;
+        finalize_staged_export(
+            target,
+            &export_id,
+            result,
+            terminal,
+            cancellation_requested,
+            routed_progress.rows_exported(),
+            |progress| emit_progress(&app, progress),
+        );
 
         dbx_core::database_export::clear_export_cancelled(&export_id).await;
     });

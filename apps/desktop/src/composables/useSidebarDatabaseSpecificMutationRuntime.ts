@@ -30,6 +30,9 @@ import {
   showDropDatabaseConfirm,
   dropDatabaseLoading,
   showFlushRedisDbConfirm,
+  showRedisDatabaseAliasDialog,
+  redisDatabaseAliasInput,
+  redisDatabaseAliasSaving,
   showRenameMongoCollectionDialog,
   renameMongoCollectionName,
   renameMongoCollectionError,
@@ -231,6 +234,38 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     showFlushRedisDbConfirm.value = true;
   }
 
+  function prepareRedisDatabaseAliasDialog() {
+    const node = activeNode.value;
+    redisDatabaseAliasInput.value = node.connectionId && node.database != null ? connectionStore.getRedisDatabaseAlias(node.connectionId, node.database) || "" : "";
+    redisDatabaseAliasSaving.value = false;
+    showRedisDatabaseAliasDialog.value = true;
+  }
+
+  async function saveRedisDatabaseAlias(alias?: string) {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    if (node.type !== "redis-db" || !node.connectionId || node.database == null || redisDatabaseAliasSaving.value) return;
+    redisDatabaseAliasSaving.value = true;
+    try {
+      await connectionStore.setRedisDatabaseAlias(node.connectionId, node.database, alias);
+      showRedisDatabaseAliasDialog.value = false;
+      const normalizedAlias = alias?.trim();
+      toast(normalizedAlias ? t("redis.databaseAliasSaved", { db: node.database, alias: normalizedAlias }) : t("redis.databaseAliasCleared", { db: node.database }), 3000);
+    } catch (error: any) {
+      toast(t("connection.saveFailed", { message: error?.message || String(error) }), 5000);
+    } finally {
+      redisDatabaseAliasSaving.value = false;
+    }
+  }
+
+  async function confirmRedisDatabaseAlias() {
+    await saveRedisDatabaseAlias(redisDatabaseAliasInput.value);
+  }
+
+  async function clearRedisDatabaseAlias() {
+    redisDatabaseAliasInput.value = "";
+    await saveRedisDatabaseAlias();
+  }
+
   async function confirmFlushRedisDb() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
     if (node.type !== "redis-db" || !node.connectionId || !node.database) return;
@@ -387,6 +422,12 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     dropMongoIndex,
     dropAllMongoIndexes,
     flushRedisDb,
+    prepareRedisDatabaseAliasDialog,
+    confirmRedisDatabaseAlias,
+    clearRedisDatabaseAlias,
+    showRedisDatabaseAliasDialog,
+    redisDatabaseAliasInput,
+    redisDatabaseAliasSaving,
     confirmFlushRedisDb,
     confirmDropMongoDatabase,
     confirmDropMongoCollection,

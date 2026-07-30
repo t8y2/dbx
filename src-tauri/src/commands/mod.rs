@@ -3,6 +3,7 @@ pub mod ai;
 pub mod ai_multi_config;
 pub mod app_settings;
 pub mod cloud_sync;
+pub mod config_cmd;
 pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
@@ -10,6 +11,7 @@ pub mod csv_export;
 pub mod data_compare;
 pub mod database_export;
 pub mod deep_link;
+pub mod dialect_cmd;
 pub mod document_cmd;
 pub mod etcd_cmd;
 pub mod external_db;

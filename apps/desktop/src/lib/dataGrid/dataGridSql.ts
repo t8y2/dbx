@@ -19,6 +19,7 @@ export interface DataGridColumnInfo {
   is_primary_key?: boolean;
   column_default?: string | null;
   extra?: string | null;
+  comment?: string | null;
 }
 
 export interface DataGridSaveStatementOptions {

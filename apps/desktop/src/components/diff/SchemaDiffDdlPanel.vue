@@ -9,10 +9,10 @@ import { DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { useDiffScrollSync } from "@/composables/useDiffScrollSync";
 import { buildHunks, type DiffLine } from "@/components/diff/DiffHunkBuilder";
 import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
-import { FileCode, ScrollText, Copy, Play } from "@lucide/vue";
+import { FileCode, ScrollText, Copy, Play, FileDiff } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
-import type { SchemaDiffObject } from "@/lib/schema/schemaDiff";
+import type { SchemaDiffObject, CompatibilityWarning, DependencyGraph, PermissionDiff, MissingRollbackObject, RollbackCompleteness } from "@/lib/schema/schemaDiff";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -36,18 +36,38 @@ const props = defineProps<{
   selectedObject: SchemaDiffObject | null;
   deploySql: string;
   deploySqlAll: string;
+  compatibilityWarnings?: CompatibilityWarning[];
+  rollbackSql?: string;
+  deploySqlMode?: "forward" | "rollback";
+  dependencyGraph?: DependencyGraph | null;
+  permissionDiffs?: PermissionDiff[];
+  rollbackCompleteness?: RollbackCompleteness;
+  missingRollbackObjects?: MissingRollbackObject[];
+  canExecute?: boolean;
 }>();
 
 const emit = defineEmits<{
   executeScript: [];
+  "update:deploySqlMode": [mode: "forward" | "rollback"];
 }>();
 
-const activeTab = ref<"ddl" | "script" | "scriptAll">("ddl");
+const activeTab = ref<"ddl" | "script" | "scriptAll" | "warnings" | "depGraph" | "permissions" | "rollbackCompare">("ddl");
 const diffContainerRef = ref<HTMLDivElement>();
 const leftPaneRef = ref<HTMLDivElement>();
 const rightPaneRef = ref<HTMLDivElement>();
 const containerSize = ref({ width: 0, height: 0 });
 const connectorKey = ref(0);
+
+const rollbackDiffContainerRef = ref<HTMLDivElement>();
+const rollbackLeftPaneRef = ref<HTMLDivElement>();
+const rollbackRightPaneRef = ref<HTMLDivElement>();
+const rollbackContainerSize = ref({ width: 0, height: 0 });
+const rollbackConnectorKey = ref(0);
+
+const rollbackHunks = computed(() => {
+  if (!props.rollbackSql) return [];
+  return buildHunks(props.deploySql, props.rollbackSql);
+});
 
 const hunks = computed(() => {
   if (!props.selectedObject?.sourceDdl && !props.selectedObject?.targetDdl) return [];
@@ -61,10 +81,32 @@ const { syncScroll, measureHunks } = useDiffScrollSync({
   hunks,
 });
 
+const { syncScroll: rollbackSyncScroll, measureHunks: rollbackMeasureHunks } = useDiffScrollSync({
+  container: rollbackDiffContainerRef,
+  leftPane: rollbackLeftPaneRef,
+  rightPane: rollbackRightPaneRef,
+  hunks: rollbackHunks,
+});
+
 // Cache char-level diff segments so we don't recompute on every render
 const modifySegments = computed(() => {
   const map = new Map<string, { leftSegments: Segment[]; rightSegments: Segment[] }>();
   for (const hunk of hunks.value) {
+    if (hunk.type !== "modify") continue;
+    for (let i = 0; i < hunk.leftLines.length; i++) {
+      const left = hunk.leftLines[i];
+      const right = hunk.rightLines[i];
+      if (left.isPadding || right.isPadding) continue;
+      const key = `${hunk.id}:${i}`;
+      map.set(key, renderModifyLine(left, right));
+    }
+  }
+  return map;
+});
+
+const rollbackModifySegments = computed(() => {
+  const map = new Map<string, { leftSegments: Segment[]; rightSegments: Segment[] }>();
+  for (const hunk of rollbackHunks.value) {
     if (hunk.type !== "modify") continue;
     for (let i = 0; i < hunk.leftLines.length; i++) {
       const left = hunk.leftLines[i];
@@ -101,6 +143,37 @@ function handleScroll(from: "left" | "right") {
   requestMeasureDebounced();
 }
 
+let rollbackMeasureRaf: number | null = null;
+let rollbackMeasureTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function rollbackRequestMeasure() {
+  if (rollbackMeasureRaf) return;
+  rollbackMeasureRaf = requestAnimationFrame(() => {
+    rollbackMeasureRaf = null;
+    rollbackMeasureHunks();
+    rollbackConnectorKey.value++;
+  });
+}
+
+function rollbackRequestMeasureDebounced() {
+  if (rollbackMeasureTimeout) clearTimeout(rollbackMeasureTimeout);
+  rollbackMeasureTimeout = setTimeout(() => {
+    rollbackRequestMeasure();
+  }, 100);
+}
+
+function rollbackHandleScroll(from: "left" | "right") {
+  rollbackSyncScroll(from);
+  rollbackRequestMeasureDebounced();
+}
+
+function rollbackUpdateContainerSize() {
+  const el = rollbackDiffContainerRef.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  rollbackContainerSize.value = { width: rect.width, height: rect.height };
+}
+
 watch(
   () => props.selectedObject?.id,
   async () => {
@@ -120,6 +193,11 @@ function updateContainerSize() {
 function onSplitpanesResized() {
   updateContainerSize();
   requestMeasure();
+}
+
+function rollbackOnSplitpanesResized() {
+  rollbackUpdateContainerSize();
+  rollbackRequestMeasure();
 }
 
 function lineBackground(line: DiffLine): string | undefined {
@@ -232,6 +310,19 @@ function copyDeploySqlAll() {
 
 <template>
   <div class="border rounded-md flex flex-col h-full">
+    <!-- Forward / Rollback SQL mode toggle -->
+    <div v-if="rollbackSql" class="flex items-center gap-1 px-3 py-1 border-b bg-muted/20 shrink-0">
+      <span class="text-[11px] text-muted-foreground mr-2">{{ t("diff.deployMode") }}:</span>
+      <button class="text-xs px-2 py-1 rounded transition-colors" :class="deploySqlMode === 'forward' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'forward')">{{ t("diff.forwardSql") }}</button>
+      <button class="text-xs px-2 py-1 rounded transition-colors" :class="deploySqlMode === 'rollback' ? 'bg-destructive text-destructive-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'rollback')">{{ t("diff.rollbackSql") }}</button>
+    </div>
+
+    <div v-if="rollbackCompleteness === 'incomplete'" class="px-3 py-1.5 border-b bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-200 shrink-0">
+      {{ t("diff.rollbackIncompleteBanner") }}
+      <ul v-if="missingRollbackObjects?.length" class="mt-1 list-disc pl-4">
+        <li v-for="(m, i) in missingRollbackObjects" :key="i">{{ m.kind }} {{ m.name }}{{ m.table ? ` @ ${m.table}` : "" }} — {{ m.reason }}</li>
+      </ul>
+    </div>
     <!-- Tabs -->
     <div class="flex border-b shrink-0">
       <button class="px-3 py-1.5 text-xs font-medium flex items-center gap-1 transition-colors" :class="activeTab === 'ddl' ? 'bg-primary/10 text-primary border-b-2 border-primary' : 'hover:bg-muted/50'" @click="activeTab = 'ddl'">
@@ -245,6 +336,29 @@ function copyDeploySqlAll() {
       <button class="px-3 py-1.5 text-xs font-medium flex items-center gap-1 transition-colors" :class="activeTab === 'scriptAll' ? 'bg-primary/10 text-primary border-b-2 border-primary' : 'hover:bg-muted/50'" @click="activeTab = 'scriptAll'">
         <ScrollText class="w-3.5 h-3.5" />
         {{ t("diff.deployScriptAll") }}
+      </button>
+      <button v-if="rollbackSql" class="px-3 py-1.5 text-xs font-medium flex items-center gap-1 transition-colors" :class="activeTab === 'rollbackCompare' ? 'bg-primary/10 text-primary border-b-2 border-primary' : 'hover:bg-muted/50'" @click="activeTab = 'rollbackCompare'">
+        <FileDiff class="w-3.5 h-3.5" />
+        {{ t("rollbackComparison.title") }}
+      </button>
+      <button
+        v-if="compatibilityWarnings && compatibilityWarnings.length > 0"
+        class="px-3 py-1.5 text-xs font-medium flex items-center gap-1 transition-colors relative"
+        :class="activeTab === 'warnings' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border-b-2 border-amber-500' : 'hover:bg-muted/50'"
+        @click="activeTab = 'warnings'"
+      >
+        <span class="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+        {{ t("diff.compatibilityWarnings") }}
+        <span class="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500 text-white font-bold">{{ compatibilityWarnings.length }}</span>
+      </button>
+      <button v-if="dependencyGraph && dependencyGraph.nodes.length > 0" class="px-3 py-1.5 text-xs font-medium flex items-center gap-1 transition-colors" :class="activeTab === 'depGraph' ? 'bg-primary/10 text-primary border-b-2 border-primary' : 'hover:bg-muted/50'" @click="activeTab = 'depGraph'">
+        <span class="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+        {{ t("diff.dependencyGraph") }}
+      </button>
+      <button v-if="permissionDiffs && permissionDiffs.length > 0" class="px-3 py-1.5 text-xs font-medium flex items-center gap-1 transition-colors" :class="activeTab === 'permissions' ? 'bg-primary/10 text-primary border-b-2 border-primary' : 'hover:bg-muted/50'" @click="activeTab = 'permissions'">
+        <span class="w-2 h-2 rounded-full bg-purple-500 shrink-0" />
+        {{ t("diff.operation") }}
+        <span class="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-purple-500 text-white font-bold">{{ permissionDiffs.length }}</span>
       </button>
     </div>
 
@@ -335,6 +449,82 @@ function copyDeploySqlAll() {
       </div>
     </div>
 
+    <!-- Rollback Comparison -->
+    <div v-else-if="activeTab === 'rollbackCompare'" class="flex-1 overflow-hidden relative">
+      <div v-if="!rollbackSql" class="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+        {{ t("diff.noDdlAvailable") }}
+      </div>
+      <div v-else ref="rollbackDiffContainerRef" class="absolute inset-0 font-mono text-xs leading-relaxed">
+        <Splitpanes class="h-full" @resized="rollbackOnSplitpanesResized">
+          <Pane min-size="20">
+            <div ref="rollbackLeftPaneRef" class="h-full overflow-y-auto border-r" @scroll="rollbackHandleScroll('left')">
+              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+                {{ t("rollbackComparison.forwardSql") }}
+              </div>
+              <div v-for="hunk in rollbackHunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
+                <div
+                  v-for="(line, idx) in hunk.leftLines"
+                  :key="`l-${hunk.id}-${idx}`"
+                  class="flex min-h-[1.5em]"
+                  :class="{
+                    'border-l border-r border-yellow-500/40': hunk.type === 'modify',
+                    'border-t rounded-t-sm': hunk.type === 'modify' && idx === 0,
+                    'border-b rounded-b-sm': hunk.type === 'modify' && idx === hunk.leftLines.length - 1,
+                  }"
+                  :style="{ backgroundColor: lineBackground(line) }"
+                >
+                  <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
+                    {{ line.lineNumber ?? "" }}
+                  </span>
+                  <span class="flex-1 px-1 whitespace-pre" :class="lineTextClass(line)">
+                    <template v-if="line.type === 'modify' && !line.isPadding">
+                      <template v-for="(segment, si) in rollbackModifySegments.get(`${hunk.id}:${idx}`)?.leftSegments ?? []" :key="`ls-${si}`">
+                        <span :style="segment.changed ? { backgroundColor: toRgba(ddlColors.modifiedCharBg, ddlColors.modifiedCharBgAlpha) } : undefined">{{ segment.text }}</span>
+                      </template>
+                    </template>
+                    <span v-else>{{ line.isPadding ? "\u00A0" : line.content }}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </Pane>
+          <Pane min-size="20">
+            <div ref="rollbackRightPaneRef" class="h-full overflow-y-auto" @scroll="rollbackHandleScroll('right')">
+              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+                {{ t("rollbackComparison.rollbackSql") }}
+              </div>
+              <div v-for="hunk in rollbackHunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
+                <div
+                  v-for="(line, idx) in hunk.rightLines"
+                  :key="`r-${hunk.id}-${idx}`"
+                  class="flex min-h-[1.5em]"
+                  :class="{
+                    'border-l border-r border-yellow-500/40': hunk.type === 'modify',
+                    'border-t rounded-t-sm': hunk.type === 'modify' && idx === 0,
+                    'border-b rounded-b-sm': hunk.type === 'modify' && idx === hunk.rightLines.length - 1,
+                  }"
+                  :style="{ backgroundColor: lineBackground(line) }"
+                >
+                  <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
+                    {{ line.lineNumber ?? "" }}
+                  </span>
+                  <span class="flex-1 px-1 whitespace-pre" :class="lineTextClass(line)">
+                    <template v-if="line.type === 'modify' && !line.isPadding">
+                      <template v-for="(segment, si) in rollbackModifySegments.get(`${hunk.id}:${idx}`)?.rightSegments ?? []" :key="`rs-${si}`">
+                        <span :style="segment.changed ? { backgroundColor: toRgba(ddlColors.modifiedCharBg, ddlColors.modifiedCharBgAlpha) } : undefined">{{ segment.text }}</span>
+                      </template>
+                    </template>
+                    <span v-else>{{ line.isPadding ? "\u00A0" : line.content }}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </Pane>
+        </Splitpanes>
+        <DiffSvgConnector :key="rollbackConnectorKey" :hunks="rollbackHunks" :container-width="rollbackContainerSize.width" :container-height="rollbackContainerSize.height" />
+      </div>
+    </div>
+
     <!-- Deploy Script -->
     <div v-else-if="activeTab === 'script'" class="flex-1 flex flex-col overflow-hidden">
       <div class="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
@@ -344,7 +534,7 @@ function copyDeploySqlAll() {
             <Copy class="w-3 h-3" />
             {{ t("diff.copy") }}
           </Button>
-          <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" @click="$emit('executeScript')">
+          <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" :disabled="canExecute === false" @click="$emit('executeScript')">
             <Play class="w-3 h-3" />
             {{ t("diff.execute") }}
           </Button>
@@ -352,6 +542,63 @@ function copyDeploySqlAll() {
       </div>
       <div class="flex-1 overflow-auto p-3">
         <pre class="text-xs whitespace-pre-wrap font-mono">{{ deploySql || t("diff.noDeployScript") }}</pre>
+      </div>
+    </div>
+
+    <!-- Compatibility Warnings -->
+    <div v-else-if="activeTab === 'warnings'" class="flex-1 flex flex-col overflow-hidden p-3">
+      <div v-if="compatibilityWarnings && compatibilityWarnings.length > 0" class="space-y-2">
+        <div v-for="(w, i) in compatibilityWarnings" :key="i" class="flex items-start gap-2 p-2 rounded border bg-amber-50 dark:bg-amber-950/20 text-xs">
+          <span class="shrink-0 w-2 h-2 rounded-full mt-0.5" :class="w.risk === 'high' ? 'bg-red-500' : w.risk === 'medium' ? 'bg-amber-500' : 'bg-yellow-400'" />
+          <div class="min-w-0">
+            <span class="font-medium">{{ w.table }}.{{ w.column }}</span
+            >:
+            <span class="text-muted-foreground">{{ w.sourceType }} → {{ w.targetType }}</span>
+            <p class="text-muted-foreground mt-0.5">{{ w.message }}</p>
+          </div>
+        </div>
+      </div>
+      <div v-else class="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+        {{ t("diff.noDifferences") }}
+      </div>
+    </div>
+
+    <!-- Dependency Graph -->
+    <div v-else-if="activeTab === 'depGraph'" class="flex-1 flex flex-col overflow-hidden p-3">
+      <div v-if="dependencyGraph && dependencyGraph.nodes.length > 0" class="space-y-1">
+        <div v-for="node in dependencyGraph.nodes" :key="node.tableName" class="py-1 text-xs">
+          <span class="font-mono font-medium">{{ node.tableName }}</span>
+          <span v-if="node.dependsOn.length > 0" class="text-muted-foreground ml-2">
+            → {{ t("diff.dependsOn") }}: <span class="font-mono">{{ node.dependsOn.join(", ") }}</span>
+          </span>
+          <span v-if="node.dependedBy.length > 0" class="text-muted-foreground ml-2">
+            ← {{ t("diff.dependedBy") }}: <span class="font-mono">{{ node.dependedBy.join(", ") }}</span>
+          </span>
+        </div>
+      </div>
+      <div v-else class="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+        {{ t("diff.noDifferences") }}
+      </div>
+    </div>
+
+    <!-- Permissions -->
+    <div v-else-if="activeTab === 'permissions'" class="flex-1 flex flex-col overflow-hidden p-3">
+      <div v-if="permissionDiffs && permissionDiffs.length > 0" class="space-y-2">
+        <div v-for="(pd, i) in permissionDiffs" :key="i" class="flex items-start gap-2 p-2 rounded border text-xs">
+          <span class="shrink-0 w-2 h-2 rounded-full mt-0.5 bg-purple-500" />
+          <div class="min-w-0">
+            <span class="font-medium">{{ pd.objectName }}</span>
+            <span class="text-muted-foreground"> — {{ pd.permissionType }}</span>
+            <div class="mt-0.5">
+              <span v-if="pd.sourcePermission" class="text-green-600 dark:text-green-400">{{ t("diff.source") }}: {{ pd.sourcePermission }}</span>
+              <span v-if="pd.sourcePermission && pd.targetPermission" class="text-muted-foreground mx-1">→</span>
+              <span v-if="pd.targetPermission" class="text-red-600 dark:text-red-400">{{ t("diff.target") }}: {{ pd.targetPermission }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+        {{ t("diff.noDifferences") }}
       </div>
     </div>
 
@@ -364,7 +611,7 @@ function copyDeploySqlAll() {
             <Copy class="w-3 h-3" />
             {{ t("diff.copy") }}
           </Button>
-          <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" @click="$emit('executeScript')">
+          <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" :disabled="canExecute === false" @click="$emit('executeScript')">
             <Play class="w-3 h-3" />
             {{ t("diff.executeAll") }}
           </Button>

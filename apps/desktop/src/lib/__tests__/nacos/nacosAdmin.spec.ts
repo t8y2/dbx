@@ -13,6 +13,7 @@ import {
   createNacosConfigDeleteSnapshot,
   createNacosConfigSaveSnapshot,
   createNacosLatestRequestGuard,
+  formatNacosHistoryTime,
   isNacosRawMutation,
   isNacosErrorCode,
   isNacosConfigSaveSnapshotCurrent,
@@ -96,6 +97,23 @@ describe("nacosAdmin helpers", () => {
     expect(isNacosErrorCode(new Error("NACOS_ERROR[stalePreview]: preview again"), "stalePreview")).toBe(true);
     expect(isNacosErrorCode("NACOS_ERROR[authFailed]: forbidden", "stalePreview")).toBe(false);
     expect(isNacosErrorCode(new Error("stalePreview"), "stalePreview")).toBe(false);
+  });
+
+  it("formats Nacos history timestamps for display", () => {
+    const epochDate = new Date(1_710_000_000_000);
+    const epochDatePart = [epochDate.getFullYear(), epochDate.getMonth() + 1, epochDate.getDate()].map((part) => String(part).padStart(2, "0")).join("-");
+    const epochTimePart = [epochDate.getHours(), epochDate.getMinutes(), epochDate.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
+    const epochDisplay = `${epochDatePart} ${epochTimePart}`;
+
+    expect(formatNacosHistoryTime("2026-07-27T18:16:36.000+08:00")).toBe("2026-07-27 18:16:36");
+    expect(formatNacosHistoryTime("2026-07-27T18:16:36Z")).toBe("2026-07-27 18:16:36");
+    expect(formatNacosHistoryTime("2026-07-27 18:16:36")).toBe("2026-07-27 18:16:36");
+    expect(formatNacosHistoryTime("1710000000000")).toBe(epochDisplay);
+    expect(formatNacosHistoryTime("1710000000")).toBe(epochDisplay);
+    expect(formatNacosHistoryTime("0")).toBe("-");
+    expect(formatNacosHistoryTime("")).toBe("-");
+    expect(formatNacosHistoryTime(null)).toBe("-");
+    expect(formatNacosHistoryTime("not-a-time")).toBe("not-a-time");
   });
 
   it("redirects r-nacos console settings to the compatible OpenAPI endpoint", () => {

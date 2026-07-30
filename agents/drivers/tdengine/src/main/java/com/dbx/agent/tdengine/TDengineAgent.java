@@ -10,7 +10,6 @@ import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
-import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
@@ -48,6 +47,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class TDengineAgent extends BaseDatabaseAgent {
+    private static final long TABLE_CACHE_TTL_MILLIS = 10_000L;
     private static final DateTimeFormatter TDENGINE_TIMESTAMP_FORMAT =
         new DateTimeFormatterBuilder()
             .appendPattern("yyyy-MM-dd HH:mm:ss")
@@ -63,6 +63,10 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         Pattern.compile("(?i)\\bCOMPOSITE\\s+KEY\\b");
 
     private Connection connection;
+    private final Object tableCacheLock = new Object();
+    private String tableCacheSchema = "";
+    private long tableCacheTimeMillis;
+    private List<TableInfo> tableCache = Collections.emptyList();
 
     @Override
     public Connection getConnection() {
@@ -73,6 +77,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     public void connect(ConnectParams params) {
         uncheckedVoid(() -> {
             connection = TDengineConnectionFactory.open(params);
+            clearTableCache();
         });
     }
 
@@ -118,19 +123,21 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         if (!normalized.tableTypeAllowed("TABLE")) {
             return Collections.emptyList();
         }
-        try {
-            return queryConstrainedTables(schema, normalized);
-        } catch (RuntimeException ignored) {
-            // TDengine 2.x does not expose information_schema.ins_stables/ins_tables.
-            return normalized.filterTables(listTablesLegacy(schema));
-        }
+        return normalized.filterTables(listTablesFromShow(schema));
     }
 
-    private List<TableInfo> listTablesLegacy(String schema) {
+    private List<TableInfo> listTablesFromShow(String schema) {
+        List<TableInfo> cached = cachedTables(schema);
+        if (cached != null) {
+            return cached;
+        }
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE"));
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE"));
+            // Connector/J 3.6.3 ignores Statement#setMaxRows. Read the SHOW
+            // results once and page locally from a short-lived cache instead of
+            // issuing the same full scan for every sidebar page.
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE", false));
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE", true));
 
             Map<String, TableInfo> distinct = new LinkedHashMap<>();
             for (TableInfo table : result) {
@@ -138,7 +145,8 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             }
             List<TableInfo> sorted = new ArrayList<>(distinct.values());
             sortTablesForHierarchy(sorted);
-            return sorted;
+            cacheTables(schema, sorted);
+            return copyTables(sorted);
         });
     }
 
@@ -199,7 +207,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        return JdbcExecutor.current().execute(
+        QueryResult result = JdbcExecutor.current().execute(
             requireConnected(),
             sql,
             prepareExecutionSchema(schema),
@@ -209,6 +217,10 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             options.getTimeoutSecs(),
             this::tdengineResultValue
         );
+        if (mayChangeMetadata(sql)) {
+            clearTableCache();
+        }
+        return result;
     }
 
     @Override
@@ -242,12 +254,20 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeTransaction(List<String> statements, String schema) {
-        return super.executeTransaction(statements, prepareExecutionSchema(schema));
+        QueryResult result = super.executeTransaction(statements, prepareExecutionSchema(schema));
+        if (statements.stream().anyMatch(TDengineAgent::mayChangeMetadata)) {
+            clearTableCache();
+        }
+        return result;
     }
 
     @Override
     public QueryResult executeBatch(List<String> statements, String schema) {
-        return super.executeBatch(statements, prepareExecutionSchema(schema));
+        QueryResult result = super.executeBatch(statements, prepareExecutionSchema(schema));
+        if (statements.stream().anyMatch(TDengineAgent::mayChangeMetadata)) {
+            clearTableCache();
+        }
+        return result;
     }
 
     private String prepareExecutionSchema(String schema) {
@@ -273,98 +293,84 @@ public final class TDengineAgent extends BaseDatabaseAgent {
                 connection.close();
             }
             connection = null;
+            clearTableCache();
         });
     }
 
-    private List<TableInfo> queryTables(String sql, String tableType) throws Exception {
+    private List<TableInfo> queryTables(String sql, String tableType, boolean includesStableName) throws Exception {
         List<TableInfo> result = new ArrayList<>();
-        try (java.sql.Statement stmt = requireConnected().createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                result.add(new TableInfo(rs.getString(1), tableType, null));
+        try (java.sql.Statement stmt = requireConnected().createStatement()) {
+            try (ResultSet rs = stmt.executeQuery(sql)) {
+                while (rs.next()) {
+                    // SHOW TABLES returns the owning STABLE as its fourth column. It
+                    // is absent for ordinary tables and older servers, where this
+                    // best-effort read simply leaves the table at the root level.
+                    String parentName = includesStableName ? optionalString(rs, 4) : null;
+                    if (parentName != null && parentName.trim().isEmpty()) {
+                        parentName = null;
+                    }
+                    result.add(new TableInfo(rs.getString(1), tableType, null, null, parentName));
+                }
             }
         }
         return result;
     }
 
-    private List<TableInfo> queryConstrainedTables(String database, MetadataListConstraints constraints) {
-        return unchecked(() -> {
-            TableMetadataQuery query = buildTableMetadataQuery(database, constraints);
-            List<TableInfo> result = new ArrayList<>();
-            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(query.sql())) {
-                MetadataSqlSupport.bind(stmt, query.args());
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new TableInfo(
-                            rs.getString(1),
-                            rs.getString(2),
-                            optionalString(rs, 3),
-                            null,
-                            optionalString(rs, 4)
-                        ));
-                    }
-                }
+    private List<TableInfo> cachedTables(String schema) {
+        String normalizedSchema = normalizedSchema(schema);
+        synchronized (tableCacheLock) {
+            if (cacheFresh(tableCacheTimeMillis) && tableCacheSchema.equals(normalizedSchema)) {
+                return copyTables(tableCache);
             }
-            MetadataListConstraints postFilter = constraints.hasLimit() ? constraints.withoutPaging() : constraints;
-            return postFilter.filterTables(result);
-        });
+        }
+        return null;
     }
 
-    static TableMetadataQuery buildTableMetadataQuery(String database, MetadataListConstraints constraints) {
-        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
-        List<Object> args = new ArrayList<>();
-        StringBuilder sql = new StringBuilder("""
-            SELECT table_name, table_type, table_comment, parent_name
-            FROM (
-                SELECT stable_name AS table_name,
-                       'STABLE' AS table_type,
-                       table_comment,
-                       CAST(NULL AS VARCHAR(192)) AS parent_name,
-                       stable_name AS hierarchy_name,
-                       0 AS hierarchy_rank
-                FROM information_schema.ins_stables
-                WHERE db_name = ?
-                UNION ALL
-                SELECT table_name,
-                       'TABLE' AS table_type,
-                       table_comment,
-                       stable_name AS parent_name,
-                       CASE WHEN stable_name IS NULL THEN table_name ELSE stable_name END AS hierarchy_name,
-                       1 AS hierarchy_rank
-                FROM information_schema.ins_tables
-                WHERE db_name = ?
-            ) metadata
-            WHERE 1 = 1
-            """.stripIndent().trim());
-        args.add(database);
-        args.add(database);
-        if (normalized.hasFilter()) {
-            String pattern = normalized.fuzzyLikePattern();
-            sql.append(" AND (table_name LIKE ? OR table_comment LIKE ?)");
-            args.add(pattern);
-            args.add(pattern);
+    private void cacheTables(String schema, List<TableInfo> tables) {
+        synchronized (tableCacheLock) {
+            tableCacheSchema = normalizedSchema(schema);
+            tableCache = copyTables(tables);
+            tableCacheTimeMillis = System.currentTimeMillis();
         }
-        sql.append(" ORDER BY hierarchy_name, hierarchy_rank, table_name");
-        MetadataSqlSupport.appendLiteralLimitOffset(sql, normalized);
-        return new TableMetadataQuery(sql.toString(), args);
     }
 
-    static final class TableMetadataQuery {
-        private final String sql;
-        private final List<Object> args;
-
-        TableMetadataQuery(String sql, List<Object> args) {
-            this.sql = sql;
-            this.args = args;
+    private void clearTableCache() {
+        synchronized (tableCacheLock) {
+            tableCacheSchema = "";
+            tableCacheTimeMillis = 0L;
+            tableCache = Collections.emptyList();
         }
+    }
 
-        String sql() {
-            return sql;
-        }
+    private static boolean cacheFresh(long cachedAtMillis) {
+        return cachedAtMillis > 0L && System.currentTimeMillis() - cachedAtMillis <= TABLE_CACHE_TTL_MILLIS;
+    }
 
-        List<Object> args() {
-            return args;
+    private static String normalizedSchema(String schema) {
+        return schema == null ? "" : schema.trim();
+    }
+
+    private static List<TableInfo> copyTables(List<TableInfo> tables) {
+        List<TableInfo> copies = new ArrayList<>(tables.size());
+        for (TableInfo table : tables) {
+            copies.add(new TableInfo(
+                table.getName(),
+                table.getTable_type(),
+                table.getComment(),
+                table.getParent_schema(),
+                table.getParent_name()
+            ));
         }
+        return copies;
+    }
+
+    private static boolean mayChangeMetadata(String sql) {
+        String normalized = sql == null ? "" : sql.trim().toLowerCase(Locale.ROOT);
+        return normalized.startsWith("create ")
+            || normalized.startsWith("drop ")
+            || normalized.startsWith("alter ")
+            || normalized.startsWith("rename ")
+            || normalized.startsWith("truncate ");
     }
 
     static void sortTablesForHierarchy(List<TableInfo> tables) {

@@ -4,7 +4,8 @@ use super::capabilities::{
     firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, TablePaginationStrategy,
 };
 use super::identifiers::{
-    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
+    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_gaussdb_jdbc_identifier,
+    quote_table_identifier,
 };
 use super::types::{
     TableDataSelectSqlOptions, TableSelectSqlOptions, DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN,
@@ -23,7 +24,7 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     }
 
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
-    let table = if database_type == Some(DatabaseType::Kingbase) {
+    let table = if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
         table_data_qualified_table_name(
             database_type,
             options.schema.as_deref(),
@@ -166,7 +167,7 @@ pub(crate) fn table_data_qualified_table_name(
     table_name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
-    if database_type != Some(DatabaseType::Kingbase) {
+    if !uses_connection_identifier_quote(database_type, identifier_quote) {
         return qualified_table_name(database_type, schema, table_name);
     }
     let table = quote_table_data_identifier(database_type, table_name, identifier_quote);
@@ -182,16 +183,28 @@ pub(crate) fn quote_table_data_identifier(
     name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
-    if database_type != Some(DatabaseType::Kingbase) {
+    if !uses_connection_identifier_quote(database_type, identifier_quote) {
         return quote_table_identifier(database_type, name);
     }
     let Some(quote) = identifier_quote else {
         return quote_table_identifier(database_type, name);
     };
+    if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres)) {
+        return quote_gaussdb_jdbc_identifier(name, quote);
+    }
     if quote.is_empty() {
         return name.to_string();
     }
     format!("{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))
+}
+
+pub(crate) fn uses_connection_identifier_quote(
+    database_type: Option<DatabaseType>,
+    identifier_quote: Option<&str>,
+) -> bool {
+    database_type == Some(DatabaseType::Kingbase)
+        || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
+            && identifier_quote.is_some())
 }
 
 fn is_view_table_type(table_type: Option<&str>) -> bool {

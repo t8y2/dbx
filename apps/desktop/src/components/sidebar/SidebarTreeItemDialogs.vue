@@ -94,6 +94,11 @@ const {
   renameMongoCollectionPreview,
   renameMongoCollectionLoading,
   confirmRenameMongoCollection,
+  showRedisDatabaseAliasDialog,
+  redisDatabaseAliasInput,
+  redisDatabaseAliasSaving,
+  confirmRedisDatabaseAlias,
+  clearRedisDatabaseAlias,
   showCreateSchemaDialog,
   createSchemaName,
   confirmCreateSchema,
@@ -150,6 +155,7 @@ watch(
     showCreateNacosNamespaceDialog,
     showEditNacosNamespaceDialog,
     showRenameMongoCollectionDialog,
+    showRedisDatabaseAliasDialog,
     showCreateSchemaDialog,
     showEditSchemaCommentDialog,
   ],
@@ -244,6 +250,26 @@ watch(
         <Button :disabled="renameMongoCollectionLoading || !renameMongoCollectionName || renameMongoCollectionName === node.label" @click="confirmRenameMongoCollection">
           <Loader2 v-if="renameMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
           {{ t("contextMenu.renameObject") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showRedisDatabaseAliasDialog">
+    <DialogContent class="sm:max-w-[420px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("redis.databaseAliasTitle", { db: node.database }) }}</DialogTitle>
+      </DialogHeader>
+      <div class="grid gap-2">
+        <Input v-model="redisDatabaseAliasInput" :placeholder="t('redis.databaseAliasPlaceholder')" :disabled="redisDatabaseAliasSaving" @keydown.enter.prevent="confirmRedisDatabaseAlias" />
+        <p class="text-xs text-muted-foreground">{{ t("redis.databaseAliasHint") }}</p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" :disabled="redisDatabaseAliasSaving" @click="clearRedisDatabaseAlias">{{ t("redis.clearDatabaseAlias") }}</Button>
+        <Button variant="outline" :disabled="redisDatabaseAliasSaving" @click="showRedisDatabaseAliasDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="redisDatabaseAliasSaving || !redisDatabaseAliasInput.trim()" @click="confirmRedisDatabaseAlias">
+          <Loader2 v-if="redisDatabaseAliasSaving" class="mr-2 h-4 w-4 animate-spin" />
+          {{ t("common.save") }}
         </Button>
       </DialogFooter>
     </DialogContent>

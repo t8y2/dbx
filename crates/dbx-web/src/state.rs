@@ -35,10 +35,32 @@ pub struct WebState {
     pub login_rate_limit: Mutex<LoginRateLimit>,
     /// Table export temp files: export_id -> (file_path, format)
     pub export_files: RwLock<HashMap<String, (String, String)>>,
+    pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
 }
 
 impl WebState {
     pub async fn remove_sse_channel(&self, id: &str) {
         self.sse_channels.write().await.remove(id);
+    }
+
+    /// Test helper: full field set so new WebState fields don't break scattered test fixtures.
+    #[cfg(test)]
+    pub fn for_tests(app: Arc<AppState>, data_dir: PathBuf) -> Self {
+        Self {
+            app,
+            data_dir,
+            public_base_path: "/".to_string(),
+            password_disabled: false,
+            password_hash: RwLock::new(None),
+            sessions: RwLock::new(HashSet::new()),
+            sse_channels: RwLock::new(HashMap::new()),
+            transfer_progress_channels: RwLock::new(HashMap::new()),
+            table_import_channels: RwLock::new(HashMap::new()),
+            sql_file_executions: RwLock::new(HashMap::new()),
+            nacos_imports: RwLock::new(HashMap::new()),
+            login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
+            export_files: RwLock::new(HashMap::new()),
+            ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
+        }
     }
 }

@@ -229,10 +229,10 @@ export function useExportTracker() {
       .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
   }
 
-  function addTask(tableName: string, format: string, filePath: string): ExportTask {
-    const exportId = generateUUID();
+  function addTask(tableName: string, format: string, filePath: string, exportId?: string): ExportTask {
+    const id = exportId ?? generateUUID();
     const task = reactive<ExportTask>({
-      exportId,
+      exportId: id,
       kind: "table-export",
       tableName,
       format,
@@ -242,7 +242,7 @@ export function useExportTracker() {
       status: "Running",
       errorMessage: null,
     });
-    taskMap.set(exportId, task);
+    taskMap.set(id, task);
     return task;
   }
 
@@ -381,7 +381,10 @@ export function useExportTracker() {
   function updateDatabaseExportTask(exportId: string, progress: api.ExportProgress) {
     const task = taskMap.get(exportId);
     if (!task) return;
-    task.tableName = progress.currentObject || task.tableName;
+    // Keep the database label during metadata prefetch; only follow object names while writing.
+    if (!progress.preparing && progress.currentObject) {
+      task.tableName = progress.currentObject;
+    }
     task.rowsExported = progress.rowsExported;
     task.totalRows = progress.totalRows;
     task.status = normalizeExportStatus(progress.status);

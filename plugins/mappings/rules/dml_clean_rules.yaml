@@ -1,0 +1,128 @@
+# DML Clean Rules — pre-transform SQL templates for lossy type mappings
+# Each rule fires when fidelity_score < max_fidelity for the source→target pair.
+# The {table} and {column} placeholders are substituted at generation time.
+
+rules:
+  - name: "bigint_to_int"
+    source_type: "BIGINT"
+    target_type: "INT"
+    max_fidelity: 0.8
+    pre_transform_sql: "UPDATE {table} SET {column} = NULL WHERE {column} > 2147483647"
+    description: "Truncate BIGINT values exceeding INT range"
+
+  - name: "bigint_to_int_numeric" 
+    source_type: "BIGINT"
+    target_type: "INTEGER"
+    max_fidelity: 0.8
+    pre_transform_sql: "UPDATE {table} SET {column} = NULL WHERE {column} > 2147483647"
+
+  - name: "bigint_to_smallint"
+    source_type: "BIGINT"
+    target_type: "SMALLINT"
+    max_fidelity: 0.6
+    pre_transform_sql: "UPDATE {table} SET {column} = NULL WHERE {column} > 32767"
+    description: "Truncate BIGINT values exceeding SMALLINT range"
+
+  - name: "bigint_to_tinyint"
+    source_type: "BIGINT"
+    target_type: "TINYINT"
+    max_fidelity: 0.5
+    pre_transform_sql: "UPDATE {table} SET {column} = NULL WHERE {column} > 127"
+
+  - name: "int_to_smallint"
+    source_type: "INT"
+    target_type: "SMALLINT"
+    max_fidelity: 0.7
+    pre_transform_sql: "UPDATE {table} SET {column} = NULL WHERE {column} > 32767"
+
+  - name: "int_to_tinyint"
+    source_type: "INT"
+    target_type: "TINYINT"
+    max_fidelity: 0.6
+    pre_transform_sql: "UPDATE {table} SET {column} = NULL WHERE {column} > 127"
+
+  - name: "varchar_truncate_255"
+    source_type: "VARCHAR"
+    target_type: "VARCHAR"
+    max_fidelity: 0.7
+    pre_transform_sql: "UPDATE {table} SET {column} = LEFT({column}, 255) WHERE LENGTH({column}) > 255"
+    description: "Truncate VARCHAR values exceeding target max length (generic 255)"
+
+  - name: "varchar_to_text"
+    source_type: "VARCHAR"
+    target_type: "TEXT"
+    max_fidelity: 0.9
+    # No DML needed — widening to TEXT is safe (fidelity >= 0.9)
+
+  - name: "float_to_int"
+    source_type: "FLOAT"
+    target_type: "INT"
+    max_fidelity: 0.6
+    pre_transform_sql: "UPDATE {table} SET {column} = ROUND({column}) WHERE {column} IS NOT NULL"
+    description: "Round floating-point values before integer cast"
+
+  - name: "timestamp_with_tz_to_timestamp"
+    source_type: "TIMESTAMPTZ"
+    target_type: "TIMESTAMP"
+    max_fidelity: 0.8
+    pre_transform_sql: "UPDATE {table} SET {column} = {column} AT TIME ZONE 'UTC'"
+    description: "Convert to UTC before stripping timezone"
+
+  - name: "timestamptz_to_datetime"
+    source_type: "TIMESTAMPTZ"
+    target_type: "DATETIME"
+    max_fidelity: 0.7
+    pre_transform_sql: "UPDATE {table} SET {column} = {column} AT TIME ZONE 'UTC'"
+
+  - name: "bool_to_tinyint"
+    source_type: "BOOLEAN"
+    target_type: "TINYINT"
+    max_fidelity: 0.8
+    pre_transform_sql: "UPDATE {table} SET {column} = CASE WHEN {column} = true THEN 1 ELSE 0 END"
+    description: "Convert BOOLEAN to TINYINT(1)"
+
+  - name: "uuid_to_char"
+    source_type: "UUID"
+    target_type: "CHAR"
+    max_fidelity: 0.7
+    pre_transform_sql: "UPDATE {table} SET {column} = CAST({column} AS VARCHAR(36))"
+    description: "Cast UUID to CHAR(36) before migration"
+
+  - name: "decimal_to_int"
+    source_type: "DECIMAL"
+    target_type: "INT"
+    max_fidelity: 0.6
+    pre_transform_sql: "UPDATE {table} SET {column} = ROUND({column}) WHERE {column} IS NOT NULL"
+
+  - name: "decimal_to_float"
+    source_type: "DECIMAL"
+    target_type: "FLOAT"
+    max_fidelity: 0.8
+    pre_transform_sql: "UPDATE {table} SET {column} = CAST({column} AS DOUBLE) WHERE {column} IS NOT NULL"
+
+  - name: "json_to_text"
+    source_type: "JSON"
+    target_type: "TEXT"
+    max_fidelity: 0.5
+    pre_transform_sql: "UPDATE {table} SET {column} = CAST({column} AS VARCHAR) WHERE {column} IS NOT NULL"
+    description: "JSON→TEXT loses structure — store as serialized string"
+
+  - name: "json_to_varchar"
+    source_type: "JSON"
+    target_type: "VARCHAR"
+    max_fidelity: 0.5
+    pre_transform_sql: "UPDATE {table} SET {column} = CAST({column} AS VARCHAR) WHERE {column} IS NOT NULL"
+
+  - name: "enum_to_varchar"
+    source_type: "ENUM"
+    target_type: "VARCHAR"
+    max_fidelity: 0.7
+    pre_transform_sql: "UPDATE {table} SET {column} = CAST({column} AS CHAR) WHERE {column} IS NOT NULL"
+    description: "ENUM→VARCHAR: explicit cast to string"
+
+  - name: "text_to_varchar_truncate"
+    source_type: "TEXT"
+    target_type: "VARCHAR"
+    max_fidelity: 0.6
+    pre_transform_sql: "UPDATE {table} SET {column} = LEFT({column}, 65535) WHERE LENGTH({column}) > 65535"
+    description: "Truncate TEXT exceeding VARCHAR max length"

@@ -22,6 +22,7 @@ const emit = defineEmits<{
   export: [];
   startResize: [event: MouseEvent];
   collapse: [];
+  "open-settings": [initialTab: string];
 }>();
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
@@ -243,7 +244,7 @@ defineExpose({ focusSearch });
         </template>
       </div>
       <div class="flex-1 min-h-0">
-        <ConnectionTree ref="connectionTreeRef" />
+        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" />
       </div>
     </div>
     <div class="panel-resize-handle panel-resize-handle--right" @mousedown="emit('startResize', $event)" />

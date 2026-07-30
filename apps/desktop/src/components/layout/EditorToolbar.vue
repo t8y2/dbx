@@ -9,18 +9,17 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
+import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
-import * as api from "@/lib/backend/api";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
 import { useConnectionGroupLabel } from "@/composables/useConnectionGroupLabel";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
-import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
+import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
-import type { QueryTab, ConnectionConfig, CatalogInfo } from "@/types/database";
+import type { QueryTab, ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -48,9 +47,9 @@ const emit = defineEmits<{
   importResultArchive: [];
   pasteSqlInCondition: [];
   changeConnection: [connectionId: string];
+  changeCatalog: [catalog: string | undefined, database: string];
   changeDatabase: [database: string];
   changeSchema: [schema: string | undefined];
-  changeCatalog: [catalog: string | undefined];
   setDefaultDatabase: [];
   clearDefaultDatabase: [];
   "update:blockDangerousRedisCommands": [value: boolean];
@@ -62,42 +61,30 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
-const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions } = useDatabaseOptions();
+const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
 
-const catalogOptions = ref<CatalogInfo[]>([]);
-const loadingCatalogs = ref(false);
-
-const isCatalogCapableConnection = computed(() => {
-  return isDorisFamilyCatalogCapable(props.activeConnection?.db_type, props.activeConnection?.driver_profile);
+const activeCatalogs = computed(() => {
+  const connection = props.activeConnection;
+  return connection ? (catalogOptions.value[connection.id] ?? []) : [];
 });
-
-async function loadCatalogOptions(connectionId: string) {
-  if (!connectionId || !isCatalogCapableConnection.value) {
-    catalogOptions.value = [];
-    return;
-  }
-  loadingCatalogs.value = true;
-  try {
-    const catalogs = await api.listDorisCatalogs(connectionId);
-    catalogOptions.value = catalogs;
-  } catch {
-    catalogOptions.value = [];
-  } finally {
-    loadingCatalogs.value = false;
-  }
-}
-
-watchEffect(() => {
-  if (props.activeConnection && isCatalogCapableConnection.value && props.activeTab.catalog === undefined) {
-    loadCatalogOptions(props.activeConnection.id).catch(() => {});
-  }
-});
-
+const activeCatalogNames = computed(() => activeCatalogs.value.map((catalog) => catalog.name));
+const showCatalogSelector = computed(() => connectionIsDorisFamilyCatalogCapable(props.activeConnection) && queryCatalogSelectorVisible(activeCatalogs.value));
+const activeCatalogValue = computed(() => selectedQueryCatalogName(activeCatalogs.value, props.activeTab.catalog));
+const activeCatalogDatabaseKey = computed(() => (props.activeConnection && props.activeTab.catalog ? catalogDatabaseOptionsKey(props.activeConnection.id, props.activeTab.catalog) : ""));
 const activeDatabaseOptions = computed(() => {
   const connection = props.activeConnection;
-  return connection ? (databaseOptions.value[connection.id] ?? []) : [];
+  if (!connection) return [];
+  if (props.activeTab.catalog) return catalogDatabaseOptions.value[activeCatalogDatabaseKey.value] ?? [];
+  return databaseOptions.value[connection.id] ?? [];
 });
+const loadingActiveDatabaseOptions = computed(() => {
+  const connection = props.activeConnection;
+  if (!connection) return false;
+  if (props.activeTab.catalog) return loadingCatalogDatabaseOptions.value[activeCatalogDatabaseKey.value] ?? false;
+  return loadingDatabaseOptions.value[connection.id] ?? false;
+});
+const switchingCatalog = ref(false);
 
 const connectionOptionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
 const { connectionGroupLabel } = useConnectionGroupLabel();
@@ -167,6 +154,18 @@ watchEffect(() => {
     loadSchemaOptions(connection.id, schemaDatabaseKey.value).catch(() => {});
   }
 });
+watchEffect(() => {
+  const connection = props.activeConnection;
+  if (!connection || !connectionIsDorisFamilyCatalogCapable(connection)) return;
+  void loadCatalogOptions(connection.id).catch(() => {});
+});
+
+watchEffect(() => {
+  const connection = props.activeConnection;
+  const catalog = props.activeTab.catalog;
+  if (!connection || !catalog) return;
+  void loadCatalogDatabaseOptions(connection.id, catalog).catch(() => {});
+});
 
 const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeConnection, activeDatabaseValue.value));
 const toolbarStyle = computed(() => {
@@ -192,6 +191,18 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
 function databaseOptionIsProduction(database: string): boolean {
   if (!database || props.activeConnection?.is_production) return false;
   return productionContextForDatabase(props.activeConnection, database).reason === "database";
+}
+async function changeCatalog(selectedCatalog: string) {
+  const connection = props.activeConnection;
+  if (!connection) return;
+  switchingCatalog.value = true;
+  try {
+    const catalog = normalizedQueryTabCatalog(activeCatalogs.value, selectedCatalog);
+    const databases = catalog ? await loadCatalogDatabaseOptions(connection.id, selectedCatalog) : await loadDatabaseOptions(connection.id).then(() => databaseOptions.value[connection.id] ?? []);
+    emit("changeCatalog", catalog, databaseAfterCatalogChange(props.activeTab.database, databases));
+  } finally {
+    switchingCatalog.value = false;
+  }
 }
 </script>
 
@@ -396,18 +407,19 @@ function databaseOptionIsProduction(database: string): boolean {
           </template>
         </SearchableSelect>
       </div>
-      <!-- Catalog selector (Doris / StarRocks multi-catalog) -->
-      <div v-if="isCatalogCapableConnection" class="flex items-center gap-1">
+      <div v-if="showCatalogSelector" class="flex items-center gap-1">
         <SearchableSelect
-          :model-value="activeTab.catalog ?? ''"
-          :options="catalogOptions.map((c) => c.name)"
+          :model-value="activeCatalogValue"
+          :options="activeCatalogNames"
           :placeholder="t('editor.selectCatalog')"
           :search-placeholder="t('editor.searchCatalog')"
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
-          :loading="loadingCatalogs"
+          :loading="loadingCatalogOptions[activeConnection?.id || ''] || switchingCatalog"
+          trigger-variant="ghost"
           trigger-class="gap-1.5"
-          @update:model-value="(catalog) => emit('changeCatalog', catalog || undefined)"
+          trigger-icon-class="h-3 w-3"
+          @update:model-value="changeCatalog"
           @update:open="
             (open: boolean) => {
               if (open && activeConnection) loadCatalogOptions(activeConnection.id).catch(() => {});
@@ -415,11 +427,8 @@ function databaseOptionIsProduction(database: string): boolean {
           "
         >
           <template #trigger-label="{ label, loading }">
-            <Database class="h-3.5 w-3.5 shrink-0" />
+            <Layers class="h-3.5 w-3.5 shrink-0" />
             <span class="truncate">{{ loading ? t("common.loading") : label }}</span>
-          </template>
-          <template #option-label="{ label }">
-            <TruncatedTextTooltip :text="label" class="min-w-0 flex-1" side="left" :side-offset="8" />
           </template>
         </SearchableSelect>
       </div>
@@ -435,7 +444,7 @@ function databaseOptionIsProduction(database: string): boolean {
           :search-placeholder="t('editor.searchDatabase')"
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
-          :loading="loadingDatabaseOptions[activeConnection?.id || '']"
+          :loading="loadingActiveDatabaseOptions"
           :display-name="databaseDisplayName"
           trigger-variant="ghost"
           trigger-class="gap-1.5"
@@ -443,7 +452,9 @@ function databaseOptionIsProduction(database: string): boolean {
           @update:model-value="(database) => emit('changeDatabase', database)"
           @update:open="
             (open: boolean) => {
-              if (open && activeConnection) loadDatabaseOptions(activeConnection.id, activeTab.catalog).catch(() => {});
+              if (!open || !activeConnection) return;
+              if (activeTab.catalog) loadCatalogDatabaseOptions(activeConnection.id, activeTab.catalog).catch(() => {});
+              else loadDatabaseOptions(activeConnection.id).catch(() => {});
             }
           "
         >
@@ -467,7 +478,7 @@ function databaseOptionIsProduction(database: string): boolean {
           </TooltipTrigger>
           <TooltipContent>{{ t("editor.clearDatabase") }}</TooltipContent>
         </Tooltip>
-        <Button v-if="activeDatabaseValue" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+        <Button v-if="activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
           <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
           {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
         </Button>

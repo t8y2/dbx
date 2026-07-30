@@ -83,6 +83,13 @@ impl ProxyTunnelManager {
             }
         }
     }
+
+    pub async fn stop_all_tunnels(&self) {
+        let tunnels = std::mem::take(&mut *self.tunnels.lock().await);
+        for (handle, _) in tunnels.into_values() {
+            handle.abort();
+        }
+    }
 }
 
 #[derive(Clone)]

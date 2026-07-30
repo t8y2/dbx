@@ -215,13 +215,27 @@ func (s *server) listDatabases() ([]databaseInfo, error) {
 	return []databaseInfo{{Name: s.params.Database}}, nil
 }
 
-func (s *server) listSchemas(visible []string) ([]string, error) {
-	query := "SELECT nspname FROM sys_catalog.sys_namespace WHERE nspname NOT LIKE 'sys_temp_%' AND nspname NOT LIKE 'sys_toast_temp_%' ORDER BY nspname"
-	if s.mode.postgresCatalog {
-		query = "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%' ORDER BY nspname"
-	} else if s.mode.mysqlCompat {
-		query = kingbaseMySQLCompatListSchemasSQL
+func kingbaseListSchemasSQL(mode kingbaseMode, showSystemSchemas bool) string {
+	if mode.mysqlCompat {
+		if showSystemSchemas {
+			return "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name"
+		}
+		return kingbaseMySQLCompatListSchemasSQL
 	}
+	if mode.postgresCatalog {
+		if showSystemSchemas {
+			return "SELECT nspname FROM pg_catalog.pg_namespace ORDER BY nspname"
+		}
+		return "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%' ORDER BY nspname"
+	}
+	if showSystemSchemas {
+		return "SELECT nspname FROM sys_catalog.sys_namespace ORDER BY nspname"
+	}
+	return "SELECT nspname FROM sys_catalog.sys_namespace WHERE nspname NOT LIKE 'sys_temp_%' AND nspname NOT LIKE 'sys_toast_temp_%' ORDER BY nspname"
+}
+
+func (s *server) listSchemas(visible []string, showSystemSchemas bool) ([]string, error) {
+	query := kingbaseListSchemasSQL(s.mode, showSystemSchemas)
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -383,7 +397,7 @@ func (s *server) completionAssistantSearch(request completionAssistantRequest) (
 	} else {
 		schemas := []string{request.Schema}
 		if request.GlobalSearch {
-			visible, err := s.listSchemas(nil)
+			visible, err := s.listSchemas(nil, false)
 			if err != nil {
 				return completionAssistantResponse{}, err
 			}

@@ -7,6 +7,13 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
 
 vi.mock("vue-i18n", () => ({
+  createI18n: () => ({
+    global: {
+      locale: { value: "en" },
+      setLocaleMessage: vi.fn(),
+    },
+    install: vi.fn(),
+  }),
   useI18n: () => ({
     t: (key: string) => key,
   }),

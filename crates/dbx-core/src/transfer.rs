@@ -121,8 +121,9 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
 /// Resolve an optional catalog for external-catalog routing in the transfer
 /// pipeline.  Returns `Some(catalog)` only when:
 ///   - the catalog is non-empty and not a built-in catalog name, AND
-///   - the database type is Doris/StarRocks (the only engines that support
-///     external catalogs).
+///   - the database type is Doris/StarRocks, or MySQL (StarRocks/Doris are often
+///     saved as `db_type=mysql` with a matching `driver_profile`; the transfer UI
+///     only sends `sourceCatalog`/`targetCatalog` for catalog-capable connections).
 ///
 /// Built-in catalogs: Doris `internal`, StarRocks `default_catalog`. Prefer
 /// [`resolve_external_transfer_catalog_for_config`] when a full connection
@@ -130,7 +131,7 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
 pub fn resolve_external_transfer_catalog<'a>(catalog: Option<&'a str>, db_type: &DatabaseType) -> Option<&'a str> {
     let catalog = normalize_external_catalog_name(catalog)?;
     match db_type {
-        DatabaseType::Doris | DatabaseType::StarRocks => Some(catalog),
+        DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Mysql => Some(catalog),
         _ => None,
     }
 }
@@ -160,10 +161,11 @@ fn normalize_external_catalog_name(catalog: Option<&str>) -> Option<&str> {
 
 /// Create (or reuse) a transfer pool for the given connection/database/catalog.
 ///
-/// For Doris/StarRocks external catalogs the pool is created **without** a
-/// default database and with `catalog=<name>` in the connection URL params so
-/// mysql_async runs `SET catalog` during setup. All transfer SQL uses 3-part
-/// qualified names (`catalog.database.table`) and does not rely on `USE`.
+/// For Doris/StarRocks external catalogs the pool is created with
+/// `catalog=<name>` in the connection URL params so mysql_async runs
+/// `SET catalog` **before** `USE <database>` during setup. The handshake does
+/// not send the external database name (mysql_async strips the path when a
+/// catalog is present), which is what previously caused `Unknown database`.
 pub async fn ensure_transfer_pool(
     state: &AppState,
     connection_id: &str,
@@ -175,7 +177,10 @@ pub async fn ensure_transfer_pool(
         configs.get(connection_id).cloned().ok_or_else(|| format!("Connection config not found: {connection_id}"))?
     };
     if let Some(catalog) = resolve_external_transfer_catalog_for_config(catalog, &config) {
-        state.get_or_create_pool_with_catalog(connection_id, None, Some(catalog)).await
+        // SET catalog first, then USE <database> so session has both catalog and
+        // database selected — StarRocks rejects unqualified analysis with
+        // "No database selected" when only SET catalog ran.
+        state.get_or_create_pool_with_catalog(connection_id, Some(database), Some(catalog)).await
     } else {
         state.get_or_create_pool(connection_id, Some(database)).await
     }
@@ -6338,18 +6343,15 @@ mod tests {
     }
 
     #[test]
-    fn mysql_insert_omits_database_qualified_table_name() {
-        let sql = generate_insert_typed(
-            &[String::from("id")],
-            &[Some(String::from("int"))],
-            &[vec![json!(1)]],
-            "users",
-            "app",
-            &DatabaseType::Mysql,
-            None,
-        );
+    fn count_sql_uses_three_part_name_for_mysql_external_catalog() {
+        let sql = count_sql("t1", "ads", &DatabaseType::Mysql, Some("hive_catalog"));
+        assert_eq!(sql, "SELECT COUNT(*) FROM `hive_catalog`.`ads`.`t1`");
+    }
 
-        assert_eq!(sql, "INSERT INTO `users` (`id`) VALUES\n(1)");
+    #[test]
+    fn count_sql_uses_three_part_name_for_starrocks_external_catalog() {
+        let sql = count_sql("t1", "ads", &DatabaseType::StarRocks, Some("paimon"));
+        assert_eq!(sql, "SELECT COUNT(*) FROM `paimon`.`ads`.`t1`");
     }
 
     #[test]
@@ -6926,7 +6928,10 @@ SELECT 1 FROM dual"#
         assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::StarRocks), Some("hive"));
         assert_eq!(resolve_external_transfer_catalog(Some("default_catalog"), &DatabaseType::StarRocks), None);
         assert_eq!(resolve_external_transfer_catalog(Some("internal"), &DatabaseType::Doris), None);
-        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::Mysql), None);
+        // MySQL db_type is included so StarRocks saved as mysql+driver_profile still
+        // gets 3-part catalog qualification (UI only sends catalog for capable engines).
+        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::Mysql), Some("hive"));
+        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::Postgres), None);
     }
 
     #[test]

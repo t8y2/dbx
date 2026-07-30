@@ -4046,12 +4046,15 @@ mod tests {
     }
 
     #[test]
-    fn database_connection_config_with_catalog_clears_starrocks_database_and_injects_param() {
-        let mut config = mysql_config(Some("configured_db"));
+    fn database_connection_config_with_catalog_keeps_database_for_use_after_set_catalog() {
+        let mut config = mysql_config(None);
         config.db_type = DatabaseType::StarRocks;
-        let db_config = database_connection_config_with_catalog(&config, None, Some("paimon_catalog"));
-        assert_eq!(db_config.database, None);
+        let db_config = database_connection_config_with_catalog(&config, Some("ads"), Some("paimon_catalog"));
+        assert_eq!(db_config.database.as_deref(), Some("ads"));
         assert_eq!(db_config.url_params.as_deref(), Some("catalog=paimon_catalog"));
+        let url = db_config.connection_url();
+        assert!(url.contains("/ads"), "url should include database for USE setup: {url}");
+        assert!(url.contains("catalog=paimon_catalog"), "url should include catalog param: {url}");
     }
 
     #[test]

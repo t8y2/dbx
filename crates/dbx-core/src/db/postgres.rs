@@ -706,7 +706,7 @@ fn escape_tsvector_lexeme(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "''")
 }
 
-fn pg_error_to_string(err: tokio_postgres::Error) -> String {
+pub(crate) fn pg_error_to_string(err: tokio_postgres::Error) -> String {
     err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string())
 }
 

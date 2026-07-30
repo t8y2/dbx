@@ -5,7 +5,7 @@ import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogContent } from "
 import { Button } from "@/components/ui/button";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
+import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, ChevronDown, ChevronRight } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
@@ -15,6 +15,7 @@ import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
 import SchemaDiffDdlPanel from "@/components/diff/SchemaDiffDdlPanel.vue";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue";
+import SchemaDiffDeployResultPanel from "@/components/diff/SchemaDiffDeployResultPanel.vue";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
@@ -23,6 +24,7 @@ import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry } from "@/types/schemaDiff";
 import type { ObjectSourceKind, TableInfo } from "@/types/database";
 import {
+  buildDeployObjectResults,
   buildDeploySqlForObjects,
   convertToSchemaDiffObjects,
   groupDiffObjects,
@@ -30,6 +32,7 @@ import {
   schemaDiffDeployTargetSchema,
   databaseTypeToDialectKind,
   normalizeDialectKind,
+  sortSchemaDiffObjects,
   type OperationGroup,
   type SchemaDiffObject,
   type DiffOperationType,
@@ -42,6 +45,7 @@ import {
   type CompatibilityWarning,
   type PermissionDiff,
   type DependencyGraph,
+  type DeployObjectResult,
 } from "@/lib/schema/schemaDiff";
 import { compileSchemaDiffTableFilter, filterSchemaDiffTables, isSchemaDiffView } from "@/lib/schema/schemaDiffTableFilter";
 import { Splitpanes, Pane } from "splitpanes";
@@ -59,7 +63,7 @@ const props = defineProps<{
 }>();
 
 // Wizard state
-const step = ref<"config" | "compare" | "result" | "deploy-review">("config");
+const step = ref<"config" | "compare" | "result" | "deploy-review" | "deploy-result">("config");
 
 // Deploy confirm dialog
 const showConfirmDialog = ref(false);
@@ -101,8 +105,8 @@ const deploySqlAll = ref("");
 const executing = ref(false);
 const lastDiffResult = ref<SchemaDiffPreparation | null>(null);
 const targetDbVersion = ref<string | null>(null);
-const showResultDialog = ref(false);
-const deployResult = ref<{ success: boolean; status?: string; message: string; affectedRows?: number; error?: string } | null>(null);
+const deployResult = ref<{ success: boolean; status?: string; message: string; affectedRows?: number; executionTimeMs?: number; error?: string; statementResults?: any[] } | null>(null);
+const objectResults = ref<DeployObjectResult[]>([]);
 
 // Phase 4 result fields
 const rollbackSql = ref("");
@@ -119,11 +123,38 @@ const showRenamePanel = ref(true);
 // Rollback / forward SQL mode in deploy step
 const deploySqlMode = ref<"forward" | "rollback">("forward");
 
-// Dialog size memory (width + height + splitpanes ratio)
+// Dialog size memory (shared across all steps, defaults match the config step)
 const DIALOG_SIZE_KEY = "dbx-schema-diff-size";
-const SPLITPANES_SIZE_KEY = "dbx-schema-diff-splitpanes-v2";
-const savedSize = JSON.parse(localStorage.getItem(DIALOG_SIZE_KEY) || "null");
+const DEFAULT_WIDTH = 1320;
+const DEFAULT_HEIGHT = 984;
 
+function parseSavedSize(): { width: number; height: number } | null {
+  try {
+    const raw = localStorage.getItem(DIALOG_SIZE_KEY);
+    if (!raw) return null;
+    const val = JSON.parse(raw);
+    const parseDim = (v: unknown): number | undefined => {
+      if (typeof v === "number") return v;
+      if (typeof v === "string") {
+        const n = parseInt(v, 10);
+        return isNaN(n) ? undefined : n;
+      }
+      return undefined;
+    };
+    const w = parseDim(val?.width);
+    const h = parseDim(val?.height);
+    if (w !== undefined && h !== undefined) {
+      return { width: Math.max(w, DEFAULT_WIDTH), height: Math.max(h, DEFAULT_HEIGHT) };
+    }
+  } catch {
+    // ignore invalid stored value
+  }
+  return null;
+}
+
+const savedSize = ref(parseSavedSize());
+
+const SPLITPANES_SIZE_KEY = "dbx-schema-diff-splitpanes-v2";
 const savedSplitpanes = (() => {
   try {
     const raw = localStorage.getItem(SPLITPANES_SIZE_KEY);
@@ -148,8 +179,6 @@ function handleSplitpanesResized(payload: { panes: { size: number }[] }) {
 
 const isMaximized = ref(false);
 
-// Config step: always use default size 1100x820
-// Result step: use saved size if exists
 const dialogStyle = computed(() => {
   if (isMaximized.value) {
     return {
@@ -160,17 +189,11 @@ const dialogStyle = computed(() => {
       borderRadius: "0",
     };
   }
-  if (step.value === "result") {
-    return {
-      width: savedSize?.width || "1100px",
-      height: savedSize?.height || "820px",
-      maxWidth: "calc(100vw - 2rem)",
-      maxHeight: "calc(100vh - 2rem)",
-    };
-  }
+  const width = savedSize.value?.width ?? DEFAULT_WIDTH;
+  const height = savedSize.value?.height ?? DEFAULT_HEIGHT;
   return {
-    width: "1100px",
-    height: "820px",
+    width: `${width}px`,
+    height: `${height}px`,
     maxWidth: "calc(100vw - 2rem)",
     maxHeight: "calc(100vh - 2rem)",
   };
@@ -199,13 +222,12 @@ function setupResizeObserver() {
       const { width, height } = entry.contentRect;
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = window.setTimeout(() => {
-        localStorage.setItem(
-          DIALOG_SIZE_KEY,
-          JSON.stringify({
-            width: `${width}px`,
-            height: `${height}px`,
-          }),
-        );
+        const size = {
+          width: Math.max(width, DEFAULT_WIDTH),
+          height: Math.max(height, DEFAULT_HEIGHT),
+        };
+        savedSize.value = size;
+        localStorage.setItem(DIALOG_SIZE_KEY, JSON.stringify(size));
       }, 500);
     }
   });
@@ -219,16 +241,17 @@ function teardownResizeObserver() {
   resizeObserver = null;
 }
 
-// Only enable resize observer in result step
+// Save dialog size whenever the dialog is open
 watch(
-  () => step.value,
-  (newStep) => {
-    if (newStep === "result") {
+  () => open.value,
+  (isOpen) => {
+    if (isOpen) {
       setTimeout(setupResizeObserver, 100);
     } else {
       teardownResizeObserver();
     }
   },
+  { immediate: true },
 );
 
 onBeforeUnmount(() => {
@@ -496,6 +519,7 @@ async function handleCompare() {
 
     // Convert to unified objects
     diffObjects.value = convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates);
+    diffObjects.value = sortSchemaDiffObjects(diffObjects.value, result.deployOrder);
 
     // Group by operation type and object kind
     diffGroups.value = groupDiffObjects(diffObjects.value);
@@ -685,11 +709,15 @@ async function executeDeploySql() {
     if (failed === undefined) return;
     showDeployTxResult(failed);
   } catch (e: any) {
+    const message = e?.message || String(e);
     deployResult.value = {
       success: false,
-      message: e?.message || String(e),
+      status: "failed",
+      message,
+      error: message,
     };
-    showResultDialog.value = true;
+    objectResults.value = buildDeployObjectResults(diffObjects.value, []);
+    step.value = "deploy-result";
   } finally {
     executing.value = false;
   }
@@ -697,7 +725,12 @@ async function executeDeploySql() {
 
 function showDeployTxResult(txLog: any) {
   deployResult.value = buildDeployTxResult(txLog, t);
-  showResultDialog.value = true;
+  objectResults.value = buildDeployObjectResults(diffObjects.value, deployResult.value.statementResults ?? []);
+  step.value = "deploy-result";
+}
+
+function handleCloseDeployResult() {
+  step.value = "result";
 }
 async function handleSelectObject(obj: SchemaDiffObject) {
   selectedObjectId.value = obj.id;
@@ -858,8 +891,8 @@ const targetConnectionInfo = computed(() => {
         <span class="sr-only">{{ isMaximized ? t("diff.restore") : t("diff.maximize") }}</span>
       </Button>
 
-      <DialogHeader>
-        <DialogTitle class="flex items-center gap-2">
+      <DialogHeader data-tauri-drag-region>
+        <DialogTitle class="flex items-center gap-2" data-tauri-drag-region>
           <GitCompareArrows class="w-4 h-4" />
           {{ t("diff.title") }}
         </DialogTitle>
@@ -998,10 +1031,22 @@ const targetConnectionInfo = computed(() => {
             @deploy="handleDeploy"
           />
         </template>
+        <!-- Deploy Result Step -->
+        <template v-else-if="step === 'deploy-result'">
+          <SchemaDiffDeployResultPanel
+            :deploy-sql="deploySql"
+            :object-results="objectResults"
+            :overall-status="deployResult?.status ?? 'unknown'"
+            :affected-rows="deployResult?.affectedRows"
+            :execution-time-ms="deployResult?.executionTimeMs"
+            :error="deployResult?.error"
+            @close="handleCloseDeployResult"
+          />
+        </template>
       </div>
 
       <!-- Footer -->
-      <DialogFooter class="flex items-center justify-between">
+      <DialogFooter v-if="step !== 'deploy-result'" class="flex items-center justify-between">
         <div v-if="step === 'result'" class="flex items-center gap-2">
           <Button variant="outline" size="sm" @click="step = 'config'">
             <ArrowLeft class="w-3.5 h-3.5 mr-1" />
@@ -1064,57 +1109,6 @@ const targetConnectionInfo = computed(() => {
             <Button variant="destructive" :disabled="executing" @click="onConfirmDeploy">
               <Loader2 v-if="executing" class="w-3.5 h-3.5 mr-1 animate-spin" />
               {{ t("diff.confirmDeploy") }}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <!-- Deploy Result Dialog -->
-      <Dialog v-model:open="showResultDialog">
-        <DialogContent class="sm:max-w-[480px]">
-          <DialogHeader>
-            <DialogTitle class="flex items-center gap-2" :class="deployResult?.success ? 'text-green-500' : 'text-destructive'">
-              <AlertTriangle v-if="!deployResult?.success" class="h-5 w-5" />
-              <CircleCheck v-else class="h-5 w-5" />
-              <template v-if="deployResult?.status === 'mixed'">{{ t("diff.deployMixedTitle") }}</template>
-              <template v-else-if="deployResult?.status === 'rolled_back'">{{ t("diff.deployRolledBackTitle") }}</template>
-              <template v-else>{{ deployResult?.success ? t("diff.deploySuccess") : t("diff.deployFailed") }}</template>
-            </DialogTitle>
-          </DialogHeader>
-
-          <div class="py-2">
-            <div v-if="deployResult?.status === 'mixed'" class="space-y-2">
-              <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
-              <div class="bg-yellow-50 border border-yellow-300 p-3 rounded text-xs text-yellow-800">
-                {{ t("diff.deployMixedWarning") }}
-              </div>
-            </div>
-            <div v-else-if="deployResult?.status === 'rolled_back'" class="space-y-2">
-              <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
-            </div>
-            <div v-else-if="deployResult?.success" class="space-y-2">
-              <p class="text-sm text-muted-foreground">{{ t("diff.deploySuccessMessage") }}</p>
-              <div class="bg-muted p-3 rounded text-xs font-mono">
-                <div>{{ t("diff.affectedRows") }}: {{ deployResult.affectedRows ?? 0 }}</div>
-                <div>{{ t("diff.executedStatements") }}: {{ deployStats.total }}</div>
-              </div>
-            </div>
-            <div v-else class="space-y-2">
-              <p class="text-sm text-muted-foreground">{{ t("diff.deployFailedMessage") }}</p>
-              <pre class="text-xs bg-destructive/10 text-destructive p-3 rounded overflow-auto max-h-40 font-mono whitespace-pre-wrap">{{ deployResult?.message }}</pre>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" @click="showResultDialog = false">{{ t("diff.close") }}</Button>
-            <Button
-              v-if="deployResult?.success"
-              @click="
-                showResultDialog = false;
-                step = 'result';
-              "
-            >
-              {{ t("diff.backToResult") }}
             </Button>
           </DialogFooter>
         </DialogContent>

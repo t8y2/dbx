@@ -51,6 +51,17 @@ fn query_error_with_omitted_sql_context(error: &str, _sql: &str) -> String {
     }
 }
 
+/// Strip the "SQL text omitted..." suffix that is added to user-facing errors
+/// in regular query paths. Schema Diff deploy shows the statement separately,
+/// so the error should only contain the raw database message.
+fn strip_omitted_sql_context(error: &str) -> String {
+    if let Some(pos) = error.find(SQL_OMITTED_ERROR_CONTEXT) {
+        error[..pos].trim_end().to_string()
+    } else {
+        error.to_string()
+    }
+}
+
 /// A multi-statement result with metadata intended for query clients.
 ///
 /// `execution_error` is emitted for synthesized per-statement errors so clients
@@ -2211,6 +2222,43 @@ pub struct SchemaDiffDeployResult {
     pub statement_count: usize,
     pub error: Option<String>,
     pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statement_results: Vec<SchemaDiffStatementResult>,
+}
+
+/// Per-statement execution detail captured during a Schema Diff deploy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDiffStatementResult {
+    pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub affected_rows: u64,
+    #[serde(default)]
+    pub execution_time_ms: u128,
+}
+
+/// Internal per-statement execution detail used while building [`SchemaDiffStatementResult`].
+#[derive(Debug, Clone)]
+struct StatementExecutionDetail {
+    pub index: usize,
+    pub statement: Option<String>,
+    pub status: StatementExecutionStatus,
+    pub error: Option<String>,
+    pub affected_rows: u64,
+    pub execution_time_ms: u128,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementExecutionStatus {
+    Success,
+    Failed,
+    Skipped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2370,6 +2418,7 @@ pub async fn execute_schema_diff_deploy(
             statement_count: 0,
             error: None,
             metadata: serde_json::json!({"source": "schema_diff_deploy", "mode": "single_connection_tx"}),
+            statement_results: vec![],
         };
     }
 
@@ -2389,6 +2438,7 @@ pub async fn execute_schema_diff_deploy(
                     statement_count: parsed.len(),
                     error: Some("Connection not available for deploy".to_string()),
                     metadata: serde_json::json!({"source": "schema_diff_deploy", "mode": "single_connection_tx"}),
+                    statement_results: vec![],
                 };
             }
         }
@@ -2399,27 +2449,60 @@ pub async fn execute_schema_diff_deploy(
     };
     let atomicity = classify_schema_diff_atomicity(db_type, &parsed, has_transactional_path);
 
-    match execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, &parsed, schema, None)
-        .await
+    let mut statement_details: Vec<StatementExecutionDetail> = Vec::new();
+    match execute_statements_in_transaction_on_pool_with_details(
+        state,
+        &pool_key,
+        connection_id,
+        database,
+        &parsed,
+        schema,
+        None,
+        &mut statement_details,
+    )
+    .await
     {
-        Ok(result) => SchemaDiffDeployResult {
-            transaction_id: tx_id,
-            status: crate::two_phase_commit::TransactionStatus::Committed.as_str().to_string(),
-            participants: vec![participant],
-            created_at: now.clone(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            executed_count: parsed.len(),
-            statement_count: parsed.len(),
-            error: None,
-            metadata: serde_json::json!({
-                "source": "schema_diff_deploy",
-                "mode": "single_connection_tx",
-                "affected_rows": result.affected_rows,
-                "execution_time_ms": result.execution_time_ms,
-            }),
-        },
+        Ok(result) => {
+            let statement_results = build_schema_diff_statement_results(
+                &statement_details,
+                parsed.len(),
+                crate::two_phase_commit::TransactionStatus::Committed,
+                None,
+            );
+            SchemaDiffDeployResult {
+                transaction_id: tx_id,
+                status: crate::two_phase_commit::TransactionStatus::Committed.as_str().to_string(),
+                participants: vec![participant],
+                created_at: now.clone(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                executed_count: parsed.len(),
+                statement_count: parsed.len(),
+                error: None,
+                metadata: serde_json::json!({
+                    "source": "schema_diff_deploy",
+                    "mode": "single_connection_tx",
+                    "affected_rows": result.affected_rows,
+                    "execution_time_ms": result.execution_time_ms,
+                }),
+                statement_results,
+            }
+        }
         Err(e) => {
+            let e = strip_omitted_sql_context(&e);
+            for d in statement_details.iter_mut() {
+                d.error = d.error.as_ref().map(|err| strip_omitted_sql_context(err));
+            }
             let (status, executed_count) = schema_diff_failure_outcome(atomicity, &e, parsed.len());
+            let tx_status = match status {
+                crate::two_phase_commit::TransactionStatus::RolledBack => {
+                    crate::two_phase_commit::TransactionStatus::RolledBack
+                }
+                _ => crate::two_phase_commit::TransactionStatus::Mixed,
+            };
+            let statement_results =
+                build_schema_diff_statement_results(&statement_details, parsed.len(), tx_status, Some(&e));
+            let total_affected_rows: u64 = statement_details.iter().map(|d| d.affected_rows).sum();
+            let total_execution_time_ms: u128 = statement_details.iter().map(|d| d.execution_time_ms).sum();
             SchemaDiffDeployResult {
                 transaction_id: tx_id,
                 status: status.as_str().to_string(),
@@ -2438,10 +2521,79 @@ pub async fn execute_schema_diff_deploy(
                         SchemaDiffAtomicity::PartialEffectsPossible => "partial_effects_possible",
                     },
                     "error": e,
+                    "affected_rows": total_affected_rows,
+                    "execution_time_ms": total_execution_time_ms,
                 }),
+                statement_results,
             }
         }
     }
+}
+
+/// Convert internal statement execution details into the public [`SchemaDiffStatementResult`] shape.
+///
+/// - `Committed`: every recorded statement is reported as `success`.
+/// - `RolledBack`: statements that were successfully executed before the failure are
+///   still reported as `failed` because the transaction was rolled back, so they had no
+///   lasting effect. The failing statement keeps its own error; earlier statements inherit
+///   the overall error if they lack one.
+/// - `Mixed`: statements that executed are reported as they ran (`success`/`failed`).
+///   Any statements after the first failure are `skipped`.
+fn build_schema_diff_statement_results(
+    details: &[StatementExecutionDetail],
+    statement_count: usize,
+    overall_status: crate::two_phase_commit::TransactionStatus,
+    overall_error: Option<&str>,
+) -> Vec<SchemaDiffStatementResult> {
+    let mut results = Vec::with_capacity(statement_count);
+    let first_failed = details.iter().position(|d| d.status == StatementExecutionStatus::Failed);
+
+    for i in 0..statement_count {
+        let detail = details.iter().find(|d| d.index == i);
+        let (status, error, affected_rows, execution_time_ms, statement) = match detail {
+            None => ("skipped".to_string(), None, 0, 0, None),
+            Some(d) => {
+                let status = match overall_status {
+                    crate::two_phase_commit::TransactionStatus::Committed => "success",
+                    crate::two_phase_commit::TransactionStatus::Mixed => match d.status {
+                        StatementExecutionStatus::Success => "success",
+                        StatementExecutionStatus::Failed => "failed",
+                        StatementExecutionStatus::Skipped => "skipped",
+                    },
+                    _ => "failed",
+                };
+                let error = if status == "failed" {
+                    d.error.clone().or_else(|| overall_error.map(|e| e.to_string()))
+                } else {
+                    d.error.clone()
+                };
+                (status.to_string(), error, d.affected_rows, d.execution_time_ms, d.statement.clone())
+            }
+        };
+        results.push(SchemaDiffStatementResult {
+            index: i,
+            statement,
+            status,
+            error,
+            affected_rows,
+            execution_time_ms,
+        });
+    }
+
+    // For non-transactional (mixed) paths, mark any statements after the first failure as skipped.
+    if overall_status == crate::two_phase_commit::TransactionStatus::Mixed {
+        if let Some(idx) = first_failed {
+            for result in results.iter_mut().skip(idx + 1) {
+                result.status = "skipped".to_string();
+                result.error = None;
+                result.affected_rows = 0;
+                result.execution_time_ms = 0;
+                result.statement = None;
+            }
+        }
+    }
+
+    results
 }
 
 /// Execute multiple SQL statements within a single transaction.
@@ -2472,6 +2624,8 @@ pub async fn execute_statements_in_transaction(
 
 /// Execute multiple SQL statements transactionally on an already-resolved pool.
 /// This preserves session-scoped pools used by long-running imports.
+/// For a variant that also returns per-statement details, see
+/// [`execute_statements_in_transaction_on_pool_with_details`].
 pub async fn execute_statements_in_transaction_on_pool(
     state: &AppState,
     pool_key: &str,
@@ -2480,6 +2634,36 @@ pub async fn execute_statements_in_transaction_on_pool(
     statements: &[String],
     schema: Option<&str>,
     catalog: Option<&str>,
+) -> Result<db::QueryResult, String> {
+    let mut details = Vec::new();
+    execute_statements_in_transaction_on_pool_with_details(
+        state,
+        pool_key,
+        connection_id,
+        database,
+        statements,
+        schema,
+        catalog,
+        &mut details,
+    )
+    .await
+}
+
+/// Execute multiple SQL statements transactionally on an already-resolved pool
+/// and record per-statement execution details.
+///
+/// `details` is populated for every statement that was attempted or skipped.
+/// On failure, the entries reflect the state at the point of failure (e.g.
+/// statements executed before a rollback are marked accordingly).
+async fn execute_statements_in_transaction_on_pool_with_details(
+    state: &AppState,
+    pool_key: &str,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+    catalog: Option<&str>,
+    details: &mut Vec<StatementExecutionDetail>,
 ) -> Result<db::QueryResult, String> {
     // Read-only check: intercept all transaction paths before dispatching
     check_read_only_for_connection_multi(state, pool_key, statements).await?;
@@ -2516,7 +2700,7 @@ pub async fn execute_statements_in_transaction_on_pool(
     let result = match path {
         Some(TxPath::Pg(pool)) => {
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
-            exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
+            exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context, details).await
         }
         Some(TxPath::Mysql(pool, _bare)) => {
             exec_tx_mysql_inner(
@@ -2529,26 +2713,53 @@ pub async fn execute_statements_in_transaction_on_pool(
                 mysql_catalog_dialect,
                 catalog,
                 database,
+                details,
             )
             .await
         }
-        Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
+        Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start, details).await,
         Some(TxPath::CloudflareD1(client)) => {
             let sql = statements.join(";\n");
-            wait_for_query_opt(
+            let stmt_start = std::time::Instant::now();
+            let result = wait_for_query_opt(
                 None,
                 operation_budget.query_timeout,
                 db::cloudflare_d1_driver::execute_query_with_max_rows(&client, &sql, None),
             )
-            .await
+            .await;
+            match result {
+                Ok(query_result) => {
+                    details.push(StatementExecutionDetail {
+                        index: 0,
+                        statement: Some(sql.clone()),
+                        status: StatementExecutionStatus::Success,
+                        error: None,
+                        affected_rows: query_result.affected_rows,
+                        execution_time_ms: stmt_start.elapsed().as_millis(),
+                    });
+                    Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..query_result })
+                }
+                Err(e) => {
+                    details.push(StatementExecutionDetail {
+                        index: 0,
+                        statement: Some(sql.clone()),
+                        status: StatementExecutionStatus::Failed,
+                        error: Some(e.clone()),
+                        affected_rows: 0,
+                        execution_time_ms: stmt_start.elapsed().as_millis(),
+                    });
+                    Err(e)
+                }
+            }
         }
         Some(TxPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start, details)
+                .await
         }
         Some(TxPath::None) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_none_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_none_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start, details).await
         }
         None => Err("Connection not found for transaction".to_string()),
     };
@@ -2582,6 +2793,7 @@ async fn exec_tx_pg_inner(
     start: std::time::Instant,
     budget: DbOperationBudget,
     cancel_context: Option<db::postgres::PostgresCancelContext>,
+    details: &mut Vec<StatementExecutionDetail>,
 ) -> Result<db::QueryResult, String> {
     let mut client = db::postgres::checkout_postgres_client(&pool, None, budget.checkout_timeout)
         .await
@@ -2597,7 +2809,7 @@ async fn exec_tx_pg_inner(
         .await
         .map_err(|e| format!("SET search_path failed: {}", e))?;
     }
-    let tx_result = exec_tx_pg_statements(&mut client, statements, &budget, cancel_context).await;
+    let tx_result = exec_tx_pg_statements(&mut client, statements, &budget, cancel_context, details).await;
 
     // Always reset search_path so the connection is clean when returned to the pool
     let reset_result = if had_schema {
@@ -2637,6 +2849,7 @@ async fn exec_tx_pg_statements(
     statements: &[String],
     budget: &DbOperationBudget,
     cancel_context: Option<db::postgres::PostgresCancelContext>,
+    details: &mut Vec<StatementExecutionDetail>,
 ) -> Result<u64, String> {
     let tx = tokio::time::timeout(budget.recycle_timeout, client.transaction())
         .await
@@ -2646,17 +2859,37 @@ async fn exec_tx_pg_statements(
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
+        let stmt_start = std::time::Instant::now();
         let pg_cancel_token = tx.client().cancel_token();
         let affected = db::postgres::wait_postgres_operation(
             pg_cancel_token,
             cancel_context.clone(),
             budget.query_timeout,
             budget.cancel_timeout,
-            async { tx.execute(sql, &[]).await.map_err(|e| e.to_string()) },
+            async { tx.execute(sql, &[]).await.map_err(db::postgres::pg_error_to_string) },
         )
         .await
-        .map_err(|e| query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql))?;
+        .map_err(|e| {
+            let error_msg = query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql);
+            details.push(StatementExecutionDetail {
+                index: i,
+                statement: Some(sql.to_string()),
+                status: StatementExecutionStatus::Failed,
+                error: Some(error_msg.clone()),
+                affected_rows: 0,
+                execution_time_ms: stmt_start.elapsed().as_millis(),
+            });
+            error_msg
+        })?;
         total_affected += affected;
+        details.push(StatementExecutionDetail {
+            index: i,
+            statement: Some(sql.to_string()),
+            status: StatementExecutionStatus::Success,
+            error: None,
+            affected_rows: affected,
+            execution_time_ms: stmt_start.elapsed().as_millis(),
+        });
     }
     tokio::time::timeout(budget.cleanup_timeout, tx.commit())
         .await
@@ -2675,6 +2908,7 @@ async fn exec_tx_mysql_inner(
     catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
     catalog: Option<&str>,
     database: &str,
+    details: &mut Vec<StatementExecutionDetail>,
 ) -> Result<db::QueryResult, String> {
     let mut conn = db::mysql::get_conn_with_health_check_with_timeout(&pool, budget.checkout_timeout).await?;
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, None).await?;
@@ -2688,12 +2922,33 @@ async fn exec_tx_mysql_inner(
     .await?;
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
+        let stmt_start = std::time::Instant::now();
         match mysql_query_iter_with_timeout(&mut conn, sql, budget.query_timeout).await {
-            Ok(affected) => total_affected += affected,
+            Ok(affected) => {
+                total_affected += affected;
+                details.push(StatementExecutionDetail {
+                    index: i,
+                    statement: Some(sql.to_string()),
+                    status: StatementExecutionStatus::Success,
+                    error: None,
+                    affected_rows: affected,
+                    execution_time_ms: stmt_start.elapsed().as_millis(),
+                });
+            }
             Err(e) => {
+                let error_msg =
+                    query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql);
                 let _ = mysql_query_drop_with_timeout(&mut conn, "ROLLBACK", budget.cleanup_timeout, "ROLLBACK failed")
                     .await;
-                return Err(query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql));
+                details.push(StatementExecutionDetail {
+                    index: i,
+                    statement: Some(sql.to_string()),
+                    status: StatementExecutionStatus::Failed,
+                    error: Some(error_msg.clone()),
+                    affected_rows: 0,
+                    execution_time_ms: stmt_start.elapsed().as_millis(),
+                });
+                return Err(error_msg);
             }
         }
     }
@@ -2743,21 +2998,43 @@ async fn exec_tx_sqlite_inner(
     pool: db::sqlite::SqliteHandle,
     statements: &[String],
     start: std::time::Instant,
+    details: &mut Vec<StatementExecutionDetail>,
 ) -> Result<db::QueryResult, String> {
     let statements = statements.to_vec();
-    tokio::task::spawn_blocking(move || {
+    let details_arc = std::sync::Arc::new(std::sync::Mutex::new(Vec::<StatementExecutionDetail>::new()));
+    let details_clone = details_arc.clone();
+    let result = tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
             conn.execute_batch("BEGIN").map_err(|e| format!("Failed to begin transaction: {}", e))?;
             let mut total_affected: u64 = 0;
             for (i, sql) in statements.iter().enumerate() {
+                let stmt_start = std::time::Instant::now();
                 match conn.execute_batch(sql) {
-                    Ok(_) => total_affected += conn.changes(),
+                    Ok(_) => {
+                        let affected = conn.changes();
+                        total_affected += affected;
+                        details_clone.lock().unwrap().push(StatementExecutionDetail {
+                            index: i,
+                            statement: Some(sql.to_string()),
+                            status: StatementExecutionStatus::Success,
+                            error: None,
+                            affected_rows: affected,
+                            execution_time_ms: stmt_start.elapsed().as_millis(),
+                        });
+                    }
                     Err(e) => {
                         let _ = conn.execute_batch("ROLLBACK");
-                        return Err(query_error_with_omitted_sql_context(
-                            &format!("Statement {} failed: {}", i + 1, e),
-                            sql,
-                        ));
+                        let error_msg =
+                            query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql);
+                        details_clone.lock().unwrap().push(StatementExecutionDetail {
+                            index: i,
+                            statement: Some(sql.to_string()),
+                            status: StatementExecutionStatus::Failed,
+                            error: Some(error_msg.clone()),
+                            affected_rows: 0,
+                            execution_time_ms: stmt_start.elapsed().as_millis(),
+                        });
+                        return Err(error_msg);
                     }
                 }
             }
@@ -2777,7 +3054,9 @@ async fn exec_tx_sqlite_inner(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    details.extend(details_arc.lock().unwrap().drain(..));
+    result
 }
 
 async fn exec_tx_explicit_inner(
@@ -2788,6 +3067,7 @@ async fn exec_tx_explicit_inner(
     statements: &[String],
     schema: Option<&str>,
     start: std::time::Instant,
+    details: &mut Vec<StatementExecutionDetail>,
 ) -> Result<db::QueryResult, String> {
     let conns = state.connections.read().await;
     if let Some(crate::connection::PoolKind::Agent(client)) = conns.get(pool_key) {
@@ -2803,6 +3083,17 @@ async fn exec_tx_explicit_inner(
         };
         let mut client = client.lock().await;
         let result: db::QueryResult = client.execute_transaction(database, statements, execution_schema).await?;
+        let stmt_count = statements.len().max(1);
+        for i in 0..stmt_count {
+            details.push(StatementExecutionDetail {
+                index: i,
+                statement: statements.get(i).map(|s| s.to_string()),
+                status: StatementExecutionStatus::Success,
+                error: None,
+                affected_rows: result.affected_rows / stmt_count as u64,
+                execution_time_ms: result.execution_time_ms / stmt_count as u128,
+            });
+        }
         return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result });
     }
     drop(conns);
@@ -2822,11 +3113,20 @@ async fn exec_tx_explicit_inner(
 
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
+        let stmt_start = std::time::Instant::now();
         match do_execute(state, pool_key, mysql_dialect, database, sql, schema, None, QueryExecutionOptions::default())
             .await
         {
             Ok(result) => {
                 total_affected += result.affected_rows;
+                details.push(StatementExecutionDetail {
+                    index: i,
+                    statement: Some(sql.to_string()),
+                    status: StatementExecutionStatus::Success,
+                    error: None,
+                    affected_rows: result.affected_rows,
+                    execution_time_ms: stmt_start.elapsed().as_millis(),
+                });
             }
             Err(e) => {
                 if let Err(rb_err) = do_execute(
@@ -2843,7 +3143,17 @@ async fn exec_tx_explicit_inner(
                 {
                     log::error!("ROLLBACK failed after statement {} error: {}", i + 1, rb_err);
                 }
-                return Err(query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql));
+                let error_msg =
+                    query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql);
+                details.push(StatementExecutionDetail {
+                    index: i,
+                    statement: Some(sql.to_string()),
+                    status: StatementExecutionStatus::Failed,
+                    error: Some(error_msg.clone()),
+                    affected_rows: 0,
+                    execution_time_ms: stmt_start.elapsed().as_millis(),
+                });
+                return Err(error_msg);
             }
         }
     }
@@ -2874,9 +3184,11 @@ async fn exec_tx_none_inner(
     statements: &[String],
     schema: Option<&str>,
     start: std::time::Instant,
+    details: &mut Vec<StatementExecutionDetail>,
 ) -> Result<db::QueryResult, String> {
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
+        let stmt_start = std::time::Instant::now();
         log::info!("[query][tx-none:statement:start] index={}", i + 1);
         match do_execute(state, pool_key, mysql_dialect, database, sql, schema, None, QueryExecutionOptions::default())
             .await
@@ -2884,13 +3196,30 @@ async fn exec_tx_none_inner(
             Ok(result) => {
                 total_affected += result.affected_rows;
                 log::info!("[query][tx-none:statement:done] index={} affected_rows={}", i + 1, result.affected_rows);
+                details.push(StatementExecutionDetail {
+                    index: i,
+                    statement: Some(sql.to_string()),
+                    status: StatementExecutionStatus::Success,
+                    error: None,
+                    affected_rows: result.affected_rows,
+                    execution_time_ms: stmt_start.elapsed().as_millis(),
+                });
             }
             Err(e) => {
                 log::warn!("Statement {} failed (no transaction support): {}", i + 1, e);
-                return Err(query_error_with_omitted_sql_context(
+                let error_msg = query_error_with_omitted_sql_context(
                     &format!("Statement {} failed: {}. No transaction support for this database type.", i + 1, e),
                     sql,
-                ));
+                );
+                details.push(StatementExecutionDetail {
+                    index: i,
+                    statement: Some(sql.to_string()),
+                    status: StatementExecutionStatus::Failed,
+                    error: Some(error_msg.clone()),
+                    affected_rows: 0,
+                    execution_time_ms: stmt_start.elapsed().as_millis(),
+                });
+                return Err(error_msg);
             }
         }
     }

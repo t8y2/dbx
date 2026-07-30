@@ -17,6 +17,9 @@ use crate::types::{
     ColumnInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, OwnerInfo, RuleInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
+mod deploy_order;
+include!("schema_diff_deploy_sql_helpers.rs");
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnDiff {
@@ -127,6 +130,28 @@ pub struct OwnerDiff {
     pub target: Option<OwnerInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<String>,
+}
+
+/// Kind of object participating in the deploy dependency graph.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum DeployObjectKind {
+    Table,
+    View,
+    Function,
+    Sequence,
+    Rule,
+    Owner,
+}
+
+/// Reference to a deployable object used for dependency ordering.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployObjectRef {
+    pub kind: DeployObjectKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -386,6 +411,10 @@ pub struct SchemaDiffPreparation {
     pub permission_sync_sql: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_graph: Option<DependencyGraph>,
+    /// Topologically sorted order of objects for the forward deploy SQL.
+    /// Forward (create/alter/owner) objects precede reverse (drop) objects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deploy_order: Vec<DeployObjectRef>,
 }
 
 fn default_rollback_complete() -> RollbackCompleteness {
@@ -1302,7 +1331,19 @@ pub fn generate_rollback_sync_sql_with_missing(
     cascade_delete: bool,
 ) -> (String, Vec<MissingRollbackObject>) {
     let rollback_diffs: Vec<TableDiff> = rollback_graph.rollback_nodes.iter().map(|n| n.table_diff.clone()).collect();
-    generate_schema_sync_sql_inner(&rollback_diffs, &[], &[], &[], &[], db_type, schema, cascade_delete, None, &[])
+    generate_schema_sync_sql_inner(
+        &rollback_diffs,
+        &[],
+        &[],
+        &[],
+        &[],
+        db_type,
+        schema,
+        cascade_delete,
+        None,
+        &[],
+        None,
+    )
 }
 
 // ============================================================================
@@ -1813,6 +1854,38 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
     let rule_diffs = diff_rules(&options.source_rules, &options.target_rules);
     let owner_diffs = diff_owners(&options.source_owners, &options.target_owners);
 
+    let forward_diffs: Vec<TableDiff> = diffs.iter().filter(|d| d.diff_type != "removed").cloned().collect();
+    let reverse_diffs: Vec<TableDiff> = diffs.iter().filter(|d| d.diff_type == "removed").cloned().collect();
+    let forward_functions: Vec<FunctionDiff> =
+        function_diffs.iter().filter(|d| d.diff_type != "removed").cloned().collect();
+    let reverse_functions: Vec<FunctionDiff> =
+        function_diffs.iter().filter(|d| d.diff_type == "removed").cloned().collect();
+    let forward_sequences: Vec<SequenceDiff> =
+        sequence_diffs.iter().filter(|d| d.diff_type != "removed").cloned().collect();
+    let reverse_sequences: Vec<SequenceDiff> =
+        sequence_diffs.iter().filter(|d| d.diff_type == "removed").cloned().collect();
+    let forward_rules: Vec<RuleDiff> = rule_diffs.iter().filter(|d| d.diff_type != "removed").cloned().collect();
+    let reverse_rules: Vec<RuleDiff> = rule_diffs.iter().filter(|d| d.diff_type == "removed").cloned().collect();
+
+    let forward_graph = deploy_order::build_deploy_graph(
+        &forward_diffs,
+        &forward_functions,
+        &forward_sequences,
+        &forward_rules,
+        &owner_diffs,
+        &options.source_details,
+    );
+    let reverse_graph = deploy_order::build_deploy_graph(
+        &reverse_diffs,
+        &reverse_functions,
+        &reverse_sequences,
+        &reverse_rules,
+        &[],
+        &options.target_details,
+    );
+    let mut deploy_order = forward_graph.topological_order();
+    deploy_order.extend(reverse_graph.reverse_order());
+
     for diff in &mut diffs {
         let (sync_sql, _) = generate_schema_sync_sql_inner(
             std::slice::from_ref(diff),
@@ -1825,6 +1898,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
             options.cascade_delete,
             options.source_dialect,
             &options.field_mappings,
+            None,
         );
         if !sync_sql.is_empty() {
             diff.sync_sql = Some(sync_sql);
@@ -1842,6 +1916,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         options.cascade_delete,
         options.source_dialect,
         &options.field_mappings,
+        Some(&deploy_order),
     );
 
     let (rollback_sync_sql, missing_rollback_objects) = match &rollback_graph {
@@ -1890,6 +1965,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         permission_diffs,
         permission_sync_sql,
         dependency_graph: Some(dep_graph),
+        deploy_order,
     }
 }
 
@@ -3272,10 +3348,12 @@ pub fn generate_schema_sync_sql(
         cascade_delete,
         source_dialect,
         field_mappings,
+        None,
     )
     .0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_schema_sync_sql_inner(
     diffs: &[TableDiff],
     function_diffs: &[FunctionDiff],
@@ -3287,6 +3365,7 @@ fn generate_schema_sync_sql_inner(
     cascade_delete: bool,
     source_dialect: Option<DialectKind>,
     field_mappings: &[FieldMapping],
+    deploy_order: Option<&[DeployObjectRef]>,
 ) -> (String, Vec<MissingRollbackObject>) {
     let mut lines = Vec::new();
     let mut missing_objects: Vec<MissingRollbackObject> = Vec::new();
@@ -3300,6 +3379,42 @@ fn generate_schema_sync_sql_inner(
         }
         rewrite_column_type(source_type, db_type, source_dialect)
     };
+
+    if let Some(order) = deploy_order {
+        for node in order {
+            match node.kind {
+                DeployObjectKind::Table | DeployObjectKind::View => {
+                    if let Some(diff) = diffs.iter().find(|d| d.name == node.name) {
+                        let (mut l, mut m) =
+                            emit_table_diff_lines(diff, db_type, schema, cascade, source_dialect, field_mappings);
+                        lines.append(&mut l);
+                        missing_objects.append(&mut m);
+                    }
+                }
+                DeployObjectKind::Function => {
+                    if let Some(diff) = function_diffs.iter().find(|d| deploy_order::function_diff_ref(d) == *node) {
+                        lines.extend(emit_function_diff_lines(diff, db_type, schema, cascade));
+                    }
+                }
+                DeployObjectKind::Sequence => {
+                    if let Some(diff) = sequence_diffs.iter().find(|d| deploy_order::sequence_diff_ref(d) == *node) {
+                        lines.extend(emit_sequence_diff_lines(diff, db_type, schema, cascade));
+                    }
+                }
+                DeployObjectKind::Rule => {
+                    if let Some(diff) = rule_diffs.iter().find(|d| deploy_order::rule_diff_ref(d) == *node) {
+                        lines.extend(emit_rule_diff_lines(diff, db_type, schema, cascade));
+                    }
+                }
+                DeployObjectKind::Owner => {
+                    if let Some(diff) = owner_diffs.iter().find(|d| deploy_order::owner_diff_ref(d) == *node) {
+                        lines.extend(emit_owner_diff_lines(diff, db_type, schema));
+                    }
+                }
+            }
+        }
+        return (lines.join("\n").trim().to_string(), missing_objects);
+    }
 
     for diff in diffs {
         let table = qualified_name(&diff.name, db_type, schema);

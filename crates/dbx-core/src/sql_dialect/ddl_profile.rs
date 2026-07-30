@@ -193,6 +193,7 @@ const SEQ_CREATE: &str =
 const SEQ_ALTER: &str =
     "ALTER SEQUENCE {name} AS {data_type} START WITH {start_value} INCREMENT BY {increment} MINVALUE {min_value} MAXVALUE {max_value} {cycle};";
 const SEQ_DROP: &str = "DROP SEQUENCE {name}{cascade};";
+const SEQ_DROP_IF_EXISTS: &str = "DROP SEQUENCE IF EXISTS {name}{cascade};";
 const RULE_DROP: &str = "DROP RULE IF EXISTS {rule_name} ON {table_name}{cascade};";
 const OWNER_ALTER: &str = "ALTER {object_type} {name} OWNER TO {owner};";
 
@@ -364,7 +365,7 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         function_drop_template: Some(FN_DROP),
         sequence_create_template: Some(SEQ_CREATE),
         sequence_alter_template: Some(SEQ_ALTER),
-        sequence_drop_template: Some(SEQ_DROP),
+        sequence_drop_template: Some(SEQ_DROP_IF_EXISTS),
         rule_drop_template: Some(RULE_DROP),
         owner_alter_template: Some(OWNER_ALTER),
         lock_timeout_sql: Some("SET lock_timeout = '3s';"),

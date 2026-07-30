@@ -488,7 +488,6 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
     reuseDataTab: editReuseDataTab.value,
     prefillNewQueryWithSelect: editPrefillNewQueryWithSelect.value,
-    clickTableNavigationTarget: editClickTableNavigationTarget.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,

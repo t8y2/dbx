@@ -859,8 +859,6 @@ export default withEnglishFallback({
       confirm: "確定",
       selectFirst: "請選擇清單文字",
     },
-    selectCatalog: "選擇 Catalog",
-    searchCatalog: "搜尋 Catalog...",
   },
   tabs: {
     sql: "SQL",

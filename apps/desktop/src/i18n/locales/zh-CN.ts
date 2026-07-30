@@ -739,8 +739,6 @@ export default withEnglishFallback({
     searchDatabase: "搜索数据库...",
     selectSchema: "选择模式",
     searchSchema: "搜索模式...",
-    selectCatalog: "选择 Catalog",
-    searchCatalog: "搜索 Catalog...",
     setDefaultDatabase: "设为默认",
     defaultDatabase: "默认库",
     clearDatabase: "清除数据库选择",

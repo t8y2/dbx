@@ -859,8 +859,6 @@ export default withEnglishFallback({
       confirm: "確定",
       selectFirst: "リストテキストを選択してください",
     },
-    selectCatalog: "Catalogを選択",
-    searchCatalog: "Catalogを検索...",
   },
   tabs: {
     sql: "SQL",

@@ -859,8 +859,6 @@ export default withEnglishFallback({
       confirm: "Conferma",
       selectFirst: "Seleziona il testo della lista",
     },
-    selectCatalog: "Seleziona Catalogo",
-    searchCatalog: "Cerca Catalogo...",
   },
   tabs: {
     sql: "SQL",

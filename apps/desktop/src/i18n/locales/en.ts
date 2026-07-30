@@ -738,8 +738,6 @@ export default {
     searchDatabase: "Search databases...",
     selectSchema: "Select schema",
     searchSchema: "Search schemas...",
-    selectCatalog: "Select catalog",
-    searchCatalog: "Search catalogs...",
     setDefaultDatabase: "Set Default",
     defaultDatabase: "Default",
     clearDatabase: "Clear database",

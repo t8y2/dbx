@@ -125,12 +125,12 @@ final class ZooKeeperAgentTest {
     }
 
     @Test
-    void saslRequiresUsernameAndPasswordBeforeNetworkProbe() {
+    void saslDigestRequiresUsernameAndPasswordBeforeNetworkProbe() {
         JsonObject missingUsername = JsonParser.parseString(
-            "{\"auth_scheme\":\"sasl\",\"password\":\"secret\",\"connect_string\":\"127.0.0.1:1\"}"
+            "{\"auth_scheme\":\"sasl_digest\",\"password\":\"secret\",\"connect_string\":\"127.0.0.1:1\"}"
         ).getAsJsonObject();
         JsonObject missingPassword = JsonParser.parseString(
-            "{\"auth_scheme\":\"sasl\",\"username\":\"dbx\",\"connect_string\":\"127.0.0.1:1\"}"
+            "{\"auth_scheme\":\"sasl_digest\",\"username\":\"dbx\",\"connect_string\":\"127.0.0.1:1\"}"
         ).getAsJsonObject();
 
         IllegalArgumentException usernameError = Assertions.assertThrows(
@@ -144,6 +144,21 @@ final class ZooKeeperAgentTest {
 
         Assertions.assertTrue(usernameError.getMessage().contains("username"), usernameError.getMessage());
         Assertions.assertTrue(passwordError.getMessage().contains("password"), passwordError.getMessage());
+    }
+
+    @Test
+    void rejectsGenericSaslSchemeBeforeNetworkProbe() {
+        JsonObject connection = JsonParser.parseString(
+            "{\"auth_scheme\":\"sasl\",\"username\":\"dbx\",\"password\":\"secret\",\"connect_string\":\"127.0.0.1:1\"}"
+        ).getAsJsonObject();
+
+        IllegalArgumentException error = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> ZooKeeperAgent.buildClient(connection)
+        );
+
+        Assertions.assertTrue(error.getMessage().contains("sasl_digest"), error.getMessage());
+        Assertions.assertFalse(error.getMessage().contains("No reachable"), error.getMessage());
     }
 
     @Test
@@ -179,7 +194,7 @@ final class ZooKeeperAgentTest {
                 Map.of("authProvider.1", "org.apache.zookeeper.server.auth.SASLAuthenticationProvider")
             );
             try (TestingServer server = new TestingServer(spec, true)) {
-                String connection = "{\"connection\":{\"url_params\":\"auth_scheme=sasl\","
+                String connection = "{\"connection\":{\"url_params\":\"auth_scheme=sasl_digest\","
                     + "\"username\":\"dbx\",\"password\":\"secret\","
                     + "\"connect_string\":\"" + server.getConnectString() + "\"}}";
 
@@ -197,7 +212,7 @@ final class ZooKeeperAgentTest {
                 JsonObject disconnect = result(request(4, "disconnect", "{}"));
                 Assertions.assertTrue(disconnect.get("ok").getAsBoolean());
 
-                String wrongConnection = "{\"connection\":{\"url_params\":\"auth_scheme=sasl\","
+                String wrongConnection = "{\"connection\":{\"url_params\":\"auth_scheme=sasl_digest\","
                     + "\"username\":\"dbx\",\"password\":\"wrong\","
                     + "\"connect_string\":\"" + server.getConnectString() + "\"}}";
                 JsonObject authError = error(request(5, "test_connection", wrongConnection));

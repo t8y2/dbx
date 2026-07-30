@@ -47,7 +47,7 @@ public final class ZooKeeperAgent {
     private static final int MIN_STAT_LOOKUP_CONCURRENCY = 1;
     private static final int MAX_STAT_LOOKUP_CONCURRENCY = 64;
     private static final String DEFAULT_AUTH_SCHEME = "digest";
-    private static final String SASL_AUTH_SCHEME = "sasl";
+    private static final String SASL_DIGEST_AUTH_SCHEME = "sasl_digest";
     private static final String SASL_LOGIN_CONTEXT_PREFIX = "DbxZooKeeperClient";
     private static final Object JAAS_LOCK = new Object();
     private static final AtomicInteger SASL_CONTEXT_SEQUENCE = new AtomicInteger(1);
@@ -74,7 +74,7 @@ public final class ZooKeeperAgent {
 
     private static Object connect(JsonObject params) throws Exception {
         JsonObject connection = connectionObject(params);
-        SaslLease nextLease = SASL_AUTH_SCHEME.equals(authScheme(connection)) ? acquireSaslLease(connection) : null;
+        SaslLease nextLease = SASL_DIGEST_AUTH_SCHEME.equals(authScheme(connection)) ? acquireSaslLease(connection) : null;
         CuratorFramework nextClient = null;
         try {
             nextClient = buildClient(connection, nextLease == null ? null : nextLease.contextName);
@@ -98,7 +98,7 @@ public final class ZooKeeperAgent {
 
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject connection = connectionObject(params);
-        SaslLease probeLease = SASL_AUTH_SCHEME.equals(authScheme(connection)) ? acquireSaslLease(connection) : null;
+        SaslLease probeLease = SASL_DIGEST_AUTH_SCHEME.equals(authScheme(connection)) ? acquireSaslLease(connection) : null;
         CuratorFramework probe = null;
         try {
             probe = buildClient(connection, probeLease == null ? null : probeLease.contextName);
@@ -127,12 +127,12 @@ public final class ZooKeeperAgent {
         }
 
         String scheme = authScheme(connection);
-        if (!DEFAULT_AUTH_SCHEME.equals(scheme) && !SASL_AUTH_SCHEME.equals(scheme)) {
+        if (!DEFAULT_AUTH_SCHEME.equals(scheme) && !SASL_DIGEST_AUTH_SCHEME.equals(scheme)) {
             throw new IllegalArgumentException(
-                "Unsupported auth_scheme \"" + scheme + "\"; expected \"digest\" or \"sasl\""
+                "Unsupported auth_scheme \"" + scheme + "\"; expected \"digest\" or \"sasl_digest\""
             );
         }
-        if (SASL_AUTH_SCHEME.equals(scheme)) {
+        if (SASL_DIGEST_AUTH_SCHEME.equals(scheme)) {
             saslCredentials(connection);
         }
 
@@ -149,17 +149,13 @@ public final class ZooKeeperAgent {
             .connectionTimeoutMs(connectionTimeoutMs)
             .retryPolicy(new ExponentialBackoffRetry(baseSleepTimeMs, maxRetries));
 
-        if (SASL_AUTH_SCHEME.equals(scheme)) {
+        if (SASL_DIGEST_AUTH_SCHEME.equals(scheme)) {
             if (saslContextName == null) {
                 throw new IllegalStateException("SASL JAAS context was not initialized");
             }
             ZKClientConfig clientConfig = new ZKClientConfig();
             clientConfig.setProperty(ZKClientConfig.ENABLE_CLIENT_SASL_KEY, "true");
             clientConfig.setProperty(ZKClientConfig.LOGIN_CONTEXT_NAME_KEY, saslContextName);
-            String serviceName = connectionOption(connection, "sasl_service_name");
-            if (serviceName != null) {
-                clientConfig.setProperty(ZKClientConfig.ZK_SASL_CLIENT_USERNAME, serviceName);
-            }
             builder.zkClientConfig(clientConfig);
         }
 
@@ -748,10 +744,10 @@ public final class ZooKeeperAgent {
         String username = stringOrEmpty(connection, "username").trim();
         String password = stringOrEmpty(connection, "password");
         if (username.isEmpty()) {
-            throw new IllegalArgumentException("username is required when auth_scheme = \"sasl\"");
+            throw new IllegalArgumentException("username is required when auth_scheme = \"sasl_digest\"");
         }
         if (password.isEmpty()) {
-            throw new IllegalArgumentException("password is required when auth_scheme = \"sasl\"");
+            throw new IllegalArgumentException("password is required when auth_scheme = \"sasl_digest\"");
         }
         return new SaslCredentials(username, password);
     }

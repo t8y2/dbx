@@ -198,7 +198,7 @@ fn ensure_startup_probe_parent_dir(path: &std::path::Path) -> bool {
     let Some(dir) = path.parent() else {
         return false;
     };
-    if std::fs::create_dir_all(&dir).is_err() {
+    if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
     true

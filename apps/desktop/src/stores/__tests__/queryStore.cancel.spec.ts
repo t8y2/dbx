@@ -58,6 +58,19 @@ describe("queryStore cancel timeout recovery", () => {
     const store = useQueryStore();
     const tabId = store.createTab("duckdb-1", "main", "query_1");
     store.setExecutingWithId(tabId, "exec-1");
+    store.tabs[0]!.batchSqlExecution = {
+      executionId: "exec-1",
+      submittedSql: "SELECT 1; SELECT 2",
+      editorFingerprint: "fingerprint",
+      sourceOffset: 0,
+      completed: 0,
+      total: 2,
+      startedAt: Date.now(),
+      items: [
+        { statementIndex: 0, sql: "SELECT 1", from: 0, to: 8, status: "running" },
+        { statementIndex: 1, sql: "SELECT 2", from: 10, to: 18, status: "pending" },
+      ],
+    };
 
     const cancel = store.cancelTabExecution(tabId);
     await vi.advanceTimersByTimeAsync(1);
@@ -71,6 +84,10 @@ describe("queryStore cancel timeout recovery", () => {
       isExecuting: false,
       isCancelling: false,
       executionId: undefined,
+      batchSqlExecution: {
+        finishedAt: expect.any(Number),
+        items: [{ status: "cancelled" }, { status: "skipped" }],
+      },
     });
     expect(store.tabs[0]?.result?.rows[0]?.[0]).toContain("Query canceled");
   }, 15_000);

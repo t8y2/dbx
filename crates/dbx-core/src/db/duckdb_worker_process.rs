@@ -1,7 +1,8 @@
-#![cfg(feature = "duckdb-bundled")]
+#![cfg(feature = "duckdb-sidecar")]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -14,20 +15,21 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db;
 use crate::db::duckdb_worker_protocol::{
-    DuckDbWorkerConnectParams, DuckDbWorkerError, DuckDbWorkerExecuteParams, DuckDbWorkerMethod,
-    DuckDbWorkerObjectSourceParams, DuckDbWorkerRequest, DuckDbWorkerResponse,
+    DuckDbWorkerColumnParams, DuckDbWorkerConnectParams, DuckDbWorkerError, DuckDbWorkerExecuteParams,
+    DuckDbWorkerMethod, DuckDbWorkerObjectSourceParams, DuckDbWorkerRequest, DuckDbWorkerResponse,
 };
 use crate::models::connection::AttachedDatabaseConfig;
 use crate::storage::{normalize_duckdb_worker_max_processes, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
 
 /// Error code the worker reports when a query error left the DuckDB connection poisoned
 /// (see the duckdb-rs Parser Error bug). The client kills the worker on this code so the
-/// next request starts a fresh one. Must match the code emitted in `duckdb_worker_runtime`.
+/// next request starts a fresh one. Must match the code emitted by the standalone driver runtime.
 const DUCKDB_WORKER_POISONED_CODE: &str = "duckdb_worker_poisoned";
 const DUCKDB_WORKER_REQUEST_TIMEOUT_CODE: &str = "duckdb_worker_request_timeout";
 const DEFAULT_WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_WORKER_KILL_WAIT: Duration = Duration::from_secs(3);
 const DEFAULT_WORKER_START_WAIT: Duration = Duration::from_secs(5);
+pub const DUCKDB_DRIVER_PATH_ENV: &str = "DBX_DUCKDB_DRIVER_PATH";
 type PendingRequests = Arc<Mutex<HashMap<String, PendingRequest>>>;
 
 struct PendingRequest {
@@ -48,6 +50,7 @@ struct DuckDbWorkerClientInner {
     process_limiter: Arc<Semaphore>,
     process_limit: usize,
     executable: PathBuf,
+    executable_args: Vec<OsString>,
     connect_params: DuckDbWorkerConnectParams,
     request_timeout: Duration,
     worker_start_timeout: Duration,
@@ -68,8 +71,16 @@ impl DuckDbWorkerClient {
         attached_databases: Vec<AttachedDatabaseConfig>,
         init_script: Option<String>,
     ) -> Result<Self, String> {
-        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        Self::open_with_executable(executable, path, attached_databases, init_script).await
+        let (executable, executable_args) = resolve_duckdb_driver_command()?;
+        Self::open_with_command_and_process_limit(
+            executable,
+            executable_args,
+            path,
+            attached_databases,
+            init_script,
+            DUCKDB_WORKER_MAX_PROCESSES_DEFAULT,
+        )
+        .await
     }
 
     pub async fn open_with_process_limit(
@@ -78,9 +89,16 @@ impl DuckDbWorkerClient {
         init_script: Option<String>,
         process_limit: usize,
     ) -> Result<Self, String> {
-        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        Self::open_with_executable_and_process_limit(executable, path, attached_databases, init_script, process_limit)
-            .await
+        let (executable, executable_args) = resolve_duckdb_driver_command()?;
+        Self::open_with_command_and_process_limit(
+            executable,
+            executable_args,
+            path,
+            attached_databases,
+            init_script,
+            process_limit,
+        )
+        .await
     }
 
     pub async fn open_with_executable(
@@ -106,8 +124,28 @@ impl DuckDbWorkerClient {
         init_script: Option<String>,
         process_limit: usize,
     ) -> Result<Self, String> {
+        Self::open_with_command_and_process_limit(
+            executable,
+            Vec::new(),
+            path,
+            attached_databases,
+            init_script,
+            process_limit,
+        )
+        .await
+    }
+
+    async fn open_with_command_and_process_limit(
+        executable: PathBuf,
+        executable_args: Vec<OsString>,
+        path: String,
+        attached_databases: Vec<AttachedDatabaseConfig>,
+        init_script: Option<String>,
+        process_limit: usize,
+    ) -> Result<Self, String> {
         let client = Self::new_unconnected_with_timeouts(
             executable,
+            executable_args,
             path,
             attached_databases,
             init_script,
@@ -122,6 +160,7 @@ impl DuckDbWorkerClient {
     #[doc(hidden)]
     pub fn new_unconnected_with_timeouts(
         executable: PathBuf,
+        executable_args: Vec<OsString>,
         path: String,
         attached_databases: Vec<AttachedDatabaseConfig>,
         init_script: Option<String>,
@@ -139,6 +178,7 @@ impl DuckDbWorkerClient {
                 process_limiter,
                 process_limit,
                 executable,
+                executable_args,
                 connect_params: DuckDbWorkerConnectParams { path, attached_databases, init_script },
                 request_timeout,
                 worker_start_timeout,
@@ -244,6 +284,18 @@ impl DuckDbWorkerClient {
             serde_json::json!({ "database": database, "schema": schema, "table": table }),
         )
         .await
+    }
+
+    pub async fn get_table_ddl(&self, database: String, schema: String, table: String) -> Result<String, String> {
+        self.metadata_request(DuckDbWorkerMethod::GetTableDdl, DuckDbWorkerColumnParams { database, schema, table })
+            .await
+    }
+
+    pub async fn completion_assistant(
+        &self,
+        request: db::CompletionAssistantRequest,
+    ) -> Result<db::CompletionAssistantResponse, String> {
+        self.metadata_request(DuckDbWorkerMethod::CompletionAssistant, request).await
     }
 
     pub async fn get_object_source(
@@ -413,9 +465,14 @@ impl DuckDbWorkerClient {
                 .map_err(|_| duckdb_worker_process_limit_error(self.inner.process_limit))?
                 .map_err(|_| "DuckDB worker process limiter is closed".to_string())?;
 
-        log::info!("[duckdb-worker:start] executable={}", self.inner.executable.display());
-        let mut child = crate::process::new_tokio_command(&self.inner.executable)
-            .arg("--duckdb-worker")
+        log::info!(
+            "[duckdb-worker:start] executable={} args={:?}",
+            self.inner.executable.display(),
+            self.inner.executable_args
+        );
+        let mut command = crate::process::new_tokio_command(&self.inner.executable);
+        command.args(&self.inner.executable_args);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -522,6 +579,25 @@ impl DuckDbWorkerClient {
             let _ = sender.send(DuckDbWorkerResponse::err(id, DuckDbWorkerError::new(code, message)));
         }
     }
+}
+
+fn resolve_duckdb_driver_command() -> Result<(PathBuf, Vec<OsString>), String> {
+    if let Some(executable) = std::env::var_os(DUCKDB_DRIVER_PATH_ENV).filter(|value| !value.is_empty()) {
+        let executable = PathBuf::from(executable);
+        ensure_duckdb_driver_exists(&executable)?;
+        return Ok((executable, Vec::new()));
+    }
+
+    Err(format!(
+        "DuckDB driver is not installed. Please install it from the Driver Manager or set {DUCKDB_DRIVER_PATH_ENV}."
+    ))
+}
+
+fn ensure_duckdb_driver_exists(executable: &Path) -> Result<(), String> {
+    if executable.is_file() {
+        return Ok(());
+    }
+    Err(format!("DuckDB driver configured by {DUCKDB_DRIVER_PATH_ENV} was not found: {}", executable.display()))
 }
 
 struct WorkerProcessLimiterState {

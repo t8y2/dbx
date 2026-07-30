@@ -45,6 +45,12 @@ SELECT s.SCHEMA_NAME, q.SEQ_NAME
 FROM ALL_SEQUENCES q
 JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE q.IS_SYS = FALSE`
+const xuguCatalogSynonymSelectSQL = `
+SELECT s.SCHEMA_NAME, y.SYNO_NAME, t.SCHEMA_NAME AS TARGET_SCHEMA, y.TARG_NAME
+FROM ALL_SYNONYMS y
+JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+LEFT JOIN ALL_SCHEMAS t ON t.DB_ID = y.DB_ID AND t.SCHEMA_ID = y.TARG_SCHE_ID
+WHERE y.IS_PUBLIC = FALSE`
 const xuguPrimaryKeyColumnsSQL = `
 SELECT c.DEFINE
 FROM ALL_CONSTRAINTS c
@@ -429,6 +435,13 @@ type xuguSequenceMetadata struct {
 	Cache   any
 	Cycle   any
 	Comment any
+}
+
+type xuguCatalogSynonym struct {
+	Schema       string
+	Name         string
+	TargetSchema sql.NullString
+	TargetName   string
 }
 
 // xuguIndexKey preserves the catalog spelling and SQL semantics of an index
@@ -1639,6 +1652,12 @@ JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND q.IS_SYS = FALSE
 UNION ALL
+SELECT y.SYNO_NAME AS OBJECT_NAME, 'SYNONYM' AS OBJECT_TYPE, NULL AS COMMENTS, y.VALID
+FROM ALL_SYNONYMS y
+JOIN ALL_SCHEMAS s ON s.DB_ID = y.DB_ID AND s.SCHEMA_ID = y.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND y.IS_PUBLIC = FALSE
+UNION ALL
 SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID
 FROM ALL_TYPES u
 JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
@@ -1652,7 +1671,7 @@ WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID",
 		"OBJECT_NAME",
 		"OBJECT_TYPE",
-		[]any{schema, schema, schema, schema, schema, schema, schema, schema, schema},
+		[]any{schema, schema, schema, schema, schema, schema, schema, schema, schema, schema},
 		constraints,
 	)
 }
@@ -1717,7 +1736,7 @@ func normalizedXuguObjectTypes(values []string) []string {
 			normalized = "TABLE"
 		case "VIEW":
 			normalized = "VIEW"
-		case "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY":
+		case "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY":
 			// Already normalized.
 		default:
 			continue
@@ -2026,6 +2045,9 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 	if strings.EqualFold(strings.TrimSpace(objectType), "SEQUENCE") {
 		return s.getSequenceSource(schema, name)
 	}
+	if strings.EqualFold(strings.TrimSpace(objectType), "SYNONYM") {
+		return s.getSynonymSource(schema, name)
+	}
 	var err error
 	schema, err = s.normalizeSchema(schema)
 	if err != nil {
@@ -2231,6 +2253,115 @@ func renderXuguSequenceDDL(sequence xuguSequenceMetadata) string {
 	}
 	builder.WriteString(";")
 	return builder.String()
+}
+
+// getSynonymSource reconstructs private synonym DDL from ALL_SYNONYMS. Public
+// synonyms deliberately remain outside schema groups: their catalog rows have
+// no owning schema and showing them in every schema would duplicate objects.
+func (s *server) getSynonymSource(schema, name string) (map[string]any, error) {
+	synonym, err := s.resolveCatalogSynonym(schema, name)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(synonym.TargetName) == "" {
+		return nil, fmt.Errorf("synonym target is missing: %s.%s", synonym.Schema, synonym.Name)
+	}
+
+	var builder strings.Builder
+	builder.WriteString("CREATE SYNONYM ")
+	builder.WriteString(quoteIdentifier(synonym.Schema))
+	builder.WriteByte('.')
+	builder.WriteString(quoteIdentifier(synonym.Name))
+	builder.WriteString("\nFOR ")
+	if targetSchema := strings.TrimSpace(synonym.TargetSchema.String); targetSchema != "" {
+		builder.WriteString(quoteIdentifier(targetSchema))
+		builder.WriteByte('.')
+	}
+	builder.WriteString(quoteIdentifier(synonym.TargetName))
+	builder.WriteString(";")
+
+	return map[string]any{
+		"name":        synonym.Name,
+		"object_type": "SYNONYM",
+		"schema":      synonym.Schema,
+		"source":      builder.String(),
+	}, nil
+}
+
+// resolveCatalogSynonym applies exact matching before a case-insensitive
+// fallback. This preserves quoted identifiers and refuses an ambiguous lookup
+// instead of silently generating DDL for a different alias.
+func (s *server) resolveCatalogSynonym(schema, name string) (xuguCatalogSynonym, error) {
+	schema = strings.TrimSpace(schema)
+	name = strings.TrimSpace(name)
+	if schema == "" {
+		current, err := s.currentSchema()
+		if err != nil {
+			return xuguCatalogSynonym{}, err
+		}
+		schema = current
+	}
+	if name == "" {
+		return xuguCatalogSynonym{}, errors.New("synonym name is required")
+	}
+
+	candidates, err := s.catalogSynonymCandidates(xuguCatalogSynonymQuery(schema, name, false))
+	if err != nil {
+		return xuguCatalogSynonym{}, err
+	}
+	if len(candidates) == 0 {
+		candidates, err = s.catalogSynonymCandidates(xuguCatalogSynonymQuery(schema, name, true))
+		if err != nil {
+			return xuguCatalogSynonym{}, err
+		}
+	}
+	return selectXuguCatalogSynonym(schema, name, candidates)
+}
+
+func xuguCatalogSynonymQuery(schema, name string, caseInsensitive bool) string {
+	schemaExpr := quoteStringLiteral(schema)
+	nameExpr := quoteStringLiteral(name)
+	if caseInsensitive {
+		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
+		nameExpr = quoteStringLiteral(strings.ToUpper(name))
+		return xuguCatalogSynonymSelectSQL + "\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
+			"\n  AND UPPER(y.SYNO_NAME) = " + nameExpr
+	}
+	return xuguCatalogSynonymSelectSQL + "\n  AND s.SCHEMA_NAME = " + schemaExpr +
+		"\n  AND y.SYNO_NAME = " + nameExpr
+}
+
+func (s *server) catalogSynonymCandidates(query string) ([]xuguCatalogSynonym, error) {
+	rows, err := s.queryRows(strings.TrimSpace(query), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+
+	var candidates []xuguCatalogSynonym
+	for rows.Next() {
+		var candidate xuguCatalogSynonym
+		if err := rows.Scan(&candidate.Schema, &candidate.Name, &candidate.TargetSchema, &candidate.TargetName); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, rows.Err()
+}
+
+func selectXuguCatalogSynonym(schema, name string, candidates []xuguCatalogSynonym) (xuguCatalogSynonym, error) {
+	for _, candidate := range candidates {
+		if candidate.Schema == schema && candidate.Name == name {
+			return candidate, nil
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	if len(candidates) == 0 {
+		return xuguCatalogSynonym{}, fmt.Errorf("synonym not found: %s.%s", schema, name)
+	}
+	return xuguCatalogSynonym{}, fmt.Errorf("synonym name is ambiguous: %s.%s; specify the catalog's exact case", schema, name)
 }
 
 func xuguSequenceNumber(value any) string {

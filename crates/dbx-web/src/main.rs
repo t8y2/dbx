@@ -328,6 +328,7 @@ async fn main() {
         .route("/agents/runtime/restart", post(routes::agents::restart_driver_runtime))
         .route("/agents/install", post(routes::agents::install_agent))
         .route("/agents/upgrade-all", post(routes::agents::upgrade_all_agents))
+        .route("/agents/update-blockers", post(routes::agents::check_agent_update_blockers))
         .route("/agents/uninstall", post(routes::agents::uninstall_agent))
         .route("/agents/import-offline", post(routes::agents::import_agents_from_zip))
         .route("/agents/import-driver", post(routes::agents::import_agent_driver_file))
@@ -719,6 +720,10 @@ async fn main() {
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
+        .route(
+            "/app-settings/max-retries",
+            get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
+        )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync
         .route("/cloud-sync/webdav/test", post(routes::cloud_sync::webdav_sync_test))
@@ -743,8 +748,8 @@ async fn main() {
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
-    // Do not expose DuckDB-only handlers from builds that intentionally omit bundled DuckDB.
-    #[cfg(feature = "duckdb-bundled")]
+    // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.
+    #[cfg(feature = "duckdb-sidecar")]
     let api =
         api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
 
@@ -795,7 +800,7 @@ async fn main() {
         })
         .await
         .expect("Server error");
-    shutdown_state.shutdown_background_tasks(std::time::Duration::from_secs(3)).await;
+    shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
 }
 
 #[cfg(test)]

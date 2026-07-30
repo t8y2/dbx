@@ -50,6 +50,18 @@ describe("buildSnippetItems", () => {
     expect(items[0].apply).toBe("SELECT *\nFROM my_table;");
   });
 
+  it("keeps a distinct trigger available to CodeMirror filtering", () => {
+    const items = buildSnippetItemsForTest("ssf", [{ id: "custom", label: "SELECT *", prefix: "ssf", body: "SELECT * FROM" }]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        label: "SELECT *",
+        filterText: "ssf",
+        type: "snippet",
+      }),
+    ]);
+  });
+
   it("uses CodeMirror placeholders for the built-in select snippet", () => {
     const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT]);
 

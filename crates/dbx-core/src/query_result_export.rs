@@ -101,6 +101,8 @@ pub struct QueryResultExportRequest {
     pub export_column_types: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_comments: Option<Vec<Option<String>>>,
 }
 
 pub struct StagedExportTarget {
@@ -207,6 +209,7 @@ fn query_sql_worksheets(request: &QueryResultExportRequest) -> Vec<XlsxWorksheet
         sheet_name: Some("SQL".to_string()),
         columns: vec!["SQL".to_string()],
         column_types: Vec::new(),
+        column_comments: Vec::new(),
         rows: split_excel_cell_text(&request.sql).into_iter().map(|sql| vec![Value::String(sql)]).collect(),
         numeric_column_right_align: false,
     }]
@@ -219,11 +222,13 @@ fn start_query_result_xlsx_workbook<W: Write + Seek>(
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
     let trailing_sheets = query_sql_worksheets(request);
+    let column_comments: &[Option<String>] = request.column_comments.as_deref().unwrap_or(&[]);
     start_streaming_xlsx_workbook_with_options(
         writer,
         Some("Result"),
         columns,
         column_types,
+        column_comments,
         &trailing_sheets,
         request.date_time_format.as_deref(),
         request.numeric_column_right_align,
@@ -588,6 +593,7 @@ pub async fn export_query_result_core(
             &request.database,
             &session_id,
             request.client_session_id.as_deref(),
+            None,
         )
         .await;
     }
@@ -1853,6 +1859,7 @@ mod tests {
             export_table_name: None,
             export_column_types: None,
             numeric_column_right_align: false,
+            column_comments: None,
         }
     }
 

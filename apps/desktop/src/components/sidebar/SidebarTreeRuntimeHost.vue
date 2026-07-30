@@ -52,6 +52,7 @@ import {
   ListX,
   Info,
   X,
+  Settings2,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -87,6 +88,7 @@ import {
   supportsTableImport,
   supportsTableTruncate,
   supportsTableStructureEditing,
+  supportsTransfer,
   usesTreeSchemaMode,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
@@ -125,7 +127,7 @@ import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFor
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableDataCopyColumnOptions, type TableClipboardContext, type TableClipboardTableContext } from "@/lib/table/tableClipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type TableClipboardContext, type TableClipboardTableContext } from "@/lib/table/tableClipboard";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
@@ -316,6 +318,7 @@ const emit = defineEmits<{
   "open-ddl": [node: TreeNode];
   "open-object-source": [node: TreeNode, initialEditing: boolean];
   "open-procedure": [node: TreeNode];
+  "open-settings": [initialTab: string];
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
   "open-visible-schemas": [node: TreeNode];
@@ -397,6 +400,12 @@ const {
   dropMongoIndex,
   dropAllMongoIndexes,
   flushRedisDb,
+  prepareRedisDatabaseAliasDialog,
+  confirmRedisDatabaseAlias,
+  clearRedisDatabaseAlias,
+  showRedisDatabaseAliasDialog,
+  redisDatabaseAliasInput,
+  redisDatabaseAliasSaving,
   confirmFlushRedisDb,
   confirmDropMongoDatabase,
   confirmDropMongoCollection,
@@ -483,6 +492,7 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-procedures",
   "group-functions",
   "group-sequences",
+  "group-synonyms",
   "group-packages",
   "group-types",
   "group-partitions",
@@ -575,7 +585,9 @@ async function toggle() {
       }
     } else if (node.type === "redis-db" && node.connectionId && node.database) {
       await connectionStore.ensureConnected(node.connectionId);
-      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:db${node.database}`;
+      const alias = connectionStore.getRedisDatabaseAlias(node.connectionId, node.database);
+      const databaseLabel = alias ? `db${node.database} · ${alias}` : `db${node.database}`;
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:${databaseLabel}`;
       queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
     } else if (node.type === "mq-tenant" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
@@ -845,6 +857,35 @@ function canPasteTreeClipboardToCurrentNode(): boolean {
   return tableClipboardMatchesTarget(normalizedTreeClipboardTableEntries(), pasteTableTargetContext());
 }
 
+function canTransferTreeClipboardToCurrentNode(): boolean {
+  const entries = normalizedTreeClipboardTableEntries();
+  const target = pasteTableTargetContext();
+  if (!target || entries.length === 0) return false;
+  const source = tableClipboardSourceContext(entries);
+  const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
+  const targetConfig = connectionStore.getConfig(target.connectionId);
+  return !!source && !!sourceConfig && !!targetConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(targetConfig.db_type) && !targetConfig.read_only && !tableClipboardMatchesTarget(entries, target);
+}
+
+function openTransferFromTreeClipboard(): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  const entries = normalizedTreeClipboardTableEntries();
+  const target = pasteTableTargetContext();
+  if (clipboard?.kind !== "table-copy" || !target) return false;
+  const source = tableClipboardSourceContext(entries);
+  if (!source || tableClipboardMatchesTarget(entries, target)) return false;
+  connectionStore.transferSource = {
+    connectionId: source.connectionId,
+    database: source.database,
+    schema: source.schema ?? undefined,
+    tables: clipboard.tables.map((entry) => entry.tableName),
+    targetConnectionId: target.connectionId,
+    targetDatabase: target.database,
+    targetSchema: target.schema ?? undefined,
+  };
+  return true;
+}
+
 function requestPasteTreeClipboard(): boolean {
   claimTreeItemDialogOwnership();
   ensureDangerDialogRouting();
@@ -860,14 +901,16 @@ function requestPasteTreeClipboard(): boolean {
       .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
     return true;
   }
-  if (clipboard?.kind !== "table-copy" || !canPasteTreeClipboardToCurrentNode()) return false;
+  if (clipboard?.kind !== "table-copy") return false;
+  if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();
+  if (!canPasteTreeClipboardToCurrentNode()) return false;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
     targetName: `${entry.tableName}_copy`,
     connectionId: entry.connectionId,
     database: entry.database,
-    schema: entry.schema,
+    schema: normalizeTreeClipboardSchema(entry.connectionId, entry.database, entry.schema),
   }));
   showPasteDialog.value = true;
   return true;
@@ -914,6 +957,12 @@ function openRenameMongoCollectionDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   prepareRenameMongoCollectionDialog();
+}
+
+function openRedisDatabaseAliasDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareRedisDatabaseAliasDialog();
 }
 
 function requestEditSelectedConnection(): boolean {
@@ -1172,7 +1221,7 @@ async function loadTemplateContext(allowView = false) {
   let columns: ColumnInfo[] = [];
   try {
     const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
-    columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
+    columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label, node.catalog);
   } catch (e) {
     console.warn("[DBX][tableSqlTemplate:getColumns:error]", e);
   }
@@ -1181,7 +1230,7 @@ async function loadTemplateContext(allowView = false) {
   if (dbType === "tdengine") {
     try {
       const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
-      const tables = await api.listTables(node.connectionId, node.database, querySchema, node.label, 200);
+      const tables = await api.listTables(node.connectionId, node.database, querySchema, node.label, 200, undefined, undefined, node.catalog);
       const matched = tables.find((table) => table.name.toLowerCase() === node.label.toLowerCase());
       if (matched?.table_type) tableType = matched.table_type;
     } catch (e) {
@@ -1192,8 +1241,8 @@ async function loadTemplateContext(allowView = false) {
   return { node, dbType, tableSchema, columns, tableType };
 }
 
-function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, sql: string, title?: string) {
-  const tabId = queryStore.createTab(connectionId, database, title, "query", schema);
+function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {
+  const tabId = queryStore.createTab(connectionId, database, title, "query", schema, undefined, catalog);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -1203,11 +1252,13 @@ async function newSelectTemplate() {
     if (!context) return;
     const sql = buildTableSelectTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1219,12 +1270,14 @@ async function newInsertTemplate() {
     if (!context) return;
     const sql = buildTableInsertTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
       tableType: context.tableType,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1236,11 +1289,13 @@ async function newUpdateTemplate() {
     if (!context) return;
     const sql = buildTableUpdateTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1252,11 +1307,13 @@ async function newDeleteTemplate() {
     if (!context) return;
     const sql = buildTableDeleteTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1285,7 +1342,7 @@ async function generateDdlTemplate() {
       });
     }
     const formatted = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(currentDatabaseType()), settingsStore.editorSettings.sqlFormatter);
-    openSqlTemplateTab(node.connectionId, node.database, node.schema, formatted, `DDL - ${node.label}`);
+    openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, formatted, `DDL - ${node.label}`);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }
@@ -1486,12 +1543,38 @@ async function refreshDropTableChildObjectPreviewSql() {
 function openObjectSourceDialog(initialEditing: boolean) {
   const node = activeNode.value;
   if (!node.connectionId || !node.database) return;
+  const connectionId = node.connectionId;
+  const database = node.database;
   const objectType = objectSourceKindForTreeNode(node.type);
   if (!objectType) return;
+  const openMode = settingsStore.editorSettings.routineSourceOpenMode;
+  if (openMode === "query-tab") {
+    void connectionStore
+      .ensureConnected(connectionId)
+      .then(async () => {
+        connectionStore.activeConnectionId = connectionId;
+        const schema = node.schema || database;
+        const result = await api.getObjectSource(connectionId, database, schema, node.objectName || node.label, objectType as any, node.signature);
+        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, result.source, node.catalog, { forceNew: true });
+        const sourceIsEditable = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(objectType);
+        if (sourceIsEditable) {
+          queryStore.setObjectSource(tabId, {
+            schema,
+            name: node.objectName || node.label,
+            objectType,
+            signature: node.signature,
+          });
+        }
+      })
+      .catch((e: any) => {
+        toast(e?.message || String(e), 5000);
+      });
+    return;
+  }
   void connectionStore
-    .ensureConnected(node.connectionId)
+    .ensureConnected(connectionId)
     .then(() => {
-      connectionStore.activeConnectionId = node.connectionId!;
+      connectionStore.activeConnectionId = connectionId;
       emit("open-object-source", node, initialEditing);
     })
     .catch((e: any) => {
@@ -2994,7 +3077,15 @@ async function confirmPasteTable() {
 
 function openPasteTableDialog() {
   const clipboard = connectionStore.treeClipboard;
-  if (clipboard?.kind !== "table-copy" || !canPasteTreeClipboardToCurrentNode()) {
+  if (clipboard?.kind !== "table-copy") {
+    toast(t("contextMenu.noTableToPaste"), 2000);
+    return;
+  }
+  if (canTransferTreeClipboardToCurrentNode()) {
+    openTransferFromTreeClipboard();
+    return;
+  }
+  if (!canPasteTreeClipboardToCurrentNode()) {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
   }
@@ -3004,7 +3095,7 @@ function openPasteTableDialog() {
     targetName: `${entry.tableName}_copy`,
     connectionId: entry.connectionId,
     database: entry.database,
-    schema: entry.schema,
+    schema: normalizeTreeClipboardSchema(entry.connectionId, entry.database, entry.schema),
   }));
   showPasteDialog.value = true;
 }
@@ -3028,7 +3119,7 @@ function createView() {
   const viewName = "new_view";
   const effectiveDbType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId));
   const viewSqlName = effectiveDbType === "informix" || !node.schema ? viewName : `${node.schema}.${viewName}`;
-  const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema);
+  const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema, undefined, node.catalog);
   queryStore.updateSql(tabId, `CREATE VIEW ${viewSqlName} AS\nSELECT\n  *\nFROM table_name;\n`);
   queryStore.setObjectSource(tabId, {
     schema: node.schema,
@@ -3063,7 +3154,7 @@ function createMysqlObjectTemplate() {
   const template = mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
   if (!template) return;
   connectionStore.activeConnectionId = node.connectionId;
-  const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema);
+  const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema, undefined, node.catalog);
   queryStore.updateSql(tabId, template.sql);
 }
 
@@ -3521,6 +3612,11 @@ function databaseSpecificDialogCapabilities() {
     renameMongoCollectionPreview,
     renameMongoCollectionLoading,
     confirmRenameMongoCollection,
+    showRedisDatabaseAliasDialog,
+    redisDatabaseAliasInput,
+    redisDatabaseAliasSaving,
+    confirmRedisDatabaseAlias,
+    clearRedisDatabaseAlias,
     showCreateSchemaDialog,
     createSchemaName,
     confirmCreateSchema,
@@ -4017,6 +4113,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "redis-db") {
       items.push({ label: "", separator: true });
+      items.push({ label: t("redis.setDatabaseAlias"), action: openRedisDatabaseAliasDialog, icon: Pencil });
       items.push({ label: t("redis.flushDb"), action: flushRedisDb, icon: Eraser, variant: "destructive" as const });
     }
     if (canDropMongoDatabase.value) {
@@ -4122,6 +4219,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         action: () => emit("open-ddl", node),
         icon: FileCode,
       });
+      items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     }
     if (canOpenStructureEditor.value) {
       items.push({ label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
@@ -4286,6 +4384,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
     }
     items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+    items.push({ label: "", separator: true });
     items.push({
       label: deleteMenuLabel(node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction")),
       action: deleteMenuAction(requestDropObject),
@@ -4298,15 +4398,15 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "sequence") {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-    items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     return true;
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-    items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     return true;
   }
   return false;
@@ -4315,12 +4415,16 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
   const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
   if (!node.connectionId || !node.database) return [copyItem];
-  const state = tableClipboardMenuState(normalizedTreeClipboardTableEntries(), {
-    connectionId: node.connectionId,
-    database: node.database,
-    schema: normalizeTreeClipboardSchema(node.connectionId, node.database, node.schema),
-    tableName: node.label,
-  });
+  const state = tableClipboardMenuState(
+    normalizedTreeClipboardTableEntries(),
+    {
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: normalizeTreeClipboardSchema(node.connectionId, node.database, node.schema),
+      tableName: node.label,
+    },
+    canTransferTreeClipboardToCurrentNode(),
+  );
   if (state === "copy") return [copyItem];
   const pasteItem: ContextMenuItem = { label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
   return state === "paste" ? [pasteItem] : [copyItem, pasteItem];
@@ -4338,7 +4442,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
       if (canOpenTableImport.value) {
         items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
       }
-      if (canPasteTreeClipboardToCurrentNode()) {
+      if (canPasteTreeClipboardToCurrentNode() || canTransferTreeClipboardToCurrentNode()) {
         items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
       }
     }

@@ -136,7 +136,7 @@ class ValidateAgentsTest(unittest.TestCase):
                 "include(*(infrastructureModules + driverModules))\n",
                 encoding="utf-8",
             )
-            for driver in ("oracle-go", "kingbase-go", "xugu"):
+            for driver in ("oracle-go", "kingbase-go", "xugu", "duckdb"):
                 (root / "drivers" / driver).mkdir(parents=True)
             (root / "versions.json").write_text(
                 json.dumps({"h2": "0.1.0", "oracle": "0.1.0", "kingbase": "0.1.0", "xugu": "0.1.0"}),

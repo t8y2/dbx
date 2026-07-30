@@ -76,6 +76,7 @@ import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelectio
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
 import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
@@ -1251,8 +1252,9 @@ async function loadMentionCandidates(query: string) {
       );
       tableCandidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
     } else {
-      const schema = props.tab.database || props.connection.database || "main";
-      const tables = await listTables(props.tab.connectionId, props.tab.database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+      const database = props.connection.db_type === "sqlite" ? normalizeSqliteNamespace(props.tab.database || props.connection.database, props.connection) : props.tab.database;
+      const schema = database || props.connection.database || "main";
+      const tables = await listTables(props.tab.connectionId, database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
       tableCandidates = filterAiTableMentionCandidates(
         tables.map((table) => mentionCandidateFromTable(table)),
         tableFilter,

@@ -47,7 +47,7 @@ async fn live_manual_transaction_postgres_preserves_typed_selects_and_empty_meta
     let database = config.database.clone().expect("database");
     let (state, db_path) = app_state_with_config(config.clone()).await;
 
-    let txn = begin_manual_transaction(&state, &config.id, &database, None).await.expect("begin");
+    let txn = begin_manual_transaction(&state, &config.id, &database, None, None).await.expect("begin");
     let typed = execute_in_manual_transaction(
         &state,
         &txn,
@@ -85,7 +85,7 @@ async fn live_manual_transaction_mysql_streams_with_row_limit() {
     let database = config.database.clone().expect("database");
     let (state, db_path) = app_state_with_config(config.clone()).await;
 
-    let txn = begin_manual_transaction(&state, &config.id, &database, None).await.expect("begin");
+    let txn = begin_manual_transaction(&state, &config.id, &database, None, None).await.expect("begin");
     let limited = execute_in_manual_transaction(
         &state,
         &txn,

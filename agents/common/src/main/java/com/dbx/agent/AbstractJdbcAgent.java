@@ -7,15 +7,21 @@ import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
+    private static final String GAUSSDB_COMPATIBILITY_SQL =
+        "SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()";
+
     private Connection connection;
     private String configuredDatabase = "";
+    private String identifierQuote = "";
 
     @Override
     public final Connection getConnection() {
@@ -24,12 +30,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public String getIdentifierQuote() {
-        try {
-            String quote = requireConnected().getMetaData().getIdentifierQuoteString();
-            return quote == null || quote.trim().isEmpty() ? "" : quote.trim();
-        } catch (Exception ignored) {
-            return "";
-        }
+        return identifierQuote;
     }
 
     @Override
@@ -39,6 +40,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             connection = openConnection(params);
             configuredDatabase = params.getDatabase();
             afterConnect(params, connection);
+            identifierQuote = resolveIdentifierQuote(params, connection);
         });
     }
 
@@ -218,7 +220,77 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
                 connection.close();
             }
             connection = null;
+            identifierQuote = "";
         });
+    }
+
+    private static String resolveIdentifierQuote(ConnectParams params, Connection connection) {
+        if (isPostgresCompatibleJdbc(params)) {
+            try (Statement statement = connection.createStatement()) {
+                statement.setQueryTimeout(5);
+                try (ResultSet result = statement.executeQuery(GAUSSDB_COMPATIBILITY_SQL)) {
+                    if (result.next()) {
+                        String quote = gaussdbIdentifierQuote(result.getString(1));
+                        if (quote != null) {
+                            return quote;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        try {
+            String quote = connection.getMetaData().getIdentifierQuoteString();
+            return quote == null || quote.trim().isEmpty() ? "" : quote.trim();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static String gaussdbIdentifierQuote(String compatibilityMode) {
+        if (compatibilityMode == null) {
+            return null;
+        }
+        String normalized = compatibilityMode.trim().toUpperCase(Locale.ROOT);
+        if ("M".equals(normalized) || "B".equals(normalized) || "MYSQL".equals(normalized)) {
+            return "`";
+        }
+        if ("A".equals(normalized) || "PG".equals(normalized) || "ORA".equals(normalized) || "POSTGRESQL".equals(normalized)) {
+            return "\"";
+        }
+        return null;
+    }
+
+    private static boolean isPostgresCompatibleJdbc(ConnectParams params) {
+        StringBuilder identity = new StringBuilder();
+        appendJdbcIdentity(identity, params.getConnection_string());
+        appendJdbcIdentity(identity, params.getJdbc_driver_class());
+        List<String> driverPaths = params.getJdbc_driver_paths();
+        if (driverPaths != null) {
+            for (String path : driverPaths) {
+                appendJdbcIdentity(identity, path);
+            }
+        }
+        String normalized = identity.toString().toLowerCase(Locale.ROOT);
+        return normalized.contains("jdbc:postgresql:")
+            || normalized.contains("jdbc:opengauss:")
+            || normalized.contains("jdbc:gaussdb:")
+            || normalized.contains("org.postgresql")
+            || normalized.contains("org.opengauss")
+            || normalized.contains("com.huawei.gaussdb")
+            || normalized.contains("postgresql")
+            || normalized.contains("opengauss")
+            || normalized.contains("gaussdb");
+    }
+
+    private static void appendJdbcIdentity(StringBuilder identity, String value) {
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+        if (identity.length() > 0) {
+            identity.append('\n');
+        }
+        identity.append(value);
     }
 
     protected abstract String driverClass();

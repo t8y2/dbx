@@ -40,12 +40,14 @@ const H2_PROFILES: &[AgentDriverProfile] =
     &[AgentDriverProfile { profile: "h2-legacy", key: "h2-legacy", label: "H2 2.1 Legacy", store_visible: true }];
 
 const EXTRA_AGENT_LABELS: &[(&str, &str)] = &[
+    ("duckdb", "DuckDB"),
     ("kafka", "Apache Kafka"),
     ("rocketmq", "Apache RocketMQ"),
     ("rabbitmq", "RabbitMQ"),
     ("sqlserver-legacy", "SQL Server legacy compatibility component"),
 ];
 const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[
+    ("duckdb", "DuckDB"),
     ("kafka", "Apache Kafka"),
     ("rocketmq", "Apache RocketMQ"),
     ("rabbitmq", "RabbitMQ"),
@@ -387,5 +389,12 @@ mod tests {
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2")), Some("h2"));
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2-legacy")), Some("h2-legacy"));
         assert!(driver_store_entries().any(|(key, label)| key == "h2-legacy" && label == "H2 2.1 Legacy"));
+    }
+
+    #[test]
+    fn duckdb_is_available_in_driver_store_without_using_agent_runtime() {
+        assert!(driver_store_entries().any(|(key, label)| key == "duckdb" && label == "DuckDB"));
+        assert_eq!(label_for_key("duckdb"), Some("DuckDB"));
+        assert!(!is_agent_type(&DatabaseType::DuckDb));
     }
 }

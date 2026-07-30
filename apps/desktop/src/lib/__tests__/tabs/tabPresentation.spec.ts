@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionGroupDisplayName, middleEllipsis, queryResultBaseSql, queryResultExecutionSql, resultSourceRange, statementExecutionMarkers, tabTooltipLines, tabularResultItems } from "@/lib/tabs/tabPresentation";
+import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const translations: Record<string, string> = {
@@ -224,6 +225,47 @@ describe("query result source ranges", () => {
 });
 
 describe("statement execution markers", () => {
+  it("renders a live marker for a single statement", () => {
+    const sql = "SELECT 1";
+    expect(
+      statementExecutionMarkers(sql, undefined, "mysql", sql, "", {
+        executionId: "run-single",
+        submittedSql: sql,
+        editorFingerprint: sqlTextFingerprint(sql),
+        sourceOffset: 0,
+        completed: 0,
+        total: 1,
+        startedAt: 1,
+        items: [{ statementIndex: 0, sql, from: 0, to: sql.length, status: "running" }],
+      }),
+    ).toEqual([{ from: 0, status: "running", successCount: 0, errorCount: 0, runningCount: 1 }]);
+  });
+
+  it("renders running and completed markers from live batch state", () => {
+    const sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+    const secondFrom = sql.indexOf("SELECT 2");
+    const thirdFrom = sql.indexOf("SELECT 3");
+    expect(
+      statementExecutionMarkers(sql, undefined, "sqlite", sql, "", {
+        executionId: "run-1",
+        submittedSql: sql,
+        editorFingerprint: sqlTextFingerprint(sql),
+        sourceOffset: 0,
+        completed: 1,
+        total: 3,
+        startedAt: 1,
+        items: [
+          { statementIndex: 0, sql: "SELECT 1", from: 0, to: 8, status: "success" },
+          { statementIndex: 1, sql: "SELECT 2", from: secondFrom, to: secondFrom + 8, status: "running" },
+          { statementIndex: 2, sql: "SELECT 3", from: thirdFrom, to: thirdFrom + 8, status: "pending" },
+        ],
+      }),
+    ).toEqual([
+      { from: 0, status: "success", successCount: 1, errorCount: 0 },
+      { from: secondFrom, status: "running", successCount: 0, errorCount: 0, runningCount: 1 },
+    ]);
+  });
+
   it("projects explicit statement indexes to current editor lines", () => {
     const sql = "SELECT 1;\nSELECT * FROM missing;\nSELECT 3;";
     const secondFrom = sql.indexOf("SELECT *");
@@ -243,7 +285,7 @@ describe("statement execution markers", () => {
     ]);
   });
 
-  it("omits unindexed query-level errors and single-statement executions", () => {
+  it("omits unindexed query-level errors and legacy single-statement results without live state", () => {
     expect(statementExecutionMarkers("SELECT 1; SELECT 2;", [{ columns: ["Error"], rows: [["pool failed"]], affected_rows: 0, execution_time_ms: 1, execution_error: true }], "mysql", "SELECT 1; SELECT 2;")).toEqual([]);
     expect(statementExecutionMarkers("SELECT 1", [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, statement_index: 0, sourceStatement: "SELECT 1", sourceFrom: 0, sourceTo: 8 }], "mysql", "SELECT 1")).toEqual([]);
   });

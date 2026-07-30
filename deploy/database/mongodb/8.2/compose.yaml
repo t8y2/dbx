@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/mongo:8.2.3-noble
     container_name: dbx-mongodb-8.2
+    restart: always
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-27018}:27017"
     environment:

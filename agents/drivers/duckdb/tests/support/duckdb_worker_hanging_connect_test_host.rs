@@ -1,5 +1,3 @@
-#![cfg(feature = "duckdb-bundled")]
-
 use std::io::{self, BufRead};
 use std::time::Duration;
 

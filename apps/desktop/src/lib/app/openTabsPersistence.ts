@@ -61,6 +61,11 @@ export interface RestoredOpenTabs {
 }
 
 export type OpenTabsRestoreFilter = "all" | "pinned";
+export interface OpenTabsRestoreOptions {
+  queryOnly?: boolean;
+  filter?: OpenTabsRestoreFilter;
+  validConnectionIds?: Iterable<string>;
+}
 
 function shouldPersistTabSql(tab: QueryTab) {
   if (!tab.savedSqlId) return true;
@@ -143,14 +148,17 @@ function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && (typeof tab.sql === "string" || typeof tab.savedSqlId === "string");
 }
 
-function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
+function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
   if (!Array.isArray(parsed)) return { tabs: [], activeTabId: null };
 
   try {
+    const validConnectionIds = options.validConnectionIds ? new Set(options.validConnectionIds) : undefined;
     const saved = parsed.filter(isSavedOpenTab);
     const filtered = saved.filter((tab) => {
-      if (options.queryOnly && (tab.mode ?? "query") !== "query") return false;
+      const mode = tab.mode ?? "query";
+      if (options.queryOnly && mode !== "query") return false;
       if (options.filter === "pinned" && !tab.pinned) return false;
+      if (mode !== "query" && validConnectionIds && !validConnectionIds.has(tab.connectionId)) return false;
       return true;
     });
     const tabs: QueryTab[] = filtered.map((tab) => {
@@ -194,12 +202,12 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
   }
 }
 
-export function restoreOpenTabsPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
+export function restoreOpenTabsPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
   if (!payload) return { tabs: [], activeTabId: null };
   return restoreOpenTabsArray(payload.tabs, typeof payload.activeTabId === "string" ? payload.activeTabId : null, options);
 }
 
-export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
+export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
   if (!rawTabs) return { tabs: [], activeTabId: null };
 
   try {

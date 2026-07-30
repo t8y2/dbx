@@ -1,21 +1,17 @@
-#![cfg(feature = "duckdb-bundled")]
-
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
 pub struct DuckDbConnection {
     connection: Mutex<duckdb::Connection>,
     interrupt_handle: Arc<duckdb::InterruptHandle>,
-    draining: AtomicBool,
 }
 
 impl DuckDbConnection {
     pub fn new(connection: duckdb::Connection) -> Self {
         let interrupt_handle = connection.interrupt_handle();
-        Self { connection: Mutex::new(connection), interrupt_handle, draining: AtomicBool::new(false) }
+        Self { connection: Mutex::new(connection), interrupt_handle }
     }
 
     pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, duckdb::Connection>> {
@@ -26,19 +22,8 @@ impl DuckDbConnection {
         self.interrupt_handle.clone()
     }
 
-    pub fn mark_draining(&self) {
-        self.draining.store(true, Ordering::SeqCst);
-    }
-
-    pub fn clear_draining(&self) {
-        self.draining.store(false, Ordering::SeqCst);
-    }
-
-    pub fn is_draining(&self) -> bool {
-        self.draining.load(Ordering::SeqCst)
-    }
-
     // Preserve PoisonError ownership so close_connection can still release the contained DuckDB handle.
+    #[cfg(test)]
     #[allow(clippy::result_large_err)]
     fn into_inner(self) -> std::sync::LockResult<duckdb::Connection> {
         self.connection.into_inner()
@@ -69,8 +54,8 @@ pub fn connect_path(path: &str) -> Result<Arc<DuckDbConnection>, String> {
 /// Runs a connection init script statement-by-statement so a failure can
 /// point at the offending statement instead of the whole batch.
 pub fn run_init_script(con: &duckdb::Connection, script: &str) -> Result<(), String> {
-    for (index, statement) in crate::db::duckdb_sql::split_sql_statements(script).iter().enumerate() {
-        if crate::db::duckdb_sql::strip_leading_comments(statement).is_empty() {
+    for (index, statement) in crate::sql::split_sql_statements(script).iter().enumerate() {
+        if crate::sql::strip_leading_comments(statement).is_empty() {
             continue;
         }
         con.execute_batch(statement)
@@ -131,7 +116,8 @@ pub fn is_memory_database_path(path: &str) -> bool {
 /// Unlike relying on Drop, this calls `duckdb_disconnect` synchronously
 /// so the file handle is released before this function returns.
 /// On Windows this prevents "file already in use" errors when reconnecting.
-pub fn close_connection(con: Arc<DuckDbConnection>) {
+#[cfg(test)]
+fn close_connection(con: Arc<DuckDbConnection>) {
     match Arc::try_unwrap(con) {
         Ok(handle) => match handle.into_inner() {
             Ok(conn) => {

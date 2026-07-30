@@ -15,6 +15,28 @@ function layoutLabels(layout: SidebarLayout, connectionNames: Map<string, string
 }
 
 describe("DataGrip connection import", () => {
+  it("imports a SQLite file path without treating it as a schema", () => {
+    const [connection] = parseDataGripConnections(
+      payload(`
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="Local SQLite" uuid="sqlite-1">
+              <driver-ref>sqlite.xerial</driver-ref>
+              <jdbc-url>jdbc:sqlite:/tmp/app.sqlite</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+      `),
+    );
+
+    expect(connection).toMatchObject({
+      name: "Local SQLite",
+      db_type: "sqlite",
+      host: "/tmp/app.sqlite",
+    });
+    expect(connection?.database).toBeUndefined();
+  });
+
   it("recognizes Kingbase custom JDBC drivers", () => {
     const connections = parseDataGripConnections(
       payload(`

@@ -25,6 +25,17 @@ function postgresConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function mysqlConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "mysql-1",
+    name: "MySQL",
+    db_type: "mysql",
+    port: 3306,
+    username: "root",
+  } as ConnectionConfig;
+}
+
 function oracleConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -282,6 +293,39 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("oracle-1", "ORCL", "", "ORDERS", undefined, "tab-a");
     expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
+  });
+
+  it("rejects assistant columns returned for a different MySQL parent table", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "status", kind: "column", schema: "app", parent_schema: "app", parent_name: "TB_KPI_SET_SCORE_DETAIL", data_type: "tinyint" },
+        { name: "priority", kind: "column", schema: "app", parent_schema: "app", parent_name: "tb_kpi_set_score_relationship", data_type: "smallint" },
+        { name: "archived_status", kind: "column", schema: "archive", parent_schema: "archive", parent_name: "tb_kpi_set_score_detail", data_type: "tinyint" },
+        { name: "legacy_flag", kind: "column", schema: "app", data_type: "tinyint" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns: vi.fn(),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [mysqlConnection()];
+    store.connectedIds.add("mysql-1");
+
+    const columns = await store.listCompletionColumns("mysql-1", "app", "tb_kpi_set_score_detail", "app");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ parent_name: "tb_kpi_set_score_detail", parent_schema: "app" }));
+    expect(columns.map((column) => [column.name, column.table])).toEqual([
+      ["status", "tb_kpi_set_score_detail"],
+      ["legacy_flag", "tb_kpi_set_score_detail"],
+    ]);
   });
 
   it("normalizes unquoted Oracle aliases while preserving quoted case before catalog lookup", async () => {

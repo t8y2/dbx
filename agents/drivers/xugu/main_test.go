@@ -756,23 +756,33 @@ func TestXuguListObjectsQueryRejectsUnsupportedObjectTypes(t *testing.T) {
 		t.Fatalf("unsupported object type should produce empty-result predicate:\n%s", query.SQL)
 	}
 
-	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", 10, 0}
+	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", 10, 0}
 	assertArgs(t, query.Args, wantArgs)
 }
 
 func TestXuguListObjectsQueryIncludesProgrammableObjects(t *testing.T) {
 	query := xuguListObjectsQuery("APP", metadataListConstraints{
-		ObjectTypes: []string{"procedure", "function", "package", "package-body", "trigger", "sequence", "type", "type-body"},
+		ObjectTypes: []string{"procedure", "function", "package", "package-body", "trigger", "sequence", "synonym", "type", "type-body"},
 	})
 
-	for _, want := range []string{"ALL_PROCEDURES", "p.VALID", "ALL_PACKAGES", "p.BODY IS NOT NULL", "ALL_TRIGGERS", "ALL_SEQUENCES", "ALL_TYPES", "u.BODY IS NOT NULL", "OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID", "OBJECT_TYPE IN (?,?,?,?,?,?,?,?)"} {
+	for _, want := range []string{"ALL_PROCEDURES", "p.VALID", "ALL_PACKAGES", "p.BODY IS NOT NULL", "ALL_TRIGGERS", "ALL_SEQUENCES", "ALL_SYNONYMS", "y.IS_PUBLIC = FALSE", "ALL_TYPES", "u.BODY IS NOT NULL", "OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID", "OBJECT_TYPE IN (?,?,?,?,?,?,?,?,?)"} {
 		if !strings.Contains(query.SQL, want) {
 			t.Fatalf("expected SQL to contain %q:\n%s", want, query.SQL)
 		}
 	}
 
-	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"}
+	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "SEQUENCE", "SYNONYM", "TRIGGER", "TYPE", "TYPE_BODY"}
 	assertArgs(t, query.Args, wantArgs)
+}
+
+func TestXuguListObjectsQueryKeepsPublicSynonymsOutOfSchemaGroups(t *testing.T) {
+	query := xuguListObjectsQuery("SYSDBA", metadataListConstraints{ObjectTypes: []string{"SYNONYM"}})
+	for _, want := range []string{"FROM ALL_SYNONYMS y", "y.IS_PUBLIC = FALSE", "OBJECT_TYPE IN (?)"} {
+		if !strings.Contains(query.SQL, want) {
+			t.Fatalf("expected SQL to contain %q:\n%s", want, query.SQL)
+		}
+	}
+	assertArgs(t, query.Args, []any{"SYSDBA", "SYSDBA", "SYSDBA", "SYSDBA", "SYSDBA", "SYSDBA", "SYSDBA", "SYSDBA", "SYSDBA", "SYSDBA", "SYNONYM"})
 }
 
 func TestXuguListObjectsQueryExcludesSystemSequences(t *testing.T) {
@@ -822,6 +832,30 @@ func TestGetSequenceSourceReconstructsExecutableDDL(t *testing.T) {
 	}
 	if !strings.HasSuffix(strings.TrimSpace(ddl), ";") {
 		t.Fatalf("sequence DDL must end with a statement terminator:\n%s", ddl)
+	}
+}
+
+func TestGetSynonymSourceReconstructsPrivateQuotedDDL(t *testing.T) {
+	db, err := sql.Open("xugu-test-synonym-source", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	source, err := s.getObjectSource("SYSDBA", "dbxSynonymReplayCase", "SYNONYM")
+	if err != nil {
+		t.Fatalf("get synonym source: %v", err)
+	}
+	if source["schema"] != "SYSDBA" || source["name"] != "dbxSynonymReplayCase" {
+		t.Fatalf("synonym source must preserve catalog spelling: %#v", source)
+	}
+
+	ddl, _ := source["source"].(string)
+	want := "CREATE SYNONYM \"SYSDBA\".\"dbxSynonymReplayCase\"\nFOR \"AppSchema\".\"tbUserProfile\";"
+	if ddl != want {
+		t.Fatalf("synonym DDL = %q, want %q", ddl, want)
 	}
 }
 
@@ -1399,6 +1433,22 @@ func TestSelectXuguCatalogSequenceNamePrefersExactCaseAndRejectsAmbiguity(t *tes
 	}
 }
 
+func TestSelectXuguCatalogSynonymPrefersExactCaseAndRejectsAmbiguity(t *testing.T) {
+	candidates := []xuguCatalogSynonym{
+		{Schema: "SYSDBA", Name: "dbxSynonym", TargetName: "TB_A"},
+		{Schema: "SYSDBA", Name: "DBXSYNONYM", TargetName: "TB_B"},
+	}
+
+	synonym, err := selectXuguCatalogSynonym("SYSDBA", "dbxSynonym", candidates)
+	if err != nil || synonym.Name != "dbxSynonym" || synonym.TargetName != "TB_A" {
+		t.Fatalf("exact-case selection = (%#v, %v), want quoted catalog synonym", synonym, err)
+	}
+
+	if _, err := selectXuguCatalogSynonym("SYSDBA", "DbxSynonym", candidates); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("mixed-case ambiguous selection error = %v, want ambiguity error", err)
+	}
+}
+
 func TestCatalogTableLookupQueriesAvoidCaseFoldingBoundParameters(t *testing.T) {
 	exact := xuguCatalogTableNameQuery("S'CHEMA", "MiX'ed", false)
 	if strings.Contains(strings.ToUpper(exact), "UPPER(") {
@@ -1437,6 +1487,25 @@ func TestCatalogSequenceLookupQueriesPreferExactIdentifiers(t *testing.T) {
 	for _, fragment := range []string{"q.IS_SYS = FALSE", "UPPER(s.SCHEMA_NAME) = 'APP''SCHEMA'", "UPPER(q.SEQ_NAME) = 'SEQ''MIXEDCASE'"} {
 		if !strings.Contains(folded, fragment) {
 			t.Fatalf("case-insensitive sequence lookup missing %q:\n%s", fragment, folded)
+		}
+	}
+}
+
+func TestCatalogSynonymLookupQueriesPreferExactPrivateIdentifiers(t *testing.T) {
+	exact := xuguCatalogSynonymQuery("App'Schema", "syn'MixedCase", false)
+	if strings.Contains(strings.ToUpper(exact), "UPPER(") {
+		t.Fatalf("exact synonym lookup must not case-fold identifiers:\n%s", exact)
+	}
+	for _, fragment := range []string{"y.IS_PUBLIC = FALSE", "s.SCHEMA_NAME = 'App''Schema'", "y.SYNO_NAME = 'syn''MixedCase'"} {
+		if !strings.Contains(exact, fragment) {
+			t.Fatalf("exact synonym lookup missing %q:\n%s", fragment, exact)
+		}
+	}
+
+	folded := xuguCatalogSynonymQuery("App'Schema", "syn'MixedCase", true)
+	for _, fragment := range []string{"y.IS_PUBLIC = FALSE", "UPPER(s.SCHEMA_NAME) = 'APP''SCHEMA'", "UPPER(y.SYNO_NAME) = 'SYN''MIXEDCASE'"} {
+		if !strings.Contains(folded, fragment) {
+			t.Fatalf("case-insensitive synonym lookup missing %q:\n%s", fragment, folded)
 		}
 	}
 }
@@ -1722,6 +1791,7 @@ func init() {
 	sql.Register("xugu-test-table-ddl", &xuguTableDDLDriver{})
 	sql.Register("xugu-test-show-result", &xuguShowResultDriver{})
 	sql.Register("xugu-test-sequence-source", &xuguSequenceSourceDriver{})
+	sql.Register("xugu-test-synonym-source", &xuguSynonymSourceDriver{})
 }
 
 type xuguShowResultDriver struct{}
@@ -1818,6 +1888,33 @@ func (c *xuguSequenceSourceConn) QueryContext(_ context.Context, query string, _
 	}
 	return &xuguStaticRows{
 		columns: []string{"SCHEMA_NAME", "SEQ_NAME"},
+	}, nil
+}
+
+type xuguSynonymSourceDriver struct{}
+
+func (d *xuguSynonymSourceDriver) Open(name string) (driver.Conn, error) {
+	return &xuguSynonymSourceConn{}, nil
+}
+
+type xuguSynonymSourceConn struct{}
+
+func (c *xuguSynonymSourceConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguSynonymSourceConn) Close() error              { return nil }
+func (c *xuguSynonymSourceConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+func (c *xuguSynonymSourceConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	if !strings.Contains(upper, "FROM ALL_SYNONYMS") || !strings.Contains(upper, "Y.IS_PUBLIC = FALSE") {
+		return nil, fmt.Errorf("unexpected synonym source query: %s", query)
+	}
+	if strings.Contains(upper, "UPPER(") || !strings.Contains(query, "s.SCHEMA_NAME = 'SYSDBA'") || !strings.Contains(query, "y.SYNO_NAME = 'dbxSynonymReplayCase'") {
+		return nil, fmt.Errorf("synonym resolution must prioritize exact catalog identifiers: %s", query)
+	}
+	return &xuguStaticRows{
+		columns: []string{"SCHEMA_NAME", "SYNO_NAME", "TARGET_SCHEMA", "TARG_NAME"},
+		values:  [][]driver.Value{{"SYSDBA", "dbxSynonymReplayCase", "AppSchema", "tbUserProfile"}},
 	}, nil
 }
 

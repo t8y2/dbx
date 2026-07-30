@@ -190,6 +190,13 @@ const oracleCapabilities = capabilities({
   indexType: true,
 });
 
+// Dameng (DM8): ALTER TABLE ... DROP PRIMARY KEY / ADD PRIMARY KEY is official DDL.
+// Keep separate from oracleCapabilities so UI cannot enable PK edit without BE drop SQL.
+const damengCapabilities = capabilities({
+  ...oracleCapabilities,
+  alterPrimaryKey: true,
+});
+
 const irisCapabilities = capabilities({
   ...oracleCapabilities,
   // IRIS exposes %DESCRIPTION at definition time but cannot alter persisted descriptions.
@@ -323,7 +330,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   duckdb: duckdbCapabilities,
   sqlserver: sqlserverCapabilities,
   oracle: oracleCapabilities,
-  dameng: oracleCapabilities,
+  dameng: damengCapabilities,
   "oceanbase-oracle": oracleCapabilities,
   iris: irisCapabilities,
   yashandb: oracleCapabilities,

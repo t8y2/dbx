@@ -300,7 +300,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
   const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) || getAny(node.values, ["host", "server", "hostname"]) || sqlitePath || effectiveProfile.label;
   const host = sqlitePath || getAny(node.values, ["host", "server", "hostname", "serverHost", "address"]) || (effectiveProfile.dbType === "sqlite" ? "" : "127.0.0.1");
   // Navicat exports OceanBase Oracle connections with Database="ORCL", but OceanBase resolves the target from the username.
-  const database = effectiveProfile.dbType === "sqlite" ? sqlitePath : effectiveProfile.dbType === "oceanbase-oracle" ? "" : getAny(node.values, ["database", "databaseName", "initialDatabase", "serviceName", "sid", "schema"]);
+  const database = effectiveProfile.dbType === "sqlite" ? "" : effectiveProfile.dbType === "oceanbase-oracle" ? "" : getAny(node.values, ["database", "databaseName", "initialDatabase", "serviceName", "sid", "schema"]);
   const isOracleLike = effectiveProfile.dbType === "oracle" || effectiveProfile.dbType === "oceanbase-oracle";
   const oracleConnectionType = isOracleLike && getAny(node.values, ["sid"]) ? "sid" : isOracleLike ? "service_name" : undefined;
   const username = getAny(node.values, ["user", "username", "userName", "uid"]) || profile.user;

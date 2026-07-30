@@ -205,6 +205,19 @@ describe("semantic SQL completion candidates", () => {
   });
 
   it.each([
+    ["table name", "SELECT orders.| FROM orders"],
+    ["schema-qualified table name", "SELECT public.orders.| FROM public.orders"],
+  ] as const)("completes PostgreSQL columns through a %s qualifier", (_label, markedSql) => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id", "customer_name", "total_amount"].map((name) => ({ name, table: "orders", schema: "public" }))]]);
+
+    const { context, items } = semanticCompletion(markedSql, { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.contextKind).toBe("alias_column");
+    expect(context.exclusiveColumnSuggestions).toBe(true);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "customer_name", "total_amount"]);
+  });
+
+  it.each([
     ["PostgreSQL", "postgres", "postgres"],
     ["SQL Server", "sqlserver", "sqlserver"],
   ] as const)("uses row-source aliases for %s self-join column collisions", (_label, databaseType, dialect) => {
@@ -228,6 +241,27 @@ describe("semantic SQL completion candidates", () => {
 
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "table_b", alias: "b" })]));
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "status"]);
+  });
+
+  it("keeps a SELECT-list alias scoped when comma-separated sources follow the cursor", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["tb_kpi_set_score", ["id", "score_name"].map((name) => ({ name, table: "tb_kpi_set_score" }))],
+      ["tb_kpi_set_score_detail", ["id", "fk_kpi_set_score_id", "detail_score"].map((name) => ({ name, table: "tb_kpi_set_score_detail" }))],
+      ["tb_kpi_set_score_relationship", ["priority", "exclude_users_account"].map((name) => ({ name, table: "tb_kpi_set_score_relationship" }))],
+    ]);
+
+    const { context, items } = semanticCompletion(
+      `SELECT
+  b.|
+FROM tb_kpi_set_score a,
+  tb_kpi_set_score_detail b
+WHERE a.id = b.fk_kpi_set_score_id`,
+      { columnsByTable },
+      { databaseType: "mysql", dialect: "mysql" },
+    );
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "tb_kpi_set_score_detail", alias: "b" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "fk_kpi_set_score_id", "detail_score"]);
   });
 
   it("completes correlation columns for generic PostgreSQL table functions", () => {

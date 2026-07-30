@@ -70,13 +70,14 @@ import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGr
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems } from "@/lib/tabs/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems, type ExecutionSummaryItem } from "@/lib/tabs/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
+import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
@@ -293,7 +294,7 @@ const activeTabDimension = computed(() => {
 const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialect(activeEffectiveDatabaseType.value));
-const editorSyntaxDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialectForConnection(props.activeConnection));
+const editorSyntaxDialect = computed<CodeMirrorSqlDialectName>(() => codeMirrorSqlDialectForConnection(props.activeConnection));
 
 const shortcutModifier = computed(() => (navigator.platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl"));
 
@@ -367,6 +368,7 @@ const activeStatementExecutionMarkers = computed(() =>
     activeEffectiveDatabaseType.value,
     props.activeTab.resultBaseSql || props.activeTab.lastExecutedSql || props.activeTab.sql,
     props.activeTab.resultEditorFingerprint ?? "",
+    props.activeTab.batchSqlExecution,
   ),
 );
 const activeElasticsearchJsonResponse = computed(() => elasticsearchJsonResponseForResult(activeEffectiveDatabaseType.value, activeResultSql.value, props.activeTab.result));
@@ -400,6 +402,11 @@ watch(
 );
 const summaryItems = computed(() => executionSummaryItems(props.activeTab));
 const hasExecutionSummary = computed(() => summaryItems.value.length > 0 || props.activeTab.isExecuting);
+const batchExecutionProgress = computed(() => props.activeTab.batchSqlExecution);
+const batchExecutionPercent = computed(() => {
+  const progress = batchExecutionProgress.value;
+  return progress?.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+});
 const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length) return true;
   return visibleResultItems.value.length > 0;
@@ -850,6 +857,21 @@ function selectResultItem(item: (typeof visibleResultItems.value)[number]) {
   });
 }
 
+function executionSummaryItemRange(item: ExecutionSummaryItem) {
+  if (typeof item.sourceFrom === "number" && typeof item.sourceTo === "number" && item.sql && props.activeTab.sql.slice(item.sourceFrom, item.sourceTo) === item.sql) {
+    return { from: item.sourceFrom, to: item.sourceTo };
+  }
+  return item.result ? resultSourceRange(props.activeTab.sql, item.result, item.statementIndex, activeEffectiveDatabaseType.value) : undefined;
+}
+
+function previewExecutionSummaryItem(item: ExecutionSummaryItem) {
+  queryEditorRef.value?.previewStatementRange(executionSummaryItemRange(item) ?? null);
+}
+
+function focusExecutionSummaryItem(item: ExecutionSummaryItem) {
+  queryEditorRef.value?.focusStatementRange(executionSummaryItemRange(item) ?? null);
+}
+
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
@@ -866,7 +888,7 @@ function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
-async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt" }) {
+async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
   const tab = props.activeTab;
   if (!tab || tab.mode !== "query") return;
   let filePath = `query-result.${payload.format}`;
@@ -877,7 +899,7 @@ async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" 
     if (!picked) return;
     filePath = picked as string;
   }
-  await queryStore.exportQuerySqlDirect(tab.id, payload.sql, payload.format, filePath);
+  await queryStore.exportQuerySqlDirect(tab.id, payload.sql, payload.format, filePath, payload.columnComments);
 }
 
 function pasteClipboardAsSqlInCondition() {
@@ -1295,37 +1317,68 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
             <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex-1 min-h-0 overflow-auto bg-background">
-              <div v-if="activeTab.isExecuting" class="flex h-full items-center justify-center text-sm text-muted-foreground">
-                <Loader2 class="mr-2 h-4 w-4 animate-spin" />
-                {{ t("executionSummary.executing") }}
+              <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
+                <Loader2 v-if="activeTab.isExecuting" class="mr-2 h-4 w-4 animate-spin" />
+                <template v-if="activeTab.isExecuting">{{ t("executionSummary.executing") }}</template>
+                <template v-else>{{ t("executionSummary.empty") }}</template>
               </div>
-              <div v-else-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
-                {{ t("executionSummary.empty") }}
-              </div>
-              <div v-else>
+              <div v-else class="min-w-[46rem]">
+                <div v-if="batchExecutionProgress" class="sticky top-0 z-10 border-b bg-background/95 px-3 py-2 backdrop-blur">
+                  <div class="mb-1.5 flex items-center gap-3 text-xs">
+                    <span class="font-medium">{{ activeTab.isExecuting ? t("executionSummary.executing") : t("executionSummary.finished") }}</span>
+                    <span class="tabular-nums text-muted-foreground">{{ batchExecutionProgress.completed }} / {{ batchExecutionProgress.total }}</span>
+                    <span class="ml-auto tabular-nums text-muted-foreground">{{ batchExecutionPercent }}%</span>
+                  </div>
+                  <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${batchExecutionPercent}%` }" />
+                  </div>
+                </div>
                 <div class="overflow-hidden border-b">
-                  <div class="grid grid-cols-[4rem_1fr_8rem_8rem_7rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                  <div class="grid grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
                     <div>{{ t("executionSummary.statement") }}</div>
-                    <div>{{ t("executionSummary.type") }}</div>
-                    <div class="text-right">{{ t("executionSummary.rows") }}</div>
+                    <div>{{ t("executionSummary.sql") }}</div>
+                    <div>{{ t("executionSummary.status") }}</div>
                     <div class="text-right">{{ t("executionSummary.affected") }}</div>
                     <div class="text-right">{{ t("executionSummary.time") }}</div>
                   </div>
-                  <div v-for="item in summaryItems" :key="item.index" class="grid grid-cols-[4rem_1fr_8rem_8rem_7rem] items-center border-b px-3 py-2 text-xs last:border-b-0">
-                    <div class="font-mono text-muted-foreground">#{{ item.index + 1 }}</div>
-                    <div class="flex min-w-0 items-center gap-2">
-                      <span class="inline-flex h-5 items-center rounded-full border px-2 text-[10px]" :class="item.isError ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'">
-                        {{ item.isError ? t("executionSummary.error") : t("executionSummary.success") }}
-                      </span>
-                      <span class="truncate">
-                        {{ item.hasTabularResult ? t("executionSummary.returnedTable", { count: item.returnedColumns }) : t("executionSummary.noTable") }}
+                  <button
+                    v-for="item in summaryItems"
+                    :key="item.statementIndex"
+                    type="button"
+                    class="grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs transition-colors last:border-b-0 hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
+                    :title="item.error || item.sql"
+                    @click="previewExecutionSummaryItem(item)"
+                    @dblclick="focusExecutionSummaryItem(item)"
+                    @keydown.enter.prevent="focusExecutionSummaryItem(item)"
+                  >
+                    <div class="font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
+                    <div class="min-w-0">
+                      <div class="truncate font-mono text-[11px] text-foreground">{{ item.sql || t("executionSummary.noSql") }}</div>
+                      <div v-if="item.error" class="mt-0.5 truncate text-[11px] text-destructive">{{ item.error }}</div>
+                    </div>
+                    <div>
+                      <span
+                        class="inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px]"
+                        :class="{
+                          'border-primary/35 bg-primary/10 text-primary': item.status === 'running',
+                          'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300': item.status === 'success',
+                          'border-destructive/40 bg-destructive/10 text-destructive': item.status === 'error',
+                          'border-border bg-muted/40 text-muted-foreground': item.status === 'pending' || item.status === 'skipped',
+                          'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300': item.status === 'cancelled',
+                        }"
+                      >
+                        <Loader2 v-if="item.status === 'running'" class="h-3 w-3 animate-spin" />
+                        <Check v-else-if="item.status === 'success'" class="h-3 w-3" />
+                        <X v-else-if="item.status === 'error'" class="h-3 w-3" />
+                        <SquareDashed v-else class="h-3 w-3" />
+                        {{ t(`executionSummary.statuses.${item.status}`) }}
                       </span>
                     </div>
-                    <div class="text-right tabular-nums">{{ item.returnedRows.toLocaleString() }}</div>
-                    <div class="text-right tabular-nums">{{ item.affectedRows.toLocaleString() }}</div>
-                    <div class="text-right tabular-nums">{{ item.executionTimeMs }}ms</div>
-                  </div>
+                    <div class="text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.affectedRows.toLocaleString() }}</div>
+                    <div class="text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                  </button>
                 </div>
+                <div class="px-3 py-2 text-[11px] text-muted-foreground">{{ t("executionSummary.navigationHint") }}</div>
               </div>
             </div>
 

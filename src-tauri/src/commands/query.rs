@@ -12,9 +12,13 @@ use dbx_core::sql::split_sql_statements;
 #[serde(rename_all = "camelCase")]
 struct ExecuteMultiProgress {
     execution_id: String,
+    statement_index: usize,
     completed: usize,
     total: usize,
     success: bool,
+    execution_time_ms: u128,
+    affected_rows: u64,
+    error: Option<String>,
 }
 
 #[tauri::command]
@@ -25,6 +29,7 @@ pub async fn execute_query(
     database: String,
     sql: String,
     schema: Option<String>,
+    catalog: Option<String>,
     execution_id: Option<String>,
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
@@ -54,6 +59,7 @@ pub async fn execute_query(
             max_rows,
             fetch_size,
             page_size,
+            catalog,
             result_session_id,
             client_session_id,
             timeout_secs,
@@ -74,6 +80,7 @@ pub async fn execute_multi(
     database: String,
     sql: String,
     schema: Option<String>,
+    catalog: Option<String>,
     execution_id: Option<String>,
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
@@ -96,10 +103,19 @@ pub async fn execute_multi(
     let progress = execution_id.as_ref().map(|execution_id| {
         let app = app.clone();
         let execution_id = execution_id.clone();
-        Arc::new(move |completed, total, success| {
+        Arc::new(move |progress: dbx_core::query::ExecuteMultiProgress| {
             let _ = app.emit(
                 "query-batch-progress",
-                ExecuteMultiProgress { execution_id: execution_id.clone(), completed, total, success },
+                ExecuteMultiProgress {
+                    execution_id: execution_id.clone(),
+                    statement_index: progress.statement_index,
+                    completed: progress.completed,
+                    total: progress.total,
+                    success: progress.success,
+                    execution_time_ms: progress.execution_time_ms,
+                    affected_rows: progress.affected_rows,
+                    error: progress.error,
+                },
             );
         }) as dbx_core::query::ExecuteMultiProgressCallback
     });
@@ -125,6 +141,7 @@ pub async fn execute_multi(
             max_rows,
             fetch_size,
             page_size,
+            catalog,
             result_session_id,
             client_session_id,
             timeout_secs,
@@ -167,9 +184,17 @@ pub async fn close_query_session(
     database: String,
     session_id: String,
     client_session_id: Option<String>,
+    catalog: Option<String>,
 ) -> Result<bool, String> {
-    dbx_core::query::close_query_session(&state, &connection_id, &database, &session_id, client_session_id.as_deref())
-        .await
+    dbx_core::query::close_query_session(
+        &state,
+        &connection_id,
+        &database,
+        &session_id,
+        client_session_id.as_deref(),
+        catalog.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -178,9 +203,18 @@ pub async fn close_client_connection_session(
     connection_id: String,
     database: String,
     client_session_id: String,
+    catalog: Option<String>,
 ) -> Result<bool, String> {
-    let database = if database.trim().is_empty() { None } else { Some(database.as_str()) };
+    let database = query_session_database(&database, catalog.as_deref());
     state.close_client_session_pool(&connection_id, database, &client_session_id).await
+}
+
+fn query_session_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
+    if database.trim().is_empty() || catalog.is_some() {
+        None
+    } else {
+        Some(database)
+    }
 }
 
 #[tauri::command]
@@ -230,6 +264,7 @@ pub async fn execute_in_transaction(
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
+    catalog: Option<String>,
 ) -> Result<db::QueryResult, String> {
     dbx_core::query::execute_statements_in_transaction(
         &state,
@@ -237,6 +272,7 @@ pub async fn execute_in_transaction(
         &database,
         &statements,
         schema.as_deref(),
+        catalog.as_deref(),
     )
     .await
 }
@@ -274,8 +310,10 @@ pub async fn begin_manual_transaction(
     connection_id: String,
     database: String,
     schema: Option<String>,
+    catalog: Option<String>,
 ) -> Result<String, String> {
-    dbx_core::query::begin_manual_transaction(&state, &connection_id, &database, schema.as_deref()).await
+    dbx_core::query::begin_manual_transaction(&state, &connection_id, &database, schema.as_deref(), catalog.as_deref())
+        .await
 }
 
 #[tauri::command]
@@ -390,7 +428,7 @@ pub fn build_create_database_sql(options: dbx_core::db_admin_sql::CreateDatabase
     dbx_core::db_admin_sql::build_create_database_sql(options)
 }
 
-#[cfg(feature = "duckdb-bundled")]
+#[cfg(feature = "duckdb-sidecar")]
 #[tauri::command]
 pub fn build_duckdb_attach_database_sql(
     options: dbx_core::db_admin_sql::DuckDbAttachDatabaseSqlOptions,

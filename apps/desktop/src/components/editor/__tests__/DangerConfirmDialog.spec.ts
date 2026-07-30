@@ -51,6 +51,28 @@ afterEach(() => {
 });
 
 describe("DangerConfirmDialog SQL preview", () => {
+  it("wraps SQL by default, including long unbroken identifiers", async () => {
+    await mountDialog(`UPDATE ${"very_long_identifier_".repeat(20)} SET value = 1;`);
+
+    const container = document.body.querySelector('[data-testid="danger-code-container"]');
+    const preview = container?.querySelector('[data-testid="danger-code-preview"]');
+    const code = preview?.querySelector("pre");
+    expect(code?.classList).toContain("whitespace-pre-wrap");
+    expect(code?.classList).toContain("break-all");
+    expect(preview?.classList).toContain("overflow-auto");
+    const actions = container?.querySelector('[data-testid="danger-code-actions"]');
+    expect(actions?.classList).toContain("justify-end");
+    expect(actions?.nextElementSibling).toBe(preview);
+    expect(actions?.classList).not.toContain("absolute");
+
+    actions?.querySelectorAll("button")[1]?.click();
+    await nextTick();
+
+    expect(code?.classList).toContain("whitespace-pre");
+    expect(code?.classList).toContain("w-max");
+    expect(code?.classList).toContain("min-w-full");
+  });
+
   it("fully highlights short SQL without a truncation notice", async () => {
     const sql = "DROP TABLE IF EXISTS users;";
 

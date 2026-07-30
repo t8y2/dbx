@@ -10,7 +10,7 @@ describe("getCategoryForAgentDriver", () => {
     // domestic
     expect(getCategoryForAgentDriver("dameng")).toBe("domestic");
     // lightweight
-    expect(getCategoryForAgentDriver("access")).toBe("lightweight");
+    expect(getCategoryForAgentDriver("duckdb")).toBe("lightweight");
     // document
     expect(getCategoryForAgentDriver("mongodb")).toBe("document");
     // graph_ai
@@ -69,8 +69,8 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
 
   it("covers all known agent driver keys with no stale entries", () => {
     // Golden set — mirrors the store-visible entries in agent_catalog.rs
-    // plus EXTRA_DRIVER_STORE_ENTRIES (kafka, rocketmq, rabbitmq,
-    // sqlserver-legacy) and the PrestoSQL built-in driver.
+    // plus EXTRA_DRIVER_STORE_ENTRIES (duckdb, kafka, rocketmq,
+    // rabbitmq, sqlserver-legacy) and the PrestoSQL built-in driver.
     // When an Agent driver is added to the catalog its key MUST appear here;
     // removing a key from the map without removing it from the list below
     // will fail this test.
@@ -112,6 +112,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "yashandb",
       // lightweight
       "access",
+      "duckdb",
       "h2",
       "h2-legacy",
       // document

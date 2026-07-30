@@ -43,6 +43,12 @@ describe("tableStructureCapabilities", () => {
     expect(getTableStructureCapabilities("dameng", "dameng").comment).toBe(true);
   });
 
+  it("enables alter primary key for Dameng without enabling it for Oracle", () => {
+    expect(getTableStructureCapabilities("dameng", "dameng").alterPrimaryKey).toBe(true);
+    expect(getTableStructureCapabilities("oracle", "oracle").alterPrimaryKey).toBe(false);
+    expect(getTableStructureCapabilities("oceanbase-oracle", "oceanbase-oracle").alterPrimaryKey).toBe(false);
+  });
+
   it("uses local-only column reordering for editable databases without physical reorder support", () => {
     for (const databaseType of ["sqlserver", "postgres", "sqlite", "oracle", "dameng", "duckdb", "informix"] as const) {
       expect(supportsLocalTableColumnReorder(databaseType, databaseType)).toBe(true);

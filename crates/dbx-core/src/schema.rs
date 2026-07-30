@@ -117,605 +117,6 @@ pub fn table_name_filter_matches(name: &str, filter: Option<&TableNameFilter>) -
     included && !exclude_patterns.iter().any(|pattern| sql_like_pattern_matches_case_insensitive(pattern, name))
 }
 
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_query_tables(con: &duckdb::Connection) -> Result<Vec<db::TableInfo>, String> {
-    duckdb_query_tables_in_database(con, "main", "main")
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_query_tables_in_database(
-    con: &duckdb::Connection,
-    database: &str,
-    schema: &str,
-) -> Result<Vec<db::TableInfo>, String> {
-    duckdb_query_tables_in_database_with_attached(con, database, schema, &[])
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_query_tables_in_database_with_attached(
-    con: &duckdb::Connection,
-    database: &str,
-    schema: &str,
-    attached_names: &[String],
-) -> Result<Vec<db::TableInfo>, String> {
-    let database = duckdb_catalog_name(con, database, attached_names)?;
-    let mut stmt = con.prepare(
-        "SELECT table_name, table_type FROM information_schema.tables WHERE table_catalog = ? AND table_schema = ? ORDER BY table_name"
-    ).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map((database.as_str(), schema), |row| {
-            Ok(db::TableInfo {
-                name: row.get::<_, String>(0)?,
-                table_type: row.get::<_, String>(1)?,
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    let tables: Vec<db::TableInfo> = rows.filter_map(|r| r.ok()).collect();
-    if tables.is_empty() && duckdb_is_quack_catalog(con, &database) {
-        if let Some(remote) = duckdb_quack_remote_tables(con, &database, schema) {
-            return Ok(remote);
-        }
-    }
-    Ok(tables)
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_attach_database(con: &duckdb::Connection, name: &str, path: &str) -> Result<(), String> {
-    let name = name.trim();
-    let path = path.trim();
-    if name.is_empty() || path.is_empty() {
-        return Err("DuckDB attached database name and path are required".to_string());
-    }
-    let sql = format!("ATTACH {} AS {}", duckdb_quote_string(path), duckdb_quote_ident(name));
-    con.execute_batch(&sql).map_err(|e| format!("Failed to attach database \"{name}\": {e}"))
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_list_databases(con: &duckdb::Connection) -> Result<Vec<db::DatabaseInfo>, String> {
-    duckdb_list_databases_with_attached(con, &[])
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_list_databases_with_attached(
-    con: &duckdb::Connection,
-    attached_names: &[String],
-) -> Result<Vec<db::DatabaseInfo>, String> {
-    let primary = duckdb_primary_catalog(con, attached_names)?;
-    let mut stmt = con.prepare("SHOW DATABASES").map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            let name = row.get::<_, String>(0)?;
-            Ok(db::DatabaseInfo { name: if name == primary { "main".to_string() } else { name } })
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_list_schemas(con: &duckdb::Connection, database: &str) -> Result<Vec<String>, String> {
-    duckdb_list_schemas_with_attached(con, database, &[])
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_list_schemas_with_attached(
-    con: &duckdb::Connection,
-    database: &str,
-    attached_names: &[String],
-) -> Result<Vec<String>, String> {
-    let database = duckdb_catalog_name(con, database, attached_names)?;
-    let mut stmt = con
-        .prepare(
-            "SELECT schema_name FROM information_schema.schemata WHERE catalog_name = ? AND schema_name NOT IN ('information_schema', 'pg_catalog') ORDER BY schema_name",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([database.as_str()], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-    let schemas: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-    if schemas.is_empty() && duckdb_is_quack_catalog(con, &database) {
-        if let Some(remote) = duckdb_quack_remote_schemas(con, &database) {
-            return Ok(remote);
-        }
-    }
-    Ok(schemas)
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_object_source_with_attached(
-    con: &duckdb::Connection,
-    database: &str,
-    schema: &str,
-    name: &str,
-    object_type: &db::ObjectSourceKind,
-    attached_names: &[String],
-) -> Result<String, String> {
-    if !matches!(object_type, db::ObjectSourceKind::View) {
-        return Err("DuckDB object source only supports views".to_string());
-    }
-
-    let database = duckdb_catalog_name(con, database, attached_names)?;
-    let mut stmt = con
-        .prepare("SELECT sql FROM duckdb_views() WHERE database_name = ? AND schema_name = ? AND view_name = ?")
-        .map_err(|e| e.to_string())?;
-    let mut rows =
-        stmt.query_map((database.as_str(), schema, name), |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-
-    match rows.next() {
-        Some(row) => row.map_err(|e| e.to_string()),
-        None => Err(format!("DuckDB view source not found: {database}.{schema}.{name}")),
-    }
-}
-
-/// Identifies quack catalogs by the storage-extension `type` that
-/// `duckdb_databases()` reports, rather than by the attach aliases parsed from
-/// the init script: `ATTACH 'quack:host:port'` without an `AS` alias gets a
-/// derived catalog name (e.g. `localhost:9494`) that no parser sees.
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_is_quack_catalog(con: &duckdb::Connection, database: &str) -> bool {
-    con.query_row("SELECT type FROM duckdb_databases() WHERE lower(database_name) = lower(?)", [database], |row| {
-        row.get::<_, String>(0)
-    })
-    .map(|catalog_type| catalog_type.eq_ignore_ascii_case("quack"))
-    .unwrap_or(false)
-}
-
-/// Quack-attached catalogs expose no metadata on the client side (the beta
-/// extension implements name resolution and streaming scans, but not catalog
-/// enumeration: `information_schema`, `duckdb_tables()` and `SHOW ALL TABLES`
-/// all skip the remote catalog). The extension's `quack_query_by_name` table
-/// function runs SQL on the remote server, so when a metadata query for an
-/// attached catalog comes back empty we ask the remote for its own
-/// information_schema. For non-quack catalogs (or when the extension is not
-/// loaded) the function call errors and the fallback quietly yields `None`.
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_quack_remote_query<T>(
-    con: &duckdb::Connection,
-    alias: &str,
-    remote_sql: &str,
-    map_row: impl Fn(&duckdb::Row<'_>) -> Result<T, duckdb::Error>,
-) -> Option<Vec<T>> {
-    let sql = format!(
-        "SELECT * FROM quack_query_by_name({}, {})",
-        duckdb_quote_string(alias),
-        duckdb_quote_string(remote_sql)
-    );
-    let mut stmt = match con.prepare(&sql) {
-        Ok(stmt) => stmt,
-        Err(e) => {
-            log::debug!("quack metadata fallback unavailable for catalog {alias}: {e}");
-            return None;
-        }
-    };
-    let rows = match stmt.query_map([], |row| map_row(row)) {
-        Ok(rows) => rows,
-        Err(e) => {
-            log::debug!("quack metadata fallback query failed for catalog {alias}: {e}");
-            return None;
-        }
-    };
-    Some(rows.filter_map(|r| r.ok()).collect())
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_quack_remote_schemas(con: &duckdb::Connection, alias: &str) -> Option<Vec<String>> {
-    duckdb_quack_remote_query(
-        con,
-        alias,
-        "SELECT DISTINCT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog') ORDER BY schema_name",
-        |row| row.get::<_, String>(0),
-    )
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_quack_remote_tables(con: &duckdb::Connection, alias: &str, schema: &str) -> Option<Vec<db::TableInfo>> {
-    let remote_sql = format!(
-        "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = {} ORDER BY table_name",
-        duckdb_quote_string(schema)
-    );
-    duckdb_quack_remote_query(con, alias, &remote_sql, |row| {
-        Ok(db::TableInfo {
-            name: row.get::<_, String>(0)?,
-            table_type: row.get::<_, String>(1)?,
-            comment: None,
-            parent_schema: None,
-            parent_name: None,
-        })
-    })
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_quack_remote_columns(
-    con: &duckdb::Connection,
-    alias: &str,
-    schema: &str,
-    table: &str,
-) -> Option<Vec<db::ColumnInfo>> {
-    let pk_sql = format!(
-        "SELECT kcu.column_name
-         FROM information_schema.table_constraints tc
-         JOIN information_schema.key_column_usage kcu
-           ON tc.constraint_name = kcu.constraint_name
-          AND tc.table_schema = kcu.table_schema
-          AND tc.table_name = kcu.table_name
-         WHERE tc.constraint_type = 'PRIMARY KEY'
-           AND tc.table_schema = {schema}
-           AND tc.table_name = {table}
-         ORDER BY kcu.ordinal_position",
-        schema = duckdb_quote_string(schema),
-        table = duckdb_quote_string(table),
-    );
-    let primary_keys: std::collections::HashSet<String> =
-        duckdb_quack_remote_query(con, alias, &pk_sql, |row| row.get::<_, String>(0))
-            .map(|names| names.into_iter().collect())
-            .unwrap_or_default();
-
-    let columns_sql = format!(
-        "SELECT column_name, data_type, is_nullable, column_default
-         FROM information_schema.columns
-         WHERE table_schema = {schema} AND table_name = {table}
-         ORDER BY ordinal_position",
-        schema = duckdb_quote_string(schema),
-        table = duckdb_quote_string(table),
-    );
-    duckdb_quack_remote_query(con, alias, &columns_sql, |row| {
-        let name = row.get::<_, String>(0)?;
-        Ok(db::ColumnInfo {
-            is_primary_key: primary_keys.contains(&name),
-            name,
-            data_type: row.get::<_, String>(1)?,
-            is_nullable: row.get::<_, String>(2).unwrap_or_default() == "YES",
-            column_default: row.get::<_, Option<String>>(3)?,
-            extra: None,
-            comment: None,
-            numeric_precision: None,
-            numeric_scale: None,
-            character_maximum_length: None,
-            enum_values: None,
-            ..Default::default()
-        })
-    })
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_catalog_name(con: &duckdb::Connection, database: &str, attached_names: &[String]) -> Result<String, String> {
-    if database.trim().is_empty() || database == "main" {
-        return duckdb_primary_catalog(con, attached_names);
-    }
-    Ok(database.to_string())
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_primary_catalog(con: &duckdb::Connection, attached_names: &[String]) -> Result<String, String> {
-    if attached_names.is_empty() {
-        return duckdb_current_database(con);
-    }
-    let attached: std::collections::HashSet<String> = attached_names.iter().map(|name| name.to_lowercase()).collect();
-    let mut stmt = con.prepare("SHOW DATABASES").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-    for row in rows {
-        let name = row.map_err(|e| e.to_string())?;
-        if !attached.contains(&name.to_lowercase()) {
-            return Ok(name);
-        }
-    }
-    duckdb_current_database(con)
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_current_database(con: &duckdb::Connection) -> Result<String, String> {
-    con.query_row("SELECT current_database()", [], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_quote_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_quote_string(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_query_columns(con: &duckdb::Connection, table: &str) -> Result<Vec<db::ColumnInfo>, String> {
-    duckdb_query_columns_in_database(con, "main", "main", table)
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_query_columns_in_database(
-    con: &duckdb::Connection,
-    database: &str,
-    schema: &str,
-    table: &str,
-) -> Result<Vec<db::ColumnInfo>, String> {
-    duckdb_query_columns_in_database_with_attached(con, database, schema, table, &[])
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_query_columns_in_database_with_attached(
-    con: &duckdb::Connection,
-    database: &str,
-    schema: &str,
-    table: &str,
-    attached_names: &[String],
-) -> Result<Vec<db::ColumnInfo>, String> {
-    let database = duckdb_catalog_name(con, database, attached_names)?;
-    let mut pk_stmt = con
-        .prepare(
-            "SELECT kcu.column_name
-         FROM information_schema.table_constraints tc
-         JOIN information_schema.key_column_usage kcu
-           ON tc.constraint_name = kcu.constraint_name
-          AND tc.table_schema = kcu.table_schema
-          AND tc.table_name = kcu.table_name
-         WHERE tc.constraint_type = 'PRIMARY KEY'
-           AND tc.table_catalog = ?
-           AND tc.table_schema = ?
-           AND tc.table_name = ?
-         ORDER BY kcu.ordinal_position",
-        )
-        .map_err(|e| e.to_string())?;
-    let pk_rows = pk_stmt
-        .query_map((database.as_str(), schema, table), |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
-    let primary_keys: std::collections::HashSet<String> = pk_rows.filter_map(|r| r.ok()).collect();
-    let column_comments = duckdb_column_comments(con, &database, schema, table);
-
-    let mut stmt = con
-        .prepare(
-            "SELECT column_name, data_type, is_nullable, column_default
-         FROM information_schema.columns
-         WHERE table_catalog = ? AND table_schema = ? AND table_name = ?
-         ORDER BY ordinal_position",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map((database.as_str(), schema, table), |row| {
-            let name = row.get::<_, String>(0)?;
-            let comment = column_comments.get(&name).cloned().flatten();
-            Ok(db::ColumnInfo {
-                is_primary_key: primary_keys.contains(&name),
-                name,
-                data_type: row.get::<_, String>(1)?,
-                is_nullable: row.get::<_, String>(2).unwrap_or_default() == "YES",
-                column_default: row.get::<_, Option<String>>(3)?,
-                extra: None,
-                comment,
-                numeric_precision: None,
-                numeric_scale: None,
-                character_maximum_length: None,
-                enum_values: None,
-                ..Default::default()
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    let columns: Vec<db::ColumnInfo> = rows.filter_map(|r| r.ok()).collect();
-    if columns.is_empty() && duckdb_is_quack_catalog(con, &database) {
-        if let Some(remote) = duckdb_quack_remote_columns(con, &database, schema, table) {
-            return Ok(remote);
-        }
-    }
-    Ok(columns)
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_column_comments(
-    con: &duckdb::Connection,
-    database: &str,
-    schema: &str,
-    table: &str,
-) -> HashMap<String, Option<String>> {
-    let Ok(mut stmt) = con.prepare(
-        "SELECT column_name, comment FROM duckdb_columns() \
-         WHERE database_name = ? AND schema_name = ? AND table_name = ?",
-    ) else {
-        // Older DuckDB versions may not expose the comment column; keep metadata browsing functional.
-        return HashMap::new();
-    };
-    let Ok(rows) = stmt
-        .query_map((database, schema, table), |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
-    else {
-        return HashMap::new();
-    };
-    rows.filter_map(Result::ok).collect()
-}
-
-#[cfg(feature = "duckdb-bundled")]
-pub fn duckdb_completion_assistant_search(
-    con: &duckdb::Connection,
-    request: &db::CompletionAssistantRequest,
-    attached_names: &[String],
-) -> Result<db::CompletionAssistantResponse, String> {
-    let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
-    let kinds = if request.object_kinds.is_empty() {
-        vec![db::CompletionAssistantObjectKind::Table, db::CompletionAssistantObjectKind::View]
-    } else {
-        request.object_kinds.clone()
-    };
-    let mut candidates = Vec::new();
-
-    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Schema)) {
-        candidates.extend(duckdb_completion_schemas(con, request, attached_names, limit)?);
-        if candidates.len() >= limit {
-            return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
-        }
-    }
-
-    if kinds.iter().any(db::CompletionAssistantObjectKind::is_table_like) {
-        candidates.extend(duckdb_completion_tables(con, request, &kinds, attached_names, limit - candidates.len())?);
-        if candidates.len() >= limit {
-            return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
-        }
-    }
-
-    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Column)) {
-        candidates.extend(duckdb_completion_columns(con, request, attached_names, limit - candidates.len())?);
-        if candidates.len() >= limit {
-            return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
-        }
-    }
-
-    Ok(db::CompletionAssistantResponse { candidates, incomplete: false, fallback_used: false })
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_completion_schemas(
-    con: &duckdb::Connection,
-    request: &db::CompletionAssistantRequest,
-    attached_names: &[String],
-    limit: usize,
-) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let database = duckdb_catalog_name(con, &request.database, attached_names)?;
-    let pattern = duckdb_completion_like_pattern(request);
-    let mut stmt = con
-        .prepare(
-            "SELECT schema_name
-             FROM information_schema.schemata
-             WHERE catalog_name = ?
-               AND schema_name NOT IN ('information_schema', 'pg_catalog')
-               AND lower(schema_name) LIKE lower(?) ESCAPE '\\'
-             ORDER BY schema_name
-             LIMIT ?",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map((database.as_str(), pattern.as_str(), limit as i64), |row| {
-            let schema = row.get::<_, String>(0)?;
-            Ok(db::CompletionAssistantCandidate {
-                name: schema.clone(),
-                kind: db::CompletionAssistantCandidateKind::Schema,
-                database: Some(request.database.clone()),
-                schema: Some(schema),
-                parent_schema: None,
-                parent_name: None,
-                comment: None,
-                data_type: None,
-                signature: None,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_completion_tables(
-    con: &duckdb::Connection,
-    request: &db::CompletionAssistantRequest,
-    kinds: &[db::CompletionAssistantObjectKind],
-    attached_names: &[String],
-    limit: usize,
-) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let database = duckdb_catalog_name(con, &request.database, attached_names)?;
-    let schema = request.parent_schema.as_deref().or(request.schema.as_deref()).unwrap_or("main");
-    let include_tables = kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Table));
-    let include_views = kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::View));
-    let pattern = duckdb_completion_like_pattern(request);
-    let mut stmt = con
-        .prepare(
-            "SELECT table_name, table_type
-             FROM information_schema.tables
-             WHERE table_catalog = ?
-               AND table_schema = ?
-               AND ((? AND table_type = 'BASE TABLE') OR (? AND table_type = 'VIEW'))
-               AND lower(table_name) LIKE lower(?) ESCAPE '\\'
-             ORDER BY table_name
-             LIMIT ?",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map((database.as_str(), schema, include_tables, include_views, pattern.as_str(), limit as i64), |row| {
-            let table_type = row.get::<_, String>(1)?;
-            Ok(db::CompletionAssistantCandidate {
-                name: row.get(0)?,
-                kind: if table_type.eq_ignore_ascii_case("VIEW") {
-                    db::CompletionAssistantCandidateKind::View
-                } else {
-                    db::CompletionAssistantCandidateKind::Table
-                },
-                database: Some(request.database.clone()),
-                schema: Some(schema.to_string()),
-                parent_schema: None,
-                parent_name: None,
-                comment: None,
-                data_type: None,
-                signature: None,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_completion_columns(
-    con: &duckdb::Connection,
-    request: &db::CompletionAssistantRequest,
-    attached_names: &[String],
-    limit: usize,
-) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) else {
-        return Ok(Vec::new());
-    };
-    let database = duckdb_catalog_name(con, &request.database, attached_names)?;
-    let schema = request.parent_schema.as_deref().or(request.schema.as_deref()).unwrap_or("main");
-    let pattern = duckdb_completion_like_pattern(request);
-    let mut stmt = con
-        .prepare(
-            "SELECT column_name, data_type
-             FROM information_schema.columns
-             WHERE table_catalog = ?
-               AND table_schema = ?
-               AND table_name = ?
-               AND lower(column_name) LIKE lower(?) ESCAPE '\\'
-             ORDER BY ordinal_position
-             LIMIT ?",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map((database.as_str(), schema, table, pattern.as_str(), limit as i64), |row| {
-            Ok(db::CompletionAssistantCandidate {
-                name: row.get(0)?,
-                kind: db::CompletionAssistantCandidateKind::Column,
-                database: Some(request.database.clone()),
-                schema: Some(schema.to_string()),
-                parent_schema: Some(schema.to_string()),
-                parent_name: Some(table.to_string()),
-                comment: None,
-                data_type: Some(row.get(1)?),
-                signature: None,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_completion_like_pattern(request: &db::CompletionAssistantRequest) -> String {
-    let mask = request.mask.trim().trim_matches('%');
-    let escaped = mask.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-    match request.match_mode.as_ref().unwrap_or(&db::CompletionAssistantMatchMode::Prefix) {
-        db::CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
-        db::CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
-    }
-}
-
-#[cfg(feature = "duckdb-bundled")]
-async fn duckdb_attached_database_names(state: &AppState, connection_id: &str) -> Vec<String> {
-    state.configs.read().await.get(connection_id).map(crate::db::duckdb_sql::config_attached_names).unwrap_or_default()
-}
-
-// ClickHouse 无 schema 概念：schema 参数携带 SQL 中 `库.表` 限定的目标库，
-// database 参数是 tab/连接的当前库。与 mysql_table_metadata_catalog 一致，
-// schema 非空时必须优先，否则跨库查询会在当前库下查不到元数据（字段注释丢失）
 fn clickhouse_metadata_database<'a>(database: &'a str, schema: &'a str) -> &'a str {
     if schema.trim().is_empty() {
         database
@@ -1075,10 +476,6 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
     let db_config = connection_config(state, connection_id).await;
     {
         let connections = state.connections.read().await;
-        #[cfg(feature = "duckdb-bundled")]
-        if extract_pool!(&connections, connection_id, ExternalTabular).is_some() {
-            return Ok(vec![db::DatabaseInfo { name: "main".to_string() }]);
-        }
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(connection_id) {
             let config = config.clone();
             let session = session.clone();
@@ -1114,8 +511,6 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         }
     }
 
-    #[cfg(feature = "duckdb-bundled")]
-    let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(connection_id).ok_or("Connection not found")?;
@@ -1131,12 +526,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
         PoolKind::HBase(client) => db::hbase_driver::list_namespaces(client).await,
-        #[cfg(feature = "duckdb-bundled")]
-        PoolKind::DuckDb(con) => {
-            let con = con.lock().map_err(|e| e.to_string())?;
-            duckdb_list_databases_with_attached(&con, &duckdb_attached_names)
-        }
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
             drop(connections);
@@ -1340,14 +730,7 @@ async fn list_schemas_once(
         PoolKind::Postgres(p) => db::postgres::list_schemas_with_system(p, show_system_schemas)
             .await
             .map(|schemas| filter_visible_schema_names(schemas, visible_schema_filter.as_deref())),
-        #[cfg(feature = "duckdb-bundled")]
-        PoolKind::DuckDb(con) => {
-            let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
-            let con = con.lock().map_err(|e| e.to_string())?;
-            duckdb_list_schemas_with_attached(&con, database, &duckdb_attached_names)
-                .map(|schemas| filter_visible_schema_names(schemas, visible_schema_filter.as_deref()))
-        }
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
             let database = database.to_string();
@@ -2267,24 +1650,10 @@ async fn list_tables_once(
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
-    #[cfg(feature = "duckdb-bundled")]
-    let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
     let db_config = connection_config(state, connection_id).await;
 
     {
         let connections = state.connections.read().await;
-        #[cfg(feature = "duckdb-bundled")]
-        if let Some(ext_pool) = extract_pool!(&connections, &pool_key, ExternalTabular) {
-            drop(connections);
-            let cache = ext_pool.cache.clone();
-            return tokio::task::spawn_blocking(move || {
-                let con = cache.lock().map_err(|e| e.to_string())?;
-                duckdb_query_tables(&con)
-            })
-            .await
-            .map_err(|e| e.to_string())?
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
-        }
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
             let config = config.clone();
             let session = session.clone();
@@ -2320,14 +1689,7 @@ async fn list_tables_once(
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
-        #[cfg(feature = "duckdb-bundled")]
-        if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
-            drop(connections);
-            let con = con.lock().map_err(|e| e.to_string())?;
-            return duckdb_query_tables_in_database_with_attached(&con, database, schema, &duckdb_attached_names)
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
-        }
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         if let Some(client) = extract_pool!(&connections, &pool_key, DuckDbWorker) {
             let database = database.to_string();
             let schema = schema.to_string();
@@ -2996,11 +2358,6 @@ mod tests {
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
         visible_schema_filter, TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
-    #[cfg(feature = "duckdb-bundled")]
-    use super::{
-        duckdb_attach_database, duckdb_completion_assistant_search, duckdb_list_databases,
-        duckdb_object_source_with_attached, duckdb_query_tables_in_database,
-    };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use std::collections::HashMap;
 
@@ -3063,6 +2420,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -3599,187 +2957,6 @@ mod tests {
         assert_eq!(columns[1].numeric_precision, None);
         assert_eq!(columns[1].numeric_scale, None);
         assert_eq!(columns[1].character_maximum_length, Some(64));
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[test]
-    fn duckdb_list_databases_includes_attached_database() {
-        let unique = uuid::Uuid::new_v4();
-        let path = std::env::temp_dir().join(format!("dbx-attached-{unique}.duckdb"));
-        let _ = std::fs::remove_file(&path);
-        let con = duckdb::Connection::open_in_memory().unwrap();
-
-        duckdb_attach_database(&con, "analytics", path.to_str().unwrap()).unwrap();
-        let databases = duckdb_list_databases(&con).unwrap();
-
-        assert!(databases.iter().any(|database| database.name == "main"));
-        assert!(databases.iter().any(|database| database.name == "analytics"));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[test]
-    fn duckdb_query_tables_filters_by_attached_database() {
-        let unique = uuid::Uuid::new_v4();
-        let path = std::env::temp_dir().join(format!("dbx-attached-tables-{unique}.duckdb"));
-        let _ = std::fs::remove_file(&path);
-        let con = duckdb::Connection::open_in_memory().unwrap();
-
-        con.execute_batch("CREATE TABLE main_table(id INTEGER);").unwrap();
-        duckdb_attach_database(&con, "analytics", path.to_str().unwrap()).unwrap();
-        con.execute_batch("CREATE TABLE analytics.attached_table(id INTEGER);").unwrap();
-
-        let main_tables = duckdb_query_tables_in_database(&con, "main", "main").unwrap();
-        let attached_tables = duckdb_query_tables_in_database(&con, "analytics", "main").unwrap();
-
-        assert!(main_tables.iter().any(|table| table.name == "main_table"));
-        assert!(!main_tables.iter().any(|table| table.name == "attached_table"));
-        assert!(attached_tables.iter().any(|table| table.name == "attached_table"));
-        assert!(!attached_tables.iter().any(|table| table.name == "main_table"));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[test]
-    fn duckdb_query_columns_includes_column_comments() {
-        let con = duckdb::Connection::open_in_memory().unwrap();
-        con.execute_batch(
-            "CREATE TABLE users (id INTEGER, name VARCHAR); \
-             COMMENT ON COLUMN users.name IS 'Display name';",
-        )
-        .unwrap();
-
-        let columns = super::duckdb_query_columns(&con, "users").unwrap();
-        let name = columns.iter().find(|column| column.name == "name").unwrap();
-
-        assert_eq!(name.comment.as_deref(), Some("Display name"));
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[test]
-    fn duckdb_object_source_filters_by_schema_and_view_name() {
-        let con = duckdb::Connection::open_in_memory().unwrap();
-        con.execute_batch(
-            "CREATE SCHEMA reporting; \
-             CREATE VIEW main.active_orders AS SELECT 'main' AS origin; \
-             CREATE VIEW reporting.active_orders AS SELECT 'reporting' AS origin;",
-        )
-        .unwrap();
-
-        let main_source =
-            duckdb_object_source_with_attached(&con, "main", "main", "active_orders", &db::ObjectSourceKind::View, &[])
-                .unwrap();
-        let reporting_source = duckdb_object_source_with_attached(
-            &con,
-            "main",
-            "reporting",
-            "active_orders",
-            &db::ObjectSourceKind::View,
-            &[],
-        )
-        .unwrap();
-
-        assert!(main_source.contains("'main'"));
-        assert!(reporting_source.contains("'reporting'"));
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[test]
-    fn duckdb_object_source_rejects_unsupported_or_missing_objects() {
-        let con = duckdb::Connection::open_in_memory().unwrap();
-
-        let unsupported = duckdb_object_source_with_attached(
-            &con,
-            "main",
-            "main",
-            "calculate_total",
-            &db::ObjectSourceKind::Function,
-            &[],
-        )
-        .unwrap_err();
-        let missing =
-            duckdb_object_source_with_attached(&con, "main", "main", "missing_view", &db::ObjectSourceKind::View, &[])
-                .unwrap_err();
-
-        assert_eq!(unsupported, "DuckDB object source only supports views");
-        assert!(missing.contains("DuckDB view source not found"));
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[test]
-    fn duckdb_catalog_view_source_can_replace_existing_view() {
-        let con = duckdb::Connection::open_in_memory().unwrap();
-        con.execute_batch("CREATE VIEW active_orders AS SELECT 1 AS value;").unwrap();
-        let source =
-            duckdb_object_source_with_attached(&con, "main", "main", "active_orders", &db::ObjectSourceKind::View, &[])
-                .unwrap();
-        let edited_source = source.replace("SELECT 1", "SELECT 2");
-        assert_ne!(edited_source, source);
-
-        let statements = crate::object_source_sql::build_executable_object_source_statements(
-            crate::object_source_sql::EditableObjectSourceSqlInput {
-                database_type: DatabaseType::DuckDb,
-                object_type: db::ObjectSourceKind::View,
-                schema: Some("main".to_string()),
-                name: "active_orders".to_string(),
-                source: edited_source,
-            },
-        )
-        .unwrap();
-        con.execute_batch(&statements.join("\n")).unwrap();
-
-        let value = con.query_row("SELECT value FROM active_orders", [], |row| row.get::<_, i32>(0)).unwrap();
-        assert_eq!(value, 2);
-    }
-
-    #[cfg(feature = "duckdb-bundled")]
-    #[test]
-    fn duckdb_completion_assistant_searches_catalog_metadata_with_limit() {
-        let con = duckdb::Connection::open_in_memory().unwrap();
-        con.execute_batch(
-            "CREATE TABLE account(id INTEGER, display_name VARCHAR); CREATE VIEW account_view AS SELECT id FROM account;",
-        )
-        .unwrap();
-
-        let request = db::CompletionAssistantRequest {
-            connection_id: "c1".to_string(),
-            database: "main".to_string(),
-            schema: Some("main".to_string()),
-            object_kinds: vec![db::CompletionAssistantObjectKind::Table, db::CompletionAssistantObjectKind::View],
-            mask: "account".to_string(),
-            case_sensitive: false,
-            global_search: false,
-            max_results: Some(1),
-            search_in_comments: false,
-            search_in_definitions: false,
-            parent_schema: Some("main".to_string()),
-            parent_name: None,
-            match_mode: Some(db::CompletionAssistantMatchMode::Prefix),
-        };
-
-        let tables = duckdb_completion_assistant_search(&con, &request, &[]).unwrap();
-        assert_eq!(tables.candidates.len(), 1);
-        assert!(tables.incomplete);
-        assert!(!tables.fallback_used);
-        assert_eq!(tables.candidates[0].name, "account");
-
-        let columns = duckdb_completion_assistant_search(
-            &con,
-            &db::CompletionAssistantRequest {
-                object_kinds: vec![db::CompletionAssistantObjectKind::Column],
-                mask: "name".to_string(),
-                max_results: Some(10),
-                parent_name: Some("account".to_string()),
-                match_mode: Some(db::CompletionAssistantMatchMode::Contains),
-                ..request
-            },
-            &[],
-        )
-        .unwrap();
-        assert_eq!(columns.candidates.len(), 1);
-        assert_eq!(columns.candidates[0].name, "display_name");
     }
 
     #[test]
@@ -4414,14 +3591,12 @@ pub async fn completion_assistant_search_core(
             }
         }
 
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         {
-            let duckdb_attached_names = duckdb_attached_database_names(state, &request.connection_id).await;
             let connections = state.connections.read().await;
-            if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
+            if let Some(client) = extract_pool!(&connections, &pool_key, DuckDbWorker) {
                 drop(connections);
-                let con = con.lock().map_err(|e| e.to_string())?;
-                return duckdb_completion_assistant_search(&con, &request, &duckdb_attached_names);
+                return client.completion_assistant(request.clone()).await;
             }
         }
 
@@ -4727,32 +3902,6 @@ async fn list_objects_once(
 
     {
         let connections = state.connections.read().await;
-        #[cfg(feature = "duckdb-bundled")]
-        if let Some(ext_pool) = extract_pool!(&connections, &pool_key, ExternalTabular) {
-            drop(connections);
-            let cache = ext_pool.cache.clone();
-            let objects = tokio::task::spawn_blocking(move || {
-                let con = cache.lock().map_err(|e| e.to_string())?;
-                Ok(duckdb_query_tables(&con)?
-                    .into_iter()
-                    .map(|table| db::ObjectInfo {
-                        name: table.name,
-                        object_type: table.table_type,
-                        schema: None,
-                        valid: None,
-                        signature: None,
-                        comment: table.comment,
-                        created_at: None,
-                        updated_at: None,
-                        parent_schema: table.parent_schema,
-                        parent_name: table.parent_name,
-                    })
-                    .collect())
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-            return objects.map(unpaged_object_list);
-        }
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
             let config = config.clone();
             let session = session.clone();
@@ -5136,24 +4285,10 @@ pub async fn get_columns_core_for_session(
         let pool_key = state
             .get_or_create_pool_for_session(connection_id, Some(database), client_session_id)
             .await?;
-        #[cfg(feature = "duckdb-bundled")]
-        let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
         let db_config = connection_config(state, connection_id).await;
 
         {
             let connections = state.connections.read().await;
-            #[cfg(feature = "duckdb-bundled")]
-            if let Some(ext_pool) = extract_pool!(&connections, &pool_key, ExternalTabular) {
-                drop(connections);
-                let cache = ext_pool.cache.clone();
-                let table = table.to_string();
-                return tokio::task::spawn_blocking(move || {
-                    let con = cache.lock().map_err(|e| e.to_string())?;
-                    duckdb_query_columns(&con, &table)
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            }
             if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
                 let config = config.clone();
                 let session = session.clone();
@@ -5225,19 +4360,7 @@ pub async fn get_columns_core_for_session(
                 }
                 return Ok(deduplicate_column_infos(columns));
             }
-            #[cfg(feature = "duckdb-bundled")]
-            if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
-                drop(connections);
-                let con = con.lock().map_err(|e| e.to_string())?;
-                return duckdb_query_columns_in_database_with_attached(
-                    &con,
-                    database,
-                    schema,
-                    table,
-                    &duckdb_attached_names,
-                );
-            }
-            #[cfg(feature = "duckdb-bundled")]
+            #[cfg(feature = "duckdb-sidecar")]
             if let Some(client) = extract_pool!(&connections, &pool_key, DuckDbWorker) {
                 let database = database.to_string();
                 let schema = schema.to_string();
@@ -5920,19 +5043,11 @@ async fn get_table_ddl_core_with_options(
 
     {
         let connections = state.connections.read().await;
-        #[cfg(feature = "duckdb-bundled")]
-        if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
+        #[cfg(feature = "duckdb-sidecar")]
+        if let Some(client) = extract_pool!(&connections, &pool_key, DuckDbWorker) {
+            let client = client.clone();
             drop(connections);
-            let tbl = table.replace('\'', "''");
-            let con = con.lock().map_err(|e| e.to_string())?;
-            let mut stmt = con
-                .prepare(&format!("SELECT sql FROM duckdb_tables() WHERE table_name = '{tbl}'"))
-                .map_err(|e| e.to_string())?;
-            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-            if let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                return row.get::<_, String>(0).map_err(|e| e.to_string());
-            }
-            return Err("Table not found".to_string());
+            return client.get_table_ddl(database.to_string(), schema.to_string(), table.to_string()).await;
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, ClickHouse) {
             drop(connections);
@@ -6460,6 +5575,27 @@ pub fn sqlite_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
     )
 }
 
+async fn sqlite_object_source(
+    pool: &db::sqlite::SqliteHandle,
+    schema: &str,
+    name: &str,
+    kind: &db::ObjectSourceKind,
+) -> Result<String, String> {
+    let pool = pool.clone();
+    let schema = schema.to_string();
+    let name = sql_string(name);
+    let object_type = sql_string(sqlite_object_type(kind));
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            let schema = db::sqlite::sqlite_quote_schema_ident_for_connection(conn, &schema)?;
+            let sql = format!("SELECT sql FROM {schema}.sqlite_master WHERE type = {object_type} AND name = {name}");
+            conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
     let qualified_name = mysql_qualified_name(database, name);
     match kind {
@@ -6613,8 +5749,6 @@ async fn get_object_source_once(
 ) -> Result<db::ObjectSource, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
-    #[cfg(feature = "duckdb-bundled")]
-    let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
     let source = {
         let connections = state.connections.read().await;
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
@@ -6692,22 +5826,8 @@ async fn get_object_source_once(
                     )
                     .await?
                 }
-                PoolKind::Sqlite(pool) => first_string_cell(
-                    db::sqlite::execute_query(pool, &sqlite_object_source_sql(schema, name, &object_type)).await?,
-                )?,
-                #[cfg(feature = "duckdb-bundled")]
-                PoolKind::DuckDb(con) => {
-                    let con = con.lock().map_err(|e| e.to_string())?;
-                    duckdb_object_source_with_attached(
-                        &con,
-                        database,
-                        schema,
-                        name,
-                        &object_type,
-                        &duckdb_attached_names,
-                    )?
-                }
-                #[cfg(feature = "duckdb-bundled")]
+                PoolKind::Sqlite(pool) => sqlite_object_source(pool, schema, name, &object_type).await?,
+                #[cfg(feature = "duckdb-sidecar")]
                 PoolKind::DuckDbWorker(client) => {
                     let client = client.clone();
                     let database = database.to_string();
@@ -7160,6 +6280,21 @@ fn postgres_missing_relispopulated_error(err: &str) -> bool {
 mod object_source_tests {
     use super::*;
     use crate::types::ObjectSourceKind;
+
+    #[tokio::test]
+    async fn reads_sqlite_object_source_from_dotted_attached_schema() {
+        let pool = db::sqlite::connect_path(":memory:").await.expect("connect primary database");
+        db::sqlite::attach_database(&pool, "analytics.db", ":memory:").expect("attach database");
+        db::sqlite::execute_query(&pool, "CREATE VIEW \"analytics.db\".active_users AS SELECT 1 AS id")
+            .await
+            .expect("create attached view");
+
+        let source = sqlite_object_source(&pool, "analytics.db", "active_users", &ObjectSourceKind::View)
+            .await
+            .expect("read attached view source");
+
+        assert!(source.contains("CREATE VIEW active_users"));
+    }
 
     #[test]
     fn builds_sqlserver_object_source_sql_for_schema_scoped_routines() {
@@ -7829,10 +6964,11 @@ fn ensure_display_ddl_terminated(sql: String) -> String {
 
 pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &str) -> Result<String, String> {
     let pool = pool.clone();
-    let schema = db::sqlite::sqlite_quote_schema_ident(schema);
+    let schema = schema.to_string();
     let table = table.to_string();
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
+            let schema = db::sqlite::sqlite_quote_schema_ident_for_connection(conn, &schema)?;
             let sql = format!("SELECT sql FROM {}.sqlite_master WHERE type='table' AND name=?1", schema);
             conn.query_row(&sql, [table], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())
         })

@@ -30,6 +30,7 @@ test("table clipboard menu state supports paste and replacing the copied source"
   assert.equal(tableClipboardMenuState([users], users), "paste");
   assert.equal(tableClipboardMenuState([users], { ...users, tableName: "orders" }), "copy-and-paste");
   assert.equal(tableClipboardMenuState([{ ...users, schema: "audit" }], users), "copy");
+  assert.equal(tableClipboardMenuState([{ ...users, schema: "audit" }], users, true), "copy-and-paste");
 });
 
 test("whole-row table data copy is enabled for known database types", () => {

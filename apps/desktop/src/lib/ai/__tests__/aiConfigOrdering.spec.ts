@@ -12,13 +12,19 @@ describe("orderAiConfigsForDisplay", () => {
     const configs: TestConfig[] = [
       { id: "claude-code-1", provider: "claude-code-cli" },
       { id: "claude", provider: "claude" },
+      { id: "anthropic-compatible", provider: "anthropic-compatible" },
       { id: "openai", provider: "openai" },
+      { id: "gemini", provider: "gemini" },
+      { id: "deepseek", provider: "deepseek" },
+      { id: "qwen", provider: "qwen" },
+      { id: "ollama", provider: "ollama" },
+      { id: "openai-compatible", provider: "openai-compatible" },
       { id: "codex", provider: "codex-cli" },
       { id: "pi", provider: "pi-agent-cli" },
       { id: "custom", provider: "custom" },
     ];
 
-    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "claude-code-1", "codex", "pi", "custom"]);
+    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "gemini", "deepseek", "qwen", "ollama", "anthropic-compatible", "openai-compatible", "claude-code-1", "codex", "pi", "custom"]);
   });
 
   it("preserves creation order for configs from the same provider", () => {

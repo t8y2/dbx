@@ -16,7 +16,7 @@ async function main() {
   if (!tag) throw new Error("GitHub release JSON is missing tagName.");
 
   const client = new CnbClient(args);
-  const release = await client.ensureRelease(tag, githubRelease);
+  const release = await client.ensureRelease(tag, githubRelease, { makeLatest: args.makeLatest });
 
   if (args.metadataOnly) {
     console.log(`Updated CNB release metadata for ${tag}.`);
@@ -56,6 +56,7 @@ function parseArgs(argv) {
     assetsDir: "",
     metadataOnly: false,
     pruneAssets: false,
+    makeLatest: false,
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -64,12 +65,13 @@ function parseArgs(argv) {
     else if (arg === "--metadata-only") args.metadataOnly = true;
     else if (arg === "--overwrite-existing") args.overwriteExisting = true;
     else if (arg === "--prune-assets") args.pruneAssets = true;
+    else if (arg === "--make-latest") args.makeLatest = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.token) throw new Error("CNB_TOKEN is required.");
   if (!args.githubReleasePath || (!args.metadataOnly && !args.assetsDir)) {
     throw new Error(
-      "Usage: sync-cnb-release.mjs --github-release <release.json> (--assets-dir <dir> | --metadata-only) [--prune-assets]",
+      "Usage: sync-cnb-release.mjs --github-release <release.json> (--assets-dir <dir> | --metadata-only) [--prune-assets] [--make-latest]",
     );
   }
   if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
@@ -112,13 +114,14 @@ export class CnbClient {
     this.token = token;
   }
 
-  async ensureRelease(tag, githubRelease) {
+  async ensureRelease(tag, githubRelease, { makeLatest = false } = {}) {
     const payload = {
       tag_name: tag,
       name: githubRelease.name || tag,
       body: githubRelease.body || "",
       prerelease: Boolean(githubRelease.isPrerelease || githubRelease.prerelease),
       target_commitish: githubRelease.targetCommitish || githubRelease.target_commitish || "",
+      ...(makeLatest ? { make_latest: "true" } : {}),
     };
     const existing = await this.request("GET", `/${this.repository}/-/releases/tags/${encodeURIComponent(tag)}`, null, true);
     if (!existing) return this.request("POST", `/${this.repository}/-/releases`, payload);
@@ -128,6 +131,7 @@ export class CnbClient {
       name: payload.name,
       body: payload.body,
       prerelease: payload.prerelease,
+      ...(makeLatest ? { make_latest: "true" } : {}),
     });
     return existing;
   }
@@ -162,6 +166,23 @@ export class CnbClient {
       "DELETE",
       `/${this.repository}/-/releases/${encodeURIComponent(releaseId)}/assets/${encodeURIComponent(assetId)}`,
     );
+  }
+
+  async listReleases(pageSize = 100) {
+    const releases = [];
+    for (let page = 1; ; page++) {
+      const batch = await this.request(
+        "GET",
+        `/${this.repository}/-/releases?page=${page}&page_size=${pageSize}`,
+      );
+      if (!Array.isArray(batch)) throw new Error("CNB release list response must be an array.");
+      releases.push(...batch);
+      if (batch.length < pageSize) return releases;
+    }
+  }
+
+  async deleteRelease(releaseId) {
+    await this.request("DELETE", `/${this.repository}/-/releases/${encodeURIComponent(releaseId)}`);
   }
 
   async request(method, path, body = null, allow404 = false) {

@@ -1,28 +1,24 @@
-#![cfg(feature = "duckdb-bundled")]
-
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 
-use crate::db;
-use crate::db::duckdb_worker_protocol::{
-    DuckDbWorkerColumnParams, DuckDbWorkerConnectParams, DuckDbWorkerDatabaseParams, DuckDbWorkerError,
-    DuckDbWorkerExecuteParams, DuckDbWorkerMethod, DuckDbWorkerObjectSourceParams, DuckDbWorkerRequest,
-    DuckDbWorkerResponse, DuckDbWorkerTableParams,
+use crate::wire as db;
+use crate::wire::{
+    AttachedDatabaseConfig, DuckDbWorkerColumnParams, DuckDbWorkerConnectParams, DuckDbWorkerDatabaseParams,
+    DuckDbWorkerError, DuckDbWorkerExecuteParams, DuckDbWorkerMethod, DuckDbWorkerObjectSourceParams,
+    DuckDbWorkerRequest, DuckDbWorkerResponse, DuckDbWorkerTableParams,
 };
-use crate::models::connection::AttachedDatabaseConfig;
-use crate::path_utils::expand_tilde;
 
 #[derive(Default)]
 pub struct DuckDbWorkerSession {
-    connection: Option<Arc<db::duckdb_driver::DuckDbConnection>>,
+    connection: Option<Arc<crate::connection::DuckDbConnection>>,
     attached_names: Vec<String>,
 }
 
 impl DuckDbWorkerSession {
     pub fn connect(&mut self, params: DuckDbWorkerConnectParams) -> Result<(), String> {
         let path = expand_tilde(&params.path);
-        let connection = db::duckdb_driver::connect_path(&path)?;
+        let connection = crate::connection::connect_path(&path)?;
         let mut attached_names = Vec::new();
         {
             let locked = connection.lock().map_err(|e| e.to_string())?;
@@ -36,7 +32,7 @@ impl DuckDbWorkerSession {
                 // instead of parsing the SQL, so ATTACH without an alias,
                 // dynamic statements, and extension-specific syntax all count.
                 let before = duckdb_catalog_list(&locked)?;
-                db::duckdb_driver::run_init_script(&locked, script)?;
+                crate::connection::run_init_script(&locked, script)?;
                 for name in duckdb_catalog_list(&locked)? {
                     if !before.iter().any(|existing| existing.eq_ignore_ascii_case(&name))
                         && !attached_names.iter().any(|attached| attached.eq_ignore_ascii_case(&name))
@@ -61,7 +57,7 @@ impl DuckDbWorkerSession {
             &params.sql,
             params.max_rows,
         )?;
-        if let Some(name) = crate::db::duckdb_sql::attached_name_from_attach_sql(&params.sql) {
+        if let Some(name) = crate::sql::attached_name_from_attach_sql(&params.sql) {
             if !self.attached_names.iter().any(|attached| attached.eq_ignore_ascii_case(&name)) {
                 self.attached_names.push(name);
             }
@@ -102,6 +98,27 @@ impl DuckDbWorkerSession {
             &params.table,
             &self.attached_names,
         )
+    }
+
+    pub fn get_table_ddl(&self, params: DuckDbWorkerColumnParams) -> Result<String, String> {
+        let connection = self.connection.as_ref().ok_or("DuckDB worker is not connected")?.clone();
+        let locked = connection.lock().map_err(|e| e.to_string())?;
+        crate::schema::duckdb_table_ddl_with_attached(
+            &locked,
+            &params.database,
+            &params.schema,
+            &params.table,
+            &self.attached_names,
+        )
+    }
+
+    pub fn completion_assistant(
+        &self,
+        request: db::CompletionAssistantRequest,
+    ) -> Result<db::CompletionAssistantResponse, String> {
+        let connection = self.connection.as_ref().ok_or("DuckDB worker is not connected")?.clone();
+        let locked = connection.lock().map_err(|e| e.to_string())?;
+        crate::schema::duckdb_completion_assistant_search(&locked, &request, &self.attached_names)
     }
 
     pub fn get_object_source(&self, params: DuckDbWorkerObjectSourceParams) -> Result<String, String> {
@@ -153,6 +170,23 @@ impl DuckDbWorkerSession {
     }
 }
 
+fn expand_tilde(path: &str) -> String {
+    if !path.starts_with('~') {
+        return path.to_string();
+    }
+    if path.len() == 1 {
+        return home_dir().unwrap_or_else(|| path.to_string());
+    }
+    if path.as_bytes().get(1) == Some(&b'/') {
+        return home_dir().map(|home| home + &path[1..]).unwrap_or_else(|| path.to_string());
+    }
+    path.to_string()
+}
+
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()
+}
+
 fn duckdb_catalog_list(con: &duckdb::Connection) -> Result<Vec<String>, String> {
     let mut stmt = con.prepare("SHOW DATABASES").map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
@@ -195,6 +229,14 @@ impl DuckDbWorkerRuntime {
             DuckDbWorkerMethod::ListColumns => self.handle_session_request(request, |session, request| {
                 let params = request.parse_params()?;
                 Ok(DuckDbWorkerResponse::ok(request.id, session.list_columns(params)?))
+            }),
+            DuckDbWorkerMethod::GetTableDdl => self.handle_session_request(request, |session, request| {
+                let params = request.parse_params()?;
+                Ok(DuckDbWorkerResponse::ok(request.id, session.get_table_ddl(params)?))
+            }),
+            DuckDbWorkerMethod::CompletionAssistant => self.handle_session_request(request, |session, request| {
+                let params = request.parse_params()?;
+                Ok(DuckDbWorkerResponse::ok(request.id, session.completion_assistant(params)?))
             }),
             DuckDbWorkerMethod::GetObjectSource => self.handle_session_request(request, |session, request| {
                 let params = request.parse_params()?;
@@ -422,7 +464,10 @@ mod tests {
             .expect("connect");
         session
             .execute(DuckDbWorkerExecuteParams {
-                sql: "CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR)".to_string(),
+                sql: "CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR); \
+                      CREATE SCHEMA analytics; \
+                      CREATE TABLE analytics.items (id INTEGER)"
+                    .to_string(),
                 database: None,
                 max_rows: None,
             })
@@ -440,10 +485,18 @@ mod tests {
                 table: "users".to_string(),
             })
             .expect("list columns");
+        let analytics_columns = session
+            .list_columns(DuckDbWorkerColumnParams {
+                database: "main".to_string(),
+                schema: "analytics".to_string(),
+                table: "items".to_string(),
+            })
+            .expect("list analytics columns");
 
         assert!(schemas.iter().any(|schema| schema == "main"));
         assert!(tables.iter().any(|table| table.name == "users"));
         assert!(columns.iter().any(|column| column.name == "id" && column.is_primary_key));
+        assert_eq!(analytics_columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id"]);
     }
 
     #[test]

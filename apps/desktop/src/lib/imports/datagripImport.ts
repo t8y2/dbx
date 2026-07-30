@@ -177,7 +177,9 @@ function parseJdbcUrl(jdbcUrl: string): {
   const fileMatch = url.match(/^(sqlite|duckdb):(.+)$/i);
   if (fileMatch) {
     result.host = expandPathMacros(fileMatch[2].split("?")[0]);
-    result.database = result.host;
+    if (fileMatch[1].toLowerCase() !== "sqlite") {
+      result.database = result.host;
+    }
     return result;
   }
 

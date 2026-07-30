@@ -6,6 +6,7 @@ import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import it from "@/i18n/locales/it";
 import ja from "@/i18n/locales/ja";
+import ko from "@/i18n/locales/ko";
 import ptBR from "@/i18n/locales/pt-BR";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
@@ -15,6 +16,7 @@ const LOCALES = {
   es,
   it,
   ja,
+  ko,
   "pt-BR": ptBR,
   "zh-CN": zhCN,
   "zh-TW": zhTW,
@@ -164,7 +166,8 @@ describe("backend error translation", () => {
 });
 
 // Matching on message text only works while both sides agree on the wording, so
-// pin the literals that the patterns above depend on to their Rust source.
+// pin current backend literals to their Rust source. Compatibility-only patterns
+// may remain after the backend stops emitting them.
 describe("backend error wording is pinned to the Rust sources", () => {
   const rust = (path: string) => readFileSync(new URL(`../../../../../${path}`, import.meta.url), "utf8");
 
@@ -172,7 +175,6 @@ describe("backend error wording is pinned to the Rust sources", () => {
     ["crates/dbx-core/src/query_result_export.rs", "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result."],
     ["crates/dbx-core/src/query_result_export.rs", "Streaming export is unsupported for this query. Simplify it or use a supported driver."],
     ["crates/dbx-core/src/query_result_export.rs", "Streaming export needs a result-set session, but this driver returned no session_id."],
-    ["crates/dbx-core/src/query.rs", "The previous DuckDB query is still stopping. Please try again shortly."],
     ["crates/dbx-core/src/agent_service.rs", "Failed to remove the old JRE directory: "],
     ["crates/dbx-core/src/agent_service.rs", "is in use by drivers: "],
     ["crates/dbx-core/src/agent_service.rs", "agent-registry.json not found in the ZIP; not a valid offline driver package."],

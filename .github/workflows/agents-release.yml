@@ -76,9 +76,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: |
-            8
-            21
+          java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew shadowJar --parallel
         working-directory: agents
@@ -207,6 +205,111 @@ jobs:
           name: kingbase-native
           path: "release-native/dbx-agent-kingbase-*"
 
+  build-duckdb-native:
+    needs: [bump-versions]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            extension: ""
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x64
+            extension: ""
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux2014_aarch64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux2014_x86_64
+          - runner: windows-2022
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            extension: .exe
+          - runner: windows-2022
+            target: x86_64-win7-windows-msvc
+            platform: windows-x64
+            extension: .exe
+            win7: true
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        if: runner.os != 'Linux' && matrix.win7 != true
+        with:
+          targets: ${{ matrix.target }}
+      - name: Setup Rust for Windows 7
+        if: matrix.win7 == true
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+      - name: Build DuckDB native driver
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp/dbx-rust-home \
+              -e CARGO_INCREMENTAL=0 \
+              -e CARGO_TARGET_DIR=/workspace/target/duckdb-driver \
+              -v "${{ github.workspace }}:/workspace" \
+              -w /workspace \
+              "${{ matrix.manylinux_image }}" \
+              bash -lc '
+                mkdir -p "$HOME"
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+                source "$HOME/.cargo/env"
+                cargo build \
+                  --manifest-path agents/drivers/duckdb/Cargo.toml \
+                  --locked \
+                  --release \
+                  --bin dbx-duckdb-driver \
+                  --target "${{ matrix.target }}"
+              '
+          else
+            BUILD_STD=()
+            if [ "${{ matrix.win7 }}" = "true" ]; then
+              BUILD_STD=(-Z build-std=std,panic_abort)
+            fi
+            cargo build \
+              --manifest-path agents/drivers/duckdb/Cargo.toml \
+              --locked \
+              --release \
+              --bin dbx-duckdb-driver \
+              --target "${{ matrix.target }}" \
+              "${BUILD_STD[@]}"
+          fi
+          mkdir -p release-native
+          cp \
+            "target/duckdb-driver/${{ matrix.target }}/release/dbx-duckdb-driver${{ matrix.extension }}" \
+            "release-native/dbx-agent-duckdb-${{ matrix.platform }}${{ matrix.extension }}"
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "${{ github.workspace }}/release-native:/driver:ro" \
+              "${{ matrix.manylinux_image }}" \
+              "/driver/dbx-agent-duckdb-${{ matrix.platform }}" < /dev/null
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duckdb-native-${{ matrix.platform }}
+          path: "release-native/dbx-agent-duckdb-*"
+
   build-jre:
     runs-on: ubuntu-latest
     strategy:
@@ -223,12 +326,14 @@ jobs:
       - name: Build JRE for all platforms
         shell: bash
         run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
           MODULES="${{ matrix.modules }}"
           JLINK_OPTS="--strip-debug --no-header-files --no-man-pages --compress=zip-6"
           JRE_KEY="${{ matrix.jre-key }}"
 
           jlink --add-modules $MODULES $JLINK_OPTS --output dbx-jre
-          tar czf dbx-jre-${JRE_KEY}-linux-x64.tar.gz dbx-jre
+          tar cf - dbx-jre | zstd -q -19 -T0 -o dbx-jre-${JRE_KEY}-linux-x64.tar.zst
           rm -rf dbx-jre
 
           ADOPTIUM="https://api.adoptium.net/v3/binary/latest/${{ matrix.java-version }}/ga"
@@ -269,18 +374,18 @@ jobs:
               CROSS_OPTS="--disable-plugin strip-native-debug-symbols"
             fi
             jlink --module-path "$JMODS" --add-modules $MODULES $JLINK_OPTS $CROSS_OPTS --output dbx-jre
-            tar czf dbx-jre-${JRE_KEY}-$platform.tar.gz dbx-jre
+            tar cf - dbx-jre | zstd -q -19 -T0 -o dbx-jre-${JRE_KEY}-$platform.tar.zst
             rm -rf dbx-jre jdk-$platform
           done
 
-          ls -lh dbx-jre-*.tar.gz
+          ls -lh dbx-jre-*.tar.zst
       - uses: actions/upload-artifact@v4
         with:
           name: jre-${{ matrix.jre-key }}
-          path: "dbx-jre-*.tar.gz"
+          path: "dbx-jre-*.tar.zst"
 
   release:
-    needs: [bump-versions, build-agents, build-oracle-native, build-xugu-native, build-kingbase-native, build-jre]
+    needs: [bump-versions, build-agents, build-oracle-native, build-xugu-native, build-kingbase-native, build-duckdb-native, build-jre]
     runs-on: ubuntu-latest
     steps:
       - name: Create DBX bot release token
@@ -310,7 +415,8 @@ jobs:
           find artifacts/oracle-native -type f -name 'dbx-agent-oracle-*' -exec cp {} release/ \;
           find artifacts/xugu-native -type f -name 'dbx-agent-xugu-*' -exec cp {} release/ \;
           find artifacts/kingbase-native -type f -name 'dbx-agent-kingbase-*' -exec cp {} release/ \;
-          find artifacts -name 'dbx-jre-*.tar.gz' -exec cp {} release/ \;
+          find artifacts/duckdb-native-* -type f -name 'dbx-agent-duckdb-*' -exec cp {} release/ \;
+          find artifacts -name 'dbx-jre-*.tar.zst' -exec cp {} release/ \;
           ls -lh release/
 
       - name: Add versions to agent artifact filenames
@@ -325,6 +431,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           REPO="${GITHUB_REPOSITORY}"
           RELEASE_VERSION="${TAG#agents-v}"
+          CURRENT_APP_VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' src-tauri/Cargo.toml)
 
           get_module_version() {
             local name="$1"
@@ -349,7 +456,7 @@ jobs:
               "${name}": {
                 "version": "${version}",
                 "label": "${label}",
-                "min_app_version": "0.6.0",
+                "min_app_version": "${CURRENT_APP_VERSION}",
                 "jre": "${jre_key}",
                 "external_driver_required": ${external_driver},
                 ${native_line}
@@ -359,13 +466,13 @@ jobs:
           }
 
           generate_native_entry() {
-            local name="$1" label="$2" jre_key="$3" version="$4" native_json="$5"
+            local name="$1" label="$2" jre_key="$3" version="$4" native_json="$5" min_app_version="$6"
             local legacy_jar_url="https://github.com/${REPO}/releases/download/${TAG}/dbx-agent-${name}-legacy-placeholder.jar"
             cat <<ENTRY
               "${name}": {
                 "version": "${version}",
                 "label": "${label}",
-                "min_app_version": "0.6.0",
+                "min_app_version": "${min_app_version}",
                 "jre": "${jre_key}",
                 "external_driver_required": false,
                 "native": {${native_json}
@@ -379,22 +486,27 @@ jobs:
             local name="$1"
             case "$name" in
               kingbase) echo "人大金仓 KingbaseES" ;;
+              duckdb) echo "DuckDB" ;;
               xugu) echo "虚谷 XuguDB" ;;
               *) echo "$name" ;;
             esac
           }
 
+          native_only_min_app_version() {
+            echo "$CURRENT_APP_VERSION"
+          }
+
           generate_jre_platforms() {
             local jre_key="$1"
             local PLATFORMS=""
-            for f in release/dbx-jre-${jre_key}-*.tar.gz; do
+            for f in release/dbx-jre-${jre_key}-*.tar.zst; do
               [ ! -f "$f" ] && continue
-              p=$(basename "$f" .tar.gz | sed "s/dbx-jre-${jre_key}-//")
+              p=$(basename "$f" .tar.zst | sed "s/dbx-jre-${jre_key}-//")
               sha256=$(sha256sum "$f" | cut -d' ' -f1)
               size=$(stat -c%s "$f")
               url="https://github.com/${REPO}/releases/download/${TAG}/$(basename $f)"
               [ -n "$PLATFORMS" ] && PLATFORMS="${PLATFORMS},"$'\n'
-              PLATFORMS="${PLATFORMS}              \"${p}\": { \"url\": \"${url}\", \"sha256\": \"${sha256}\", \"size\": ${size} }"
+              PLATFORMS="${PLATFORMS}              \"${p}\": { \"url\": \"${url}\", \"sha256\": \"${sha256}\", \"size\": ${size}, \"format\": \"tar_zstd\" }"
             done
             echo "$PLATFORMS"
           }
@@ -439,15 +551,16 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase; do
+          for name in oracle xugu kingbase duckdb; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
             [ -z "$native_json" ] && continue
             label=$(native_only_label "$name")
             jre_key=$(detect_jre_key "$name")
+            min_app_version=$(native_only_min_app_version "$name")
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
-            DRIVERS="${DRIVERS}$(generate_native_entry "$name" "$label" "$jre_key" "$version" "$native_json")"
+            DRIVERS="${DRIVERS}$(generate_native_entry "$name" "$label" "$jre_key" "$version" "$native_json" "$min_app_version")"
           done
 
           cat > release/agent-registry.json <<EOF
@@ -470,11 +583,17 @@ jobs:
           echo "=== agent-registry.json ==="
           cat release/agent-registry.json
 
-      - name: Build single-driver ZIP bundles
-        run: python3 agents/scripts/build_driver_zips.py release
-
       - name: Build offline ZIP bundles
         run: bash agents/scripts/build_offline_zip.sh release
+
+      - name: Build single-driver packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+          python3 agents/scripts/build_driver_zips.py release --cleanup-sources
+          python3 -m json.tool release/agent-registry.json > /dev/null
+          echo "=== final agent-registry.json ==="
+          cat release/agent-registry.json
 
       - name: Generate release notes
         env:
@@ -489,17 +608,14 @@ jobs:
           }
           for name in $(module_names); do
             version=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
-            [ -f "release/dbx-agent-${name}-${version}.jar" ] && DRIVER_NAMES+=("$name")
-          done
-          for name in oracle xugu kingbase; do
-            [ -f "release/dbx-agent-${name}.jar" ] && continue
-            compgen -G "release/dbx-agent-${name}-*" > /dev/null && DRIVER_NAMES+=("$name")
+            compgen -G "release/dbx-agent-${name}-${version}*.tar.zst" > /dev/null && DRIVER_NAMES+=("$name")
           done
 
           native_only_label() {
             local name="$1"
             case "$name" in
               kingbase) echo "人大金仓 KingbaseES" ;;
+              duckdb) echo "DuckDB" ;;
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
               *) echo "$name" ;;
@@ -588,47 +704,20 @@ jobs:
 
       - name: Upload to R2
         env:
-          MODULE_VERSIONS: ${{ needs.bump-versions.outputs.versions }}
-          PREV_VERSIONS: ${{ needs.bump-versions.outputs.prev_versions }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ENDPOINT: "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           R2_BUCKET: "s3://${{ secrets.R2_BUCKET_NAME }}"
         run: |
-          # Always upload agent-registry.json
+          # Always upload the current registry.
           aws s3 cp release/agent-registry.json \
             "$R2_BUCKET/agents/agent-registry.json" \
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded agent-registry.json"
 
-          # Upload only changed driver JARs
-          UPLOADED=0
-          SKIPPED=0
-          module_names() {
-            echo "$MODULE_VERSIONS" | python3 -c 'import sys,json; print("\n".join(sorted(json.load(sys.stdin))))'
-          }
-          for name in $(module_names); do
-            old_ver=$(echo "$PREV_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))" 2>/dev/null)
-            new_ver=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))" 2>/dev/null)
-            f="release/dbx-agent-${name}-${new_ver}.jar"
-            [ ! -f "$f" ] && continue
-            if [ "$old_ver" = "$new_ver" ] && [ -n "$old_ver" ]; then
-              echo "Skip $(basename $f) (unchanged $old_ver)"
-              SKIPPED=$((SKIPPED + 1))
-              continue
-            fi
-            aws s3 cp "$f" \
-              "$R2_BUCKET/agents/drivers/$(basename $f)" \
-              --endpoint-url "$R2_ENDPOINT"
-            echo "Uploaded $(basename $f) ($old_ver → $new_ver)"
-            UPLOADED=$((UPLOADED + 1))
-          done
-          echo "Drivers: $UPLOADED uploaded, $SKIPPED skipped"
-
-          # Upload versioned native binaries and all single-driver ZIP packages.
-          for f in release/dbx-agent-*; do
+          # Upload all single-driver packages.
+          for f in release/dbx-agent-*.tar.zst; do
             [ -f "$f" ] || continue
-            [[ "$f" != *.jar ]] || continue
             aws s3 cp "$f" \
               "$R2_BUCKET/agents/drivers/$(basename $f)" \
               --endpoint-url "$R2_ENDPOINT"
@@ -636,7 +725,7 @@ jobs:
           done
 
           # Upload JRE — always overwrite to ensure latest modules
-          for f in release/dbx-jre-*.tar.gz; do
+          for f in release/dbx-jre-*.tar.zst; do
             [ ! -f "$f" ] && continue
             key="agents/jre/$(basename $f)"
             aws s3 cp "$f" "$R2_BUCKET/$key" --endpoint-url "$R2_ENDPOINT"
@@ -690,3 +779,16 @@ jobs:
             args+=(--overwrite-existing --prune-assets)
           fi
           node .github/scripts/sync-cnb-release.mjs "${args[@]}"
+
+      - name: Keep latest five versioned agent releases in CNB
+        if: ${{ matrix.tag != 'agents-latest' }}
+        continue-on-error: true
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CURRENT_TAG: ${{ matrix.tag }}
+        run: |
+          node .github/scripts/cleanup-cnb-releases.mjs \
+            --current-tag "$CURRENT_TAG" \
+            --tag-pattern '^agents-v[0-9]+[.][0-9]+[.][0-9]+$' \
+            --retain 5 \
+            --apply

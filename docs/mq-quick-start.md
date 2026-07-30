@@ -355,7 +355,7 @@ async fn detect_pulsar_version(client: &reqwest::Client, base_url: &str) -> Puls
 
 ### 启用 MQ 功能
 ```bash
-# 默认已启用（default = ["duckdb-bundled", "mq-admin"]）
+# 默认已启用（default 包含 "duckdb-sidecar" 和 "mq-admin"）
 cargo build --release
 
 # 或显式指定
@@ -364,7 +364,7 @@ cargo build --release --features mq-admin
 
 ### 禁用 MQ 功能
 ```bash
-cargo build --release --no-default-features --features duckdb-bundled
+cargo build -p dbx --release --no-default-features --features duckdb-sidecar,sqlite-sqlcipher,system-fonts
 ```
 
 ### 检查编译
@@ -507,4 +507,3 @@ const response = await mqRawRequest(connectionId, {
 console.log(response.body)
 ```
 
- 

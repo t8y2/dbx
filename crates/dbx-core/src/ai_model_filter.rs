@@ -89,6 +89,7 @@ pub(crate) fn model_is_assistant_compatible(provider: &AiProvider, model_id: &st
         AiProvider::Gemini => !is_gemini_non_assistant_model(&model),
         AiProvider::Qwen => !is_qwen_non_assistant_model(&model),
         AiProvider::Claude
+        | AiProvider::AnthropicCompatible
         | AiProvider::Deepseek
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible
@@ -197,7 +198,7 @@ mod tests {
 
     #[test]
     fn generic_providers_do_not_filter_unknown_model_taxonomies() {
-        for provider in [AiProvider::OpenaiCompatible, AiProvider::Custom] {
+        for provider in [AiProvider::AnthropicCompatible, AiProvider::OpenaiCompatible, AiProvider::Custom] {
             for model in ["text-embedding-private-chat", "company/image-reasoner", "future-model"] {
                 assert!(model_is_assistant_compatible(&provider, model), "{}:{model}", provider.as_str());
             }

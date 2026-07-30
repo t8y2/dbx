@@ -552,6 +552,11 @@ async function uninstallDriver(dbType: string) {
       toast(t("driverStore.driverUninstallSuccess", { label }));
       return;
     }
+    const blockers = await api.checkAgentUpdateBlockers([dbType]);
+    if (blockers.length > 0) {
+      toast(t("driverStore.driverUpdateBlocked", { labels: blockers.map((blocker) => blocker.label).join(", ") }));
+      return;
+    }
     await api.uninstallAgent(dbType);
     await refreshAgents();
     toast(t("driverStore.driverUninstallSuccess", { label }));
@@ -561,12 +566,14 @@ async function uninstallDriver(dbType: string) {
 }
 
 const importingZip = ref(false);
+const importingDriver = ref<string | null>(null);
+const agentImportBusy = computed(() => importingZip.value || importingDriver.value !== null);
 
 function chooseWebOfflineZip(): Promise<File | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".zip";
+    input.accept = ".zip,.tar.zst";
     input.onchange = () => resolve(input.files?.[0] ?? null);
     input.click();
   });
@@ -601,7 +608,7 @@ function chooseWebFile(accept: string): Promise<File | null> {
 }
 
 async function importOfflineZip() {
-  if (importingZip.value) return;
+  if (agentImportBusy.value) return;
   let selected: string | File | null = null;
   if (isWeb) {
     selected = await chooseWebOfflineZip();
@@ -610,7 +617,7 @@ async function importOfflineZip() {
     const path = await open({
       title: t("driverStore.chooseOfflineDriverPackage"),
       multiple: false,
-      filters: [{ name: "ZIP", extensions: ["zip"] }],
+      filters: [{ name: "Driver package", extensions: ["zip", "zst"] }],
     });
     selected = typeof path === "string" ? path : null;
   }
@@ -632,6 +639,7 @@ async function importOfflineZip() {
 }
 
 async function importDriverFile(driver: AgentDriverInfo) {
+  if (agentImportBusy.value) return;
   const dbType = driver.db_type;
   if (isPrestoSqlBuiltinDriver(dbType)) {
     await importJdbcDrivers();
@@ -663,30 +671,32 @@ async function importDriverFile(driver: AgentDriverInfo) {
       toast(t("driverStore.driverImportSuccess", { label }));
     }
   };
+  const runSelectedFileImport = async (selected: string | File) => {
+    importingDriver.value = dbType;
+    try {
+      await installSelectedFile(selected);
+    } catch (e: any) {
+      toast(t("driverStore.driverImportFailed", { label, error: backendError(e) }));
+    } finally {
+      importingDriver.value = null;
+    }
+  };
   if (isWeb) {
     // Native release assets have no extension on macOS/Linux, so do not apply
     // a browser accept filter that would make the correct file unselectable.
     const file = await chooseWebFile(webDriverImportAccept(requiresJavaRuntime, isWindows));
     if (!file) return;
-    try {
-      await installSelectedFile(file);
-    } catch (e: any) {
-      toast(t("driverStore.driverImportFailed", { label, error: backendError(e) }));
-    }
+    await runSelectedFileImport(file);
     return;
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
     title: t("driverStore.chooseDriverJar"),
     multiple: false,
-    filters: requiresJavaRuntime ? [{ name: "Driver package or JAR", extensions: ["zip", "jar"] }] : isWindows ? [{ name: "Driver package or executable", extensions: ["zip", "exe"] }] : undefined,
+    filters: requiresJavaRuntime ? [{ name: "Driver package or JAR", extensions: ["zip", "zst", "jar"] }] : isWindows ? [{ name: "Driver package or executable", extensions: ["zip", "zst", "exe"] }] : undefined,
   });
   if (typeof selected !== "string") return;
-  try {
-    await installSelectedFile(selected);
-  } catch (e: any) {
-    toast(t("driverStore.driverImportFailed", { label, error: backendError(e) }));
-  }
+  await runSelectedFileImport(selected);
 }
 
 async function reinstallJre(jreKey: string) {
@@ -1337,9 +1347,10 @@ watch(driverStoreTab, (tab) => {
                   </SelectContent>
                 </Select>
               </div>
-              <Button variant="ghost" size="sm" class="h-7 rounded-md text-xs gap-1 text-muted-foreground" :disabled="importingZip || installing !== null || upgradingAll || reinstallingJre !== null || queuedDriverInstalls.length > 0" @click="importOfflineZip">
-                <FileUp class="h-3.5 w-3.5" />
-                {{ importingZip ? t("driverStore.importing") : t("driverStore.importOfflinePackage") }}
+              <Button variant="ghost" size="sm" class="h-7 rounded-md text-xs gap-1 text-muted-foreground" :disabled="agentImportBusy || installing !== null || upgradingAll || reinstallingJre !== null || queuedDriverInstalls.length > 0" @click="importOfflineZip">
+                <Loader2 v-if="agentImportBusy" class="h-3.5 w-3.5 animate-spin" />
+                <FileUp v-else class="h-3.5 w-3.5" />
+                {{ agentImportBusy ? t("driverStore.importing") : t("driverStore.importOfflinePackage") }}
               </Button>
               <Button variant="ghost" size="sm" class="h-7 rounded-md text-xs gap-1 text-muted-foreground" :disabled="refreshing" @click="forceRefresh">
                 <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': refreshing }" />
@@ -1389,15 +1400,15 @@ watch(driverStoreTab, (tab) => {
                     <Check v-if="jre.installed" class="h-4 w-4 text-green-600" />
                     <span v-else class="text-xs text-muted-foreground">{{ t("driverStore.notInstalled") }}</span>
                     <DriverInstallProgressCircle v-if="reinstallingJre === jre.key" :percent="getJreReinstallPercent()" :title="getJreReinstallTitle(jre.installed ? t('driverStore.reinstalling') : t('driverStore.installing'))" />
-                    <Button v-else-if="!jre.installed" type="button" variant="default" size="sm" class="h-8 rounded-md text-xs" :disabled="reinstallingJre !== null || installing !== null || importingZip" @click="reinstallJre(jre.key)">
+                    <Button v-else-if="!jre.installed" type="button" variant="default" size="sm" class="h-8 rounded-md text-xs" :disabled="reinstallingJre !== null || installing !== null || agentImportBusy" @click="reinstallJre(jre.key)">
                       <Download class="h-3.5 w-3.5 mr-1" />
                       {{ t("driverStore.install") }}
                     </Button>
-                    <Button v-else-if="jre.installed" type="button" variant="outline" size="sm" class="h-8 rounded-md text-xs" :disabled="reinstallingJre !== null || installing !== null || importingZip" @click="reinstallJre(jre.key)">
+                    <Button v-else-if="jre.installed" type="button" variant="outline" size="sm" class="h-8 rounded-md text-xs" :disabled="reinstallingJre !== null || installing !== null || agentImportBusy" @click="reinstallJre(jre.key)">
                       <RotateCcw class="h-3.5 w-3.5 mr-1" />
                       {{ t("driverStore.reinstall") }}
                     </Button>
-                    <Button v-if="jre.installed" type="button" variant="ghost" size="sm" class="h-8 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="reinstallingJre !== null || installing !== null || importingZip" @click="uninstallJre(jre.key)">
+                    <Button v-if="jre.installed" type="button" variant="ghost" size="sm" class="h-8 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="reinstallingJre !== null || installing !== null || agentImportBusy" @click="uninstallJre(jre.key)">
                       {{ t("driverStore.uninstall") }}
                     </Button>
                   </div>
@@ -1417,7 +1428,7 @@ watch(driverStoreTab, (tab) => {
                   <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableDrivers.length }})</div>
                   <p class="text-xs text-muted-foreground">{{ t("driverStore.updatesAvailableDescription") }}</p>
                 </div>
-                <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || importingZip" @click="upgradeAll">
+                <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || agentImportBusy" @click="upgradeAll">
                   <Loader2 v-if="upgradingAll" class="h-3 w-3 animate-spin mr-1" />
                   <Download v-else class="h-3 w-3 mr-1" />
                   {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingCompletedCount, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
@@ -1449,14 +1460,14 @@ watch(driverStoreTab, (tab) => {
                     size="sm"
                     variant="outline"
                     class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
-                    :disabled="upgradingAll || importingZip"
+                    :disabled="upgradingAll || agentImportBusy"
                     @click="removeQueuedDriverInstall(driver.db_type)"
                   >
                     <Clock3 class="h-3 w-3 mr-1" />
                     {{ t("driverStore.queued") }}
                   </Button>
                   <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" />
-                  <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                  <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                     <Download class="h-3 w-3 mr-1" />
                     {{ t("driverStore.install") }}
                   </Button>
@@ -1465,11 +1476,12 @@ watch(driverStoreTab, (tab) => {
                     size="sm"
                     variant="ghost"
                     class="h-7 w-7 rounded-md text-xs text-muted-foreground"
-                    :title="t('driverStore.importLocalJar')"
-                    :disabled="upgradingAll || installing !== null || importingZip"
+                    :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
+                    :disabled="upgradingAll || installing !== null || agentImportBusy"
                     @click="importDriverFile(driver)"
                   >
-                    <FileUp class="h-3.5 w-3.5" />
+                    <Loader2 v-if="importingDriver === driver.db_type" class="h-3.5 w-3.5 animate-spin" />
+                    <FileUp v-else class="h-3.5 w-3.5" />
                   </Button>
                   <Check v-if="driver.installed && !(driver.update_available && isDriverProgressActive(driver.db_type))" class="h-4 w-4 text-green-600" />
                   <Button
@@ -1477,17 +1489,17 @@ watch(driverStoreTab, (tab) => {
                     size="sm"
                     variant="outline"
                     class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
-                    :disabled="upgradingAll || importingZip"
+                    :disabled="upgradingAll || agentImportBusy"
                     @click="removeQueuedDriverInstall(driver.db_type)"
                   >
                     <Clock3 class="h-3 w-3 mr-1" />
                     {{ t("driverStore.queued") }}
                   </Button>
                   <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" />
-                  <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                  <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                     {{ t("driverStore.update") }}
                   </Button>
-                  <Button v-if="driver.installed" variant="ghost" size="sm" class="h-7 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="installing !== null || upgradingAll || importingZip || isDriverQueued(driver.db_type)" @click="uninstallDriver(driver.db_type)">
+                  <Button v-if="driver.installed" variant="ghost" size="sm" class="h-7 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="installing !== null || upgradingAll || agentImportBusy || isDriverQueued(driver.db_type)" @click="uninstallDriver(driver.db_type)">
                     {{ t("driverStore.uninstall") }}
                   </Button>
                 </div>
@@ -1566,14 +1578,14 @@ watch(driverStoreTab, (tab) => {
                             size="sm"
                             variant="outline"
                             class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
-                            :disabled="upgradingAll || importingZip"
+                            :disabled="upgradingAll || agentImportBusy"
                             @click="removeQueuedDriverInstall(driver.db_type)"
                           >
                             <Clock3 class="h-3 w-3 mr-1" />
                             {{ t("driverStore.queued") }}
                           </Button>
                           <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" />
-                          <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                          <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                             <Download class="h-3 w-3 mr-1" />
                             {{ t("driverStore.install") }}
                           </Button>
@@ -1582,11 +1594,12 @@ watch(driverStoreTab, (tab) => {
                             size="sm"
                             variant="ghost"
                             class="h-7 w-7 rounded-md text-xs text-muted-foreground"
-                            :title="t('driverStore.importLocalJar')"
-                            :disabled="upgradingAll || installing !== null || importingZip"
+                            :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
+                            :disabled="upgradingAll || installing !== null || agentImportBusy"
                             @click="importDriverFile(driver)"
                           >
-                            <FileUp class="h-3.5 w-3.5" />
+                            <Loader2 v-if="importingDriver === driver.db_type" class="h-3.5 w-3.5 animate-spin" />
+                            <FileUp v-else class="h-3.5 w-3.5" />
                           </Button>
                           <Check v-if="driver.installed && !(driver.update_available && isDriverProgressActive(driver.db_type))" class="h-4 w-4 text-green-600" />
                           <Button
@@ -1594,17 +1607,24 @@ watch(driverStoreTab, (tab) => {
                             size="sm"
                             variant="outline"
                             class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
-                            :disabled="upgradingAll || importingZip"
+                            :disabled="upgradingAll || agentImportBusy"
                             @click="removeQueuedDriverInstall(driver.db_type)"
                           >
                             <Clock3 class="h-3 w-3 mr-1" />
                             {{ t("driverStore.queued") }}
                           </Button>
                           <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" />
-                          <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                          <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                             {{ t("driverStore.update") }}
                           </Button>
-                          <Button v-if="driver.installed" variant="ghost" size="sm" class="h-7 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="installing !== null || upgradingAll || importingZip || isDriverQueued(driver.db_type)" @click="uninstallDriver(driver.db_type)">
+                          <Button
+                            v-if="driver.installed"
+                            variant="ghost"
+                            size="sm"
+                            class="h-7 rounded-md text-xs text-muted-foreground hover:text-destructive"
+                            :disabled="installing !== null || upgradingAll || agentImportBusy || isDriverQueued(driver.db_type)"
+                            @click="uninstallDriver(driver.db_type)"
+                          >
                             {{ t("driverStore.uninstall") }}
                           </Button>
                         </div>
@@ -1642,14 +1662,14 @@ watch(driverStoreTab, (tab) => {
                         size="sm"
                         variant="outline"
                         class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
-                        :disabled="upgradingAll || importingZip"
+                        :disabled="upgradingAll || agentImportBusy"
                         @click="removeQueuedDriverInstall(driver.db_type)"
                       >
                         <Clock3 class="h-3 w-3 mr-1" />
                         {{ t("driverStore.queued") }}
                       </Button>
                       <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" />
-                      <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                      <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                         <Download class="h-3 w-3 mr-1" />
                         {{ t("driverStore.install") }}
                       </Button>
@@ -1658,11 +1678,12 @@ watch(driverStoreTab, (tab) => {
                         size="sm"
                         variant="ghost"
                         class="h-7 w-7 rounded-md text-xs text-muted-foreground"
-                        :title="t('driverStore.importLocalJar')"
-                        :disabled="upgradingAll || installing !== null || importingZip"
+                        :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
+                        :disabled="upgradingAll || installing !== null || agentImportBusy"
                         @click="importDriverFile(driver)"
                       >
-                        <FileUp class="h-3.5 w-3.5" />
+                        <Loader2 v-if="importingDriver === driver.db_type" class="h-3.5 w-3.5 animate-spin" />
+                        <FileUp v-else class="h-3.5 w-3.5" />
                       </Button>
                       <Check v-if="driver.installed && !(driver.update_available && isDriverProgressActive(driver.db_type))" class="h-4 w-4 text-green-600" />
                       <Button
@@ -1670,17 +1691,17 @@ watch(driverStoreTab, (tab) => {
                         size="sm"
                         variant="outline"
                         class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
-                        :disabled="upgradingAll || importingZip"
+                        :disabled="upgradingAll || agentImportBusy"
                         @click="removeQueuedDriverInstall(driver.db_type)"
                       >
                         <Clock3 class="h-3 w-3 mr-1" />
                         {{ t("driverStore.queued") }}
                       </Button>
                       <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" />
-                      <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                      <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || agentImportBusy" @click="installDriver(driver.db_type)">
                         {{ t("driverStore.update") }}
                       </Button>
-                      <Button v-if="driver.installed" variant="ghost" size="sm" class="h-7 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="installing !== null || upgradingAll || importingZip || isDriverQueued(driver.db_type)" @click="uninstallDriver(driver.db_type)">
+                      <Button v-if="driver.installed" variant="ghost" size="sm" class="h-7 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="installing !== null || upgradingAll || agentImportBusy || isDriverQueued(driver.db_type)" @click="uninstallDriver(driver.db_type)">
                         {{ t("driverStore.uninstall") }}
                       </Button>
                     </div>

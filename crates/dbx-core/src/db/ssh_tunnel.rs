@@ -978,6 +978,16 @@ impl TunnelManager {
             self.stop_tunnel(&key).await;
         }
     }
+
+    pub async fn stop_all_tunnels(&self) {
+        let tunnels = std::mem::take(&mut *self.tunnels.lock().await);
+        for entry in tunnels.into_values() {
+            for handle in entry.handles {
+                handle.abort();
+            }
+        }
+        self.start_locks.lock().await.clear();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -182,8 +182,9 @@ fn identifies_single_connection_pool_types() {
 #[test]
 fn identifies_metadata_connections_that_drop_database_scope() {
     assert!(is_metadata_connection_scoped(&DatabaseType::Mysql));
-    assert!(!is_metadata_connection_scoped(&DatabaseType::Doris));
-    assert!(!is_metadata_connection_scoped(&DatabaseType::StarRocks));
+    assert!(is_metadata_connection_scoped(&DatabaseType::Doris));
+    assert!(is_metadata_connection_scoped(&DatabaseType::StarRocks));
+    assert!(is_metadata_connection_scoped(&DatabaseType::ManticoreSearch));
     assert!(!is_metadata_connection_scoped(&DatabaseType::Postgres));
     assert!(!is_metadata_connection_scoped(&DatabaseType::Kwdb));
     assert!(!is_metadata_connection_scoped(&DatabaseType::Oracle));

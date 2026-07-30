@@ -239,6 +239,60 @@ describe("queryStore table data refresh", () => {
     expect(tab.orderByInput).toBe("LOWER(name) ASC");
   });
 
+  it("preserves a manual order when only residual structured sort state is invalid", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultSortColumn = "old_name";
+    tab.resultSortColumnIndex = 1;
+    tab.resultSortDirection = "asc";
+    tab.resultSortMode = "database";
+    tab.orderByInput = "LOWER(new_name) ASC";
+
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.orderByInput).toBe("LOWER(new_name) ASC");
+  });
+
+  it("clears quoted sorts after a case-only column rename", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultSortColumn = "DisplayName";
+    tab.resultSortColumnIndex = 1;
+    tab.resultSortDirection = "asc";
+    tab.resultSortMode = "database";
+    tab.orderByInput = '"DisplayName" ASC';
+
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "displayname", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.orderByInput).toBeUndefined();
+  });
+
   it("drops restored stale sort state before building a table refresh query", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

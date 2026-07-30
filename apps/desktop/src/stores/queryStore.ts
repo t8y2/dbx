@@ -2609,22 +2609,24 @@ export const useQueryStore = defineStore("query", () => {
 
   function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {
     if (tab.mode !== "data") return false;
-    const hasColumn = (name: string) => columns.some((column) => column.name === name || column.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    const hasColumn = (name: string) => columns.some((column) => column.name === name);
     const structuredSortMissing = !!tab.resultSortColumn && !hasColumn(tab.resultSortColumn);
     const simpleOrderMissing = simpleDataGridOrderByReferencesMissingColumn(
       tab.orderByInput,
       columns.map((column) => column.name),
     );
     if (!structuredSortMissing && !simpleOrderMissing) return false;
-    tab.resultSortColumn = undefined;
-    tab.resultSortColumnIndex = undefined;
-    tab.resultSortDirection = undefined;
-    tab.resultSortMode = undefined;
-    tab.resultSortedSql = undefined;
-    tab.resultLocalSortOriginalRows = undefined;
-    tab.resultLocalSortOriginalMongoDocuments = undefined;
-    tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
-    tab.orderByInput = undefined;
+    if (structuredSortMissing) {
+      tab.resultSortColumn = undefined;
+      tab.resultSortColumnIndex = undefined;
+      tab.resultSortDirection = undefined;
+      tab.resultSortMode = undefined;
+      tab.resultSortedSql = undefined;
+      tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalMongoDocuments = undefined;
+      tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
+    }
+    if (simpleOrderMissing) tab.orderByInput = undefined;
     return true;
   }
 

@@ -205,7 +205,7 @@ import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarCopyCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -2588,12 +2588,12 @@ function syncOrderByInputWithSort(column: string | null, direction: "asc" | "des
 watch(
   () => [props.sortColumn, props.sortColumnIndex, props.sortDirection, props.sortMode] as const,
   ([column, columnIndex, direction, mode], previous) => {
-    const wasControlledSort = !!previous?.[0] && !!previous?.[2];
+    const previousOrderWasControlled = previous?.[3] === "database" && simpleDataGridOrderByMatchesSort(orderByInput.value, previous[0], previous[2]);
     const isControlledSort = !!column && !!direction;
     setSort(column && direction ? column : null, typeof columnIndex === "number" && direction ? columnIndex : null, direction ?? "asc", mode ?? "database");
     if (isControlledSort && sortMode.value === "database") {
       syncOrderByInputWithSort(sortCol.value, sortDir.value);
-    } else if (wasControlledSort) {
+    } else if (previousOrderWasControlled) {
       syncOrderByInputWithSort(null, null);
     }
   },

@@ -55,12 +55,14 @@ vi.mock("@/stores/queryStore", () => ({
       const staleSort = !!tab.resultSortColumn && !tab.tableMeta.columns.some((column) => column.name === tab.resultSortColumn);
       const staleOrder = !!simpleOrderColumn && !tab.tableMeta.columns.some((column) => column.name === simpleOrderColumn);
       if (!staleSort && !staleOrder) return false;
-      tab.resultSortColumn = undefined;
-      tab.resultSortColumnIndex = undefined;
-      tab.resultSortDirection = undefined;
-      tab.resultSortMode = undefined;
-      tab.resultSortedSql = undefined;
-      tab.orderByInput = undefined;
+      if (staleSort) {
+        tab.resultSortColumn = undefined;
+        tab.resultSortColumnIndex = undefined;
+        tab.resultSortDirection = undefined;
+        tab.resultSortMode = undefined;
+        tab.resultSortedSql = undefined;
+      }
+      if (staleOrder) tab.orderByInput = undefined;
       return true;
     }),
     setTableMeta: mocks.setTableMeta.mockImplementation((id: string, meta: NonNullable<QueryTab["tableMeta"]>) => {
@@ -206,6 +208,35 @@ describe("useDataGridActions", () => {
     expect(mocks.clearInvalidDataTabSort).toHaveReturnedWith(false);
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: undefined }));
     expect(tab.orderByInput).toBeUndefined();
+  });
+
+  it("keeps a manual order when only residual structured sort state is stale", async () => {
+    const tab = tableDataTab({
+      resultSortColumn: "old_name",
+      resultSortColumnIndex: 1,
+      resultSortDirection: "asc",
+      resultSortMode: "database",
+      orderByInput: "LOWER(new_name) ASC",
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        ],
+        primaryKeys: ["id"],
+      },
+    });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.sql, "", "", "LOWER(new_name) ASC", undefined, undefined, "refresh");
+
+    expect(mocks.clearInvalidDataTabSort).toHaveReturnedWith(true);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: "LOWER(new_name) ASC" }));
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.orderByInput).toBe("LOWER(new_name) ASC");
   });
 
   it("keeps SQL result toolbar reload free of table pagination defaults", async () => {

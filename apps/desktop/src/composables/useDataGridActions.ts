@@ -137,7 +137,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     if (tab.mode === "data" && tableMetaForDataTab(tab)) {
       tab.whereInput = whereInput ?? "";
-      const invalidStoredSortCleared = queryStore.clearInvalidDataTabSort(tab.id);
+      queryStore.clearInvalidDataTabSort(tab.id);
       const realColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
       const incomingSortMissing = realColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, realColumnNames);
       if (incomingSortMissing) tab.orderByInput = undefined;
@@ -183,7 +183,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       }
       try {
         console.info("[DBX][reloadData:build-sql:start]", { traceId, elapsed: elapsed() });
-        const nextSql = await buildTableSql(tab, { whereInput, orderBy: invalidStoredSortCleared || incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset });
+        const nextSql = await buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset });
         console.info("[DBX][reloadData:build-sql:done]", { traceId, elapsed: elapsed() });
         queryStore.updateSql(tab.id, nextSql);
         console.info("[DBX][reloadData:execute:start]", { traceId, elapsed: elapsed() });

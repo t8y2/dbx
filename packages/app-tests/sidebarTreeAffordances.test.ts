@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
+import { syncSidebarTreeNodeExpansion } from "../../apps/desktop/src/lib/sidebar/sidebarTreeExpansion.ts";
+import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
 const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
@@ -24,6 +26,23 @@ test("complex tree changes retain the full rebuild fallback", () => {
   assert.match(connectionTree, /const flatNodes = computed<FlatTreeNode\[]>/);
   assert.match(connectionTree, /flattenTree\(filteredNodes\.value\)/);
   assert.match(connectionTree, /watch\(flatNodes,/);
+  assert.doesNotMatch(connectionTree, /treeScrollerRef\.value\?\.(?:forceUpdate|updateVisibleItems)/);
+  assert.match(connectionTree, /@node-toggled="onNodeToggled"/);
+});
+
+test("tree toggles synchronize filtered node clones with the live sidebar tree", () => {
+  const liveConnection: TreeNode = {
+    id: "connection-1",
+    label: "Connection 1",
+    type: "connection",
+    connectionId: "connection-1",
+    isExpanded: true,
+  };
+  const renderedClone: TreeNode = { ...liveConnection, isExpanded: false };
+
+  assert.equal(syncSidebarTreeNodeExpansion([liveConnection], renderedClone), true);
+  assert.equal(liveConnection.isExpanded, false);
+  assert.equal(syncSidebarTreeNodeExpansion([liveConnection], liveConnection), false);
 });
 
 test("tree rebuilds keep a context menu only while its target row remains visible", () => {

@@ -40,6 +40,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
@@ -667,10 +668,7 @@ watch(flatNodes, (nodes) => {
     }
   }
   stickyScrollTop.value = 0;
-  void nextTick(() => {
-    treeScrollerRef.value?.forceUpdate(true);
-    scheduleSidebarScrollMetricsUpdate();
-  });
+  void nextTick(scheduleSidebarScrollMetricsUpdate);
 });
 
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
@@ -1183,6 +1181,11 @@ function onSearchToggle(node: TreeNode) {
   searchCollapsedIds.value = next;
 }
 
+function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
+  if (isTreeSearchFiltering.value || !wasExpanded) return;
+  syncSidebarTreeNodeExpansion(store.treeNodes, node);
+}
+
 function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void) {
   const items = sidebarTreeRuntime.buildContextMenu(node);
   sidebarContextMenuTarget.value = createSidebarActionTarget(node);
@@ -1663,6 +1666,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :node="sidebarTreeRuntimeInitialNode"
       :depth="0"
       @search-toggle="onSearchToggle"
+      @node-toggled="onNodeToggled"
       @open-ddl="openSidebarDdl"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"

@@ -720,12 +720,12 @@ fn read_identifier(text: &str, start: usize) -> Option<Identifier> {
         return None;
     }
 
-    if !(first.is_ascii_alphabetic() || first == '_') {
+    if !is_identifier_start(first) {
         return None;
     }
     let mut end = pos + first.len_utf8();
     for (offset, ch) in text[end..].char_indices() {
-        if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') {
+        if !is_identifier_char(ch) {
             return Some(Identifier { value: text[pos..end + offset].to_string(), quoted: false, end: end + offset });
         }
     }
@@ -846,8 +846,12 @@ fn previous_char(text: &str, index: usize) -> Option<char> {
     text[..index].chars().next_back()
 }
 
+fn is_identifier_start(ch: char) -> bool {
+    ch == '_' || unicode_ident::is_xid_start(ch)
+}
+
 fn is_identifier_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'
+    ch == '$' || unicode_ident::is_xid_continue(ch)
 }
 
 #[cfg(test)]
@@ -1139,6 +1143,35 @@ mod tests {
                 column(Some("country_name"), false, None, None, "country_name", "country_name"),
                 column(None, false, None, None, "score", "ihli / gdp_pc"),
             ]
+        );
+    }
+
+    #[test]
+    fn accepts_unquoted_unicode_aliases_in_mysql_and_sql_server_queries() {
+        for sql in [
+            "SELECT Guid, FDeleted AS 禁用, IsAuditing AS 审核 FROM xy.dbo.GL_CUSTOM WHERE TJBH=\n24049",
+            "SELECT Guid, FDeleted AS 禁用, IsAuditing AS 审核 FROM xy.GL_CUSTOM WHERE TJBH=24049",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(result.editable, "{sql}");
+            assert_eq!(
+                result.analysis.unwrap().columns,
+                vec![
+                    column(Some("Guid"), false, None, None, "Guid", "Guid"),
+                    column(Some("FDeleted"), false, None, None, "禁用", "FDeleted"),
+                    column(Some("IsAuditing"), false, None, None, "审核", "IsAuditing"),
+                ]
+            );
+        }
+
+        let computed = analyze_editable_query_editability(
+            "SELECT Guid, FDeleted AS 禁用, CASE WHEN IsAuditing = 1 THEN 1 ELSE 0 END AS 审核状态 FROM xy.dbo.GL_CUSTOM",
+        );
+        assert!(computed.editable);
+        assert_eq!(
+            computed.analysis.unwrap().columns[2],
+            column(None, false, None, None, "审核状态", "CASE WHEN IsAuditing = 1 THEN 1 ELSE 0 END",)
         );
     }
 

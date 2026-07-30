@@ -192,4 +192,56 @@ describe("useNavigationTargets with the real query store", () => {
     expect(queryStore.createTab("connection-1", "app", "public.orders", "data", "public")).not.toBe(base);
     expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public", undefined, undefined, { forceNew: true })).not.toBe(base);
   });
+
+  it("clears a renamed column sort when structure-save metadata reaches an open data tab", async () => {
+    const { navigation, queryStore } = await setupNavigation();
+    const dataTabId = queryStore.createTab("connection-1", "app", "public.users", "data", "public");
+    queryStore.setTableMeta(dataTabId, {
+      database: "app",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "old_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const dataTab = queryStore.tabs.find((tab) => tab.id === dataTabId)!;
+    dataTab.resultSortColumn = "old_name";
+    dataTab.resultSortColumnIndex = 1;
+    dataTab.resultSortDirection = "asc";
+    dataTab.resultSortMode = "database";
+    dataTab.orderByInput = '"old_name" ASC';
+    queryStore.createTab("connection-1", "app", "Edit users", "structure", "public", "users", undefined, { forceNew: true });
+    mocks.loadTableMetadata.mockResolvedValueOnce({
+      metadata: {
+        database: "app",
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        ],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    });
+
+    await navigation.onStructureEditorSaved(vi.fn().mockResolvedValue(undefined), vi.fn(), {
+      connectionId: "connection-1",
+      database: "app",
+      schema: "public",
+      tableName: "users",
+    });
+
+    expect(dataTab.tableMeta?.columns.map((column) => column.name)).toEqual(["id", "new_name"]);
+    expect(dataTab.tableMeta?.schema).toBe("public");
+    expect(dataTab.resultSortColumn).toBeUndefined();
+    expect(dataTab.resultSortDirection).toBeUndefined();
+    expect(dataTab.orderByInput).toBeUndefined();
+  });
 });

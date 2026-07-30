@@ -28,7 +28,7 @@ function refresh() {
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs">
-        <Label class="text-muted-foreground">开始</Label>
+        <Label class="text-muted-foreground">{{ t("dataGenerate.start") }}</Label>
         <Input v-model.number="params.startValue" type="number" placeholder="1" class="h-7 text-xs" />
       </div>
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs mt-2">

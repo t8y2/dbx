@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { Label } from "@/components/ui/label";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import * as api from "@/lib/backend/api";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{ params: GeneratorParams; config: any; connectionId?: string; database?: string }>();
+
+const { t } = useI18n();
 
 const schemas = ref<string[]>([]);
 const tables = ref<{ name: string }[]>([]);
@@ -13,11 +16,11 @@ const loadingSchemas = ref(false);
 const loadingTables = ref(false);
 const loadingColumns = ref(false);
 
-const fkModes = [
-  { value: "random", label: "随机" },
-  { value: "unique", label: "不重复" },
-  { value: "repeat", label: "重复每个值" },
-];
+const fkModes = computed(() => [
+  { value: "random", label: t("dataGenerate.genModes.random") },
+  { value: "unique", label: t("dataGenerate.genModes.unique") },
+  { value: "repeat", label: t("dataGenerate.genModes.repeat") },
+]);
 
 onMounted(async () => {
   await loadSchemas();
@@ -84,30 +87,30 @@ function onTableChange(val: string) {
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3 space-y-2">
       <div class="grid grid-cols-[60px_1fr] items-center gap-2 text-xs">
-        <Label class="text-muted-foreground">模式</Label>
+        <Label class="text-muted-foreground">{{ t("dataGenerate.schema") }}</Label>
         <select v-model="props.params.fkSchema" class="h-7 rounded border bg-background px-2 text-xs" @change="onSchemaChange(($event.target as HTMLSelectElement).value)">
-          <option v-if="loadingSchemas" disabled>加载中...</option>
+          <option v-if="loadingSchemas" disabled>{{ t("dataGenerate.loading") }}</option>
           <option v-for="s in schemas" :key="s" :value="s">{{ s }}</option>
         </select>
       </div>
       <div class="grid grid-cols-[60px_1fr] items-center gap-2 text-xs">
-        <Label class="text-muted-foreground">表</Label>
+        <Label class="text-muted-foreground">{{ t("dataGenerate.tableLabel") }}</Label>
         <select v-model="props.params.fkTable" class="h-7 rounded border bg-background px-2 text-xs" @change="onTableChange(($event.target as HTMLSelectElement).value)">
-          <option v-if="loadingTables" disabled>加载中...</option>
-          <option v-for="t in tables" :key="t.name" :value="t.name">{{ t.name }}</option>
+          <option v-if="loadingTables" disabled>{{ t("dataGenerate.loading") }}</option>
+          <option v-for="tbl in tables" :key="tbl.name" :value="tbl.name">{{ tbl.name }}</option>
         </select>
       </div>
       <div class="grid grid-cols-[60px_1fr] items-center gap-2 text-xs">
-        <Label class="text-muted-foreground">字段</Label>
+        <Label class="text-muted-foreground">{{ t("dataGenerate.columnLabel") }}</Label>
         <select v-model="props.params.fkField" class="h-7 rounded border bg-background px-2 text-xs">
-          <option v-if="loadingColumns" disabled>加载中...</option>
+          <option v-if="loadingColumns" disabled>{{ t("dataGenerate.loading") }}</option>
           <option v-for="c in columns" :key="c.name" :value="c.name">{{ c.name }}</option>
         </select>
       </div>
     </div>
 
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">生成模式</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.genMode") }}</div>
       <div class="flex items-center gap-2 text-xs flex-wrap">
         <button v-for="m in fkModes" :key="m.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.fkMode || 'random') === m.value ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.fkMode = m.value as 'random' | 'unique' | 'repeat'">
           {{ m.label }}

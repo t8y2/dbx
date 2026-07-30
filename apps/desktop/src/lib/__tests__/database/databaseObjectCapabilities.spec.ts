@@ -6,6 +6,15 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("dameng")).toContain("MATERIALIZED_VIEW");
   });
 
+  it("exposes synonyms for Xugu only", () => {
+    expect(sidebarObjectKindsForDatabase("xugu")).toContain("SYNONYM");
+    expect(sidebarObjectKindsForDatabase("postgres")).not.toContain("SYNONYM");
+  });
+
+  it("exposes only tables for HBase namespaces", () => {
+    expect(sidebarObjectKindsForDatabase("hbase")).toEqual(["TABLE"]);
+  });
+
   it("exposes materialized views for StarRocks only", () => {
     // StarRocks has a dedicated MV listing/classification path in
     // crates/dbx-core/src/db/mysql.rs (`list_starrocks_tables` +

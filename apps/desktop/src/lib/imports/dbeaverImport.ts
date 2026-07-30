@@ -52,6 +52,7 @@ const profileMap: Record<string, ConnectionProfile> = {
   mongo: { dbType: "mongodb", profile: "mongodb", label: "MongoDB", port: 27017, user: "" },
   redshift: { dbType: "redshift", profile: "redshift", label: "Redshift", port: 5439, user: "awsuser" },
   elasticsearch: { dbType: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", port: 9200, user: "" },
+  easysearch: { dbType: "easysearch", profile: "easysearch", label: "Easysearch", port: 9200, user: "" },
   doris: { dbType: "doris", profile: "doris", label: "Doris", port: 9030, user: "root" },
   starrocks: { dbType: "starrocks", profile: "starrocks", label: "StarRocks", port: 9030, user: "root" },
   dameng: { dbType: "dameng", profile: "dm", label: "达梦 Dameng", port: 5236, user: "SYSDBA" },
@@ -171,7 +172,6 @@ function parseJdbcUrl(url: string, profile: ConnectionProfile) {
   const sqliteMatch = withoutJdbc.match(/^sqlite:(.+)$/i);
   if (sqliteMatch) {
     result.host = sqliteMatch[1];
-    result.database = sqliteMatch[1];
     return result;
   }
 
@@ -221,8 +221,9 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
   const config = entry.configuration || {};
   const url = getString(config.url);
   const parsedUrl = parseJdbcUrl(url, profile);
-  const host = getString(config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? "" : "127.0.0.1"));
-  const database = getString(config.database || config["database-name"] || config.schema || parsedUrl.database);
+  const configuredDatabase = getString(config.database || config["database-name"] || config.schema || parsedUrl.database);
+  const host = getString(config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? configuredDatabase : "127.0.0.1"));
+  const database = profile.dbType === "sqlite" ? "" : configuredDatabase;
   const name = getString(entry.name || database || host || profile.label);
   if (!entry.id || !name) return null;
 

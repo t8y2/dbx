@@ -107,6 +107,43 @@ describe("tab result cache statement execution metadata", () => {
     ]);
   });
 
+  it("preserves result-run statement execution state", () => {
+    const encoded = encodeTabResultSnapshot({
+      resultRuns: [
+        {
+          id: "run-1",
+          title: "Run 1",
+          sequence: 1,
+          sql: "SELECT 1; SELECT bad",
+          createdAt: 1,
+          batchSqlExecution: {
+            executionId: "exec-1",
+            submittedSql: "SELECT 1; SELECT bad",
+            editorFingerprint: "20:0123456789abcdef",
+            sourceOffset: 0,
+            completed: 2,
+            total: 2,
+            startedAt: 1,
+            finishedAt: 2,
+            items: [
+              { statementIndex: 0, sql: "SELECT 1", from: 0, to: 8, status: "success", executionTimeMs: 1 },
+              { statementIndex: 1, sql: "SELECT bad", from: 10, to: 20, status: "error", error: "failed", executionTimeMs: 1 },
+            ],
+          },
+        },
+      ],
+      activeResultRunId: "run-1",
+      cachedAt: 1,
+    });
+
+    expect(decodeTabResultSnapshot(encoded)?.resultRuns?.[0]?.batchSqlExecution).toMatchObject({
+      executionId: "exec-1",
+      completed: 2,
+      total: 2,
+      items: [{ status: "success" }, { status: "error", error: "failed" }],
+    });
+  });
+
   it("restores multi-result, pagination, local-sort, and editable metadata fixtures", () => {
     const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(queryResultLifecycleSnapshot()));
 

@@ -9,6 +9,8 @@ const apiMock = vi.hoisted(() => ({
   setDefaultAiConfig: vi.fn<[string]>().mockResolvedValue(undefined),
   loadAiConfigs: vi.fn<[]>().mockResolvedValue([]),
   saveAiConfigs: vi.fn<[unknown[]]>().mockResolvedValue(undefined),
+  loadAiChatSelection: vi.fn<[]>().mockResolvedValue(null),
+  saveAiChatSelection: vi.fn<[unknown]>().mockResolvedValue(undefined),
   loadEditorSettings: vi.fn<[]>().mockResolvedValue(null),
   saveEditorSettings: vi.fn<[unknown]>().mockResolvedValue(undefined),
   loadDesktopSettings: vi.fn<[]>().mockResolvedValue(null),
@@ -23,10 +25,7 @@ test("createAiConfig rejects -> state unchanged", async () => {
   apiMock.saveAiConfigItem.mockRejectedValueOnce(new Error("db error"));
 
   const store = useSettingsStore();
-  await assert.rejects(
-    () => store.createAiConfig({ id: "c1", name: "test", isDefault: false } as any),
-    /db error/,
-  );
+  await assert.rejects(() => store.createAiConfig({ id: "c1", name: "test", isDefault: false } as any), /db error/);
   assert.equal(store.aiConfigs.length, 0);
 });
 
@@ -103,9 +102,7 @@ test("reloadAiConfigs resets and reloads from API", async () => {
   const store = useSettingsStore();
   store.aiConfigs.push({ id: "old", name: "stale", isDefault: true } as any);
 
-  apiMock.loadAiConfigs.mockResolvedValueOnce([
-    { id: "fresh", name: "fresh", isDefault: true } as any,
-  ]);
+  apiMock.loadAiConfigs.mockResolvedValueOnce([{ id: "fresh", name: "fresh", model: "m", isDefault: true } as any]);
 
   await store.reloadAiConfigs();
   assert.equal(store.aiConfigs.length, 1);
@@ -121,9 +118,7 @@ test("reloadAiConfigs falls back when active config was deleted", async () => {
   store.aiConfigs.push({ id: "remaining", name: "r", model: "m", isDefault: true } as any);
   store.activeModel = { configId: "deleted", modelId: "gone" };
 
-  apiMock.loadAiConfigs.mockResolvedValueOnce([
-    { id: "remaining", name: "r", model: "m", isDefault: true } as any,
-  ]);
+  apiMock.loadAiConfigs.mockResolvedValueOnce([{ id: "remaining", name: "r", model: "m", isDefault: true } as any]);
 
   await store.reloadAiConfigs();
   assert.equal(store.aiConfigs.length, 1);

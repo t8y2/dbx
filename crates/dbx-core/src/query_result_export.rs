@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 use std::mem;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -35,9 +36,11 @@ use tokio_util::sync::CancellationToken;
 
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 pub const XLSX_MAX_DATA_ROWS: usize = 1_048_575;
-const XLSX_ROW_LIMIT_ERROR: &str = "XLSX 最多支持 1,048,575 行数据，请改用 CSV 导出完整结果。";
-const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str = "当前查询暂不支持流式导出，请简化查询或使用受支持的驱动。";
-const AGENT_SESSION_MISSING_ERROR: &str = "查询结果流式导出需要驱动返回结果集会话，但当前驱动未返回 session_id。";
+const XLSX_ROW_LIMIT_ERROR: &str = "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.";
+const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
+    "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
+const AGENT_SESSION_MISSING_ERROR: &str =
+    "Streaming export needs a result-set session, but this driver returned no session_id.";
 const STREAM_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 const EXCEL_CELL_CHARACTER_LIMIT: usize = 32_767;
 const SQL_INSERT_BATCH_SIZE: usize = 100;
@@ -98,6 +101,57 @@ pub struct QueryResultExportRequest {
     pub export_column_types: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_comments: Option<Vec<Option<String>>>,
+}
+
+pub struct StagedExportTarget {
+    destination: PathBuf,
+    temporary: tempfile::TempPath,
+}
+
+impl StagedExportTarget {
+    pub fn new(destination: &str) -> Result<Self, String> {
+        let destination = PathBuf::from(destination);
+        let parent = destination.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let file_name = destination.file_name().and_then(|name| name.to_str()).unwrap_or("query-result");
+        let temporary = tempfile::Builder::new()
+            .prefix(&format!(".{file_name}.dbx-export-"))
+            .tempfile_in(parent)
+            .map_err(|error| format!("Failed to create temporary export file: {error}"))?
+            .into_temp_path();
+        Ok(Self { destination, temporary })
+    }
+
+    pub fn path(&self) -> &Path {
+        self.temporary.as_ref()
+    }
+
+    pub fn path_string(&self) -> Result<String, String> {
+        self.path()
+            .to_str()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "Temporary export path is not valid UTF-8".to_string())
+    }
+
+    pub fn commit(self) -> Result<(), String> {
+        let staged_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.path())
+            .map_err(|error| format!("Failed to open staged export file: {error}"))?;
+        if let Ok(metadata) = std::fs::metadata(&self.destination) {
+            staged_file
+                .set_permissions(metadata.permissions())
+                .map_err(|error| format!("Failed to preserve export destination permissions: {error}"))?;
+        }
+        staged_file.sync_all().map_err(|error| format!("Failed to synchronize export file: {error}"))?;
+        drop(staged_file);
+        self.temporary
+            .persist(&self.destination)
+            .map(|_| ())
+            .map_err(|error| format!("Failed to replace export destination: {}", error.error))
+    }
 }
 
 fn safe_postgres_temp_setup_sql(setup_sql: &[String]) -> Option<Vec<String>> {
@@ -155,6 +209,7 @@ fn query_sql_worksheets(request: &QueryResultExportRequest) -> Vec<XlsxWorksheet
         sheet_name: Some("SQL".to_string()),
         columns: vec!["SQL".to_string()],
         column_types: Vec::new(),
+        column_comments: Vec::new(),
         rows: split_excel_cell_text(&request.sql).into_iter().map(|sql| vec![Value::String(sql)]).collect(),
         numeric_column_right_align: false,
     }]
@@ -167,11 +222,13 @@ fn start_query_result_xlsx_workbook<W: Write + Seek>(
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
     let trailing_sheets = query_sql_worksheets(request);
+    let column_comments: &[Option<String>] = request.column_comments.as_deref().unwrap_or(&[]);
     start_streaming_xlsx_workbook_with_options(
         writer,
         Some("Result"),
         columns,
         column_types,
+        column_comments,
         &trailing_sheets,
         request.date_time_format.as_deref(),
         request.numeric_column_right_align,
@@ -229,41 +286,30 @@ fn sql_insert_column_types(request: &QueryResultExportRequest, column_types: &[S
     }
 }
 
-/// Bounded SQL INSERT writer with temp-file + atomic-rename safety.
+/// Bounded SQL INSERT writer with staged-file replacement safety.
 ///
 /// Rows are buffered and flushed to a temp file every [`SQL_INSERT_BATCH_SIZE`]
-/// rows, so memory stays bounded regardless of the query page size. The temp file
-/// lives alongside the user-chosen target (`<target>.dbx-export-tmp`) and is
-/// renamed onto the target only when [`SqlInsertWriter::finish`] succeeds. If the
-/// writer is dropped without finishing (export error or cancellation), the temp
-/// file is removed and the user's target file is never truncated or deleted.
+/// rows, so memory stays bounded regardless of the query page size. The unique
+/// temp file lives alongside the target and replaces it only after
+/// [`SqlInsertWriter::finish`] flushes and synchronizes the complete output.
 struct SqlInsertWriter {
     file: Option<BufWriter<File>>,
-    temp_path: std::path::PathBuf,
-    target_path: std::path::PathBuf,
+    target: Option<StagedExportTarget>,
     pending_rows: Vec<Vec<Value>>,
     columns: Vec<String>,
     column_types: Vec<Option<String>>,
     database_type: DatabaseType,
     schema: Option<String>,
     table_name: String,
-    finished: bool,
 }
 
 impl SqlInsertWriter {
     /// Create the writer and open the temp file. Column metadata is supplied later
     /// via [`SqlInsertWriter::set_columns`] once the executed result is known.
     fn create(request: &QueryResultExportRequest) -> Result<Self, String> {
-        let target_path = std::path::PathBuf::from(&request.file_path);
-        let mut temp_path = target_path.clone();
-        let mut temp_name = target_path
-            .file_name()
-            .map(|name| name.to_os_string())
-            .unwrap_or_else(|| std::ffi::OsString::from("export.sql"));
-        temp_name.push(".dbx-export-tmp");
-        temp_path.set_file_name(temp_name);
+        let target = StagedExportTarget::new(&request.file_path)?;
         let file = BufWriter::new(
-            File::create(&temp_path).map_err(|e| format!("Failed to create SQL export temp file: {e}"))?,
+            File::create(target.path()).map_err(|e| format!("Failed to create SQL export temp file: {e}"))?,
         );
         let table_name = request
             .export_table_name
@@ -273,15 +319,13 @@ impl SqlInsertWriter {
             .to_string();
         Ok(Self {
             file: Some(file),
-            temp_path,
-            target_path,
+            target: Some(target),
             pending_rows: Vec::new(),
             columns: Vec::new(),
             column_types: Vec::new(),
             database_type: request.database_type,
             schema: request.schema.clone(),
             table_name,
-            finished: false,
         })
     }
 
@@ -328,30 +372,18 @@ impl SqlInsertWriter {
         Ok(())
     }
 
-    /// Flush remaining rows, close the temp file, and atomically rename it onto the
-    /// target path. After this succeeds the writer no longer removes the file on drop.
+    /// Flush remaining rows, close the temp file, and atomically replace the target.
     fn finish(mut self) -> Result<(), String> {
         self.flush_batch()?;
         if let Some(file) = self.file.as_mut() {
             file.flush().map_err(|e| format!("Failed to flush SQL file: {e}"))?;
         }
-        // Close the file handle before rename (required on Windows).
         self.file.take();
-        self.finished = true;
-        std::fs::rename(&self.temp_path, &self.target_path)
-            .map_err(|e| format!("Failed to finalize SQL export file: {e}"))?;
-        Ok(())
-    }
-}
-
-impl Drop for SqlInsertWriter {
-    fn drop(&mut self) {
-        if !self.finished {
-            // Best-effort: close the handle then remove the temp file so the user's
-            // chosen target is never left truncated or deleted by a failed export.
-            self.file.take();
-            let _ = std::fs::remove_file(&self.temp_path);
-        }
+        self.target
+            .take()
+            .ok_or_else(|| "SQL export target already finalized".to_string())?
+            .commit()
+            .map_err(|error| format!("Failed to finalize SQL export file: {error}"))
     }
 }
 
@@ -561,6 +593,7 @@ pub async fn export_query_result_core(
             &request.database,
             &session_id,
             request.client_session_id.as_deref(),
+            None,
         )
         .await;
     }
@@ -1729,6 +1762,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn staged_export_target_preserves_existing_destination_on_discard_and_replace_failure() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let destination = dir.path().join("result.csv");
+        std::fs::write(&destination, "original").expect("write destination");
+
+        let discarded = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("target");
+        std::fs::write(discarded.path(), "partial").expect("write partial export");
+        drop(discarded);
+        assert_eq!(std::fs::read_to_string(&destination).expect("read destination"), "original");
+
+        let failed = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("target");
+        std::fs::write(failed.path(), "replacement").expect("write replacement");
+        std::fs::remove_file(failed.path()).expect("remove staged path");
+        assert!(failed.commit().expect_err("replace should fail").contains("open staged export file"));
+        assert_eq!(std::fs::read_to_string(destination).expect("read destination"), "original");
+    }
+
+    #[test]
+    fn staged_export_targets_are_unique_same_directory_and_replace_existing_destination() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let destination = dir.path().join("result.csv");
+        std::fs::write(&destination, "original").expect("write destination");
+        let first = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("first target");
+        let second = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("second target");
+
+        assert_eq!(first.path().parent(), destination.parent());
+        assert_eq!(second.path().parent(), destination.parent());
+        assert_ne!(first.path(), second.path());
+        std::fs::write(first.path(), "replacement").expect("write replacement");
+        first.commit().expect("commit export");
+        drop(second);
+
+        assert_eq!(std::fs::read_to_string(destination).expect("read destination"), "replacement");
+    }
+
+    #[test]
     fn stream_cancel_detection_covers_driver_token_and_export_flags() {
         assert!(stream_export_was_cancelled(QUERY_CANCELED, false, false));
         assert!(stream_export_was_cancelled("driver closed", true, false));
@@ -1790,6 +1859,7 @@ mod tests {
             export_table_name: None,
             export_column_types: None,
             numeric_column_right_align: false,
+            column_comments: None,
         }
     }
 

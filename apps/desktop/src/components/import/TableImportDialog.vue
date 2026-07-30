@@ -1453,7 +1453,7 @@ watch(rawProgressPercent, (percent) => {
 
       <!-- 全局数据类型 popover：仅一个实例，替代每列的 SearchableSelect -->
       <Teleport to="body">
-        <div v-if="activeDataTypeColumn && dataTypePickerOpen" id="table-import-data-type-options" role="listbox" :style="dataTypePickerStyle" class="z-[9999] max-h-48 overflow-auto rounded-md border bg-popover p-0.5 shadow-md">
+        <div v-if="activeDataTypeColumn && dataTypePickerOpen" id="table-import-data-type-options" role="listbox" :style="dataTypePickerStyle" class="pointer-events-auto z-[9999] max-h-48 overflow-auto rounded-md border bg-popover p-0.5 shadow-md">
           <button
             v-for="(opt, index) in dataTypePickerOptions"
             :key="opt"

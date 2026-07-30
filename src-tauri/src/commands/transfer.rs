@@ -29,27 +29,58 @@ pub async fn start_transfer(
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_target_table_names(&request)?;
 
-    // Ensure pools
-    let source_pool_key =
-        state.get_or_create_pool(&request.source_connection_id, Some(&request.source_database)).await?;
-    let target_pool_key =
-        state.get_or_create_pool(&request.target_connection_id, Some(&request.target_database)).await?;
+    // External Doris/StarRocks catalogs: pool is created with `catalog=` URL
+    // setup (SET catalog) and without USE <external-db>. See ensure_transfer_pool.
+    let source_pool_key = dbx_core::transfer::ensure_transfer_pool(
+        &state,
+        &request.source_connection_id,
+        &request.source_database,
+        request.source_catalog.as_deref(),
+    )
+    .await?;
+    let target_pool_key = dbx_core::transfer::ensure_transfer_pool(
+        &state,
+        &request.target_connection_id,
+        &request.target_database,
+        request.target_catalog.as_deref(),
+    )
+    .await?;
 
     tokio::spawn(async move {
         // Sort tables by FK dependency so referenced tables are transferred first.
-        let sorted_tables = dbx_core::transfer::sort_tables_by_fk_dependency(
-            &state,
-            &request.source_connection_id,
-            &request.source_database,
-            &request.source_schema,
-            &request.tables,
-            true,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
-            request.tables.clone()
-        });
+        // Skip for external Doris/StarRocks catalogs — the database name does not
+        // exist in the default catalog and sorting is unnecessary (no FK constraints).
+        let sorted_tables = {
+            let skip_fk_sort = {
+                let configs = state.configs.read().await;
+                configs
+                    .get(&request.source_connection_id)
+                    .and_then(|config| {
+                        dbx_core::transfer::resolve_external_transfer_catalog_for_config(
+                            request.source_catalog.as_deref(),
+                            config,
+                        )
+                    })
+                    .is_some()
+            };
+            if skip_fk_sort {
+                request.tables.clone()
+            } else {
+                dbx_core::transfer::sort_tables_by_fk_dependency(
+                    &state,
+                    &request.source_connection_id,
+                    &request.source_database,
+                    &request.source_schema,
+                    &request.tables,
+                    true,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+                    request.tables.clone()
+                })
+            }
+        };
 
         let total_tables = sorted_tables.len();
         log::info!("[transfer] starting transfer_id={} tables={}", transfer_id, total_tables);
@@ -291,10 +322,20 @@ pub async fn preview_transfer_ownership(
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_target_table_names(&request)?;
-    let source_pool_key =
-        state.get_or_create_pool(&request.source_connection_id, Some(&request.source_database)).await?;
-    let target_pool_key =
-        state.get_or_create_pool(&request.target_connection_id, Some(&request.target_database)).await?;
+    let source_pool_key = dbx_core::transfer::ensure_transfer_pool(
+        &state,
+        &request.source_connection_id,
+        &request.source_database,
+        request.source_catalog.as_deref(),
+    )
+    .await?;
+    let target_pool_key = dbx_core::transfer::ensure_transfer_pool(
+        &state,
+        &request.target_connection_id,
+        &request.target_database,
+        request.target_catalog.as_deref(),
+    )
+    .await?;
 
     dbx_core::transfer::preview_transfer_ownership(
         &state,

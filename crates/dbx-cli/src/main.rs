@@ -25,6 +25,7 @@ const BRIDGE_REQUIRED_TYPES: &[&str] = &[
     "sqlserver",
     "oracle",
     "elasticsearch",
+    "easysearch",
     "qdrant",
     "milvus",
     "weaviate",

@@ -26,6 +26,7 @@ const assetIcons: Record<string, string> = {
   mariadb: "mariadb",
   tidb: "tidb",
   elasticsearch: "elasticsearch",
+  easysearch: "easysearch",
   oracle: "oracle",
   "oracle-10g": "oracle",
   "oracle-legacy": "oracle",
@@ -52,6 +53,7 @@ const assetIcons: Record<string, string> = {
   presto: "presto",
   prestosql: "presto",
   hive: "hive",
+  hbase: "hbase",
   spark: "spark-logo.png",
   apache_kylin: "apache_kylin",
   sundb: "sundb",
@@ -98,31 +100,22 @@ const assetIcons: Record<string, string> = {
   iris: "iris",
   influxdb: "influxdb",
   zookeeper: "zookeeper",
+  oscar: "oscar.png",
   jdbcx: "jdbcx",
-};
-
-const letterIcons: Record<string, { letter: string; color: string }> = {
-  oscar: { letter: "O", color: "#2563eb" },
 };
 
 const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+/g, "_"));
 const assetName = computed(() => assetIcons[normalizedType.value]);
+const useLightIconInDarkMode = computed(() => normalizedType.value === "easysearch" && isDark.value);
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
   if (normalizedType.value === "uxdb" && isDark.value) return webPath("/icons/database/uxdb-dark.svg");
   return webPath(assetName.value.includes(".") ? `/icons/database/${assetName.value}` : `/icons/database/${assetName.value}.svg`);
 });
-const letter = computed(() => letterIcons[normalizedType.value]);
 </script>
 
 <template>
-  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" aria-hidden="true" />
-  <svg v-else-if="letter" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-    <circle cx="12" cy="12" r="12" :fill="letter.color" />
-    <text x="12" y="16.5" text-anchor="middle" fill="white" font-size="14" font-weight="bold" font-family="system-ui, sans-serif">
-      {{ letter.letter }}
-    </text>
-  </svg>
+  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" :class="{ 'database-logo-light': useLightIconInDarkMode }" aria-hidden="true" />
   <Database v-else class="text-blue-400" />
 </template>
 
@@ -130,5 +123,9 @@ const letter = computed(() => letterIcons[normalizedType.value]);
 .database-logo {
   transform: scale(1.35);
   transform-origin: center;
+}
+
+.database-logo-light {
+  filter: brightness(0) invert(82%);
 }
 </style>

@@ -550,7 +550,7 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
 
   for (const obj of objects) {
     const objectType = normalizeObjectType(obj.object_type);
-    if (!["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
+    if (!["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
       continue;
     }
 
@@ -606,6 +606,7 @@ function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType 
   if (objectType === "FUNCTION") return "function";
   if (objectType === "TRIGGER") return "trigger";
   if (objectType === "SEQUENCE") return "sequence";
+  if (objectType === "SYNONYM") return "synonym";
   if (objectType === "PACKAGE_BODY") return "package-body";
   if (objectType === "PACKAGE") return "package";
   if (objectType === "TYPE_BODY") return "type-body";
@@ -662,6 +663,13 @@ const groupDefs: Array<{
     childType: "sequence",
   },
   {
+    key: "__synonyms",
+    label: "tree.synonyms",
+    objectTypes: ["SYNONYM"],
+    nodeType: "group-synonyms",
+    childType: "synonym",
+  },
+  {
     key: "__packages",
     label: "tree.packages",
     objectTypes: ["PACKAGE", "PACKAGE_BODY"],
@@ -677,7 +685,7 @@ const groupDefs: Array<{
   },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-packages", "group-types"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
 
 export function buildObjectGroupPlaceholderNodes({ nodeId, connectionId, database, schema, objectTypes }: { nodeId: string; connectionId: string; database: string; schema?: string; objectTypes: DatabaseObjectTreeKind[] }): TreeNode[] {
   const supported = new Set(objectTypes);

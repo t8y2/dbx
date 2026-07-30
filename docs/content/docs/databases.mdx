@@ -12,7 +12,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | Group                          | Profiles                                                                                                                                                        | Notes                                                                                          |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Core SQL engines               | MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, Teradata, Vertica, Exasol, Firebird, SAP HANA, YashanDB, GBase   | Available directly in the DBX connection picker                                                |
-| Document, key-value, vector, and config services | Redis, MongoDB, Elasticsearch, Qdrant, Milvus, Weaviate, ChromaDB, etcd, Apache ZooKeeper, Nacos                                                                   | Use dedicated browsers, admin consoles, or query flows instead of the generic relational grid where appropriate |
+| Document, key-value, vector, and config services | Redis, MongoDB, Elasticsearch, Easysearch, Qdrant, Milvus, Weaviate, ChromaDB, etcd, Apache ZooKeeper, Nacos                                                       | Use dedicated browsers, admin consoles, or query flows instead of the generic relational grid where appropriate |
 | MySQL-compatible profiles      | MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB, TDSQL, PolarDB, GreatSQL, custom MySQL                                          | Reuse MySQL-style connection handling where the engine speaks a compatible protocol            |
 | PostgreSQL-compatible profiles | openGauss, KingBase, HighGo, Vastbase, CockroachDB, custom PostgreSQL                                                                                            | Reuse PostgreSQL-style connection handling where the engine speaks a compatible protocol       |
 | File-based engines             | SQLite, DuckDB, Microsoft Access, RQLite, Turso                                                                                                                  | Choose a local database file or HTTP endpoint instead of host and port                         |
@@ -31,7 +31,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | ClickHouse                                  |         8123 |
 | SQL Server                                  |         1433 |
 | Oracle                                      |         1521 |
-| Elasticsearch                               |         9200 |
+| Elasticsearch / Easysearch                  |         9200 |
 | Qdrant                                      |         6333 |
 | Milvus                                      |        19530 |
 | Weaviate                                    |         8080 |
@@ -108,7 +108,7 @@ DBX intentionally enables advanced workflows only where the app has enough metad
 | Create database                | MySQL, PostgreSQL, SQL Server, ClickHouse, Oracle, DM, GaussDB, KWDB, Doris, StarRocks, Redshift, Teradata, Vertica                                                                                                                                                                   |
 | Field lineage                  | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB                                                                                                                                                                                             |
 | Data transfer                  | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, ClickHouse, DuckDB, DM, GaussDB, KWDB                                                                                                                                                                                   |
-| SQL file execution unavailable | Redis, MongoDB, Elasticsearch, etcd, Nacos                                                                                                                                                                                                                                            |
+| SQL file execution unavailable | Redis, MongoDB, Elasticsearch, Easysearch, etcd, Nacos                                                                                                                                                                                                                                |
 
 <Callout type="warn">If a database can connect but does not appear in a feature row, that feature may be hidden or limited for that engine. This prevents DBX from generating SQL it cannot review reliably.</Callout>
 
@@ -116,7 +116,13 @@ DBX intentionally enables advanced workflows only where the app has enough metad
 
 Most network databases support host, port, username, password, default database, optional URL parameters, SSL, connection color, and tunnel / proxy settings. File-based engines replace host and port with a file picker.
 
-DBX can also parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, DM, GaussDB, KWDB, openGauss, TDengine, XuguDB, Access, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB, SAP HANA, InfluxDB, QuestDB, IoTDB, etcd, Nacos, RQLite, and Databricks.
+DBX can also parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, DM, GaussDB, KWDB, openGauss, TDengine, XuguDB, Access, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB, SAP HANA, InfluxDB, QuestDB, IoTDB, etcd, Nacos, RQLite, and Databricks.
+
+### Easysearch
+
+DBX provides a dedicated Easysearch connection type on port `9200` and connects through its Elasticsearch-compatible HTTP REST API. It reuses DBX's existing Elasticsearch document engine for index and document browsing, Query DSL, REST requests, common SQL queries, pagination and counts, document CRUD, and bulk write flows.
+
+Easysearch documents compatibility with the Elasticsearch 7.10 API and ecosystem, but this does not imply complete equivalence with every Elasticsearch version, X-Pack feature, ES|QL, or other proprietary extension. Enable SSL for HTTPS endpoints; self-signed test deployments use the same TLS connection path.
 
 ### Cloudflare D1
 

@@ -39,6 +39,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sqlFormatter",
   "sidebarActivation",
   "sidebarObjectDisplay",
+  "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "autoSelectActiveSidebarNode",
   "openTabsRestoreMode",
@@ -61,6 +62,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "snippets",
   "sqlVariableSyntaxOverrides",
   "continueOnErrorOnBatch",
+  "clickTableNavigationTarget",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];

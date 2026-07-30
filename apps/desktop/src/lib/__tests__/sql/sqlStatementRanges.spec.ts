@@ -281,6 +281,16 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 
+  it("keeps MyBatis placeholders instead of treating them as hash comments", () => {
+    const sql = "SELECT * FROM yd_org_decla_detail WHERE clr_ym = #{ym};\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "kingbase"))).toEqual(["SELECT * FROM yd_org_decla_detail WHERE clr_ym = #{ym}", "SELECT 2"]);
+  });
+
+  it("treats malformed or disabled MyBatis prefixes as hash comments", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT 1; #{1ym};\nSELECT 2", "kingbase"))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT 1; #{ym};\nSELECT 2", "kingbase", { enabledSyntaxes: ["shell"] }))).toEqual(["SELECT 1", "SELECT 2"]);
+  });
+
   it("ignores semicolons in block comments", () => {
     const sql = "SELECT /* a; b */ 1;\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT /* a; b */ 1", "SELECT 2"]);
@@ -418,8 +428,10 @@ POST /orders/_search
 
 HEAD /orders`;
 
-    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "elasticsearch"))).toEqual(["GET /_nodes/stats/jvm?pretty", 'POST /orders/_search\n{\n  "query": { "match_all": {} }\n}', "HEAD /orders"]);
-    expect(hasMultipleExecutionTargets(sql, "elasticsearch")).toBe(true);
+    for (const databaseType of ["elasticsearch", "easysearch"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(sql, databaseType))).toEqual(["GET /_nodes/stats/jvm?pretty", 'POST /orders/_search\n{\n  "query": { "match_all": {} }\n}', "HEAD /orders"]);
+      expect(hasMultipleExecutionTargets(sql, databaseType)).toBe(true);
+    }
   });
 
   it("targets the Elasticsearch request following a comment", () => {
@@ -1168,6 +1180,7 @@ describe("supportsExecutionTargetPicker", () => {
     expect(supportsExecutionTargetPicker("redis")).toBe(true);
     expect(supportsExecutionTargetPicker("mongodb")).toBe(false);
     expect(supportsExecutionTargetPicker("elasticsearch")).toBe(true);
+    expect(supportsExecutionTargetPicker("easysearch")).toBe(true);
     expect(supportsExecutionTargetPicker("qdrant")).toBe(false);
     expect(supportsExecutionTargetPicker("milvus")).toBe(false);
     expect(supportsExecutionTargetPicker("weaviate")).toBe(false);

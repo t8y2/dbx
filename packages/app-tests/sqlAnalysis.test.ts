@@ -202,6 +202,28 @@ test("accepts aliased primary key source columns for row identity", () => {
   assert.equal(allPrimaryKeysPresent(["id"], ["id", "name"], analyzeEditableQuery("select id, name from users")!), true);
 });
 
+test("accepts unquoted Unicode aliases in editable MySQL and SQL Server queries", () => {
+  for (const sql of ["SELECT Guid, FDeleted AS 禁用, IsAuditing AS 审核 FROM xy.dbo.GL_CUSTOM WHERE TJBH=\n24049", "SELECT Guid, FDeleted AS 禁用, IsAuditing AS 审核 FROM xy.GL_CUSTOM WHERE TJBH=24049"]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.deepEqual(result.analysis.columns, [
+      { sourceName: "Guid", sourceNameQuoted: false, resultName: "Guid", expression: "Guid" },
+      { sourceName: "FDeleted", sourceNameQuoted: false, resultName: "禁用", expression: "FDeleted" },
+      { sourceName: "IsAuditing", sourceNameQuoted: false, resultName: "审核", expression: "IsAuditing" },
+    ]);
+  }
+
+  const computed = analyzeEditableQueryEditability("SELECT Guid, FDeleted AS 禁用, CASE WHEN IsAuditing = 1 THEN 1 ELSE 0 END AS 审核状态 FROM xy.dbo.GL_CUSTOM");
+  assert.equal(computed.editable, true);
+  assert.deepEqual(computed.analysis.columns[2], {
+    sourceName: undefined,
+    sourceNameQuoted: false,
+    resultName: "审核状态",
+    expression: "CASE WHEN IsAuditing = 1 THEN 1 ELSE 0 END",
+  });
+});
+
 test("resolves metadata columns with dialect and quote aware identifier rules", () => {
   const postgresColumns = ["id", "ID", "name"];
   assert.equal(resolveMetadataColumnName("postgres", "ID", false, postgresColumns), "id");

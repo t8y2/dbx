@@ -182,18 +182,16 @@ tasks.named('shadowJar') {
 默认配置如下：
 
 ```groovy
-def java8Projects = ['common', 'test-support'] as Set
-
 subprojects {
     java {
         toolchain {
-            languageVersion = JavaLanguageVersion.of(java8Projects.contains(name) ? 8 : 21)
+            languageVersion = JavaLanguageVersion.of(21)
         }
     }
 }
 ```
 
-大多数 Agent 使用 JRE 21。如果某个 Agent 需要特殊的运行时，请更新根 Gradle 约定、发布工作流的 JRE 检测逻辑，并在该模块中记录原因。
+所有 Java Agent 和共享基础设施模块均使用 Java 21。如果某个 Agent 需要特殊的运行时，请更新根 Gradle 约定、发布工作流的 JRE 检测逻辑，并在该模块中记录原因。
 
 ## 测试
 

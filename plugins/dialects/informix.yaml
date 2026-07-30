@@ -1,0 +1,151 @@
+dialect:
+  name: "Informix"
+  display_name: "Informix"
+  versions:
+    - version: "14"
+      status: "RECOMMENDED"
+
+types:
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT"]
+  - name: "BIGINT"
+    category: "INTEGER"
+    aliases: ["INT8"]
+  - name: "INT8"
+    category: "INTEGER"
+  - name: "SERIAL"
+    category: "INTEGER"
+  - name: "BIGSERIAL"
+    category: "INTEGER"
+    aliases: ["SERIAL8"]
+  - name: "SMALLFLOAT"
+    category: "FLOAT"
+    aliases: ["REAL"]
+  - name: "FLOAT"
+    category: "FLOAT"
+    aliases: ["DOUBLE PRECISION"]
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["NUMERIC", "DEC"]
+  - name: "MONEY"
+    category: "DECIMAL"
+    semantic_fidelity_base: 0.8
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+    aliases: ["CHARACTER"]
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+    aliases: ["CHARACTER VARYING", "NVARCHAR"]
+  - name: "NCHAR"
+    category: "STRING"
+    has_length: true
+  - name: "LVARCHAR"
+    category: "STRING"
+  - name: "TEXT"
+    category: "STRING"
+    semantic_fidelity_base: 0.9
+  - name: "BYTE"
+    category: "BINARY"
+    semantic_fidelity_base: 0.9
+  - name: "DATE"
+    category: "DATE"
+  - name: "DATETIME YEAR TO SECOND"
+    category: "DATETIME"
+    aliases: ["DATETIME"]
+    semantic_fidelity_base: 0.9
+  - name: "INTERVAL"
+    category: "INTERVAL"
+    semantic_fidelity_base: 0.5
+  - name: "BOOLEAN"
+    category: "BOOLEAN"
+  - name: "BLOB"
+    category: "BINARY"
+  - name: "CLOB"
+    category: "STRING"
+  - name: "JSON"
+    category: "JSON"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  create_index: true
+  drop_index: true
+  rebuild_index: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_trigger: true
+  drop_trigger: true
+  grant_revoke: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP {column}"
+    rename_column: "RENAME COLUMN {table}.{old} TO {new}"
+    modify_column: "ALTER TABLE {table} MODIFY ({column} {type})"
+    create_table: "CREATE TABLE {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP {column}"
+  drop_column: "ALTER TABLE {table} ADD {column} {original_type}"
+  rename_column: "RENAME COLUMN {table}.{new} TO {old}"
+  create_table: "DROP TABLE IF EXISTS {table}"
+  drop_table: "-- Restore from backup: {table}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+  modify_column:
+    level: "BLOCKING_SHORT"
+    cost: "MEDIUM"
+  drop_table:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  truncate:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+  drop_column: "DANGEROUS"
+  alter_type: "MODIFY"
+  add_column: "SAFE"
+  create_table: "SAFE"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 32767
+  max_indexes_per_table: 200
+  max_query_size_bytes: 2097152
+  max_foreign_key_name_length: 128
+  supports_partitioning: true
+  supports_on_delete_set_null: true
+  supports_deferrable_constraints: true
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: false
+  max_length: 128
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT tabname FROM systables WHERE tabtype = 'T' AND tabid > 99"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT colname, coltype FROM syscolumns WHERE tabid = (SELECT tabid FROM systables WHERE tabname = '{table}')"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT tabname FROM systables WHERE tabtype = 'T'"
+    depth_support: 1
+    performance_profile: "MEDIUM"

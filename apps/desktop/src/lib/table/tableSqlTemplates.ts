@@ -4,6 +4,8 @@ import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelec
 export interface TableSqlTemplateOptions {
   databaseType?: DatabaseType;
   schema?: string;
+  catalog?: string;
+  database?: string;
   tableName: string;
   columns?: ColumnInfo[];
   tableType?: string;
@@ -96,6 +98,8 @@ export function buildTableDeleteTemplate(options: TableSqlTemplateOptions): stri
 function templateTableName(options: TableSqlTemplateOptions): string {
   return qualifiedTableName({
     databaseType: options.databaseType,
+    catalog: options.catalog,
+    database: options.database,
     schema: options.schema,
     tableName: options.tableName,
   });

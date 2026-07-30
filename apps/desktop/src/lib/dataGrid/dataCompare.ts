@@ -2,6 +2,15 @@ import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
 
 export type DataCompareCellValue = QueryResult["rows"][number][number];
 
+export type SamplingStrategy = "Random" | "ExtremeValues" | "Hybrid";
+
+export interface DegradationThreshold {
+  fullCompareMaxRows: number;
+  sampleMaxRows: number;
+  sampleSize: number;
+  extremeSampleCount: number;
+}
+
 export interface DataCompareChangedCell {
   column: string;
   source: DataCompareCellValue;
@@ -57,6 +66,9 @@ export interface DataCompareFromTablesOptions {
   columns: string[];
   keyColumns: string[];
   fetchBatchSize?: number;
+  degradationThreshold?: DegradationThreshold;
+  samplingStrategy?: SamplingStrategy;
+  enableChecksum?: boolean;
 }
 
 export interface DataCompareMissingTargetOptions {
@@ -70,6 +82,9 @@ export interface DataCompareMissingTargetOptions {
   targetTable: string;
   keyColumns: string[];
   fetchBatchSize?: number;
+  degradationThreshold?: DegradationThreshold;
+  samplingStrategy?: SamplingStrategy;
+  enableChecksum?: boolean;
 }
 
 export interface DataCompareFromTablesPreparation extends DataComparePreparation {

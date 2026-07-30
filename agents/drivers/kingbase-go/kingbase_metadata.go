@@ -215,13 +215,27 @@ func (s *server) listDatabases() ([]databaseInfo, error) {
 	return []databaseInfo{{Name: s.params.Database}}, nil
 }
 
-func (s *server) listSchemas(visible []string) ([]string, error) {
-	query := "SELECT nspname FROM sys_catalog.sys_namespace WHERE nspname NOT LIKE 'sys_temp_%' AND nspname NOT LIKE 'sys_toast_temp_%' ORDER BY nspname"
-	if s.mode.postgresCatalog {
-		query = "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%' ORDER BY nspname"
-	} else if s.mode.mysqlCompat {
-		query = kingbaseMySQLCompatListSchemasSQL
+func kingbaseListSchemasSQL(mode kingbaseMode, showSystemSchemas bool) string {
+	if mode.mysqlCompat {
+		if showSystemSchemas {
+			return "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name"
+		}
+		return kingbaseMySQLCompatListSchemasSQL
 	}
+	if mode.postgresCatalog {
+		if showSystemSchemas {
+			return "SELECT nspname FROM pg_catalog.pg_namespace ORDER BY nspname"
+		}
+		return "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%' ORDER BY nspname"
+	}
+	if showSystemSchemas {
+		return "SELECT nspname FROM sys_catalog.sys_namespace ORDER BY nspname"
+	}
+	return "SELECT nspname FROM sys_catalog.sys_namespace WHERE nspname NOT LIKE 'sys_temp_%' AND nspname NOT LIKE 'sys_toast_temp_%' ORDER BY nspname"
+}
+
+func (s *server) listSchemas(visible []string, showSystemSchemas bool) ([]string, error) {
+	query := kingbaseListSchemasSQL(s.mode, showSystemSchemas)
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -383,7 +397,7 @@ func (s *server) completionAssistantSearch(request completionAssistantRequest) (
 	} else {
 		schemas := []string{request.Schema}
 		if request.GlobalSearch {
-			visible, err := s.listSchemas(nil)
+			visible, err := s.listSchemas(nil, false)
 			if err != nil {
 				return completionAssistantResponse{}, err
 			}
@@ -464,17 +478,25 @@ func (s *server) queryCatalogColumns(
 	primary map[string]bool,
 	catalog, prefix, expression string,
 ) ([]columnInfo, error) {
+	identityExpression := "a.attidentity"
+	if s.catalogIdentityUnsupported {
+		identityExpression = "CAST(NULL AS varchar(1)) AS attidentity"
+	}
 	query := fmt.Sprintf(`SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
 	%s(ad.adbin, ad.adrelid), col_description(a.attrelid, a.attnum),
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN ((a.atttypmod - 4) >> 16) & 65535 END,
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN (a.atttypmod - 4) & 65535 END,
 	CASE WHEN t.typname IN ('varchar','bpchar') AND a.atttypmod > 0 THEN a.atttypmod - 4 END,
-	a.attidentity
+	%s
 	FROM %s.%s_attribute a JOIN %s.%s_type t ON t.oid = a.atttypid
 	JOIN %s.%s_class c ON c.oid = a.attrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
+	if err != nil && !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity") {
+		s.catalogIdentityUnsupported = true
+		return s.queryCatalogColumns(schema, table, primary, catalog, prefix, expression)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -505,6 +527,14 @@ func isUndefinedFunction(err error, functionName string) bool {
 	normalized := strings.ToLower(err.Error())
 	undefined = undefined || strings.Contains(normalized, "does not exist") || strings.Contains(normalized, "不存在")
 	return undefined && strings.Contains(normalized, strings.ToLower(functionName))
+}
+
+func isUndefinedColumn(err error, columnName string) bool {
+	var driverError *gokb.Error
+	undefined := errors.As(err, &driverError) && string(driverError.Code) == "42703"
+	normalized := strings.ToLower(err.Error())
+	undefined = undefined || strings.Contains(normalized, "does not exist") || strings.Contains(normalized, "不存在")
+	return undefined && strings.Contains(normalized, strings.ToLower(columnName))
 }
 
 func (s *server) informationSchemaColumns(schema, table string, primary map[string]bool) ([]columnInfo, error) {

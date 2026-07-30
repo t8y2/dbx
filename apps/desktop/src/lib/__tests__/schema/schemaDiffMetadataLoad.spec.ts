@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
+import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -22,6 +22,66 @@ describe("schemaDiffMetadataLoad", () => {
     expect(shouldFetchSchemaDiffDdl(true, { tables: false, views: true })).toBe(true);
     expect(shouldFetchSchemaDiffDdl(false, { tables: false, views: true })).toBe(false);
     expect(shouldFetchSchemaDiffDdl(false, { tables: true, views: false })).toBe(true);
+  });
+
+  it("uses DDL-only metadata for views so invalid definers cannot break column discovery", () => {
+    expect(
+      schemaDiffMetadataLoadPlan(true, {
+        tables: true,
+        views: true,
+        indexes: true,
+        primaryKeys: true,
+        uniqueKeys: true,
+        foreignKeys: true,
+        triggers: true,
+      }),
+    ).toEqual({
+      columns: false,
+      indexes: false,
+      foreignKeys: false,
+      triggers: false,
+      ddl: true,
+    });
+  });
+
+  it("does not load any metadata for disabled views", () => {
+    expect(
+      schemaDiffMetadataLoadPlan(true, {
+        tables: true,
+        views: false,
+        indexes: true,
+        primaryKeys: true,
+        uniqueKeys: true,
+        foreignKeys: true,
+        triggers: true,
+      }),
+    ).toEqual({
+      columns: false,
+      indexes: false,
+      foreignKeys: false,
+      triggers: false,
+      ddl: false,
+    });
+  });
+
+  it("preserves enabled relational metadata for tables", () => {
+    expect(
+      schemaDiffMetadataLoadPlan(false, {
+        tables: true,
+        views: false,
+        indexes: false,
+        primaryKeys: true,
+        uniqueKeys: false,
+        foreignKeys: true,
+        triggers: false,
+      }),
+    ).toEqual({
+      columns: true,
+      indexes: true,
+      foreignKeys: true,
+      triggers: false,
+      ddl: true,
+    });
   });
 
   it("maps items with limited concurrency and preserves output order", async () => {

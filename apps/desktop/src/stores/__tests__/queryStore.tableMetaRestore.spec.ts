@@ -73,4 +73,30 @@ describe("data tab snapshot restore vs tableMetaPending", () => {
     // 恢复后行标识仍未知：编辑门控必须重新挂起
     expect(tab.tableMetaPending).toBe(true);
   });
+
+  it("does not replace current data-tab metadata with an older non-empty result snapshot", async () => {
+    vi.doMock("@/lib/tabs/tabResultCache", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("@/lib/tabs/tabResultCache")>();
+      return {
+        ...actual,
+        readTabResultSnapshot: vi.fn(async () => ({ result: sampleResult(), tableMeta: { tableName: "users", schema: "public", columns: [column("old_name")], primaryKeys: [] } }) as any),
+      };
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.tableMeta = { tableName: "users", schema: "public", columns: [column("new_name")], primaryKeys: ["new_name"] };
+    tab.tableMetaPending = false;
+    tab.resultEvicted = true;
+    tab.resultCacheKey = "cache-key";
+
+    await store.reloadEvictedTab(tabId);
+
+    expect(tab.result).toBeDefined();
+    expect(tab.tableMeta?.columns.map((item) => item.name)).toEqual(["new_name"]);
+    expect(tab.tableMeta?.primaryKeys).toEqual(["new_name"]);
+    expect(tab.tableMetaPending).toBe(false);
+  });
 });

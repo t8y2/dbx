@@ -19,9 +19,11 @@ import {
   isSqlServerIdentityCompatibleDataType,
   mysqlEnumDataType,
   normalizeDataTypeParams,
+  normalizeStructureIndexType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
+  sameStructureIndexType,
   toColumnNames,
 } from "../../apps/desktop/src/lib/table/tableStructureEditorState.ts";
 import { firstStructureMetadataTab, isStructureMetadataTabSupported } from "../../apps/desktop/src/lib/table/tableMetadataCapabilities.ts";
@@ -400,6 +402,48 @@ test("creates editable index drafts and splits pasted column lists", () => {
     ],
   );
   assert.equal(toColumnNames(["id", "name"]), "id, name");
+});
+
+test("normalizes Postgres lowercase index types when creating structure drafts", () => {
+  const postgresIndexes: IndexInfo[] = [
+    {
+      name: "system_big_screen_asset_pkey",
+      columns: ["id"],
+      is_unique: true,
+      is_primary: true,
+      index_type: "btree",
+    },
+    {
+      name: "SYSTEM_BIG_SCREEN_ASSET_TAGS_JSON_IDX",
+      columns: ["tags_json"],
+      is_unique: false,
+      is_primary: false,
+      index_type: "gin",
+    },
+    {
+      name: "idx_hash",
+      columns: ["name"],
+      is_unique: false,
+      is_primary: false,
+      index_type: "hash",
+    },
+  ];
+
+  const drafts = createIndexDrafts(postgresIndexes);
+  assert.deepEqual(
+    drafts.map((draft) => ({ name: draft.name, indexType: draft.indexType })),
+    [
+      { name: "system_big_screen_asset_pkey", indexType: "BTREE" },
+      { name: "SYSTEM_BIG_SCREEN_ASSET_TAGS_JSON_IDX", indexType: "GIN" },
+      { name: "idx_hash", indexType: "HASH" },
+    ],
+  );
+
+  // Uppercased drafts must not look like a type change vs Postgres amname.
+  assert.equal(sameStructureIndexType(drafts[0]!.indexType, postgresIndexes[0]!.index_type), true);
+  assert.equal(sameStructureIndexType("BTREE", "btree"), true);
+  assert.equal(sameStructureIndexType("GIN", "hash"), false);
+  assert.equal(normalizeStructureIndexType("  gist "), "GIST");
 });
 
 test("generates conventional index names from table and columns", () => {

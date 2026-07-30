@@ -90,9 +90,8 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
-    public void disconnect() {
+    protected void afterDisconnect() {
         clearMetadataCache();
-        super.disconnect();
     }
 
     @Override

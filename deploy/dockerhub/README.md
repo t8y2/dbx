@@ -63,6 +63,8 @@ docker compose up -d --pull always
 
 Persist `/app/data` with a named volume or bind mount. Removing this data removes saved connections and other DBX application data.
 
+DuckDB is delivered as a standalone native driver instead of being embedded in `dbx-web`. Install the DuckDB driver from Driver Manager after the first launch. It is stored under `/app/data/agents` and remains available across container upgrades when `/app/data` is persisted.
+
 ## Reverse Proxy
 
 To publish DBX under a path such as `https://example.com/dbx`, set:

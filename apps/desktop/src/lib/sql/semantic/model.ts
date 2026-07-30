@@ -713,7 +713,7 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
       TABLE_INTRODUCERS.has(previous) ||
       TABLE_INTRODUCERS.has(wordBeforeReplacement) ||
       TABLE_INTRODUCERS.has(wordBeforeTrailing) ||
-      (!!targetSource && !targetSource.alias && trailing.replacementRange.start <= targetSource.sourceSpan.end + 1 && TABLE_INTRODUCERS.has(wordBeforePosition(tokens, targetSource.sourceSpan.start))))
+      (!!targetSource && !targetSource.alias && trailing.replacementRange.start >= targetSource.sourceSpan.start && trailing.replacementRange.start <= targetSource.sourceSpan.end + 1 && TABLE_INTRODUCERS.has(wordBeforePosition(tokens, targetSource.sourceSpan.start))))
   ) {
     const role = dialect.qualifierRole(trailing.qualifierParts, "table");
     return { kind: role === "catalog" ? "catalog" : "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "medium" };

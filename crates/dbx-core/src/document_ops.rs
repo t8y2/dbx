@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
 use crate::db::document_result::DocumentQueryResult;
-use crate::db::{elasticsearch_driver, mongo_driver, vector_driver};
+use crate::db::{easysearch_driver, elasticsearch_driver, mongo_driver, vector_driver};
 
 pub use crate::db::vector_driver::CollectionInfo;
 
@@ -55,6 +55,7 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
             Err(error) => Err(error),
         },
         PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
+        PoolKind::Easysearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::VectorDb(client) => vector_driver::list_databases(client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -87,13 +88,7 @@ fn mongo_list_databases_unauthorized(error: &str) -> bool {
 }
 
 fn mongo_collection_info(name: String, kind: mongo_driver::MongoCollectionKind) -> CollectionInfo {
-    CollectionInfo {
-        name: name.clone(),
-        id: name,
-        dimension: None,
-        kind: Some(kind.as_str().to_string()),
-        bucket_name: None,
-    }
+    CollectionInfo { name: name.clone(), id: name, kind: Some(kind.as_str().to_string()), ..Default::default() }
 }
 
 fn sort_mongo_collection_specs(
@@ -125,9 +120,9 @@ fn mongo_bucket_infos(names: &[String]) -> Vec<CollectionInfo> {
         .map(|bucket_name| CollectionInfo {
             name: bucket_name.clone(),
             id: format!("bucket:{bucket_name}"),
-            dimension: None,
             kind: Some("bucket".to_string()),
             bucket_name: Some(bucket_name),
+            ..Default::default()
         })
         .collect()
 }
@@ -221,10 +216,11 @@ pub async fn list_collections_core(
         }
         PoolKind::Elasticsearch(client) => {
             let names = sort_names(elasticsearch_driver::list_indices(client).await?);
-            Ok(names
-                .into_iter()
-                .map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None, kind: None, bucket_name: None })
-                .collect())
+            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
+        }
+        PoolKind::Easysearch(client) => {
+            let names = sort_names(easysearch_driver::list_indices(client).await?);
+            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
         }
         PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(client, database).await,
         PoolKind::Agent(client) => {
@@ -394,6 +390,11 @@ pub async fn find_documents_core(
             drop(connections);
             elasticsearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
         }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            easysearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+        }
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             drop(connections);
@@ -439,6 +440,11 @@ pub async fn count_elasticsearch_documents_core(
             drop(connections);
             elasticsearch_driver::count_documents(&client, index, filter).await
         }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            easysearch_driver::count_documents(&client, index, filter).await
+        }
         _ => Err("Not an Elasticsearch connection".to_string()),
     }
 }
@@ -464,6 +470,11 @@ pub async fn insert_document_core(
             let client = client.clone();
             drop(connections);
             elasticsearch_driver::insert_document(&client, collection, doc_json, routing).await
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            easysearch_driver::insert_document(&client, collection, doc_json, routing).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -500,6 +511,11 @@ pub async fn update_document_core(
             // as was used to index the document.
             elasticsearch_driver::update_document(&client, collection, id, doc_json, routing).await
         }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            easysearch_driver::update_document(&client, collection, id, doc_json, routing).await
+        }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let result: serde_json::Value = client
@@ -534,6 +550,11 @@ pub async fn delete_document_core(
             // Elasticsearch requires the same custom routing value for writes
             // as was used to index the document.
             elasticsearch_driver::delete_document(&client, collection, id, routing).await
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            easysearch_driver::delete_document(&client, collection, id, routing).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;

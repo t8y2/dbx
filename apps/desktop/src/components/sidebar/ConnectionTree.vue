@@ -6,15 +6,17 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import type { ObjectSourceKind, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
-import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards } from "@/lib/sidebar/sidebarSearchTree";
+import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
+import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
+import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
-import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { createFlatTreeIndex, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
@@ -29,6 +31,8 @@ import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { Switch } from "@/components/ui/switch";
 import { cancelPendingSidebarDataOpen, runSidebarDataOpenImmediately, type SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Button } from "@/components/ui/button";
@@ -36,6 +40,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
@@ -62,6 +67,10 @@ const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarHorizontalScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
 const sidebarContextMenuItems = ref<ContextMenuItem[]>([]);
+const emit = defineEmits<{
+  "open-settings": [initialTab: string];
+}>();
+
 const sidebarContextMenuTarget = ref<SidebarActionTarget | null>(null);
 const sidebarDangerDialogRequest = ref<SidebarDangerDialogRequest | null>(null);
 const sidebarDangerDialogOpen = ref(false);
@@ -107,6 +116,7 @@ const tableSearchTimers = new Map<string, number>();
 const tableSearchFocusRestoreTokens = new Map<string, number>();
 let tableSearchFocusRestoreTokenSeq = 0;
 let latestTableSearchInteractionParentId: string | null = null;
+let localTableSearchFocusPending = false;
 
 watch(
   searchQuery,
@@ -153,6 +163,10 @@ watch(
 
 watch(deferredSearchQuery, (newQuery, oldQuery) => {
   store.sidebarSearchQuery = newQuery;
+  if (settingsStore.editorSettings.sidebarGlobalSearchLocal) {
+    if (!newQuery && oldQuery) searchRefreshedNodeIds.clear();
+    return;
+  }
   const tasks: Promise<void>[] = [];
   for (const root of store.treeNodes) {
     collectExpandedObjectSearchTargets(root, tasks, newQuery ? searchRefreshedNodeIds : undefined);
@@ -167,9 +181,9 @@ watch(deferredSearchQuery, (newQuery, oldQuery) => {
     .catch(() => {});
 });
 
-const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-packages", "group-types"]);
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
-const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "sequence", "package", "package-body", "type", "type-body", "load-more"]);
+const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "sequence", "synonym", "package", "package-body", "type", "type-body", "load-more"]);
 
 function isSimpleObjectSearchParent(node: TreeNode): boolean {
   return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && (!!node.children?.some((child) => simpleObjectChildTypes.has(child.type)) || !!store.sidebarTableSearchQueries[node.id]?.trim());
@@ -353,12 +367,47 @@ function focusTableSearchInput(parentNodeId: string) {
 }
 
 const displayedTreeNodes = computed(() => sortConnectionListForDisplay(store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode));
+const localTableSearchResults = ref<Record<string, TableInfo[] | null>>({});
+
+const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
+const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
+
+function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
+  return nodes.map((node) => {
+    const children = node.children ? filterLocallySearchedTables(node.children) : undefined;
+    const query = settingsStore.editorSettings.sidebarTableSearchLocal && localTableSearchParentTypes.has(node.type) ? store.sidebarTableSearchQueries[node.id]?.trim() : "";
+    if (!query || !children) return children === node.children ? node : { ...node, children };
+
+    const indexed = localTableSearchResults.value[node.id];
+    const matchingChildren =
+      indexed === null
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()))
+        : indexed
+          ? reuseLiveSidebarTreeNodes(
+              buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) }),
+              children,
+            )
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
+    return { ...node, children: matchingChildren };
+  });
+}
+
+async function loadLocalTableSearchResults(parentNodeId: string, refresh = false) {
+  try {
+    const entries = refresh ? await store.refreshSidebarTableSearchIndex(parentNodeId) : await store.loadSidebarTableSearchIndex(parentNodeId);
+    localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: entries };
+  } finally {
+    if (latestTableSearchInteractionParentId === parentNodeId) focusTableSearchInput(parentNodeId);
+  }
+}
 
 const filteredNodes = computed(() => {
   let nodes = displayedTreeNodes.value;
   if (showConnectedConnectionsOnly.value) {
     nodes = filterSidebarTreeToConnectedConnections(nodes, store.connectedIds);
   }
+
+  nodes = filterLocallySearchedTables(nodes);
 
   const q = deferredSearchQuery.value;
   nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value);
@@ -793,11 +842,19 @@ const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
 provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
-  setTableSearchQuery: (parentNodeId, query) => {
+  setTableSearchQuery: (parentNodeId, query, local) => {
     latestTableSearchInteractionParentId = parentNodeId;
     store.setSidebarTableSearchQuery(parentNodeId, query);
-    scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
+    if (local) {
+      localTableSearchFocusPending = true;
+      void nextTick(() => {
+        focusTableSearchInput(parentNodeId);
+        localTableSearchFocusPending = false;
+      });
+      void loadLocalTableSearchResults(parentNodeId);
+    } else scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
   },
+  refreshTableSearchIndex: (parentNodeId) => void loadLocalTableSearchResults(parentNodeId, true),
   registerPasteHandler: pasteHandlerRegistry.register,
 });
 provide(sidebarTreeRuntimeKey, sidebarTreeRuntime);
@@ -1004,7 +1061,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadRedisDatabases(connId);
       } else if (config.db_type === "mongodb") {
         await store.loadMongoDatabases(connId);
-      } else if (config.db_type === "elasticsearch") {
+      } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
         await store.loadElasticsearchIndices(connId);
       } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
         await store.loadVectorCollections(connId);
@@ -1127,6 +1184,11 @@ function onSearchToggle(node: TreeNode) {
   searchCollapsedIds.value = next;
 }
 
+function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
+  if (isTreeSearchFiltering.value) return;
+  syncSidebarTreeNodeExpansion(store.treeNodes, node, !wasExpanded);
+}
+
 function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void) {
   const items = sidebarTreeRuntime.buildContextMenu(node);
   sidebarContextMenuTarget.value = createSidebarActionTarget(node);
@@ -1217,6 +1279,10 @@ function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
     .catch((error: any) => {
       if (requestGeneration === sidebarActionGeneration) toast(error?.message || String(error), 5000);
     });
+}
+
+function openSidebarSettings(initialTab: string) {
+  emit("open-settings", initialTab);
 }
 
 function openSidebarProcedure(node: TreeNode) {
@@ -1316,14 +1382,14 @@ function clearSidebarTableNameFilters() {
 function openSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema);
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
   queryStore.updateSql(tabId, sql);
 }
 
 async function executeSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema);
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
   queryStore.updateSql(tabId, sql);
   await queryStore.executeTabSql(tabId, sql);
 }
@@ -1441,6 +1507,7 @@ function focusSearchAtEnd() {
 
 function onWindowKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
+  if (localTableSearchFocusPending) return;
   if (sidebarShortcutTargetIsActive(event.target)) {
     if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isEditConnectionShortcut(event)) {
       if (requestSelectedConnectionEdit()) {
@@ -1528,7 +1595,7 @@ function copySelectedSidebarNames(): boolean {
           tables: tableNodes.map((node) => ({
             connectionId: node.connectionId!,
             database: node.database!,
-            schema: node.schema,
+            schema: connectionObjectTreeNodeSchema(store.getConfig(node.connectionId!), node.database!, node.schema),
             tableName: node.label,
           })),
         }
@@ -1602,9 +1669,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :node="sidebarTreeRuntimeInitialNode"
       :depth="0"
       @search-toggle="onSearchToggle"
+      @node-toggled="onNodeToggled"
       @open-ddl="openSidebarDdl"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
+      @open-settings="openSidebarSettings"
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"
@@ -1632,58 +1701,69 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <X class="h-3 w-3" />
           </button>
         </div>
-        <button class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
-          <Crosshair class="h-3.5 w-3.5" />
-        </button>
-        <LightDropdown
-          :model-value="settingsStore.editorSettings.sidebarConnectionSortMode"
-          :items="connectionListSortMenuItems"
-          :aria-label="t('sidebar.sortConnections')"
-          :label="t('sidebar.sortConnections')"
-          :trigger-title="t('sidebar.sortConnections')"
-          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', isConnectionListAlphabeticallySorted ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
-          trigger-icon-class="h-3.5 w-3.5"
-          item-icon-class="h-3.5 w-3.5"
-          content-class="w-max min-w-0"
-          selected-item-class="bg-primary/10 text-primary"
-          selected-check-class="text-primary"
-          :show-trigger-label="false"
-          :show-chevron="false"
-          align="end"
-          @update:model-value="updateConnectionListSortMode"
-        />
-        <LightDropdown
-          v-if="searchScopeOptions.length > 0"
-          model-value=""
-          :items="searchScopeMenuItems"
-          :selected-values="selectedSearchScopes"
-          :aria-label="t('sidebar.filterByType')"
-          :label="t('sidebar.filterByType')"
-          :trigger-title="t('sidebar.filterByType')"
-          :trigger-icon="ListFilter"
-          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
-          trigger-icon-class="h-3.5 w-3.5"
-          item-icon-class="h-3.5 w-3.5"
-          content-class="w-max min-w-0"
-          selected-item-class="bg-primary/10 text-primary"
-          selected-check-class="text-primary"
-          :show-trigger-label="false"
-          :show-chevron="false"
-          :close-on-select="false"
-          align="end"
-          @update:model-value="selectSearchScopeMenuItem"
-        />
-        <button
-          type="button"
-          class="shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
-          :class="showConnectedConnectionsOnly ? 'text-primary bg-primary/10 border-primary/30' : 'border-border text-muted-foreground hover:text-foreground'"
-          :aria-label="t('sidebar.showActiveConnectionsOnly')"
-          :aria-pressed="showConnectedConnectionsOnly"
-          :title="t('sidebar.showActiveConnectionsOnly')"
-          @click="showConnectedConnectionsOnly = !showConnectedConnectionsOnly"
-        >
-          <CircleDot class="h-3.5 w-3.5" />
-        </button>
+        <LightTooltip :text="t('sidebar.globalLocalSearchTooltip')" side="top" :delay="300">
+          <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
+        </LightTooltip>
+        <LightTooltip :text="t('sidebar.locateActiveTab')" side="top" :delay="300" nowrap>
+          <button type="button" class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :aria-label="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
+            <Crosshair class="h-3.5 w-3.5" />
+          </button>
+        </LightTooltip>
+        <LightTooltip :text="t('sidebar.sortConnections')" side="top" :delay="300" nowrap>
+          <span class="inline-flex">
+            <LightDropdown
+              :model-value="settingsStore.editorSettings.sidebarConnectionSortMode"
+              :items="connectionListSortMenuItems"
+              :aria-label="t('sidebar.sortConnections')"
+              :label="t('sidebar.sortConnections')"
+              :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', isConnectionListAlphabeticallySorted ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
+              trigger-icon-class="h-3.5 w-3.5"
+              item-icon-class="h-3.5 w-3.5"
+              content-class="w-max min-w-0"
+              selected-item-class="bg-primary/10 text-primary"
+              selected-check-class="text-primary"
+              :show-trigger-label="false"
+              :show-chevron="false"
+              align="end"
+              @update:model-value="updateConnectionListSortMode"
+            />
+          </span>
+        </LightTooltip>
+        <LightTooltip v-if="searchScopeOptions.length > 0" :text="t('sidebar.filterByType')" side="top" :delay="300" nowrap>
+          <span class="inline-flex">
+            <LightDropdown
+              model-value=""
+              :items="searchScopeMenuItems"
+              :selected-values="selectedSearchScopes"
+              :aria-label="t('sidebar.filterByType')"
+              :label="t('sidebar.filterByType')"
+              :trigger-icon="ListFilter"
+              :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
+              trigger-icon-class="h-3.5 w-3.5"
+              item-icon-class="h-3.5 w-3.5"
+              content-class="w-max min-w-0"
+              selected-item-class="bg-primary/10 text-primary"
+              selected-check-class="text-primary"
+              :show-trigger-label="false"
+              :show-chevron="false"
+              :close-on-select="false"
+              align="end"
+              @update:model-value="selectSearchScopeMenuItem"
+            />
+          </span>
+        </LightTooltip>
+        <LightTooltip :text="t('sidebar.showActiveConnectionsOnly')" side="top" :delay="300" nowrap>
+          <button
+            type="button"
+            class="shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
+            :class="showConnectedConnectionsOnly ? 'text-primary bg-primary/10 border-primary/30' : 'border-border text-muted-foreground hover:text-foreground'"
+            :aria-label="t('sidebar.showActiveConnectionsOnly')"
+            :aria-pressed="showConnectedConnectionsOnly"
+            @click="showConnectedConnectionsOnly = !showConnectedConnectionsOnly"
+          >
+            <CircleDot class="h-3.5 w-3.5" />
+          </button>
+        </LightTooltip>
       </div>
     </div>
     <CustomContextMenu ref="sidebarContextMenuRef" :items="sidebarContextMenuItems" v-slot="contextMenuSlot">
@@ -1879,8 +1959,17 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :close-on-confirm="false"
       @confirm="confirmSidebarDangerDialog"
     >
-      <template v-if="sidebarDangerDialogRequest.option" #options>
-        <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+      <template #options>
+        <div v-if="sidebarDangerDialogConfirming && sidebarDangerDialogRequest.progress" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
+          <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
+            <span>{{ sidebarDangerDialogRequest.progress.completed }} / {{ sidebarDangerDialogRequest.progress.total }}</span>
+            <span>{{ Math.round((sidebarDangerDialogRequest.progress.completed / sidebarDangerDialogRequest.progress.total) * 100) }}%</span>
+          </div>
+          <div class="h-2 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-valuemin="0" :aria-valuemax="sidebarDangerDialogRequest.progress.total" :aria-valuenow="sidebarDangerDialogRequest.progress.completed">
+            <div class="h-full bg-primary transition-[width] duration-200" :style="{ width: `${Math.round((sidebarDangerDialogRequest.progress.completed / sidebarDangerDialogRequest.progress.total) * 100)}%` }" />
+          </div>
+        </div>
+        <label v-if="sidebarDangerDialogRequest.option" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
           <input :checked="sidebarDangerDialogRequest.option.checked" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="updateSidebarDangerDialogOption" />
           <span class="grid gap-0.5">
             <span class="font-medium text-foreground">{{ sidebarDangerDialogRequest.option.label }}</span>

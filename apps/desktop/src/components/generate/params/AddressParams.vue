@@ -4,21 +4,24 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import CommonOptions from "./CommonOptions.vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{ params: GeneratorParams }>();
 
-const addressTypes = [
-  { value: "line1", label: "第1行地址" },
-  { value: "line2", label: "第2行地址" },
-  { value: "full", label: "完整地址" },
-];
+const { t } = useI18n();
 
-const regions = [
-  { value: "us", label: "美国" },
-  { value: "uk", label: "英国" },
-  { value: "cn", label: "中国 (English)" },
-  { value: "jp", label: "日本 (English)" },
-];
+const addressTypes = computed(() => [
+  { value: "line1", label: t("dataGenerate.addressTypes.line1") },
+  { value: "line2", label: t("dataGenerate.addressTypes.line2") },
+  { value: "full", label: t("dataGenerate.addressTypes.full") },
+]);
+
+const regions = computed(() => [
+  { value: "us", label: t("dataGenerate.countries.us") },
+  { value: "uk", label: t("dataGenerate.countries.uk") },
+  { value: "cn", label: t("dataGenerate.countries.cnEnglish") },
+  { value: "jp", label: t("dataGenerate.countries.jpEnglish") },
+]);
 
 if (!props.params.addressType) props.params.addressType = "line1";
 if (!props.params.regions) props.params.regions = ["us"];
@@ -90,14 +93,14 @@ function refresh() {
 <template>
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">类型</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.typeLabel") }}</div>
       <div class="flex items-center gap-2 text-xs">
-        <button v-for="t in addressTypes" :key="t.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.addressType || 'line1') === t.value ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.addressType = t.value">{{ t.label }}</button>
+        <button v-for="a in addressTypes" :key="a.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.addressType || 'line1') === a.value ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.addressType = a.value">{{ a.label }}</button>
       </div>
     </div>
 
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">地区</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.regionLabel") }}</div>
       <div class="flex flex-wrap gap-1.5">
         <button v-for="r in regions" :key="r.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.regions ?? []).includes(r.value) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="toggleRegion(r.value)">{{ r.label }}</button>
       </div>
@@ -105,7 +108,7 @@ function refresh() {
 
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="flex items-center gap-2 text-xs">
-        <span class="text-muted-foreground shrink-0">预览</span>
+        <span class="text-muted-foreground shrink-0">{{ t("dataGenerate.preview") }}</span>
         <span :key="previewKey" class="font-mono text-sm">{{ previewVal }}</span>
         <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="refresh">
           <RefreshCw class="h-3 w-3" />

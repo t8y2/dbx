@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Build offline ZIP bundles for each platform.
 # Usage: ./scripts/build_offline_zip.sh <release-dir>
-# The release-dir must contain agent-registry.json, dbx-agent-*.jar, and dbx-jre-*.tar.gz
+# The release-dir must contain agent-registry.json, raw driver artifacts, and dbx-jre-*.tar.zst
 
 RELEASE_DIR="$(cd "${1:?Usage: build_offline_zip.sh <release-dir>}" && pwd)"
 
@@ -32,7 +32,7 @@ for platform in "${PLATFORMS[@]}"; do
 
   # Copy all JRE archives for this platform
   JRE_COUNT=0
-  for jre_file in "$RELEASE_DIR"/dbx-jre-*-"$platform".tar.gz; do
+  for jre_file in "$RELEASE_DIR"/dbx-jre-*-"$platform".tar.zst; do
     [ -f "$jre_file" ] || continue
     cp "$jre_file" "$WORK/jre/"
     JRE_COUNT=$((JRE_COUNT + 1))

@@ -29,8 +29,8 @@ test("AI composer labels an empty template selection explicitly", () => {
 });
 
 test("AI composer exposes mode and action as one compact selector", () => {
-  const footerStart = source.indexOf('<!-- Combined mode + action selector -->');
-  const footerEnd = source.indexOf('<!-- Combined provider + model selector -->', footerStart);
+  const footerStart = source.indexOf("<!-- Combined mode + action selector -->");
+  const footerEnd = source.indexOf("<!-- Combined provider + model selector -->", footerStart);
   const footer = source.slice(footerStart, footerEnd);
 
   assert.notEqual(footerStart, -1, "the combined mode and action selector should exist");
@@ -43,6 +43,31 @@ test("AI composer exposes mode and action as one compact selector", () => {
   assert.doesNotMatch(footer, /selectAction\(button\.action\)/);
   assert.match(footer, /<template v-if="showActionButtons">[\s\S]*?<div class="border-t my-1" \/>[\s\S]*?v-for="button in actionButtons"/);
   assert.match(source, /function selectModeActionItem\(action: AiAction\) \{\s*\/\/ Vector databases[\s\S]*?if \(!showActionButtons\.value\) return;/);
+});
+
+test("AI effort control opens as a hoverable side submenu", () => {
+  const selectorStart = source.indexOf("<!-- Combined provider + model selector -->");
+  const selectorEnd = source.indexOf("</template>", source.indexOf("</Popover>", selectorStart));
+  const selector = source.slice(selectorStart, selectorEnd);
+
+  assert.notEqual(selectorStart, -1, "the combined provider and model selector should exist");
+  assert.match(selector, /<Popover v-model:open="effortMenuOpen">/);
+  assert.match(selector, /<PopoverAnchor as-child>/);
+  assert.match(selector, /@mouseenter="openEffortMenu"/);
+  assert.match(selector, /@mouseleave="scheduleEffortMenuClose"/);
+  assert.match(selector, /<PopoverContent[\s\S]*?side="left"[\s\S]*?:side-offset="6"/);
+  assert.doesNotMatch(selector, /v-if="effortPanelOpen"/);
+});
+
+test("AI model and effort menu refreshes do not persist effort settings", () => {
+  const loaderStart = source.indexOf("async function ensureModelEffort");
+  const loaderEnd = source.indexOf("function handleModelSelect", loaderStart);
+  const loader = source.slice(loaderStart, loaderEnd);
+
+  assert.notEqual(loaderStart, -1, "the effort capability loader should exist");
+  assert.notEqual(loaderEnd, -1, "the model selection handler should follow the effort loader");
+  assert.match(loader, /await resolveEffort\(config, modelId, force\)/);
+  assert.doesNotMatch(loader, /updateActiveEffort|persistAiChatSelection/);
 });
 
 test("AI composer template remains compilable", () => {

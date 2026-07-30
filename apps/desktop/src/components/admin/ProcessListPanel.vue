@@ -99,7 +99,13 @@ async function load(options: { silent?: boolean } = {}) {
     await connectionStore.ensureConnected(props.connection.id);
     if (ownSessionId.value === null) {
       try {
-        const idResult = await api.executeQuery(props.connection.id, "", activeDriver.ownSessionSql, undefined, undefined, { maxRows: 1 });
+        let idResult;
+        try {
+          idResult = await api.executeQuery(props.connection.id, "", activeDriver.ownSessionSql, undefined, undefined, { maxRows: 1 });
+        } catch (error) {
+          if (!activeDriver.fallbackOwnSessionSql || !activeDriver.shouldUseFallbackOwnSessionSql?.(error)) throw error;
+          idResult = await api.executeQuery(props.connection.id, "", activeDriver.fallbackOwnSessionSql, undefined, undefined, { maxRows: 1 });
+        }
         const raw = idResult?.rows?.[0]?.[0];
         const parsed = Number(raw);
         if (Number.isFinite(parsed)) ownSessionId.value = parsed;
@@ -143,17 +149,30 @@ async function confirmKill() {
   killing.value = true;
   try {
     const killSql = activeDriver.buildKillSql(target.id);
+    let usedFallbackKillSql = false;
+    const executeKillSql = async (sql: string) => {
+      const results = await api.executeMulti(props.connection.id, "", sql, undefined, undefined, { maxRows: 1 });
+      const executionError = processListExecutionError(results);
+      if (executionError) throw new Error(executionError);
+      return results;
+    };
     const result = await executeWithProductionSqlGuard({
       connection: props.connection,
       database: "",
       sql: killSql,
       source: t("production.sourceAdmin"),
-      execute: () => api.executeMulti(props.connection.id, "", killSql, undefined, undefined, { maxRows: 1 }),
+      execute: async () => {
+        try {
+          return await executeKillSql(killSql);
+        } catch (error) {
+          if (!activeDriver.buildFallbackKillSql || !activeDriver.shouldUseFallbackKillSql?.(error)) throw error;
+          usedFallbackKillSql = true;
+          return executeKillSql(activeDriver.buildFallbackKillSql(target.id));
+        }
+      },
     });
     if (result === undefined) return;
-    const executionError = processListExecutionError(result);
-    if (executionError) throw new Error(executionError);
-    const killResultError = activeDriver.killResultError?.(result);
+    const killResultError = usedFallbackKillSql ? activeDriver.fallbackKillResultError?.(result) : activeDriver.killResultError?.(result);
     if (killResultError) throw new Error(killResultError);
     toast(t("processList.killSuccess", { id: target.id }), 2500);
     killTarget.value = null;

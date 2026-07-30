@@ -1,6 +1,6 @@
 package com.dbx.agent.sundb;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -18,8 +18,6 @@ import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Types;
 import java.util.ArrayList;
@@ -32,32 +30,15 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public final class SundbAgent extends BaseDatabaseAgent {
-    private Connection connection;
-
+public final class SundbAgent extends AbstractJdbcAgent {
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "com.sundb.jdbc.SundbDriver";
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            Class.forName("com.sundb.jdbc.SundbDriver");
-            String url = buildUrl(params);
-            connection = DriverManager.getConnection(url, params.getUsername(), params.getPassword());
-        });
-    }
-
-    @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            Class.forName("com.sundb.jdbc.SundbDriver");
-            String url = buildUrl(params);
-            try (Connection conn = DriverManager.getConnection(url, params.getUsername(), params.getPassword())) {
-                return conn.isValid(5);
-            }
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        return buildUrl(params);
     }
 
     @Override
@@ -415,23 +396,13 @@ public final class SundbAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::getResultValue
+            this::resultValue
         );
     }
 
     @Override
     public String setSchemaSQL(String schema) {
         return "USE " + JdbcIdentifiers.INSTANCE.backtick(schema);
-    }
-
-    @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
     }
 
     private static String buildUrl(ConnectParams params) {
@@ -504,7 +475,8 @@ public final class SundbAgent extends BaseDatabaseAgent {
         return value == null || value.isEmpty() ? null : value;
     }
 
-    private Object getResultValue(ResultSet rs, int index, int sqlType) {
+    @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         try {
             Object value = switch (sqlType) {
                 case Types.BIGINT -> rs.getLong(index);

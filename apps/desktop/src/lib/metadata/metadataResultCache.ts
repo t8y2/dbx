@@ -67,10 +67,10 @@ export class MetadataResultCache<T> {
     return { value: entry.value, cachedAt: entry.cachedAt, ageMs, stale };
   }
 
-  set(scope: MetadataScopeInput, value: T): void {
+  set(scope: MetadataScopeInput, value: T, options?: { cachedAt?: number }): void {
     const key = metadataScopeKey(scope);
     this.entries.delete(key);
-    this.entries.set(key, { scope: metadataScopeParts(scope), value, cachedAt: this.now() });
+    this.entries.set(key, { scope: metadataScopeParts(scope), value, cachedAt: options?.cachedAt ?? this.now() });
     this.evictOldest();
   }
 

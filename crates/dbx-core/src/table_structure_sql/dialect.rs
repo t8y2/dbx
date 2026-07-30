@@ -6,7 +6,7 @@ pub(super) enum StructureDialect {
     Doris,
     Postgres,
     Sqlite,
-    #[cfg(feature = "duckdb-bundled")]
+    #[cfg(feature = "duckdb-sidecar")]
     DuckDb,
     SqlServer,
     Oracle,
@@ -171,7 +171,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_filter: true,
             ..base
         },
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         Some(DatabaseType::DuckDb) => TableStructureCapabilities {
             dialect: StructureDialect::DuckDb,
             add_column: true,
@@ -209,6 +209,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             drop_index: true,
             rebuild_index: true,
             index_type: true,
+            alter_primary_key: true,
             ..base
         },
         Some(DatabaseType::Iris) => TableStructureCapabilities {
@@ -304,7 +305,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::Doris => "doris",
         StructureDialect::Postgres => "postgres",
         StructureDialect::Sqlite => "sqlite",
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => "duckdb",
         StructureDialect::SqlServer => "sqlserver",
         StructureDialect::Oracle => "oracle",
@@ -325,7 +326,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::Doris => Some(DatabaseType::Doris),
         StructureDialect::Postgres => Some(DatabaseType::Postgres),
         StructureDialect::Sqlite => Some(DatabaseType::Sqlite),
-        #[cfg(feature = "duckdb-bundled")]
+        #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => Some(DatabaseType::DuckDb),
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),

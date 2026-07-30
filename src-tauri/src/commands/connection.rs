@@ -189,6 +189,7 @@ mod tests {
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -215,6 +216,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -837,13 +839,13 @@ async fn test_connection_with_info_inner(
                 // are reset after both successful and failed Redis tests.
                 test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await
             }
-            #[cfg(feature = "duckdb-bundled")]
+            #[cfg(feature = "duckdb-sidecar")]
             DatabaseType::DuckDb => {
                 state.test_duckdb_connection_config(&config).await?;
                 Ok("Connection successful".to_string())
             }
-            #[cfg(not(feature = "duckdb-bundled"))]
-            DatabaseType::DuckDb => Err("DuckDB support not compiled (enable duckdb-bundled feature)".to_string()),
+            #[cfg(not(feature = "duckdb-sidecar"))]
+            DatabaseType::DuckDb => Err("DuckDB support is not compiled in this build".to_string()),
             DatabaseType::MongoDb => {
                 if mongo_uses_legacy_driver(&config) {
                     let am = &state.agent_manager;
@@ -917,6 +919,32 @@ async fn test_connection_with_info_inner(
                     connect_timeout,
                 );
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
+            DatabaseType::Easysearch => {
+                let mut client = db::easysearch_driver::EasysearchClient::from_config(
+                    &url,
+                    Some(&config.username),
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                );
+                db::easysearch_driver::test_connection(&mut client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
+            DatabaseType::Hbase => {
+                let client = db::hbase_driver::HBaseClient::new(
+                    &url,
+                    Some(&config.username),
+                    Some(&config.password),
+                    false,
+                    connect_timeout,
+                )?;
+                db::hbase_driver::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
             }
@@ -1130,22 +1158,10 @@ pub async fn connect_db(
             };
             con
         }
-        #[cfg(feature = "duckdb-bundled")]
-        DatabaseType::DuckDb => {
-            let con = db::duckdb_driver::connect_path(&expand_tilde(&db_config.host))?;
-            {
-                let locked = con.lock().map_err(|e| e.to_string())?;
-                for attached in &db_config.attached_databases {
-                    dbx_core::schema::duckdb_attach_database(&locked, &attached.name, &expand_tilde(&attached.path))?;
-                }
-                if let Some(script) = db_config.init_script.as_deref() {
-                    db::duckdb_driver::run_init_script(&locked, script)?;
-                }
-            }
-            PoolKind::DuckDb(con)
-        }
-        #[cfg(not(feature = "duckdb-bundled"))]
-        DatabaseType::DuckDb => return Err("DuckDB support not compiled (enable duckdb-bundled feature)".to_string()),
+        #[cfg(feature = "duckdb-sidecar")]
+        DatabaseType::DuckDb => state.create_duckdb_pool(&db_config).await?,
+        #[cfg(not(feature = "duckdb-sidecar"))]
+        DatabaseType::DuckDb => return Err("DuckDB support is not compiled in this build".to_string()),
         DatabaseType::MongoDb => {
             if mongo_uses_legacy_driver(&db_config) {
                 let mut client =
@@ -1240,6 +1256,30 @@ pub async fn connect_db(
             );
             db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Elasticsearch(client)
+        }
+        DatabaseType::Easysearch => {
+            let mut client = db::easysearch_driver::EasysearchClient::from_config(
+                &url,
+                Some(&db_config.username),
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+            );
+            db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
+            PoolKind::Easysearch(client)
+        }
+        DatabaseType::Hbase => {
+            let client = db::hbase_driver::HBaseClient::new(
+                &url,
+                Some(&db_config.username),
+                Some(&db_config.password),
+                false,
+                connect_timeout,
+            )?;
+            db::hbase_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::HBase(client)
         }
         DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
             let kind = match db_config.db_type {

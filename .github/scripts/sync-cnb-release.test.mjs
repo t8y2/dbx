@@ -70,23 +70,85 @@ test("ensureRelease accepts an empty successful PATCH response", async (t) => {
   ]);
 });
 
-test("metadata-only sync updates release without reading an assets directory", async (t) => {
+test("ensureRelease explicitly marks a promoted release as latest", async (t) => {
+  const release = { id: "release-latest", tag_name: "v1.2.3", assets: [] };
+  const requests = [];
+  const server = createServer((request, response) => {
+    const bodyChunks = [];
+    request.on("data", (chunk) => bodyChunks.push(chunk));
+    request.on("end", () => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        body: bodyChunks.length ? JSON.parse(Buffer.concat(bodyChunks).toString("utf8")) : null,
+      });
+      if (request.method === "GET") {
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify(release));
+        return;
+      }
+      response.statusCode = 200;
+      response.end();
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new CnbClient({
+    apiBase: `http://127.0.0.1:${address.port}`,
+    repository: "dbxio.com/dbx",
+    token: "test-token",
+  });
+
+  await client.ensureRelease(
+    "v1.2.3",
+    { name: "DBX v1.2.3", body: "Stable", isPrerelease: false },
+    { makeLatest: true },
+  );
+
+  assert.deepEqual(requests, [
+    { method: "GET", url: "/dbxio.com/dbx/-/releases/tags/v1.2.3", body: null },
+    {
+      method: "PATCH",
+      url: "/dbxio.com/dbx/-/releases/release-latest",
+      body: {
+        name: "DBX v1.2.3",
+        body: "Stable",
+        prerelease: false,
+        make_latest: "true",
+      },
+    },
+  ]);
+});
+
+test("metadata-only sync can mark the release as latest without reading an assets directory", async (t) => {
   const release = { id: "release-2", tag_name: "v1.2.3", assets: [{ name: "large.dmg" }] };
   const requests = [];
   const server = createServer((request, response) => {
-    requests.push({ method: request.method, url: request.url });
-    if (request.method === "GET") {
-      response.setHeader("Content-Type", "application/json");
-      response.end(JSON.stringify(release));
-      return;
-    }
-    if (request.method === "PATCH") {
-      response.statusCode = 200;
+    const bodyChunks = [];
+    request.on("data", (chunk) => bodyChunks.push(chunk));
+    request.on("end", () => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        body: bodyChunks.length ? JSON.parse(Buffer.concat(bodyChunks).toString("utf8")) : null,
+      });
+      if (request.method === "GET") {
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify(release));
+        return;
+      }
+      if (request.method === "PATCH") {
+        response.statusCode = 200;
+        response.end();
+        return;
+      }
+      response.statusCode = 500;
       response.end();
-      return;
-    }
-    response.statusCode = 500;
-    response.end();
+    });
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -103,14 +165,18 @@ test("metadata-only sync updates release without reading an assets directory", a
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const result = await new Promise((resolve) => {
-    const child = spawn(process.execPath, [scriptPath, "--github-release", releasePath, "--metadata-only"], {
-      env: {
-        ...process.env,
-        CNB_API_BASE: `http://127.0.0.1:${address.port}`,
-        CNB_REPOSITORY: "dbxio.com/dbx",
-        CNB_TOKEN: "test-token",
+    const child = spawn(
+      process.execPath,
+      [scriptPath, "--github-release", releasePath, "--metadata-only", "--make-latest"],
+      {
+        env: {
+          ...process.env,
+          CNB_API_BASE: `http://127.0.0.1:${address.port}`,
+          CNB_REPOSITORY: "dbxio.com/dbx",
+          CNB_TOKEN: "test-token",
+        },
       },
-    });
+    );
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -121,8 +187,17 @@ test("metadata-only sync updates release without reading an assets directory", a
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /Updated CNB release metadata for v1\.2\.3/);
   assert.deepEqual(requests, [
-    { method: "GET", url: "/dbxio.com/dbx/-/releases/tags/v1.2.3" },
-    { method: "PATCH", url: "/dbxio.com/dbx/-/releases/release-2" },
+    { method: "GET", url: "/dbxio.com/dbx/-/releases/tags/v1.2.3", body: null },
+    {
+      method: "PATCH",
+      url: "/dbxio.com/dbx/-/releases/release-2",
+      body: {
+        name: "DBX v1.2.3",
+        body: "Stable",
+        prerelease: false,
+        make_latest: "true",
+      },
+    },
   ]);
 });
 
@@ -179,5 +254,44 @@ test("deleteAsset accepts CNB's empty successful response", async (t) => {
       method: "DELETE",
       url: "/dbxio.com/dbx/-/releases/release%2Flatest/assets/asset%20old",
     },
+  ]);
+});
+
+test("listReleases paginates and deleteRelease accepts an empty response", async (t) => {
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push({ method: request.method, url: request.url });
+    if (request.method === "GET" && request.url?.includes("page=1")) {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify([{ id: "1" }, { id: "2" }]));
+      return;
+    }
+    if (request.method === "GET" && request.url?.includes("page=2")) {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify([{ id: "3" }]));
+      return;
+    }
+    response.statusCode = 204;
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new CnbClient({
+    apiBase: `http://127.0.0.1:${address.port}`,
+    repository: "dbxio.com/dbx",
+    token: "test-token",
+  });
+
+  assert.deepEqual(await client.listReleases(2), [{ id: "1" }, { id: "2" }, { id: "3" }]);
+  await client.deleteRelease("release/old");
+
+  assert.deepEqual(requests, [
+    { method: "GET", url: "/dbxio.com/dbx/-/releases?page=1&page_size=2" },
+    { method: "GET", url: "/dbxio.com/dbx/-/releases?page=2&page_size=2" },
+    { method: "DELETE", url: "/dbxio.com/dbx/-/releases/release%2Fold" },
   ]);
 });

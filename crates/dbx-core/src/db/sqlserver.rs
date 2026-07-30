@@ -5,14 +5,17 @@ use crate::types::{
     TriggerInfo,
 };
 use futures::{FutureExt, TryStreamExt};
-use sqlparser::ast::{Expr, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{Expr, Ident, SelectItem, SetExpr, Statement};
 use sqlparser::dialect::MsSqlDialect;
 use sqlparser::parser::Parser;
+use std::borrow::Cow;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tiberius::{AuthMethod, Client, ColumnData, ColumnType, Config, FromSql, QueryItem, QueryStream, Row, SqlBrowser};
+use tiberius::{
+    AuthMethod, Client, ColumnData, ColumnType, Config, FromSql, QueryItem, QueryStream, Row, SqlBrowser, TokenRow,
+};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
@@ -428,6 +431,20 @@ struct SqlServerDescribedColumn {
 struct SqlServerLegacyProbe {
     source_sql: String,
     output_names: Option<Vec<Option<String>>>,
+    output_name_overrides: Vec<SqlServerProbeOutputNameOverride>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SqlServerWildcardProjectionProbe {
+    statement: String,
+    output_name_overrides: Vec<SqlServerProbeOutputNameOverride>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SqlServerProbeOutputNameOverride {
+    projection_ordinal: usize,
+    probe_name: String,
+    output_name: Option<String>,
 }
 
 async fn sqlserver_driver_result<T, E, F>(future: F) -> Result<T, String>
@@ -500,13 +517,33 @@ async fn describe_sqlserver_result_set_with_mode(
     }
     let mut columns = rows.iter().map(sqlserver_described_column_from_row).collect::<Vec<_>>();
     if uses_describe_dmv == Some(false) {
-        if let Some(output_names) = &legacy_probe.output_names {
-            for (column, output_name) in columns.iter_mut().zip(output_names) {
-                column.name.clone_from(output_name);
+        restore_sqlserver_legacy_probe_output_names(&mut columns, legacy_probe);
+    }
+    Ok(columns)
+}
+
+fn restore_sqlserver_legacy_probe_output_names(
+    columns: &mut [SqlServerDescribedColumn],
+    legacy_probe: &SqlServerLegacyProbe,
+) {
+    if let Some(output_names) = &legacy_probe.output_names {
+        for (column, output_name) in columns.iter_mut().zip(output_names) {
+            column.name.clone_from(output_name);
+        }
+    } else if !legacy_probe.output_name_overrides.is_empty() {
+        for column in columns {
+            let output_name = column.name.as_deref().and_then(|probe_name| {
+                legacy_probe
+                    .output_name_overrides
+                    .iter()
+                    .find(|output_name_override| output_name_override.probe_name.eq_ignore_ascii_case(probe_name))
+                    .map(|output_name_override| output_name_override.output_name.clone())
+            });
+            if let Some(output_name) = output_name {
+                column.name = output_name;
             }
         }
     }
-    Ok(columns)
 }
 
 fn sqlserver_described_column_from_row(row: &Row) -> SqlServerDescribedColumn {
@@ -534,20 +571,27 @@ async fn sqlserver_unsafe_type_query(client: &mut SqlServerClient, sql: &str) ->
 }
 
 fn sqlserver_legacy_probe(sql: &str) -> Option<SqlServerLegacyProbe> {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    sqlserver_legacy_probe_with_nonce(sql, &nonce)
+}
+
+fn sqlserver_legacy_probe_with_nonce(sql: &str, nonce: &str) -> Option<SqlServerLegacyProbe> {
     let statement = normalized_sqlserver_select_statement(sql)?;
     let output_names = sqlserver_projection_output_names(&statement);
     let source_alias = quote_sqlserver_identifier("dbx_probe_source");
-    let source_sql = if let Some(names) = &output_names {
+    let (source_sql, output_name_overrides) = if let Some(names) = &output_names {
         let aliases = (0..names.len())
             .map(sqlserver_source_column_name)
             .map(|name| quote_sqlserver_identifier(&name))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("({statement}) AS {source_alias}({aliases})")
+        (format!("({statement}) AS {source_alias}({aliases})"), Vec::new())
+    } else if let Some(wildcard_probe) = sqlserver_wildcard_projection_probe(&statement, nonce) {
+        (format!("({}) AS {source_alias}", wildcard_probe.statement), wildcard_probe.output_name_overrides)
     } else {
-        format!("({statement}) AS {source_alias}")
+        (format!("({statement}) AS {source_alias}"), Vec::new())
     };
-    Some(SqlServerLegacyProbe { source_sql, output_names })
+    Some(SqlServerLegacyProbe { source_sql, output_names, output_name_overrides })
 }
 
 fn sqlserver_projection_output_names(statement: &str) -> Option<Vec<Option<String>>> {
@@ -558,21 +602,58 @@ fn sqlserver_projection_output_names(statement: &str) -> Option<Vec<Option<Strin
     let SetExpr::Select(select) = query.body.as_ref() else {
         return None;
     };
-    select
+    select.projection.iter().map(sqlserver_projection_item_output_name).collect()
+}
+
+fn sqlserver_projection_item_output_name(item: &SelectItem) -> Option<Option<String>> {
+    match item {
+        SelectItem::ExprWithAlias { alias, .. } => Some(Some(alias.value.clone())),
+        SelectItem::UnnamedExpr(Expr::Identifier(identifier)) => {
+            Some((!identifier.value.starts_with('@')).then(|| identifier.value.clone()))
+        }
+        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(identifiers)) => {
+            Some(identifiers.last().map(|identifier| identifier.value.clone()))
+        }
+        SelectItem::UnnamedExpr(_) => Some(None),
+        SelectItem::ExprWithAliases { .. } | SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => None,
+    }
+}
+
+fn sqlserver_probe_explicit_alias(nonce: &str, projection_ordinal: usize) -> String {
+    format!("__dbx_probe_{nonce}_explicit_{projection_ordinal}__")
+}
+
+fn sqlserver_wildcard_projection_probe(statement: &str, nonce: &str) -> Option<SqlServerWildcardProjectionProbe> {
+    let mut statements = Parser::parse_sql(&MsSqlDialect {}, statement).ok()?;
+    let [Statement::Query(query)] = statements.as_mut_slice() else {
+        return None;
+    };
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return None;
+    };
+    if !select
         .projection
         .iter()
-        .map(|item| match item {
-            SelectItem::ExprWithAlias { alias, .. } => Some(Some(alias.value.clone())),
-            SelectItem::UnnamedExpr(Expr::Identifier(identifier)) => {
-                Some((!identifier.value.starts_with('@')).then(|| identifier.value.clone()))
-            }
-            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(identifiers)) => {
-                Some(identifiers.last().map(|identifier| identifier.value.clone()))
-            }
-            SelectItem::UnnamedExpr(_) => Some(None),
-            SelectItem::ExprWithAliases { .. } | SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => None,
-        })
-        .collect()
+        .any(|item| matches!(item, SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_)))
+    {
+        return None;
+    }
+
+    let mut output_name_overrides = Vec::new();
+    for (index, item) in select.projection.iter_mut().enumerate() {
+        let (expr, output_name) = match item {
+            SelectItem::UnnamedExpr(expr) => (expr.clone(), sqlserver_projection_item_output_name(item)?),
+            SelectItem::ExprWithAlias { expr, alias } => (expr.clone(), Some(alias.value.clone())),
+            SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => continue,
+            SelectItem::ExprWithAliases { .. } => return None,
+        };
+        let projection_ordinal = index + 1;
+        let probe_name = sqlserver_probe_explicit_alias(nonce, projection_ordinal);
+        *item = SelectItem::ExprWithAlias { expr, alias: Ident::with_quote('[', probe_name.clone()) };
+        output_name_overrides.push(SqlServerProbeOutputNameOverride { projection_ordinal, probe_name, output_name });
+    }
+
+    Some(SqlServerWildcardProjectionProbe { statement: query.to_string(), output_name_overrides })
 }
 
 fn build_sqlserver_unsafe_type_query(sql: &str, columns: &[SqlServerDescribedColumn]) -> Option<String> {
@@ -1338,6 +1419,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.get::<&str, _>(4).map(str::to_string),
                 comment: row.get::<&str, _>(5).filter(|s: &&str| !s.is_empty()).map(|s| (*s).to_string()),
                 data_type: row.get::<&str, _>(6).map(str::to_string),
+                signature: None,
             }
         })
         .collect::<Vec<_>>();
@@ -2005,6 +2087,57 @@ pub async fn execute_query(client: &mut SqlServerClient, sql: &str) -> Result<Qu
     execute_query_with_max_rows(client, sql, None).await
 }
 
+fn sqlserver_bulk_token_row(values: Vec<Option<String>>) -> TokenRow<'static> {
+    let mut row = TokenRow::with_capacity(values.len());
+    for value in values {
+        row.push(ColumnData::String(value.map(Cow::Owned)));
+    }
+    row
+}
+
+pub async fn bulk_insert_text_rows<T, F>(
+    client: &mut SqlServerClient,
+    staging_table: &str,
+    rows: &[T],
+    column_count: usize,
+    mut convert_row: F,
+) -> Result<u64, String>
+where
+    F: FnMut(usize, &T) -> Result<Vec<Option<String>>, String>,
+{
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    if column_count == 0 {
+        return Err("SQL Server bulk load requires at least one mapped column".to_string());
+    }
+
+    let mut request = client
+        .bulk_insert(staging_table)
+        .await
+        .map_err(|error| format!("SQL Server bulk load initialization failed: {error}"))?;
+    for (row_index, source_row) in rows.iter().enumerate() {
+        let row = convert_row(row_index, source_row)?;
+        if row.len() != column_count {
+            return Err(format!(
+                "SQL Server bulk row {} has {} columns; expected {}",
+                row_index + 1,
+                row.len(),
+                column_count
+            ));
+        }
+        request
+            .send(sqlserver_bulk_token_row(row))
+            .await
+            .map_err(|error| format!("SQL Server bulk load send failed: {error}"))?;
+    }
+    request
+        .finalize()
+        .await
+        .map(|result| result.total())
+        .map_err(|error| format!("SQL Server bulk load finalize failed: {error}"))
+}
+
 pub async fn execute_query_with_max_rows(
     client: &mut SqlServerClient,
     sql: &str,
@@ -2257,6 +2390,10 @@ fn contains_transaction_control(sql: &str) -> bool {
 }
 
 fn requires_simple_query_batch(sql: &str) -> bool {
+    if creates_local_temp_table(sql) {
+        return true;
+    }
+
     let tokens = first_sql_tokens(sql, 4);
     if tokens.len() >= 2 && tokens[0].eq_ignore_ascii_case("SET") && tokens[1].eq_ignore_ascii_case("SHOWPLAN_XML") {
         return true;
@@ -2278,6 +2415,22 @@ fn requires_simple_query_batch(sql: &str) -> bool {
     }
 
     false
+}
+
+fn creates_local_temp_table(sql: &str) -> bool {
+    if !sql.as_bytes().contains(&b'#') {
+        return false;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&MsSqlDialect {}, sql) else {
+        return false;
+    };
+    statements.iter().any(|statement| {
+        let Statement::CreateTable(table) = statement else {
+            return false;
+        };
+        table.name.0.last().and_then(|part| part.as_ident()).is_some_and(|identifier| identifier.value.starts_with('#'))
+    })
 }
 
 fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
@@ -2327,13 +2480,15 @@ mod tests {
     use super::{
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, format_sqlserver_numeric,
         is_blocking_sqlserver_unsafe_probe_error, is_sqlserver_spatial_column, is_sqlserver_variant_column,
-        query_result_with_server_messages, requires_simple_query_batch, sqlserver_batch_can_use_execute,
-        sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
-        sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error, sqlserver_hidden_schema_names,
-        sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_list_objects_sql,
-        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_schema_name_predicate,
+        query_result_with_server_messages, requires_simple_query_batch, restore_sqlserver_legacy_probe_output_names,
+        sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
+        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error,
+        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
+        sqlserver_legacy_probe_with_nonce, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
+        sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate,
         sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerResultSet, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerResultSet,
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -2341,6 +2496,15 @@ mod tests {
     use chrono::NaiveDate;
     use std::{borrow::Cow, time::Instant};
     use tiberius::{Column, ColumnData, ColumnType, IntoSql};
+
+    #[test]
+    fn sqlserver_bulk_token_row_owns_text_and_preserves_nulls() {
+        let row = sqlserver_bulk_token_row(vec![Some("Tieng Viet".to_string()), None]);
+        let values = row.iter().collect::<Vec<_>>();
+
+        assert!(matches!(&values[0], ColumnData::String(Some(value)) if value.as_ref() == "Tieng Viet"));
+        assert!(matches!(&values[1], ColumnData::String(None)));
+    }
 
     #[tokio::test]
     async fn sqlserver_ignores_non_info_tiberius_events() {
@@ -2505,6 +2669,16 @@ mod tests {
         assert!(!requires_simple_query_batch("ALTER TABLE dbo.t ADD name NVARCHAR(20);"));
         assert!(!requires_simple_query_batch("CREATE TABLE dbo.t(id INT);"));
         assert!(!requires_simple_query_batch("UPDATE dbo.t SET id = 1;"));
+    }
+
+    #[test]
+    fn sqlserver_local_temp_table_creation_keeps_session_scoped_query_path() {
+        assert!(requires_simple_query_batch("CREATE TABLE #stage (id INT);"));
+        assert!(requires_simple_query_batch("CREATE TABLE [#stage] ([id] INT);"));
+        assert!(requires_simple_query_batch(
+            "DECLARE @id INT = 1; CREATE TABLE #stage (id INT); INSERT INTO #stage VALUES (@id);"
+        ));
+        assert!(!requires_simple_query_batch("CREATE TABLE dbo.stage (id INT);"));
     }
 
     #[test]
@@ -3270,14 +3444,120 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_legacy_probe_keeps_wildcards_on_existing_server_validation_path() {
-        let probe = sqlserver_legacy_probe("SELECT a.*, b.HJRQ FROM dbo.a a JOIN dbo.b b ON b.id = a.id").unwrap();
+    fn sqlserver_legacy_probe_aliases_explicit_columns_next_to_wildcards() {
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let probe =
+            sqlserver_legacy_probe_with_nonce("SELECT a.*, b.HJRQ FROM dbo.a a JOIN dbo.b b ON b.id = a.id", nonce)
+                .unwrap();
+        let probe_name = sqlserver_probe_explicit_alias(nonce, 2);
 
-        assert_eq!(
-            probe.source_sql,
-            "(SELECT a.*, b.HJRQ FROM dbo.a a JOIN dbo.b b ON b.id = a.id) AS [dbx_probe_source]"
-        );
+        assert!(probe.source_sql.starts_with("(SELECT a.*,"));
+        assert!(probe.source_sql.contains(&format!("b.HJRQ AS [{probe_name}]")));
+        assert!(probe.source_sql.ends_with(") AS [dbx_probe_source]"));
         assert_eq!(probe.output_names, None);
+        assert_eq!(
+            probe.output_name_overrides,
+            vec![SqlServerProbeOutputNameOverride {
+                projection_ordinal: 2,
+                probe_name,
+                output_name: Some("HJRQ".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_keeps_quoted_columns_around_qualified_wildcard() {
+        let nonce = "fedcba9876543210fedcba9876543210";
+        let probe =
+            sqlserver_legacy_probe_with_nonce("SELECT t.[Order], t.*, t.[After] FROM dbo.t AS t", nonce).unwrap();
+        let first_probe_name = sqlserver_probe_explicit_alias(nonce, 1);
+        let third_probe_name = sqlserver_probe_explicit_alias(nonce, 3);
+
+        assert!(probe.source_sql.contains(&format!("t.[Order] AS [{first_probe_name}], t.*")));
+        assert!(probe.source_sql.contains(&format!("t.*, t.[After] AS [{third_probe_name}]")));
+        assert!(probe.source_sql.contains("FROM dbo.t AS t"));
+        assert_eq!(
+            probe.output_name_overrides,
+            vec![
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 1,
+                    probe_name: first_probe_name,
+                    output_name: Some("Order".to_string()),
+                },
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 3,
+                    probe_name: third_probe_name,
+                    output_name: Some("After".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_supports_explicit_columns_followed_by_wildcard() {
+        let nonce = "11223344556677889900aabbccddeeff";
+        let probe = sqlserver_legacy_probe_with_nonce("SELECT ybbz, cytzrq, jzrq, * FROM dbo.t", nonce).unwrap();
+        let first_probe_name = sqlserver_probe_explicit_alias(nonce, 1);
+        let second_probe_name = sqlserver_probe_explicit_alias(nonce, 2);
+        let third_probe_name = sqlserver_probe_explicit_alias(nonce, 3);
+
+        assert!(probe.source_sql.contains(&format!("ybbz AS [{first_probe_name}]")));
+        assert!(probe.source_sql.contains(&format!("cytzrq AS [{second_probe_name}]")));
+        assert!(probe.source_sql.contains(&format!("jzrq AS [{third_probe_name}]")));
+        assert!(probe.source_sql.contains(", * FROM dbo.t"));
+        assert_eq!(
+            probe.output_name_overrides,
+            vec![
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 1,
+                    probe_name: first_probe_name,
+                    output_name: Some("ybbz".to_string()),
+                },
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 2,
+                    probe_name: second_probe_name,
+                    output_name: Some("cytzrq".to_string()),
+                },
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 3,
+                    probe_name: third_probe_name,
+                    output_name: Some("jzrq".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_does_not_collide_with_old_probe_alias_column() {
+        let nonce = "00112233445566778899aabbccddeeff";
+        let old_probe_name = "__dbx_probe_explicit_1__";
+        let probe =
+            sqlserver_legacy_probe_with_nonce("SELECT t.[__dbx_probe_explicit_1__], t.* FROM dbo.t AS t", nonce)
+                .unwrap();
+        let generated_probe_name = sqlserver_probe_explicit_alias(nonce, 1);
+
+        assert_ne!(generated_probe_name, old_probe_name);
+        assert!(probe.source_sql.contains(&format!("t.[{old_probe_name}] AS [{generated_probe_name}], t.*")));
+        assert_eq!(probe.output_name_overrides[0].projection_ordinal, 1);
+
+        let mut columns = vec![
+            SqlServerDescribedColumn {
+                name: Some(generated_probe_name),
+                system_type_name: Some("int".to_string()),
+                user_type_schema: None,
+                user_type_name: None,
+            },
+            SqlServerDescribedColumn {
+                name: Some(old_probe_name.to_string()),
+                system_type_name: Some("int".to_string()),
+                user_type_schema: None,
+                user_type_name: None,
+            },
+        ];
+        restore_sqlserver_legacy_probe_output_names(&mut columns, &probe);
+
+        assert_eq!(columns[0].name.as_deref(), Some(old_probe_name));
+        assert_eq!(columns[1].name.as_deref(), Some(old_probe_name));
     }
 
     #[test]
@@ -3382,8 +3662,11 @@ mod tests {
 
         let setup = "\
             IF OBJECT_ID('tempdb..#dbx_issue_4002') IS NOT NULL DROP TABLE #dbx_issue_4002; \
-            CREATE TABLE #dbx_issue_4002 (id int NOT NULL, payload sql_variant NULL); \
-            INSERT INTO #dbx_issue_4002 (id, payload) VALUES (1, CAST(N'legacy' AS nvarchar(20)))";
+            CREATE TABLE #dbx_issue_4002 (\
+                id int NOT NULL, ybbz int NULL, cytzrq date NULL, jzrq datetime NULL, payload sql_variant NULL\
+            ); \
+            INSERT INTO #dbx_issue_4002 (id, ybbz, cytzrq, jzrq, payload) \
+            VALUES (1, 2, '2026-07-28', '2026-07-28T12:34:56', CAST(N'legacy' AS nvarchar(20)))";
         client.simple_query(setup).await.unwrap().into_results().await.unwrap();
 
         let sql = "SELECT id, payload FROM #dbx_issue_4002";
@@ -3427,6 +3710,39 @@ mod tests {
         assert_eq!(duplicate_rows[0].columns()[1].name(), "HJRQ");
         assert_eq!(duplicate_rows[0].get::<i32, _>(0), Some(1));
         assert_eq!(duplicate_rows[0].get::<&str, _>(1), Some("legacy"));
+
+        let wildcard_sql = "SELECT ybbz, cytzrq, jzrq, * FROM #dbx_issue_4002";
+        let previous_wildcard_probe = super::SqlServerLegacyProbe {
+            source_sql: format!("({wildcard_sql}) AS [dbx_probe_source]"),
+            output_names: None,
+            output_name_overrides: Vec::new(),
+        };
+        let previous_error =
+            super::describe_sqlserver_result_set_with_mode(&mut client, wildcard_sql, &previous_wildcard_probe, true)
+                .await
+                .unwrap_err();
+        assert!(previous_error.contains("dbx_probe_source"));
+
+        let wildcard_probe = super::sqlserver_legacy_probe(wildcard_sql).unwrap();
+        let wildcard_columns =
+            super::describe_sqlserver_result_set_with_mode(&mut client, wildcard_sql, &wildcard_probe, true)
+                .await
+                .unwrap();
+        assert_eq!(wildcard_columns.len(), 8);
+        assert_eq!(wildcard_columns[0].name.as_deref(), Some("ybbz"));
+        assert_eq!(wildcard_columns[1].name.as_deref(), Some("cytzrq"));
+        assert_eq!(wildcard_columns[2].name.as_deref(), Some("jzrq"));
+        assert_eq!(wildcard_columns[4].name.as_deref(), Some("ybbz"));
+        assert_eq!(wildcard_columns[5].name.as_deref(), Some("cytzrq"));
+        assert_eq!(wildcard_columns[6].name.as_deref(), Some("jzrq"));
+        assert!(is_sqlserver_variant_column(&wildcard_columns[7]));
+
+        let wildcard_rewritten = build_sqlserver_unsafe_type_query(wildcard_sql, &wildcard_columns).unwrap();
+        let wildcard_rows = client.query(wildcard_rewritten, &[]).await.unwrap().into_first_result().await.unwrap();
+        assert_eq!(wildcard_rows.len(), 1);
+        assert_eq!(wildcard_rows[0].columns()[0].name(), "ybbz");
+        assert_eq!(wildcard_rows[0].columns()[4].name(), "ybbz");
+        assert_eq!(wildcard_rows[0].get::<&str, _>(7), Some("legacy"));
 
         let continued = super::execute_query(&mut client, "SELECT CAST(7 AS int) AS still_connected").await.unwrap();
         assert_eq!(continued.rows, vec![vec![serde_json::json!(7)]]);

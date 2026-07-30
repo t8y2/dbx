@@ -71,17 +71,12 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
     quote_table_identifier(database_type, table_name)
 }
 
-/// Like `qualified_table_name`, but prefixes a Doris/StarRocks external
-/// catalog (`<catalog>.<database>.<table>`) when `catalog` is present,
-/// non-empty, and not the engine's `internal` catalog. The middle segment is
-/// the database — Doris/StarRocks have no separate schema concept, so
-/// `schema` is only used when a caller passes it that way; otherwise `database`
-/// fills the middle slot. When neither is set the name degrades to the 2-part
-/// `<catalog>.<table>` form. The `internal` guard is defensive — built-in
-/// catalog tables never carry a catalog in the first place (the sidebar routes
-/// them through the standard path), so this only ever prefixes genuine
-/// external catalogs. Other engines ignore `catalog` (they have no 3-part
-/// catalog naming).
+/// Like `qualified_table_name`, but also supports 3-part names for SQL Server
+/// (`<database>.<schema>.<table>`) and Doris/StarRocks external catalogs
+/// (`<catalog>.<database>.<table>`). SQL parsing stores the first segment of a
+/// 3-part source in `catalog`; for SQL Server that segment is its database.
+/// Doris/StarRocks use `schema` as the middle segment when present, otherwise
+/// `database`, and ignore their built-in `internal` catalog.
 pub fn qualified_table_name_with_catalog(
     database_type: Option<DatabaseType>,
     catalog: Option<&str>,
@@ -89,9 +84,13 @@ pub fn qualified_table_name_with_catalog(
     database: Option<&str>,
     table_name: &str,
 ) -> String {
-    let catalog = catalog.map(str::trim).filter(|catalog| !catalog.is_empty() && *catalog != "internal");
+    let catalog = catalog.map(str::trim).filter(|catalog| !catalog.is_empty());
     match (catalog, database_type) {
-        (Some(catalog), Some(DatabaseType::Doris | DatabaseType::StarRocks)) => {
+        (Some(database), Some(DatabaseType::SqlServer)) => {
+            let table = qualified_table_name(database_type, schema, table_name);
+            format!("{}.{}", quote_table_identifier(database_type, database), table)
+        }
+        (Some(catalog), Some(DatabaseType::Doris | DatabaseType::StarRocks)) if catalog != "internal" => {
             let middle = schema
                 .map(str::trim)
                 .filter(|schema| !schema.is_empty())
@@ -111,6 +110,11 @@ pub fn qualified_table_name_with_catalog(
 }
 
 pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -> String {
+    if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss))
+        && is_explicitly_quoted_identifier(name)
+    {
+        return name.to_string();
+    }
     match database_type {
         Some(DatabaseType::Iotdb) => name.to_string(),
         // JDBC connections use the driver-reported identifier quote string
@@ -141,6 +145,221 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
     }
 }
 
+pub(crate) fn quote_gaussdb_jdbc_identifier(name: &str, identifier_quote: &str) -> String {
+    if is_explicitly_quoted_identifier(name) {
+        return name.to_string();
+    }
+    let quote = identifier_quote.trim();
+    if quote.is_empty() {
+        return name.to_string();
+    }
+    let requires_quote = !is_simple_lower_identifier(name)
+        || is_postgres_reserved_identifier(name)
+        || (quote == "`" && is_mysql_only_reserved_identifier(name));
+    if !requires_quote {
+        return name.to_string();
+    }
+    format!("{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))
+}
+
+fn is_explicitly_quoted_identifier(name: &str) -> bool {
+    name.len() >= 2
+        && ((name.starts_with('"') && name.ends_with('"'))
+            || (name.starts_with('`') && name.ends_with('`'))
+            || (name.starts_with('[') && name.ends_with(']')))
+}
+
+fn is_simple_lower_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_lowercase())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_lowercase() || ch.is_ascii_digit())
+}
+
+fn is_postgres_reserved_identifier(name: &str) -> bool {
+    matches!(
+        name,
+        "all"
+            | "analyse"
+            | "analyze"
+            | "and"
+            | "any"
+            | "array"
+            | "as"
+            | "asc"
+            | "asymmetric"
+            | "authorization"
+            | "binary"
+            | "both"
+            | "case"
+            | "cast"
+            | "check"
+            | "collate"
+            | "collation"
+            | "column"
+            | "concurrently"
+            | "constraint"
+            | "create"
+            | "cross"
+            | "current_catalog"
+            | "current_date"
+            | "current_role"
+            | "current_schema"
+            | "current_time"
+            | "current_timestamp"
+            | "current_user"
+            | "default"
+            | "deferrable"
+            | "desc"
+            | "distinct"
+            | "do"
+            | "else"
+            | "end"
+            | "except"
+            | "false"
+            | "fetch"
+            | "for"
+            | "foreign"
+            | "freeze"
+            | "from"
+            | "full"
+            | "grant"
+            | "group"
+            | "having"
+            | "ilike"
+            | "in"
+            | "initially"
+            | "inner"
+            | "intersect"
+            | "into"
+            | "is"
+            | "isnull"
+            | "join"
+            | "lateral"
+            | "leading"
+            | "left"
+            | "like"
+            | "limit"
+            | "localtime"
+            | "localtimestamp"
+            | "natural"
+            | "not"
+            | "notnull"
+            | "null"
+            | "offset"
+            | "on"
+            | "only"
+            | "or"
+            | "order"
+            | "outer"
+            | "overlaps"
+            | "placing"
+            | "primary"
+            | "references"
+            | "returning"
+            | "right"
+            | "select"
+            | "session_user"
+            | "similar"
+            | "some"
+            | "symmetric"
+            | "system_user"
+            | "table"
+            | "tablesample"
+            | "then"
+            | "to"
+            | "trailing"
+            | "true"
+            | "union"
+            | "unique"
+            | "user"
+            | "using"
+            | "variadic"
+            | "verbose"
+            | "when"
+            | "where"
+            | "window"
+            | "with"
+    )
+}
+
+fn is_mysql_only_reserved_identifier(name: &str) -> bool {
+    matches!(
+        name,
+        "accessible"
+            | "auto_increment"
+            | "change"
+            | "database"
+            | "databases"
+            | "delayed"
+            | "describe"
+            | "div"
+            | "dual"
+            | "enclosed"
+            | "escaped"
+            | "explain"
+            | "force"
+            | "fulltext"
+            | "high_priority"
+            | "ignore"
+            | "index"
+            | "infile"
+            | "key"
+            | "keys"
+            | "kill"
+            | "linear"
+            | "lines"
+            | "load"
+            | "lock"
+            | "low_priority"
+            | "master_ssl_verify_server_cert"
+            | "maxvalue"
+            | "mediumint"
+            | "mod"
+            | "no_write_to_binlog"
+            | "optimize"
+            | "optionally"
+            | "outfile"
+            | "partition"
+            | "purge"
+            | "range"
+            | "read_write"
+            | "regexp"
+            | "release"
+            | "rename"
+            | "replace"
+            | "require"
+            | "rlike"
+            | "schema"
+            | "schemas"
+            | "separator"
+            | "show"
+            | "spatial"
+            | "sql_big_result"
+            | "sql_calc_found_rows"
+            | "sql_small_result"
+            | "ssl"
+            | "starting"
+            | "straight_join"
+            | "terminated"
+            | "tinyint"
+            | "unlock"
+            | "unsigned"
+            | "use"
+            | "utc_date"
+            | "utc_time"
+            | "utc_timestamp"
+            | "values"
+            | "varbinary"
+            | "varchar"
+            | "write"
+            | "xor"
+            | "zerofill"
+    )
+}
+
 pub fn normalize_where_input(where_input: Option<&str>) -> String {
     let trimmed = where_input.unwrap_or("").trim().trim_end_matches(';').trim();
     let mut chars = trimmed.chars();
@@ -166,9 +385,28 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
     }
 }
 
-pub(crate) fn qualified_transfer_table(table_name: &str, schema: &str, database_type: &DatabaseType) -> String {
+/// Qualified table name for transfer SQL.
+///
+/// * Without catalog: produces `schema.table` (or just `table` for MySQL family).
+/// * With catalog AND the database type supports external catalogs (Doris/StarRocks):
+///   produces `catalog.schema.table` — the 3-part form those engines require to
+///   address objects in an external (non-internal) catalog.
+pub(crate) fn qualified_transfer_table(
+    table_name: &str,
+    schema: &str,
+    database_type: &DatabaseType,
+    catalog: Option<&str>,
+) -> String {
     let table = quote_transfer_identifier(table_name, database_type);
-    if schema.is_empty() || matches!(database_type, DatabaseType::Mysql | DatabaseType::MongoDb | DatabaseType::Questdb)
+    if let Some(catalog) = catalog {
+        format!(
+            "{}.{}.{}",
+            quote_transfer_identifier(catalog, database_type),
+            quote_transfer_identifier(schema, database_type),
+            table
+        )
+    } else if schema.is_empty()
+        || matches!(database_type, DatabaseType::Mysql | DatabaseType::MongoDb | DatabaseType::Questdb)
     {
         table
     } else {

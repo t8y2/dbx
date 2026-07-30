@@ -103,6 +103,8 @@ DBX MCP 当前提供 10 个工具：
 
 PostgreSQL、MySQL、SQLite、兼容 SQL 数据库、独立 Redis 和 MongoDB 可以直接查询。部分 SSH、集群、厂商专用以及 Agent/JDBC 连接需要先安装对应的 DBX 组件。
 
+DuckDB 使用独立的 DBX DuckDB 驱动。通过本地 MCP 查询 DuckDB 前，需要先在 **DBX Driver Manager** 中安装该驱动。MCP 二进制只包含 sidecar 客户端，不会内置 DuckDB 引擎。
+
 ### Agent/JDBC 数据库
 
 Oracle、人大金仓和虚谷需要匹配的 DBX 原生 Agent，但不需要 JRE。达梦、DB2、Hive、Trino、Snowflake、SAP HANA 等 JDBC Agent 数据库需要匹配的 Agent、JDBC 驱动和 JRE。请先在 DBX 中安装所需组件，再使用 MCP。
@@ -110,6 +112,8 @@ Oracle、人大金仓和虚谷需要匹配的 DBX 原生 Agent，但不需要 JR
 ### DBX Web / Docker 模式
 
 设置 `DBX_WEB_URL` 后，MCP 会使用部署的 DBX Web 后端，而不是读取本机连接。如果 Web 登录启用了密码保护，还要设置 `DBX_WEB_PASSWORD`，值为 Web 登录页使用的密码。
+
+DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 Driver Manager 安装；Docker 会把驱动保存到 `/app/data/agents`，挂载 `/app/data` 数据卷后升级容器不会丢失。
 
 ### 桌面 UI 工具
 
@@ -148,6 +152,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
   <Accordion title="找不到 dbx.db">将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录。Windows 便携版通常是 `DBX.exe` 旁边的 `data` 目录。</Accordion>
   <Accordion title="提示 DBX 未运行">只有 `dbx_open_table` 和 `dbx_execute_and_show` 需要桌面端运行；本地查询工具可以在 DBX 关闭时执行。</Accordion>
   <Accordion title="Agent/JDBC 数据库无法启动">在 DBX Driver Manager 中安装或更新匹配的 Agent、JDBC 驱动和 JRE。厂商专有驱动不会随 MCP 原生包发布。</Accordion>
+  <Accordion title="DuckDB 连接无法启动">在 DBX Driver Manager 中安装或更新 DuckDB 驱动。本地 MCP、DBX Web 和 Docker 都通过独立驱动运行 DuckDB，不会内置 DuckDB 引擎。</Accordion>
   <Accordion title="出现 better-sqlite3 或 Node ABI 错误">MCP 不需要 `better-sqlite3`。请先升级 `@dbx-app/mcp-server`；如果错误来自 `@dbx-app/cli`，请按照 CLI 的安装要求处理，因为它们是两个独立的包。</Accordion>
 </Accordions>
 

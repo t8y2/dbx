@@ -11,12 +11,16 @@ import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import * as api from "@/lib/backend/api";
 import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
+import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
+import { isSameTransferDatabase, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
+import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
+import type { CatalogInfo } from "@/types/database";
 import { ArrowRightLeft, ArrowLeftRight, Loader2, Square, CheckSquare } from "@lucide/vue";
 
 const { t } = useI18n();
@@ -26,6 +30,12 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
+  prefillCatalog?: string;
+  prefillSchema?: string;
+  prefillTables?: string[];
+  prefillTargetConnectionId?: string;
+  prefillTargetDatabase?: string;
+  prefillTargetSchema?: string;
 }>();
 
 const store = useConnectionStore();
@@ -34,6 +44,8 @@ const sqlConnections = computed(() => store.connections.filter((c) => supportsTr
 
 // Source state
 const sourceConnectionId = ref("");
+const sourceCatalog = ref("");
+const sourceCatalogs = ref<CatalogInfo[]>([]);
 const sourceDatabase = ref("");
 const sourceDatabases = ref<string[]>([]);
 const sourceSchemas = ref<string[]>([]);
@@ -42,13 +54,18 @@ const sourceTables = ref<string[]>([]);
 const selectedTables = ref<Set<string>>(new Set());
 const tableSearch = ref("");
 const loadingTables = ref(false);
+const pendingSourceSchemaPrefill = ref("");
+const pendingSelectedTablesPrefill = ref<string[] | null>(null);
 
 // Target state
 const targetConnectionId = ref("");
+const targetCatalog = ref("");
+const targetCatalogs = ref<CatalogInfo[]>([]);
 const targetDatabase = ref("");
 const targetDatabases = ref<string[]>([]);
 const targetSchemas = ref<string[]>([]);
 const targetSchema = ref("");
+const pendingTargetSchemaPrefill = ref("");
 
 // Options
 const createTable = ref(true);
@@ -60,7 +77,7 @@ const ownershipDialogOpen = ref(false);
 const ownershipMissingOwners = ref<string[]>([]);
 const ownershipTargetOwner = ref("");
 const pendingOwnershipRequest = ref<api.TransferRequest | null>(null);
-const pendingOwnershipRefresh = ref<{ targetConnection: string; targetDatabase: string; targetSchema: string; shouldRefreshTargetTree: boolean } | null>(null);
+const pendingOwnershipRefresh = ref<{ shouldRefreshTargetTree: boolean } | null>(null);
 
 const filteredTables = computed(() => {
   const q = tableSearch.value.toLowerCase();
@@ -77,7 +94,23 @@ function isMongoConnection(id: string): boolean {
   return connectionType(id) === "mongodb";
 }
 
-const canStart = computed(() => sourceConnectionId.value && sourceDatabase.value && targetConnectionId.value && targetDatabase.value && selectedTables.value.size > 0 && sourceConnectionId.value + sourceDatabase.value !== targetConnectionId.value + targetDatabase.value);
+function isCatalogCapable(id: string): boolean {
+  const config = store.getConfig(id);
+  return isDorisFamilyCatalogCapable(config?.db_type, config?.driver_profile);
+}
+
+const canStart = computed(() => {
+  const effectiveSourceSchema = sourceSchema.value || sourceDatabase.value;
+  const effectiveTargetSchema = targetSchema.value || targetDatabase.value;
+  const sameCatalogAndDatabase = isSameTransferDatabase(
+    { connectionId: sourceConnectionId.value, catalog: sourceCatalog.value, catalogs: sourceCatalogs.value, database: sourceDatabase.value },
+    { connectionId: targetConnectionId.value, catalog: targetCatalog.value, catalogs: targetCatalogs.value, database: targetDatabase.value },
+  );
+  const sameSourceAndTarget = sameCatalogAndDatabase && effectiveSourceSchema === effectiveTargetSchema;
+  return (
+    !!sourceConnectionId.value && !!sourceDatabase.value && !!targetConnectionId.value && !!targetDatabase.value && (sourceCatalogs.value.length <= 1 || !!sourceCatalog.value) && (targetCatalogs.value.length <= 1 || !!targetCatalog.value) && selectedTables.value.size > 0 && !sameSourceAndTarget
+  );
+});
 
 function toggleSelectAll() {
   if (allSelected.value) {
@@ -95,6 +128,37 @@ function toggleTable(table: string) {
   }
 }
 
+async function loadCatalogs(connectionId: string, side: "source" | "target") {
+  if (!connectionId || !isCatalogCapable(connectionId)) {
+    if (side === "source") {
+      sourceCatalogs.value = [];
+      sourceCatalog.value = "";
+    } else {
+      targetCatalogs.value = [];
+      targetCatalog.value = "";
+    }
+    return;
+  }
+  try {
+    const catalogs = await api.listDorisCatalogs(connectionId);
+    if (side === "source") {
+      sourceCatalogs.value = catalogs;
+      sourceCatalog.value = catalogs.length === 1 ? catalogs[0].name : "";
+    } else {
+      targetCatalogs.value = catalogs;
+      targetCatalog.value = catalogs.length === 1 ? catalogs[0].name : "";
+    }
+  } catch {
+    if (side === "source") {
+      sourceCatalogs.value = [];
+      sourceCatalog.value = "";
+    } else {
+      targetCatalogs.value = [];
+      targetCatalog.value = "";
+    }
+  }
+}
+
 async function loadDatabases(connectionId: string, target: "source" | "target") {
   if (!connectionId) return;
   try {
@@ -102,6 +166,26 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
     const config = store.getConfig(connectionId);
     if (!config) return;
     const names = isMongoConnection(connectionId) ? databaseOptionsForConnection(await api.mongoListDatabases(connectionId), config) : await fetchNamespaceOptionsForConnection(connectionId, config);
+    if (target === "source") {
+      sourceDatabases.value = names;
+      sourceDatabase.value = names.length === 1 ? names[0] : "";
+    } else {
+      targetDatabases.value = names;
+      targetDatabase.value = names.length === 1 ? names[0] : "";
+    }
+  } catch {
+    if (target === "source") sourceDatabases.value = [];
+    else targetDatabases.value = [];
+  }
+}
+
+async function loadDatabasesForCatalog(connectionId: string, catalog: string, target: "source" | "target") {
+  if (!connectionId || !catalog) return;
+  try {
+    await store.ensureConnected(connectionId);
+    const config = store.getConfig(connectionId);
+    if (!config) return;
+    const names = await fetchCatalogNamespaceOptions(connectionId, catalog, config);
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -148,6 +232,12 @@ async function loadSchemas(connectionId: string, database: string, side: "source
   }
 }
 
+function applyPendingTableSelection() {
+  const pending = pendingSelectedTablesPrefill.value;
+  selectedTables.value = pending ? new Set(sourceTables.value.filter((table) => pending.includes(table))) : new Set(sourceTables.value);
+  pendingSelectedTablesPrefill.value = null;
+}
+
 async function loadTables() {
   if (!sourceConnectionId.value || !sourceDatabase.value) {
     sourceTables.value = [];
@@ -157,15 +247,16 @@ async function loadTables() {
   try {
     if (isMongoConnection(sourceConnectionId.value)) {
       sourceTables.value = (await api.mongoListCollections(sourceConnectionId.value, sourceDatabase.value)).map((c) => c.name);
-      selectedTables.value = new Set(sourceTables.value);
+      applyPendingTableSelection();
       return;
     }
     const config = store.getConfig(sourceConnectionId.value);
     const needsSchema = isSchemaAware(config?.db_type);
     const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;
-    const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema);
+    const catalog = sourceCatalog.value || undefined;
+    const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema, undefined, undefined, undefined, undefined, catalog);
     sourceTables.value = tables.filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE").map((t) => t.name);
-    selectedTables.value = new Set(sourceTables.value);
+    applyPendingTableSelection();
   } catch {
     sourceTables.value = [];
   } finally {
@@ -174,16 +265,38 @@ async function loadTables() {
 }
 
 const skipSourceWatch = ref(false);
+const skipTargetWatch = ref(false);
 
-watch(sourceConnectionId, (id) => {
+watch(sourceConnectionId, async (id) => {
   if (skipSourceWatch.value) {
     skipSourceWatch.value = false;
     return;
   }
+  sourceCatalog.value = "";
+  sourceCatalogs.value = [];
   sourceDatabase.value = "";
   sourceTables.value = [];
   selectedTables.value.clear();
-  loadDatabases(id, "source");
+  pendingSourceSchemaPrefill.value = "";
+  pendingSelectedTablesPrefill.value = null;
+  if (isCatalogCapable(id)) {
+    await loadCatalogs(id, "source");
+    if (sourceCatalog.value) {
+      await loadDatabasesForCatalog(id, sourceCatalog.value, "source");
+    }
+  } else {
+    await loadDatabases(id, "source");
+  }
+});
+
+watch(sourceCatalog, async (catalog) => {
+  if (!sourceConnectionId.value) return;
+  sourceDatabase.value = "";
+  sourceTables.value = [];
+  selectedTables.value.clear();
+  if (catalog) {
+    await loadDatabasesForCatalog(sourceConnectionId.value, catalog, "source");
+  }
 });
 
 watch(sourceDatabase, async (db) => {
@@ -195,7 +308,8 @@ watch(sourceDatabase, async (db) => {
       sourceSchemas.value = [];
       sourceSchema.value = db;
     } else if (isSchemaAware(config?.db_type)) {
-      await loadSchemas(sourceConnectionId.value, db, "source");
+      await loadSchemas(sourceConnectionId.value, db, "source", pendingSourceSchemaPrefill.value);
+      pendingSourceSchemaPrefill.value = "";
     } else {
       sourceSchema.value = db;
     }
@@ -204,11 +318,35 @@ watch(sourceDatabase, async (db) => {
 
 watch(sourceSchema, () => loadTables());
 
-watch(targetConnectionId, (id) => {
+watch(targetConnectionId, async (id) => {
+  if (skipTargetWatch.value) {
+    skipTargetWatch.value = false;
+    return;
+  }
+  targetCatalog.value = "";
+  targetCatalogs.value = [];
   targetDatabase.value = "";
   targetSchemas.value = [];
   targetSchema.value = "";
-  loadDatabases(id, "target");
+  pendingTargetSchemaPrefill.value = "";
+  if (isCatalogCapable(id)) {
+    await loadCatalogs(id, "target");
+    if (targetCatalog.value) {
+      await loadDatabasesForCatalog(id, targetCatalog.value, "target");
+    }
+  } else {
+    await loadDatabases(id, "target");
+  }
+});
+
+watch(targetCatalog, async (catalog) => {
+  if (!targetConnectionId.value) return;
+  targetDatabase.value = "";
+  targetSchemas.value = [];
+  targetSchema.value = "";
+  if (catalog) {
+    await loadDatabasesForCatalog(targetConnectionId.value, catalog, "target");
+  }
 });
 
 watch(targetDatabase, async (db) => {
@@ -218,7 +356,8 @@ watch(targetDatabase, async (db) => {
       targetSchemas.value = [];
       targetSchema.value = db;
     } else if (isSchemaAware(config?.db_type)) {
-      await loadSchemas(targetConnectionId.value, db, "target");
+      await loadSchemas(targetConnectionId.value, db, "target", pendingTargetSchemaPrefill.value);
+      pendingTargetSchemaPrefill.value = "";
     } else {
       targetSchema.value = db;
     }
@@ -230,13 +369,37 @@ watch(
   async (val) => {
     if (val) {
       resetState();
+      pendingSourceSchemaPrefill.value = props.prefillSchema ?? "";
+      pendingSelectedTablesPrefill.value = props.prefillTables?.length ? [...props.prefillTables] : null;
+      pendingTargetSchemaPrefill.value = props.prefillTargetSchema ?? "";
       if (props.prefillConnectionId) {
         skipSourceWatch.value = true;
         sourceConnectionId.value = props.prefillConnectionId;
-        await loadDatabases(props.prefillConnectionId, "source");
-        if (props.prefillDatabase) {
-          sourceDatabase.value = props.prefillDatabase;
+        if (isCatalogCapable(props.prefillConnectionId)) {
+          await loadCatalogs(props.prefillConnectionId, "source");
+          if (props.prefillCatalog) {
+            sourceCatalog.value = props.prefillCatalog;
+          }
+          if (sourceCatalog.value) {
+            await loadDatabasesForCatalog(props.prefillConnectionId, sourceCatalog.value, "source");
+          }
+        } else {
+          await loadDatabases(props.prefillConnectionId, "source");
         }
+        if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
+      }
+      if (props.prefillTargetConnectionId) {
+        skipTargetWatch.value = true;
+        targetConnectionId.value = props.prefillTargetConnectionId;
+        if (isCatalogCapable(props.prefillTargetConnectionId)) {
+          await loadCatalogs(props.prefillTargetConnectionId, "target");
+          if (targetCatalog.value) {
+            await loadDatabasesForCatalog(props.prefillTargetConnectionId, targetCatalog.value, "target");
+          }
+        } else {
+          await loadDatabases(props.prefillTargetConnectionId, "target");
+        }
+        if (props.prefillTargetDatabase) targetDatabase.value = props.prefillTargetDatabase;
       }
     }
   },
@@ -245,18 +408,25 @@ watch(
 
 function resetState() {
   sourceConnectionId.value = "";
+  sourceCatalog.value = "";
+  sourceCatalogs.value = [];
   sourceDatabase.value = "";
   sourceDatabases.value = [];
   sourceSchemas.value = [];
   sourceSchema.value = "";
   sourceTables.value = [];
   selectedTables.value.clear();
+  pendingSourceSchemaPrefill.value = "";
+  pendingSelectedTablesPrefill.value = null;
   tableSearch.value = "";
   targetConnectionId.value = "";
+  targetCatalog.value = "";
+  targetCatalogs.value = [];
   targetDatabase.value = "";
   targetDatabases.value = [];
   targetSchemas.value = [];
   targetSchema.value = "";
+  pendingTargetSchemaPrefill.value = "";
   createTable.value = true;
   transferMode.value = "append";
   targetTableNameCase.value = "preserve";
@@ -285,9 +455,11 @@ async function startTransfer() {
     sourceConnectionId: sourceConnectionId.value,
     sourceDatabase: sourceDatabaseName,
     sourceSchema: effectiveSourceSchema,
+    sourceCatalog: normalizeTransferCatalog(sourceCatalog.value, sourceCatalogs.value) || undefined,
     targetConnectionId: targetConnection,
     targetDatabase: targetDatabaseName,
     targetSchema: effectiveTargetSchema,
+    targetCatalog: normalizeTransferCatalog(targetCatalog.value, targetCatalogs.value) || undefined,
     tables: [...selectedTables.value],
     createTable: createTable.value,
     mode: transferMode.value,
@@ -304,9 +476,6 @@ async function startTransfer() {
         ownershipTargetOwner.value = preview.targetOwner;
         pendingOwnershipRequest.value = request;
         pendingOwnershipRefresh.value = {
-          targetConnection,
-          targetDatabase: targetDatabaseName,
-          targetSchema: effectiveTargetSchema,
           shouldRefreshTargetTree,
         };
         ownershipDialogOpen.value = true;
@@ -319,16 +488,16 @@ async function startTransfer() {
     }
   }
 
-  runTransfer(request, targetConnection, targetDatabaseName, effectiveTargetSchema, shouldRefreshTargetTree);
+  runTransfer(request, shouldRefreshTargetTree);
 }
 
-function runTransfer(request: api.TransferRequest, targetConnection: string, targetDatabaseName: string, effectiveTargetSchema: string, shouldRefreshTargetTree: boolean) {
+function runTransfer(request: api.TransferRequest, shouldRefreshTargetTree: boolean) {
   isSubmitting.value = true;
-  startDataTransferTask(request, `${request.sourceDatabase} → ${targetDatabaseName}`, {
+  startDataTransferTask(request, `${request.sourceDatabase} → ${request.targetDatabase}`, {
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
-        await store.refreshObjectListTreeNode(targetConnection, targetDatabaseName, effectiveTargetSchema);
+        await store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog);
       }
     },
   });
@@ -348,7 +517,7 @@ function resolveOwnershipDecision(policy: api.TransferOwnershipPolicy | null) {
     isSubmitting.value = false;
     return;
   }
-  runTransfer({ ...request, ownershipPolicy: policy }, refresh.targetConnection, refresh.targetDatabase, refresh.targetSchema, refresh.shouldRefreshTargetTree);
+  runTransfer({ ...request, ownershipPolicy: policy }, refresh.shouldRefreshTargetTree);
 }
 
 function getConnectionName(id: string) {
@@ -391,12 +560,27 @@ function getConnectionName(id: string) {
                 >
                   <template #option-label="{ option, label }">
                     <div class="flex min-w-0 items-center gap-1.5">
-                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                      <DatabaseIcon :db-type="connectionIconType(sqlConnections.find((c) => c.id === option))" class="h-3.5 w-3.5 shrink-0" />
                       <ConnectionGroupBadge :connection-id="option" />
                       <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                     </div>
                   </template>
                 </SearchableSelect>
+              </div>
+
+              <!-- Source Catalog (Doris/StarRocks multi-catalog) -->
+              <div v-if="sourceCatalogs.length > 1" class="space-y-1.5">
+                <Label class="text-xs">{{ t("transfer.sourceCatalog") }}</Label>
+                <SearchableSelect
+                  v-model="sourceCatalog"
+                  :options="sourceCatalogs.map((c) => c.name)"
+                  :placeholder="t('transfer.selectCatalog')"
+                  :search-placeholder="t('transfer.searchCatalog')"
+                  :empty-text="t('common.noResults')"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
               </div>
 
               <div class="space-y-1.5">
@@ -455,12 +639,27 @@ function getConnectionName(id: string) {
                 >
                   <template #option-label="{ option, label }">
                     <div class="flex min-w-0 items-center gap-1.5">
-                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                      <DatabaseIcon :db-type="connectionIconType(sqlConnections.find((c) => c.id === option))" class="h-3.5 w-3.5 shrink-0" />
                       <ConnectionGroupBadge :connection-id="option" />
                       <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                     </div>
                   </template>
                 </SearchableSelect>
+              </div>
+
+              <!-- Target Catalog (Doris/StarRocks multi-catalog) -->
+              <div v-if="targetCatalogs.length > 1" class="space-y-1.5">
+                <Label class="text-xs">{{ t("transfer.targetCatalog") }}</Label>
+                <SearchableSelect
+                  v-model="targetCatalog"
+                  :options="targetCatalogs.map((c) => c.name)"
+                  :placeholder="t('transfer.selectCatalog')"
+                  :search-placeholder="t('transfer.searchCatalog')"
+                  :empty-text="t('common.noResults')"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
               </div>
 
               <div class="space-y-1.5">

@@ -5,6 +5,7 @@ describe("dataGridPreviewLabelKey", () => {
   it("offers a query preview for document databases that never emit SQL", () => {
     expect(dataGridPreviewLabelKey("mongodb")).toBe("toolbar.previewQuery");
     expect(dataGridPreviewLabelKey("elasticsearch")).toBe("toolbar.previewQuery");
+    expect(dataGridPreviewLabelKey("easysearch")).toBe("toolbar.previewQuery");
   });
 
   it("keeps the SQL wording for SQL databases", () => {

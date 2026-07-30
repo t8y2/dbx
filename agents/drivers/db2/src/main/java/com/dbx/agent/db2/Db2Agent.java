@@ -1,6 +1,6 @@
 package com.dbx.agent.db2;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -17,8 +17,6 @@ import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -26,18 +24,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-public final class Db2Agent extends BaseDatabaseAgent {
+public final class Db2Agent extends AbstractJdbcAgent {
     private static final Set<String> NUMERIC_PRECISION_TYPES = Set.of(
         "DECIMAL", "NUMERIC", "INTEGER", "SMALLINT", "BIGINT", "REAL", "DOUBLE", "FLOAT"
     );
     private static final Set<String> NUMERIC_SCALE_TYPES = Set.of("DECIMAL", "NUMERIC");
     private static final Set<String> CHARACTER_LENGTH_TYPES = Set.of("VARCHAR", "CHAR", "CLOB", "GRAPHIC", "VARGRAPHIC");
 
-    private Connection connection;
-
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "com.ibm.db2.jcc.DB2Driver";
     }
 
     @Override
@@ -46,21 +42,8 @@ public final class Db2Agent extends BaseDatabaseAgent {
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            Class.forName("com.ibm.db2.jcc.DB2Driver");
-            connection = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword());
-        });
-    }
-
-    @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            Class.forName("com.ibm.db2.jcc.DB2Driver");
-            try (Connection conn = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword())) {
-                return conn.isValid(5);
-            }
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        return buildUrl(params);
     }
 
     @Override
@@ -97,7 +80,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
     public List<TableInfo> listTables(String schema) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            String sql = "SELECT TABNAME, TYPE FROM SYSCAT.TABLES WHERE TABSCHEMA = ? AND TYPE IN ('T','V') ORDER BY TABNAME";
+            String sql = "SELECT TABNAME, TYPE, REMARKS FROM SYSCAT.TABLES WHERE TABSCHEMA = ? AND TYPE IN ('T','V') ORDER BY TABNAME";
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
@@ -108,7 +91,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
                             case "V" -> "VIEW";
                             default -> db2Type;
                         };
-                        result.add(new TableInfo(rs.getString(1).trim(), type, null));
+                        result.add(new TableInfo(rs.getString(1).trim(), type, rs.getString(3)));
                     }
                 }
             }
@@ -136,7 +119,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
             List<Object> args = new ArrayList<>();
-            StringBuilder sql = new StringBuilder("SELECT TABNAME, TYPE FROM SYSCAT.TABLES WHERE TABSCHEMA = ?");
+            StringBuilder sql = new StringBuilder("SELECT TABNAME, TYPE, REMARKS FROM SYSCAT.TABLES WHERE TABSCHEMA = ?");
             args.add(schema);
             appendDb2TableTypePredicate(sql, args, constraints);
             MetadataSqlSupport.appendNameFilter(sql, args, "TABNAME", constraints);
@@ -146,7 +129,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
                 MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new TableInfo(rs.getString(1).trim(), db2TableType(rs.getString(2)), null));
+                        result.add(new TableInfo(rs.getString(1).trim(), db2TableType(rs.getString(2)), rs.getString(3)));
                     }
                 }
             }
@@ -198,7 +181,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
             List<Object> args = new ArrayList<>();
             if (constraints.includesTableLikeTypes()) {
                 StringBuilder tableSql = new StringBuilder(
-                    "SELECT TABNAME AS OBJECT_NAME, CASE TYPE WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE TYPE END AS OBJECT_TYPE FROM SYSCAT.TABLES WHERE TABSCHEMA = ?"
+                    "SELECT TABNAME AS OBJECT_NAME, CASE TYPE WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE TYPE END AS OBJECT_TYPE, REMARKS AS OBJECT_COMMENT FROM SYSCAT.TABLES WHERE TABSCHEMA = ?"
                 );
                 args.add(schema);
                 appendDb2TableTypePredicate(tableSql, args, constraints);
@@ -207,7 +190,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
             }
             if (constraints.objectTypeAllowed("PROCEDURE")) {
                 StringBuilder procedureSql = new StringBuilder(
-                    "SELECT PROCNAME AS OBJECT_NAME, 'PROCEDURE' AS OBJECT_TYPE FROM SYSCAT.PROCEDURES WHERE PROCSCHEMA = ?"
+                    "SELECT PROCNAME AS OBJECT_NAME, 'PROCEDURE' AS OBJECT_TYPE, CAST(NULL AS VARCHAR(254)) AS OBJECT_COMMENT FROM SYSCAT.PROCEDURES WHERE PROCSCHEMA = ?"
                 );
                 args.add(schema);
                 MetadataSqlSupport.appendNameFilter(procedureSql, args, "PROCNAME", constraints);
@@ -216,7 +199,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
             if (branches.isEmpty()) {
                 return List.of();
             }
-            StringBuilder sql = new StringBuilder("SELECT OBJECT_NAME, OBJECT_TYPE FROM (")
+            StringBuilder sql = new StringBuilder("SELECT OBJECT_NAME, OBJECT_TYPE, OBJECT_COMMENT FROM (")
                 .append(String.join(" UNION ALL ", branches))
                 .append(") metadata_objects ORDER BY CASE OBJECT_TYPE WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 ELSE 9 END, OBJECT_NAME");
             MetadataSqlSupport.appendLiteralOffsetFetch(sql, constraints);
@@ -224,7 +207,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
                 MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new ObjectInfo(rs.getString(1).trim(), rs.getString(2), schema, null));
+                        result.add(new ObjectInfo(rs.getString(1).trim(), rs.getString(2), schema, rs.getString(3)));
                     }
                 }
             }
@@ -269,7 +252,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
 
             List<ColumnInfo> result = new ArrayList<>();
             String colSql = """
-                SELECT COLNAME, TYPENAME, NULLS, DEFAULT, LENGTH, SCALE
+                SELECT COLNAME, TYPENAME, NULLS, DEFAULT, LENGTH, SCALE, REMARKS
                 FROM SYSCAT.COLUMNS
                 WHERE TABSCHEMA = ? AND TABNAME = ?
                 ORDER BY COLNO
@@ -292,7 +275,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
                             trimNullable(rs.getString("DEFAULT")),
                             pkColumns.contains(name),
                             null,
-                            null,
+                            rs.getString("REMARKS"),
                             NUMERIC_PRECISION_TYPES.contains(typeName) ? length : null,
                             NUMERIC_SCALE_TYPES.contains(typeName) ? scale : null,
                             CHARACTER_LENGTH_TYPES.contains(typeName) ? length : null
@@ -395,21 +378,12 @@ public final class Db2Agent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::stringResultValue
+            this::resultValue
         );
     }
 
     @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
-    }
-
-    private Object stringResultValue(ResultSet rs, int index, int sqlType) {
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();

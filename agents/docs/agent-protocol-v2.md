@@ -8,7 +8,7 @@ Protocol v2 allows one Agent process to serve multiple isolated database session
 - Every connection-scoped RPC contains `agentSessionId`.
 - `validate_session` validates and, where supported, reconnects only that session.
 - `cancel_session` cancels active statements and cursor fetches for only that session; other sessions in the runtime continue normally.
-- `close_session` closes the session connection, query cursors, and table-read cursors without affecting other sessions.
+- `close_session` closes the session resources, query cursors, and table-read cursors without affecting other sessions.
 - `shutdown` closes all sessions and terminates the runtime.
 
 `agentSessionId` identifies a logical database connection. Existing `sessionId` fields remain pagination cursor identifiers and must not be used as logical connection identifiers.
@@ -16,6 +16,10 @@ Protocol v2 allows one Agent process to serve multiple isolated database session
 ## Concurrency
 
 Requests for different sessions may execute concurrently. Requests for the same session are serialized because connection state, transactions, schema changes, and driver connections are not generally safe for concurrent use. JSON-RPC responses may be returned out of order and are correlated by request `id`.
+
+All Java JDBC runtimes share HikariCP pools by immutable connection identity through `AbstractJdbcAgent`. Stateless requests borrow and return connections. Paged cursors and explicit session-state SQL pin a connection to the logical session, and stateful connections are evicted when that session closes so state cannot leak across sessions. Custom URL construction, transport fallback, connection initialization, and native-driver access remain behind shared lifecycle hooks.
+
+DBX uses unique short-lived logical sessions for independent Agent metadata tasks so they do not queue behind editor execution. These sessions close after completion, and cancellation-safe cleanup closes them when the caller is dropped.
 
 ## Runtime compatibility
 
@@ -29,6 +33,6 @@ A runtime accepts at most 256 logical sessions. Closing the final session starts
 
 ## Driver author guidance
 
-Use `MultiSessionJsonRpcServer(YourAgent::new)` for Java SQL Agents so each logical session receives a new `DatabaseAgent` and JDBC connection. Do not store connection, statement, cursor, transaction, or schema state in static mutable fields. Use the session execution context for paged query resources. Native Agents must provide equivalent per-session state and synchronized stdout writes.
+Use `MultiSessionJsonRpcServer(YourAgent::new)` for Java SQL Agents so each logical session receives a new `DatabaseAgent` with isolated connection state. The shared runtime owns the physical JDBC pools. Do not store connection, statement, cursor, transaction, or schema state in static mutable fields. Use the session execution context for paged query resources. Native Agents must provide equivalent per-session state and synchronized stdout writes.
 
 The Xugu native Agent keeps one database connection per logical session plus one shared control connection per database endpoint. Because `go-xugu-driver` does not interrupt network reads through `context.Context`, cancellation records the server-side session ID and calls `DBMS_DBA.KILL_SESSION_TRANS` through the shared control connection.

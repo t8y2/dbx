@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget } from "@/lib/database/databaseNamespaceCreation";
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
-import { isSchemaAware, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 
 describe("schema awareness", () => {
   it("keeps SQLite database aliases separate from schema-capable databases", () => {
@@ -17,6 +17,14 @@ describe("database and schema qualifiers", () => {
 
   it.each(["mysql", "postgres", "oracle", "snowflake"] as const)("does not widen unverified three-part completion for %s", (databaseType) => {
     expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(false);
+  });
+
+  it.each(["mysql", "sqlite", "sqlserver"] as const)("suggests database names for %s", (databaseType) => {
+    expect(supportsDatabaseNameCompletion(databaseType)).toBe(true);
+  });
+
+  it.each(["postgres", "oracle", "snowflake", "trino", "prestosql"] as const)("does not add database name completion for %s", (databaseType) => {
+    expect(supportsDatabaseNameCompletion(databaseType)).toBe(false);
   });
 });
 
@@ -65,6 +73,7 @@ describe("supportsSqlInListPaste", () => {
     expect(supportsSqlInListPaste("redis")).toBe(false);
     expect(supportsSqlInListPaste("mongodb")).toBe(false);
     expect(supportsSqlInListPaste("elasticsearch")).toBe(false);
+    expect(supportsSqlInListPaste("easysearch")).toBe(false);
     expect(supportsSqlInListPaste("qdrant")).toBe(false);
     expect(supportsSqlInListPaste("milvus")).toBe(false);
     expect(supportsSqlInListPaste("weaviate")).toBe(false);
@@ -98,6 +107,7 @@ describe("database property editing", () => {
     expect(editableDatabasePropertyGroups({ db_type: "mysql", read_only: true }, { type: "database", database: "app" })).toEqual([]);
     expect(editableDatabasePropertyGroups({ db_type: "sqlite" }, { type: "database", database: "main" })).toEqual([]);
     expect(editableDatabasePropertyGroups({ db_type: "sqlserver" }, { type: "database", database: "master" })).toEqual([]);
+    expect(editableDatabasePropertyGroups({ db_type: "hbase" }, { type: "database", database: "default" })).toEqual([]);
     expect(editableDatabasePropertyGroups({ db_type: "postgres" }, { type: "connection" })).toEqual([]);
     expect(editableSchemaPropertyGroups({ db_type: "postgres", read_only: true }, { type: "schema", database: "postgres", schema: "public" })).toEqual([]);
     expect(editableSchemaPropertyGroups({ db_type: "postgres" }, { type: "database", database: "postgres" })).toEqual([]);
@@ -137,6 +147,7 @@ describe("database namespace creation", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "sqlite", read_only: true })).toBeNull();
     expect(connectionNamespaceCreationTarget({ db_type: "jdbc" })).toBeNull();
     expect(connectionNamespaceCreationTarget({ db_type: "oracle" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "hbase" })).toBeNull();
   });
 
   it("allows schema creation only on writable database nodes with schema targets", () => {

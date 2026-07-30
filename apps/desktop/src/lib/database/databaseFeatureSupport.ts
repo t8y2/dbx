@@ -11,6 +11,10 @@ export function supportsDatabaseSchemaQualifier(dbType?: DatabaseType): boolean 
   return !!dbType && DATABASE_SCHEMA_QUALIFIED_TYPES.has(dbType);
 }
 
+export function supportsDatabaseNameCompletion(dbType?: DatabaseType): boolean {
+  return !!dbType && ((!isSchemaAware(dbType) && !isSingleDatabase(dbType)) || dbType === "sqlserver");
+}
+
 /**
  * Doris-family engines that support multi-catalog federation (`SHOW CATALOGS`):
  * Doris (incl. SelectDB) and StarRocks. Manticore Search shares the MySQL code
@@ -74,7 +78,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
 }
 
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos";
+  return dbType !== "nacos" && dbType !== "hbase";
 }
 
 export function usesFetchFirst(dbType?: DatabaseType): boolean {

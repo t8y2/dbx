@@ -1,6 +1,6 @@
 package com.dbx.agent.informix;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -28,15 +28,18 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-public final class InformixAgent extends BaseDatabaseAgent {
-    private Connection connection;
-
+public final class InformixAgent extends AbstractJdbcAgent {
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "com.informix.jdbc.IfxDriver";
     }
 
-    public static String buildJdbcUrl(ConnectParams params) {
+    @Override
+    protected String buildJdbcUrl(ConnectParams params) {
+        return jdbcUrl(params);
+    }
+
+    public static String jdbcUrl(ConnectParams params) {
         String rawUrlParams = params.getUrl_params();
         String extraParams = rawUrlParams == null ? "" : trimEnd(trimStart(rawUrlParams.trim(), ':', ';'), ';');
         String rawDatabase = params.getDatabase();
@@ -138,30 +141,16 @@ public final class InformixAgent extends BaseDatabaseAgent {
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        String url = buildJdbcUrl(params);
-        uncheckedVoid(() -> {
-            Class.forName("com.informix.jdbc.IfxDriver");
-            try {
-                connection = DriverManager.getConnection(url, params.getUsername(), params.getPassword());
-            } catch (SQLException e) {
-                throw new SQLException(
-                    "Informix connection failed.\nURL: " + url.replaceAll("//[^@]+@", "//***@") + "\nError: " + e.getMessage(),
-                    e.getSQLState(), e.getErrorCode()
-                );
-            }
-        });
-    }
-
-    @Override
-    public boolean testConnection(ConnectParams params) {
-        String url = buildJdbcUrl(params);
-        return unchecked(() -> {
-            Class.forName("com.informix.jdbc.IfxDriver");
-            try (Connection conn = DriverManager.getConnection(url, params.getUsername(), params.getPassword())) {
-                return conn.isValid(5);
-            }
-        });
+    protected Connection openConnection(ConnectParams params) throws SQLException {
+        String url = jdbcUrl(params);
+        try {
+            return DriverManager.getConnection(url, params.getUsername(), params.getPassword());
+        } catch (SQLException error) {
+            throw new SQLException(
+                "Informix connection failed.\nURL: " + url.replaceAll("//[^@]+@", "//***@") + "\nError: " + error.getMessage(),
+                error.getSQLState(), error.getErrorCode()
+            );
+        }
     }
 
     @Override
@@ -467,7 +456,7 @@ public final class InformixAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::stringResultValue
+            this::resultValue
         );
     }
 
@@ -477,16 +466,7 @@ public final class InformixAgent extends BaseDatabaseAgent {
     }
 
     @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
-    }
-
-    private Object stringResultValue(ResultSet rs, int index, int sqlType) {
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();

@@ -1,6 +1,6 @@
 package com.dbx.agent.dameng;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -40,7 +40,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public final class DamengAgent extends BaseDatabaseAgent {
+public final class DamengAgent extends AbstractJdbcAgent {
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
     private static final String DAMENG_CLASSIFIED_OBJECT_TYPE_SQL =
         "CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' OR (o.OBJECT_TYPE = 'VIEW' AND mv.MVIEW_NAME IS NOT NULL) "
@@ -72,35 +72,33 @@ public final class DamengAgent extends BaseDatabaseAgent {
               ON schema_object.OBJECT_ID = m.SCHID AND schema_object.OBJECT_TYPE = 'SCH'
         ) mv ON mv.OWNER = o.OWNER AND mv.MVIEW_NAME = o.OBJECT_NAME
         """.stripIndent().trim();
-    private Connection connection;
     private String connectedUsername;
 
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "dm.jdbc.driver.DmDriver";
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            withSuppressedStdout(() -> {
-                Class.forName("dm.jdbc.driver.DmDriver");
-                connection = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword());
-                connectedUsername = params.getUsername();
-            });
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        return buildUrl(params);
     }
 
     @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            return withSuppressedStdout(() -> {
-                Class.forName("dm.jdbc.driver.DmDriver");
-                try (Connection conn = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword())) {
-                    return conn.isValid(5);
-                }
-            });
-        });
+    protected void loadDriver(ConnectParams params) throws Exception {
+        withSuppressedStdout(() -> super.loadDriver(params));
+    }
+
+    @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        return withSuppressedStdout(
+            () -> DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword())
+        );
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        connectedUsername = params.getUsername();
     }
 
     /**
@@ -883,7 +881,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::stringResultValue
+            this::resultValue
         );
     }
 
@@ -979,7 +977,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::stringResultValue
+            this::resultValue
         );
     }
 
@@ -991,7 +989,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::stringResultValue
+            this::resultValue
         );
     }
 
@@ -1001,16 +999,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
     }
 
     @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
-    }
-
-    private Object stringResultValue(ResultSet rs, int index, int sqlType) {
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = switch (sqlType) {
                 case Types.BIGINT -> rs.getLong(index);
@@ -1464,9 +1453,10 @@ public final class DamengAgent extends BaseDatabaseAgent {
                     }
                     try {
                         Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
-                        if (dmConnClass.isInstance(conn)) {
+                        Object dmConnection = unwrapConnection(conn, dmConnClass);
+                        if (dmConnection != null) {
                             Method m = dmConnClass.getMethod("getExplainInfo", Statement.class);
-                            planText = (String) m.invoke(dmConnClass.cast(conn), stmt);
+                            planText = (String) m.invoke(dmConnection, stmt);
                         }
                     } catch (Exception ignored) {}
                 } finally {
@@ -1479,9 +1469,10 @@ public final class DamengAgent extends BaseDatabaseAgent {
             } else {
                 try {
                     Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
-                    if (dmConnClass.isInstance(conn)) {
+                    Object dmConnection = unwrapConnection(conn, dmConnClass);
+                    if (dmConnection != null) {
                         Method m = dmConnClass.getMethod("getExplainInfo", String.class);
-                        planText = (String) m.invoke(dmConnClass.cast(conn), sql);
+                        planText = (String) m.invoke(dmConnection, sql);
                     }
                 } catch (Exception ignored) {}
             }

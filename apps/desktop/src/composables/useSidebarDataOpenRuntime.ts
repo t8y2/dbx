@@ -30,6 +30,12 @@ export function useSidebarDataOpenRuntime() {
   async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default") {
     if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
     const config = connectionStore.getConfig(node.connectionId);
+    if (config?.db_type === "hbase") {
+      await connectionStore.ensureConnected(node.connectionId);
+      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, { forceNew: openMode === "new-tab" });
+      queryStore.updateSql(tabId, node.label);
+      return;
+    }
     const traceId = uuid().slice(0, 8);
     const startedAt = performance.now();
     let lastPhaseAt = startedAt;

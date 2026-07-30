@@ -1,7 +1,7 @@
 //! Quote-aware helpers for inspecting DuckDB SQL snippets without a full
 //! parser. Shared by the DuckDB worker (execute-time ATTACH tracking) and the
-//! connection layer (init-script handling), and kept free of `duckdb-bundled`
-//! so config-derived metadata works in every build.
+//! connection layer (init-script handling). It stays independent of the native
+//! DuckDB engine so config-derived metadata remains in the main application.
 
 use crate::models::connection::ConnectionConfig;
 
@@ -130,7 +130,7 @@ pub fn attached_name_from_attach_sql(sql: &str) -> Option<String> {
     parse_identifier_after_as(&trimmed[as_index + 2..])
 }
 
-pub(crate) fn strip_leading_comments(sql: &str) -> &str {
+pub fn strip_leading_comments(sql: &str) -> &str {
     let mut rest = sql.trim_start();
     loop {
         if let Some(after) = rest.strip_prefix("--") {

@@ -21,6 +21,7 @@ export type ShortcutActionId =
   | "uppercaseSelection"
   | "lowercaseSelection"
   | "exPasteSqlInCondition"
+  | "toggleFold"
   | "copyCurrentRow"
   | "deleteCurrentRow"
   | "newQuery"
@@ -201,6 +202,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutExPasteSqlInCondition",
     scope: "editor",
     defaultShortcut: "",
+  },
+  {
+    id: "toggleFold",
+    labelKey: "settings.shortcutToggleFold",
+    scope: "editor",
+    defaultShortcut: "Mod+.",
   },
   {
     id: "copyCurrentRow",

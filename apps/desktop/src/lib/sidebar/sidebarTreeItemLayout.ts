@@ -7,6 +7,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "trigger",
   "procedure",
   "function",
+  "synonym",
   "package",
   "package-body",
   "type",

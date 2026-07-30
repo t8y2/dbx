@@ -21,6 +21,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     connectionStore.transferSource = {
       connectionId: activeNode.value.connectionId,
       database: activeNode.value.database ?? "",
+      catalog: activeNode.value.catalog,
     };
   }
 

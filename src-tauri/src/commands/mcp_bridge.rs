@@ -368,6 +368,7 @@ mod tests {
         assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::MongoDb).is_err());
         assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::Redis).is_err());
         assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::Elasticsearch).is_err());
+        assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::Easysearch).is_err());
     }
 
     #[test]

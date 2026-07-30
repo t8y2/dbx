@@ -995,7 +995,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       fontSize: `clamp(11px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px) - 1px), 13px)`,
       fontWeight: "500",
       fontStyle: "normal",
-      flex: "1 1 auto",
+      flex: "1 1 0",
       marginLeft: "10px",
       minWidth: "0",
       opacity: "1",

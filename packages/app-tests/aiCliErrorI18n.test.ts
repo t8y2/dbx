@@ -10,7 +10,28 @@ import ptBR from "../../apps/desktop/src/i18n/locales/pt-BR";
 import zhCN from "../../apps/desktop/src/i18n/locales/zh-CN";
 import zhTW from "../../apps/desktop/src/i18n/locales/zh-TW";
 
-const errorCodes = ["claudeCodeNotInstalled", "claudeCodeCliPathInvalid", "claudeCodeEnvInvalid", "claudeCodeEnvReserved", "claudeCodeNotAuthenticated", "claudeCodeMcpConfigInvalid", "dbxMcpMissing", "claudeCodeMcpStartupFailed", "claudeCodeCommandLineTooLong", "claudeCodeRunFailed"] as const;
+const errorCodes = [
+  "claudeCodeNotInstalled",
+  "claudeCodeCliPathInvalid",
+  "claudeCodeEnvInvalid",
+  "claudeCodeEnvReserved",
+  "claudeCodeNotAuthenticated",
+  "claudeCodeMcpConfigInvalid",
+  "dbxMcpMissing",
+  "claudeCodeMcpStartupFailed",
+  "claudeCodeCommandLineTooLong",
+  "claudeCodeRunFailed",
+  "piAgentNotInstalled",
+  "piAgentCliPathInvalid",
+  "piAgentEnvInvalid",
+  "piAgentEnvReserved",
+  "piAgentNotAuthenticated",
+  "piAgentMcpStartupFailed",
+  "piAgentTimeout",
+  "piAgentProtocolError",
+  "piAgentModelInvalid",
+  "piAgentRunFailed",
+] as const;
 
 test("Claude Code CLI errors are localized while retaining their stable code and raw diagnostics", () => {
   const messages: Record<string, string> = {
@@ -35,7 +56,7 @@ test("Claude Code CLI errors are localized while retaining their stable code and
   assert.match(translated, /C:\\Temp\\mcp\.json/);
 });
 
-test("every current locale defines all Claude Code CLI diagnostic messages", () => {
+test("every current locale defines all AI CLI diagnostic messages", () => {
   const locales = { en, es, it, ja, ptBR, zhCN, zhTW } as const;
 
   for (const [localeName, locale] of Object.entries(locales)) {

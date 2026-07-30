@@ -25,13 +25,30 @@ const clipboardMock = vi.hoisted(() => ({
 }));
 const runtimeMock = vi.hoisted(() => ({ isTauri: false }));
 const dialogMock = vi.hoisted(() => ({ save: vi.fn() }));
+const toastMock = vi.hoisted(() => vi.fn());
+const translateMock = vi.hoisted(() =>
+  vi.fn((key: string, params?: Record<string, unknown>) => {
+    if (key === "exportProgress.xlsxRowLimit") return `XLSX 最多支持 ${params?.limit} 行数据，请使用 CSV 导出完整结果。`;
+    if (key === "grid.exportFailed") return `导出失败：${params?.message}`;
+    return key;
+  }),
+);
 
 vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/lib/common/clipboard", () => clipboardMock);
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtimeMock.isTauri }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMock.save }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: toastMock }) }));
+vi.mock("vue-i18n", () => ({
+  createI18n: () => ({
+    global: {
+      locale: { value: "en" },
+      setLocaleMessage: vi.fn(),
+    },
+    install: vi.fn(),
+  }),
+  useI18n: () => ({ t: translateMock }),
+}));
 
 const { defaultDataGridExportFileName, useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
 
@@ -380,6 +397,20 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
 });
 
+test("streaming query result export translates terminal backend errors before the toast", async () => {
+  const rawMessage = "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.";
+  apiMock.startQueryResultExport.mockImplementationOnce(async (request, onProgress) => {
+    onProgress({ exportId: request.exportId, tableName: "", rowsExported: 0, totalRows: 1_048_576, status: "Error", errorMessage: rawMessage });
+    throw new Error(rawMessage);
+  });
+  const { composable, exportProgressState } = buildExportHarness();
+
+  await composable.exportXlsx();
+
+  assert.equal(exportProgressState.value.errorMessage, rawMessage);
+  assert.deepEqual(toastMock.mock.calls.at(-1), ["导出失败：XLSX 最多支持 1,048,575 行数据，请使用 CSV 导出完整结果。", 5000]);
+});
+
 test("complete local query result XLSX export does not re-execute the query", async () => {
   const completeLocalResult: QueryResult = {
     columns: ["id", "name"],
@@ -400,7 +431,7 @@ test("complete local query result XLSX export does not re-execute the query", as
   assert.equal(fullExportResult.mock.calls.length, 0);
   assert.equal(queryResultExportRequest.mock.calls.length, 0);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 5), ["Export", ["id", "name"], ["int4", "text"], completeLocalResult.rows]);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 6), ["Export", ["id", "name"], ["int4", "text"], undefined, completeLocalResult.rows]);
 });
 
 test("MySQL joined query SQL export keeps result aliases instead of source column names", async () => {
@@ -499,10 +530,11 @@ test("complete local query result export removes only internal hidden columns", 
 
   await composable.exportXlsx();
 
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 5), [
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 6), [
     "Export",
     ["id", "name"],
     ["int4", "text"],
+    undefined,
     [
       [1, "Ada"],
       [2, "Lin"],
@@ -527,7 +559,7 @@ test("complete local CSV, XLSX, and TXT exports honor the enabled row limit", as
   assert.equal(apiMock.exportQueryResultCsv.mock.calls[0]?.[2].length, 100);
 
   await composable.exportXlsx();
-  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0]?.[4].length, 100);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0]?.[5].length, 100);
 
   const download = installTextDownloadCapture();
   try {
@@ -673,7 +705,8 @@ test("selected query result XLSX export uses the current source label as the she
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][1], "aaa.apis");
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][2], ["id", "name"]);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], ["bigint(20)", "varchar(64)"]);
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][4], [[1, "Ada"]]);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][4], undefined);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][5], [[1, "Ada"]]);
 });
 
 test("selected query result XLSX export forwards the numericColumnRightAlign setting to the backend", async () => {
@@ -684,13 +717,13 @@ test("selected query result XLSX export forwards the numericColumnRightAlign set
   await composable.exportXlsx([1]);
 
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls.length, 1);
-  // Argument 5 is `numericColumnRightAlign`, and must reflect the persisted
+  // Argument 6 is `numericColumnRightAlign`, and must reflect the persisted
   // setting rather than always defaulting to true.
-  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][5], false);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][6], false);
 
   settingsStore.updateEditorSettings({ numericColumnRightAlign: true });
   await composable.exportXlsx([1]);
-  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[1][5], true);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[1][6], true);
 });
 
 test("streaming query result XLSX export carries numericColumnRightAlign in the backend request", async () => {

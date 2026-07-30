@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
+use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
@@ -65,6 +66,24 @@ pub struct ExecuteQueryRequest {
     pub database: Option<String>,
     #[schemars(description = "SQL query to execute")]
     pub sql: String,
+    #[schemars(
+        description = "Session ID from dbx_open_session. When set, the query runs on the session's pinned connection, preserving USE/SET and other session state across calls."
+    )]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OpenSessionRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Database name")]
+    pub database: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloseSessionRequest {
+    #[schemars(description = "Session ID returned by dbx_open_session")]
+    pub session_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -132,6 +151,7 @@ pub struct ExecuteAndShowRequest {
 pub struct DbxMcpServer {
     backend: Arc<dyn DbxBackend>,
     scope: McpScope,
+    sessions: Arc<McpSessionStore>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -194,7 +214,16 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_open_table");
             tool_router.disable_route("dbx_execute_and_show");
         }
-        Self { backend, scope, tool_router }
+        Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
+    }
+
+    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
+        for session in sessions {
+            let _ = self
+                .backend
+                .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
+                .await;
+        }
     }
 }
 
@@ -285,10 +314,47 @@ impl DbxMcpServer {
                 "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
             );
         }
+        // Resolve the session before the database so its connection/database
+        // binding is enforced on every stateful query.
+        let session = match request.session_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            Some(session_id) => {
+                let (session, expired) = self.sessions.resolve(session_id).await.into_parts();
+                self.close_backend_sessions_best_effort(expired).await;
+                match session {
+                    Some(session) if session.connection_id == connection.id => Some(session),
+                    Some(_) => {
+                        return tool_error(
+                            "SESSION_CONNECTION_MISMATCH",
+                            format!("Session \"{session_id}\" is bound to a different connection."),
+                        )
+                    }
+                    None => {
+                        return tool_error(
+                            "SESSION_NOT_FOUND",
+                            format!(
+                                "Session \"{session_id}\" not found or expired. Open a new one with dbx_open_session."
+                            ),
+                        )
+                    }
+                }
+            }
+            None => None,
+        };
         let database = match self.resolve_database(request.database, connection) {
             Ok(database) => database,
             Err(error) => return error,
         };
+        if let Some(session) = &session {
+            if session.database != database {
+                return tool_error(
+                    "SESSION_DATABASE_MISMATCH",
+                    format!(
+                        "Session \"{}\" is bound to database \"{}\", not \"{database}\".",
+                        session.id, session.database
+                    ),
+                );
+            }
+        }
         if connection.db_type == DatabaseType::MongoDb {
             let command = match validate_mongo_command(connection, &resolved.policy, &database, &request.sql) {
                 Ok(command) => command,
@@ -299,21 +365,82 @@ impl DbxMcpServer {
                 Err(error) => backend_tool_error("QUERY_ERROR", error),
             };
         }
-        let permissions = match validate_sql_policy(connection, &resolved.policy, &database, &request.sql) {
-            Ok(permissions) => permissions,
+        // A pinned session makes USE/SET CATALOG meaningful, so database
+        // switching is allowed — unless a hard database scope is configured,
+        // which a USE statement could otherwise escape.
+        let allow_database_switch = session.is_some() && self.scope.database.is_none();
+        let permissions =
+            match validate_sql_policy(connection, &resolved.policy, &database, &request.sql, allow_database_switch) {
+                Ok(permissions) => permissions,
+                Err(error) => return error,
+            };
+        let mut arguments = json!({ "sql": request.sql, "limit": 100 });
+        if let Some(session) = &session {
+            arguments["client_session_id"] = json!(session.client_session_id);
+        }
+        let result =
+            self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
+        agent_result(result)
+    }
+
+    #[tool(
+        name = "dbx_open_session",
+        description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes."
+    )]
+    async fn open_session(&self, Parameters(request): Parameters<OpenSessionRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let result = self
+        let connection = &resolved.connection;
+        if matches!(connection.db_type, DatabaseType::Redis | DatabaseType::MongoDb) {
+            return tool_error(
+                "SESSION_UNSUPPORTED",
+                format!("Sessions are only supported for SQL connections; \"{}\" is not one.", connection.name),
+            );
+        }
+        let database = match self.resolve_database(request.database, connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        let (session, expired) = self.sessions.open(&connection.id, &database).await.into_parts();
+        self.close_backend_sessions_best_effort(expired).await;
+        match session {
+            Ok(session) => text(format!(
+                "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\n\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
+                session.id, connection.name, connection.id, database
+            )),
+            Err(error) => tool_error("SESSION_LIMIT", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_close_session",
+        description = "Close a stateful query session and release its pinned backend connection"
+    )]
+    async fn close_session(&self, Parameters(request): Parameters<CloseSessionRequest>) -> CallToolResult {
+        let (session, expired) = self.sessions.begin_close(&request.session_id).await.into_parts();
+        self.close_backend_sessions_best_effort(expired).await;
+        let Some(session) = session else {
+            return tool_error(
+                "SESSION_NOT_FOUND",
+                format!("Session \"{}\" not found or already closed.", request.session_id),
+            );
+        };
+        match self
             .backend
-            .execute_agent_tool(
-                connection,
-                &database,
-                "execute_query",
-                json!({ "sql": request.sql, "limit": 100 }),
-                permissions,
-            )
-            .await;
-        agent_result(result)
+            .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
+            .await
+        {
+            Ok(_) => {
+                self.sessions.finish_close(&session.id).await;
+                text(format!("Session \"{}\" closed.", session.id))
+            }
+            Err(error) => {
+                self.sessions.restore_after_failed_close(session).await;
+                backend_tool_error("SESSION_CLOSE_ERROR", error)
+            }
+        }
     }
 
     #[tool(name = "dbx_execute_redis_command", description = "Execute a Redis command on a Redis connection")]
@@ -570,7 +697,7 @@ impl DbxMcpServer {
         let permissions = if connection.db_type == DatabaseType::MongoDb {
             mcp_permissions(connection, &resolved.policy)
         } else {
-            match validate_sql_policy(connection, &resolved.policy, &database, &request.sql) {
+            match validate_sql_policy(connection, &resolved.policy, &database, &request.sql, false) {
                 Ok(permissions) => permissions,
                 Err(error) => return error,
             }
@@ -793,7 +920,21 @@ fn mcp_permissions(
     dbx_core::agent_tools::AgentSqlPermissions {
         allow_writes: !policy.read_only && !connection.read_only,
         allow_dangerous: !policy.read_only && !connection.read_only && policy.allow_dangerous_sql,
+        confirmed_write_sql: mcp_confirmed_write_sql_from_env(),
     }
+}
+
+/// Read the DBX_MCP_CONFIRMED_WRITE_SQL env var (set by the CLI agent when the
+/// user confirmed a specific write SQL). Returns None when the var is unset or
+/// empty, so desktop-embedded MCP contexts (which don't set this var) continue
+/// to work without a confirmed-SQL binding.
+fn mcp_confirmed_write_sql_from_env() -> Option<String> {
+    normalize_confirmed_write_sql(std::env::var("DBX_MCP_CONFIRMED_WRITE_SQL").ok())
+}
+
+fn normalize_confirmed_write_sql(value: Option<String>) -> Option<String> {
+    let trimmed = value?.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -803,9 +944,13 @@ fn validate_sql_policy(
     policy: &McpGlobalPolicy,
     database: &str,
     sql: &str,
+    allow_database_switch: bool,
 ) -> Result<dbx_core::agent_tools::AgentSqlPermissions, CallToolResult> {
-    if mcp_sql_has_forbidden_database_switch(sql, connection.db_type) {
-        return Err(tool_error("SQL_BLOCKED", "MCP does not allow USE or persistent database switching."));
+    if !allow_database_switch && mcp_sql_has_forbidden_database_switch(sql, connection.db_type) {
+        return Err(tool_error(
+            "SQL_BLOCKED",
+            "MCP does not allow USE or persistent database switching outside a session. Open one with dbx_open_session to run stateful queries.",
+        ));
     }
     let risk =
         classify_sql_risk_for_database(sql, connection.db_type).map_err(|error| tool_error("SQL_BLOCKED", error))?;
@@ -823,13 +968,24 @@ fn validate_sql_policy(
         ));
     }
     let high_risk = risk == SqlRisk::Ddl || is_dangerous_sql_for_database(sql, connection.db_type);
-    if high_risk && !policy.allow_dangerous_sql {
+    let confirmed_sql = mcp_confirmed_write_sql_from_env();
+    if high_risk && !policy.allow_dangerous_sql && confirmed_sql.is_none() {
         return Err(tool_error("SQL_BLOCKED", "High-risk SQL is disabled in DBX MCP settings."));
     }
     if is_write && targets_production_database(connection, database, sql) {
         return Err(tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database."));
     }
-    Ok(mcp_permissions(connection, policy))
+    let mut permissions = mcp_permissions(connection, policy);
+    // When the user confirmed a specific write/DDL SQL via the CLI agent, the
+    // confirmed-SQL binding authorises dangerous (DDL) execution in the SQL
+    // path only. The precise SQL match check (sql_matches_confirmed_write) in
+    // agent_tools still guards execution — only the exact confirmed statement
+    // can run. Redis and Mongo paths are unaffected; they continue to use the
+    // persistent policy (mcp_permissions) without any confirmed-SQL elevation.
+    if confirmed_sql.is_some() {
+        permissions.allow_dangerous = true;
+    }
+    Ok(permissions)
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -1026,9 +1182,26 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use dbx_core::models::connection::ConnectionConfig;
+    use std::collections::HashSet;
 
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
+        recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+        closed_sessions: std::sync::Mutex<Vec<String>>,
+        pinned_sessions: std::sync::Mutex<HashSet<String>>,
+        close_failures_remaining: std::sync::Mutex<usize>,
+    }
+
+    impl Default for FakeBackend {
+        fn default() -> Self {
+            Self {
+                connections: Vec::new(),
+                recorded_arguments: std::sync::Mutex::new(Vec::new()),
+                closed_sessions: std::sync::Mutex::new(Vec::new()),
+                pinned_sessions: std::sync::Mutex::new(HashSet::new()),
+                close_failures_remaining: std::sync::Mutex::new(0),
+            }
+        }
     }
 
     fn connection(id: &str, name: &str, db_type: &str, database: &str) -> ConnectionConfig {
@@ -1050,6 +1223,14 @@ mod tests {
         result.content[0].as_text().expect("text tool result").text.as_str()
     }
 
+    fn opened_session_id(result: &CallToolResult) -> String {
+        result_text(result)
+            .lines()
+            .find_map(|line| line.strip_prefix("session_id: "))
+            .expect("open_session returns a session_id")
+            .to_string()
+    }
+
     #[async_trait]
     impl DbxBackend for FakeBackend {
         async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
@@ -1065,9 +1246,15 @@ mod tests {
             _connection: &ConnectionConfig,
             _database: &str,
             tool_name: &str,
-            _arguments: serde_json::Value,
+            arguments: serde_json::Value,
             _permissions: dbx_core::agent_tools::AgentSqlPermissions,
         ) -> dbx_core::agent_events::ToolResult {
+            if let Some(client_session_id) =
+                arguments.get("client_session_id").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty())
+            {
+                self.pinned_sessions.lock().unwrap().insert(client_session_id.to_string());
+            }
+            self.recorded_arguments.lock().unwrap().push((tool_name.to_string(), arguments));
             dbx_core::agent_events::ToolResult {
                 tool_call_id: "test".to_string(),
                 tool_name: tool_name.to_string(),
@@ -1075,6 +1262,23 @@ mod tests {
                 is_error: false,
                 explain_data: None,
             }
+        }
+
+        async fn close_client_session(
+            &self,
+            _connection_id: &str,
+            _database: &str,
+            client_session_id: &str,
+        ) -> Result<bool, String> {
+            let mut failures = self.close_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err("temporary close failure".to_string());
+            }
+            drop(failures);
+            self.closed_sessions.lock().unwrap().push(client_session_id.to_string());
+            self.pinned_sessions.lock().unwrap().remove(client_session_id);
+            Ok(true)
         }
 
         async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
@@ -1102,14 +1306,10 @@ mod tests {
 
     #[test]
     fn server_registers_list_connections_tool() {
-        let server = DbxMcpServer::with_runtime_options(
-            Arc::new(FakeBackend { connections: Vec::new() }),
-            McpScope::default(),
-            false,
-        );
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 12);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_tables"));
         assert!(names.contains(&"dbx_describe_table"));
@@ -1120,21 +1320,25 @@ mod tests {
         assert!(names.contains(&"dbx_get_schema_context"));
         assert!(names.contains(&"dbx_open_table"));
         assert!(names.contains(&"dbx_execute_and_show"));
+        assert!(names.contains(&"dbx_open_session"));
+        assert!(names.contains(&"dbx_close_session"));
     }
 
     #[test]
     fn scoped_server_hides_mutating_and_desktop_tools() {
         let server = DbxMcpServer::with_runtime_options(
-            Arc::new(FakeBackend { connections: Vec::new() }),
+            Arc::new(FakeBackend::default()),
             McpScope { connection_ids: vec!["scoped".to_string()], ..Default::default() },
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 8);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
+        assert!(names.iter().any(|name| name == "dbx_open_session"));
+        assert!(names.iter().any(|name| name == "dbx_close_session"));
     }
 
     #[test]
@@ -1157,7 +1361,7 @@ mod tests {
     async fn database_scope_is_a_hard_bound_without_filtering_connections() {
         let scoped = connection("scoped", "scoped", "postgres", "configured");
         let server = DbxMcpServer::with_runtime_options(
-            Arc::new(FakeBackend { connections: vec![scoped.clone()] }),
+            Arc::new(FakeBackend { connections: vec![scoped.clone()], ..Default::default() }),
             McpScope { database: Some("analytics".to_string()), ..Default::default() },
             false,
         );
@@ -1177,7 +1381,7 @@ mod tests {
     fn redis_database_scope_fails_closed_and_cannot_be_overridden() {
         let redis = connection("redis", "redis", "redis", "1");
         let scoped = DbxMcpServer::with_runtime_options(
-            Arc::new(FakeBackend { connections: vec![redis.clone()] }),
+            Arc::new(FakeBackend { connections: vec![redis.clone()], ..Default::default() }),
             McpScope { database: Some("2".to_string()), ..Default::default() },
             false,
         );
@@ -1186,7 +1390,7 @@ mod tests {
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
 
         let invalid = DbxMcpServer::with_runtime_options(
-            Arc::new(FakeBackend { connections: vec![redis.clone()] }),
+            Arc::new(FakeBackend { connections: vec![redis.clone()], ..Default::default() }),
             McpScope { database: Some("analytics".to_string()), ..Default::default() },
             false,
         );
@@ -1224,5 +1428,270 @@ mod tests {
             explain_data: None,
         });
         assert!(result_text(&result).contains("Error [MCP_READ_ONLY]: policy changed"));
+    }
+
+    #[test]
+    fn mcp_confirmation_and_policy_guards_fail_closed() {
+        assert_eq!(
+            normalize_confirmed_write_sql(Some("  DELETE FROM sessions WHERE id = 7  ".to_string())),
+            Some("DELETE FROM sessions WHERE id = 7".to_string())
+        );
+        assert_eq!(normalize_confirmed_write_sql(Some(" \n ".to_string())), None);
+
+        let read_only = ConnectionConfig { read_only: true, ..connection("readonly", "readonly", "postgres", "app") };
+        let writable_policy =
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let read_only_error =
+            validate_sql_policy(&read_only, &writable_policy, "app", "DELETE FROM sessions", false).unwrap_err();
+        assert!(result_text(&read_only_error).contains("CONNECTION_READ_ONLY"));
+
+        let mut production = connection("production", "production", "postgres", "app");
+        production.production_databases = vec!["app".to_string()];
+        let production_error =
+            validate_sql_policy(&production, &writable_policy, "app", "DROP TABLE sessions", false).unwrap_err();
+        assert!(result_text(&production_error).contains("PRODUCTION_WRITE_BLOCKED"));
+    }
+
+    /// RAII guard that sets an env var and restores the original value (or
+    /// removes the var) on drop. Panic-safe — cleanup runs even when an
+    /// assertion fails.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(original) => std::env::set_var(self.key, original),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_sql_binding_tests() {
+        let connection = connection("dev", "dev", "postgres", "app");
+
+        // 1. mcp_permissions (Redis/Mongo path) must NOT elevate allow_dangerous.
+        let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
+        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let permissions = mcp_permissions(&connection, &policy);
+        assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
+        assert!(permissions.allow_writes);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
+
+        // 2. SQL path (validate_sql_policy) elevates allow_dangerous with a confirmed binding.
+        let permissions =
+            validate_sql_policy(&connection, &policy, "app", "CREATE TABLE metrics (id INT)", false).unwrap();
+        assert!(permissions.allow_dangerous, "SQL path should elevate allow_dangerous with confirmed binding");
+        assert!(permissions.allow_writes);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
+        drop(_guard);
+
+        // 3. Without a confirmed binding, high-risk SQL is blocked.
+        let _guard = EnvGuard::remove("DBX_MCP_CONFIRMED_WRITE_SQL");
+        let error = validate_sql_policy(&connection, &policy, "app", "DROP TABLE sessions", false).unwrap_err();
+        assert!(result_text(&error).contains("SQL_BLOCKED"));
+        assert!(result_text(&error).contains("High-risk SQL is disabled"));
+        drop(_guard);
+
+        // 4. Confirmed SQL must not bypass global read_only.
+        let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
+        let read_only_policy =
+            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let error = validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)", false)
+            .unwrap_err();
+        assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
+    }
+
+    #[test]
+    fn use_statements_require_a_session() {
+        let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
+        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+
+        let blocked = validate_sql_policy(&starrocks, &policy, "default_catalog", "USE analytics", false).unwrap_err();
+        assert!(result_text(&blocked).contains("SQL_BLOCKED"));
+        assert!(result_text(&blocked).contains("dbx_open_session"));
+
+        // Inside a pinned session, USE is meaningful and passes policy checks.
+        assert!(validate_sql_policy(&starrocks, &policy, "default_catalog", "USE analytics", true).is_ok());
+    }
+
+    fn selector(id: &str) -> ConnectionSelector {
+        ConnectionSelector { connection_id: Some(id.to_string()), connection_name: None }
+    }
+
+    #[tokio::test]
+    async fn session_queries_pin_client_session_and_close_releases_pool() {
+        let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
+        let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let opened =
+            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let session_id = opened_session_id(&opened);
+
+        // A USE statement is allowed inside the session and runs with the
+        // session's pinned client_session_id.
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sr"),
+                database: None,
+                sql: "USE analytics".to_string(),
+                session_id: Some(session_id.clone()),
+            }))
+            .await;
+        assert_eq!(result_text(&result), "ok");
+        let pinned_client_session = {
+            let recorded = backend.recorded_arguments.lock().unwrap();
+            let (_, arguments) = recorded.iter().find(|(name, _)| name == "execute_query").unwrap();
+            arguments["client_session_id"].as_str().unwrap().to_string()
+        };
+        assert_eq!(pinned_client_session, format!("mcp:{session_id}"));
+
+        // Queries bound to another database are rejected.
+        let mismatch = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sr"),
+                database: Some("other".to_string()),
+                sql: "SELECT 1".to_string(),
+                session_id: Some(session_id.clone()),
+            }))
+            .await;
+        assert!(result_text(&mismatch).contains("SESSION_DATABASE_MISMATCH"));
+
+        let closed = server.close_session(Parameters(CloseSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&closed).contains("closed"));
+        assert_eq!(backend.closed_sessions.lock().unwrap().as_slice(), [format!("mcp:{session_id}")]);
+
+        // The session is gone: further queries fail instead of silently
+        // falling back to an unpinned connection.
+        let missing = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sr"),
+                database: None,
+                sql: "SELECT 1".to_string(),
+                session_id: Some(session_id.clone()),
+            }))
+            .await;
+        assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));
+
+        let second_close = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
+        assert!(result_text(&second_close).contains("SESSION_NOT_FOUND"));
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_close_backend_pools_without_accumulating() {
+        let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
+        let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let mut expired_client_session_ids = Vec::new();
+
+        for _ in 0..3 {
+            let opened =
+                server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+            let session_id = opened_session_id(&opened);
+            let result = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sr"),
+                    database: None,
+                    sql: "SELECT 1".to_string(),
+                    session_id: Some(session_id.clone()),
+                }))
+                .await;
+            assert_eq!(result_text(&result), "ok");
+            assert_eq!(backend.pinned_sessions.lock().unwrap().len(), 1);
+
+            server.sessions.expire_for_test(&session_id).await;
+            expired_client_session_ids.push(format!("mcp:{session_id}"));
+        }
+
+        let opened =
+            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let final_session_id = opened_session_id(&opened);
+        assert!(backend.pinned_sessions.lock().unwrap().is_empty());
+        assert_eq!(backend.closed_sessions.lock().unwrap().as_slice(), expired_client_session_ids.as_slice());
+
+        let closed = server.close_session(Parameters(CloseSessionRequest { session_id: final_session_id })).await;
+        assert!(result_text(&closed).contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn failed_session_close_can_be_retried() {
+        let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
+        let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
+        *backend.close_failures_remaining.lock().unwrap() = 1;
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let opened =
+            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let session_id = opened_session_id(&opened);
+        let query = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sr"),
+                database: None,
+                sql: "SELECT 1".to_string(),
+                session_id: Some(session_id.clone()),
+            }))
+            .await;
+        assert_eq!(result_text(&query), "ok");
+
+        let failed = server.close_session(Parameters(CloseSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&failed).contains("SESSION_CLOSE_ERROR"));
+        assert_eq!(backend.pinned_sessions.lock().unwrap().len(), 1);
+
+        let retry_query = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sr"),
+                database: None,
+                sql: "SELECT 1".to_string(),
+                session_id: Some(session_id.clone()),
+            }))
+            .await;
+        assert_eq!(result_text(&retry_query), "ok");
+
+        let closed = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
+        assert!(result_text(&closed).contains("closed"));
+        assert!(backend.pinned_sessions.lock().unwrap().is_empty());
+        assert_eq!(backend.closed_sessions.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_session_rejects_non_sql_connections_and_unknown_sessions_fail_closed() {
+        let redis = connection("redis", "redis", "redis", "0");
+        let pg = connection("pg", "pg", "postgres", "app");
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: vec![redis, pg], ..Default::default() }),
+            McpScope::default(),
+            false,
+        );
+        let rejected =
+            server.open_session(Parameters(OpenSessionRequest { selector: selector("redis"), database: None })).await;
+        assert!(result_text(&rejected).contains("SESSION_UNSUPPORTED"));
+
+        let missing = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1".to_string(),
+                session_id: Some("mcp-session-nope".to_string()),
+            }))
+            .await;
+        assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));
     }
 }

@@ -26,14 +26,21 @@ var registerMetadataDriver sync.Once
 var metadataState atomic.Pointer[metadataDriverState]
 
 type fakeDriverState struct {
-	queryArgs int
-	queryCtx  context.Context
-	rowCount  int
+	mu             sync.Mutex
+	nextConnID     int
+	queryArgs      int
+	queryCtx       context.Context
+	queryConnID    int
+	rowCount       int
+	execStatements []string
+	execConnIDs    []int
 }
 
 type fakeDriver struct{}
 
-type fakeConn struct{}
+type fakeConn struct {
+	id int
+}
 
 type fakeRows struct {
 	current int
@@ -41,8 +48,9 @@ type fakeRows struct {
 }
 
 type fallbackDriverState struct {
-	mu      sync.Mutex
-	queries []string
+	mu                sync.Mutex
+	queries           []string
+	rejectAttidentity bool
 }
 
 type fallbackDriver struct{}
@@ -103,7 +111,13 @@ type valueRows struct {
 	index   int
 }
 
-func (fakeDriver) Open(string) (driver.Conn, error) { return fakeConn{}, nil }
+func (fakeDriver) Open(string) (driver.Conn, error) {
+	state := testDriverState.Load()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.nextConnID++
+	return fakeConn{id: state.nextConnID}, nil
+}
 
 func (fakeConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
 
@@ -111,14 +125,22 @@ func (fakeConn) Close() error { return nil }
 
 func (fakeConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
 
-func (fakeConn) QueryContext(ctx context.Context, _ string, args []driver.NamedValue) (driver.Rows, error) {
+func (connection fakeConn) QueryContext(ctx context.Context, _ string, args []driver.NamedValue) (driver.Rows, error) {
 	state := testDriverState.Load()
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	state.queryArgs = len(args)
 	state.queryCtx = ctx
+	state.queryConnID = connection.id
 	return &fakeRows{count: state.rowCount}, nil
 }
 
-func (fakeConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+func (connection fakeConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	state := testDriverState.Load()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.execStatements = append(state.execStatements, query)
+	state.execConnIDs = append(state.execConnIDs, connection.id)
 	return driver.RowsAffected(1), nil
 }
 
@@ -186,13 +208,20 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			rows:    [][]driver.Value{{"id", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
 		}, nil
 	}
+	if connection.state.rejectAttidentity && strings.Contains(query, "a.attidentity") {
+		return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column a.attidentity does not exist"}
+	}
 	if strings.Contains(query, "sys_get_expr(") {
 		return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function sys_get_expr(pg_node_tree, oid) does not exist"}
 	}
 	if strings.Contains(query, "pg_get_expr(") {
+		var identity driver.Value = "d"
+		if strings.Contains(query, "CAST(NULL AS varchar(1)) AS attidentity") {
+			identity = nil
+		}
 		return &valueRows{
 			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
-			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, "d"}},
+			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -706,6 +735,24 @@ func TestMySQLCompatSchemaQueryKeepsUserSchemasWithSystemLikeNames(t *testing.T)
 	}
 }
 
+func TestListSchemasQueryIncludesSystemSchemasWhenEnabled(t *testing.T) {
+	for _, mode := range []kingbaseMode{{}, {postgresCatalog: true}, {mysqlCompat: true}} {
+		query := kingbaseListSchemasSQL(mode, true)
+		if strings.Contains(query, "NOT LIKE") || strings.Contains(query, "<>") {
+			t.Fatalf("show-system query must not filter schemas: %s", query)
+		}
+	}
+}
+
+func TestListSchemasQueryKeepsDefaultTemporarySchemaFilters(t *testing.T) {
+	for _, mode := range []kingbaseMode{{}, {postgresCatalog: true}} {
+		query := kingbaseListSchemasSQL(mode, false)
+		if !strings.Contains(query, "temp_%") {
+			t.Fatalf("default query must keep temporary schema filters: %s", query)
+		}
+	}
+}
+
 func TestMetadataNormalizationHelpers(t *testing.T) {
 	if normalizeTableType("BASE TABLE") != "TABLE" {
 		t.Fatal("BASE TABLE was not normalized")
@@ -864,6 +911,51 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 	}
 	if sysCalls != 1 || pgCalls != 2 {
 		t.Fatalf("fallback choice was not cached: sys=%d pg=%d queries=%v", sysCalls, pgCalls, state.queries)
+	}
+}
+
+func TestColumnsFallbackWhenCatalogHasNoAttidentityAndCacheChoice(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{rejectAttidentity: true}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+
+	for call := 0; call < 2; call++ {
+		columns, err := server.getColumns("public", "orders")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columns[0].Extra != nil {
+			t.Fatalf("unexpected columns: %#v", columns)
+		}
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	var identityCalls, compatibleCalls, sysCalls, pgCalls int
+	for _, query := range state.queries {
+		if strings.Contains(query, "a.attidentity") {
+			identityCalls++
+		}
+		if strings.Contains(query, "CAST(NULL AS varchar(1)) AS attidentity") {
+			compatibleCalls++
+		}
+		if strings.Contains(query, "sys_get_expr(") {
+			sysCalls++
+		}
+		if strings.Contains(query, "pg_get_expr(") {
+			pgCalls++
+		}
+	}
+	if identityCalls != 1 || compatibleCalls != 3 || sysCalls != 2 || pgCalls != 2 {
+		t.Fatalf("fallback choices were not cached: identity=%d compatible=%d sys=%d pg=%d queries=%v", identityCalls, compatibleCalls, sysCalls, pgCalls, state.queries)
 	}
 }
 
@@ -1217,6 +1309,69 @@ func TestExecuteQueryUsesSimpleProtocolAndReleasesContext(t *testing.T) {
 		t.Fatalf("unexpected result or bound arguments: rows=%v args=%d", result.Rows, state.queryArgs)
 	}
 	assertContextCanceled(t, state.queryCtx)
+}
+
+func TestExecuteQueryReappliesSchemaForRepeatedRequests(t *testing.T) {
+	db, state := openFakeDB(t, 1)
+	server := newServer()
+	server.db = db
+
+	for range 2 {
+		if _, err := server.executeQuery(queryOptions{SQL: "SELECT 1", Schema: "sdy_smartsite", MaxRows: 10}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	expected := []string{`SET search_path TO "sdy_smartsite"`, `SET search_path TO "sdy_smartsite"`}
+	if len(state.execStatements) != len(expected) {
+		t.Fatalf("expected repeated schema setup, got %v", state.execStatements)
+	}
+	for index, statement := range expected {
+		if state.execStatements[index] != statement {
+			t.Fatalf("unexpected schema statement at %d: %s", index, state.execStatements[index])
+		}
+	}
+}
+
+func TestExecuteQueryAppliesSchemaOnSamePoolConnection(t *testing.T) {
+	db, state := openFakeDB(t, 1)
+	db.SetMaxOpenConns(4)
+	server := newServer()
+	server.db = db
+
+	if _, err := server.executeQuery(queryOptions{SQL: "SELECT 1", Schema: "sdy_smartsite", MaxRows: 10}); err != nil {
+		t.Fatal(err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.execStatements) != 1 || state.execStatements[0] != `SET search_path TO "sdy_smartsite"` {
+		t.Fatalf("unexpected schema setup: %v", state.execStatements)
+	}
+	if len(state.execConnIDs) != 1 || state.execConnIDs[0] != state.queryConnID {
+		t.Fatalf("schema setup and query used different connections: exec=%v query=%d", state.execConnIDs, state.queryConnID)
+	}
+}
+
+func TestExecuteStatementAppliesSchemaOnSamePoolConnection(t *testing.T) {
+	db, state := openFakeDB(t, 0)
+	db.SetMaxOpenConns(4)
+	server := newServer()
+	server.db = db
+
+	if _, err := server.executeQuery(queryOptions{SQL: "UPDATE orders SET status = 1", Schema: "sdy_smartsite"}); err != nil {
+		t.Fatal(err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	expected := []string{`SET search_path TO "sdy_smartsite"`, "UPDATE orders SET status = 1"}
+	if strings.Join(state.execStatements, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected statements: %v", state.execStatements)
+	}
+	if len(state.execConnIDs) != 2 || state.execConnIDs[0] != state.execConnIDs[1] {
+		t.Fatalf("schema setup and statement used different connections: %v", state.execConnIDs)
+	}
 }
 
 func TestPagedQueryKeepsContextUntilSessionCloses(t *testing.T) {

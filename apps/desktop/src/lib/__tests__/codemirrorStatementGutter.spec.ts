@@ -37,4 +37,17 @@ describe("CodeMirror statement gutter marker", () => {
     expect(marker.querySelectorAll(".cm-statement-execution-badge")).toHaveLength(0);
     expect(marker.getAttribute("aria-label")).toBe("1 statement failed");
   });
+
+  it("renders an animated running marker", () => {
+    const marker = createStatementGutterMarkerDom({
+      canExecute: false,
+      executeLabel: "Execute SQL",
+      status: "running",
+      statusLabel: "1 statement running",
+    });
+
+    expect(marker.classList.contains("cm-statement-execution-marker--running")).toBe(true);
+    expect(marker.querySelector(".cm-statement-execution-spinner")).not.toBeNull();
+    expect(marker.getAttribute("aria-label")).toBe("1 statement running");
+  });
 });

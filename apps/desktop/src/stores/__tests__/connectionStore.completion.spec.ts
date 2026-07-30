@@ -25,6 +25,17 @@ function postgresConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function mysqlConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "mysql-1",
+    name: "MySQL",
+    db_type: "mysql",
+    port: 3306,
+    username: "root",
+  } as ConnectionConfig;
+}
+
 function oracleConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -34,6 +45,18 @@ function oracleConnection(): ConnectionConfig {
     port: 1521,
     username: "APP",
     database: "ORCL",
+  } as ConnectionConfig;
+}
+
+function sapHanaConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "hana-1",
+    name: "SAP HANA",
+    db_type: "saphana",
+    port: 30015,
+    username: "SYSTEM",
+    database: "",
   } as ConnectionConfig;
 }
 
@@ -272,6 +295,39 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  it("rejects assistant columns returned for a different MySQL parent table", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "status", kind: "column", schema: "app", parent_schema: "app", parent_name: "TB_KPI_SET_SCORE_DETAIL", data_type: "tinyint" },
+        { name: "priority", kind: "column", schema: "app", parent_schema: "app", parent_name: "tb_kpi_set_score_relationship", data_type: "smallint" },
+        { name: "archived_status", kind: "column", schema: "archive", parent_schema: "archive", parent_name: "tb_kpi_set_score_detail", data_type: "tinyint" },
+        { name: "legacy_flag", kind: "column", schema: "app", data_type: "tinyint" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns: vi.fn(),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [mysqlConnection()];
+    store.connectedIds.add("mysql-1");
+
+    const columns = await store.listCompletionColumns("mysql-1", "app", "tb_kpi_set_score_detail", "app");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ parent_name: "tb_kpi_set_score_detail", parent_schema: "app" }));
+    expect(columns.map((column) => [column.name, column.table])).toEqual([
+      ["status", "tb_kpi_set_score_detail"],
+      ["legacy_flag", "tb_kpi_set_score_detail"],
+    ]);
+  });
+
   it("normalizes unquoted Oracle aliases while preserving quoted case before catalog lookup", async () => {
     const completionAssistantSearch = vi.fn();
     const getColumns = vi.fn().mockResolvedValue([]);
@@ -294,6 +350,45 @@ describe("connectionStore completion assistant", () => {
 
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["ORDERS_ALIAS", "orders_alias", "Orders_Alias"]);
     expect(completionAssistantSearch).not.toHaveBeenCalled();
+  });
+
+  it("normalizes unquoted SAP HANA table and schema names before column lookup", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name?: string | null; parent_schema?: string | null }) => ({
+      candidates: [
+        {
+          name: request.parent_name === "ACDOCA" ? "BELNR" : "MixedColumn",
+          kind: "column",
+          schema: request.parent_schema,
+          parent_schema: request.parent_schema,
+          parent_name: request.parent_name,
+          data_type: "NVARCHAR",
+        },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns: vi.fn(),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sapHanaConnection()];
+    store.connectedIds.add("hana-1");
+
+    const unquoted = await store.listCompletionColumns("hana-1", "", "acdoca", "saphanadb", { tableQuoted: false, schemaQuoted: false });
+    const quoted = await store.listCompletionColumns("hana-1", "", "MixedTable", "MixedSchema", { tableQuoted: true, schemaQuoted: true });
+
+    expect(completionAssistantSearch.mock.calls.map(([request]) => ({ schema: request.schema, parent_schema: request.parent_schema, parent_name: request.parent_name }))).toEqual([
+      { schema: "SAPHANADB", parent_schema: "SAPHANADB", parent_name: "ACDOCA" },
+      { schema: "MixedSchema", parent_schema: "MixedSchema", parent_name: "MixedTable" },
+    ]);
+    expect(unquoted).toEqual([expect.objectContaining({ name: "BELNR", table: "ACDOCA", schema: "SAPHANADB" })]);
+    expect(quoted).toEqual([expect.objectContaining({ name: "MixedColumn", table: "MixedTable", schema: "MixedSchema" })]);
   });
 
   it("keeps quoted and unquoted Oracle objects separate in the local column index", async () => {
@@ -628,6 +723,32 @@ describe("connectionStore completion assistant", () => {
     await store.listCompletionDatabases("pg-0");
 
     expect(listDatabases).toHaveBeenCalledTimes(52);
+  });
+
+  it("invalidates cached completion databases for a connection", async () => {
+    const listDatabases = vi
+      .fn()
+      .mockResolvedValueOnce([{ name: "Archive" }])
+      .mockResolvedValueOnce([{ name: "Reporting" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    expect(await store.listCompletionDatabases("sqlserver-1")).toEqual(["Archive"]);
+    expect(await store.listCompletionDatabases("sqlserver-1")).toEqual(["Archive"]);
+
+    store.invalidateCompletionCache("sqlserver-1");
+
+    expect(await store.listCompletionDatabases("sqlserver-1")).toEqual(["Reporting"]);
+    expect(listDatabases).toHaveBeenCalledTimes(2);
   });
 
   it("evicts old completion schema entries", async () => {

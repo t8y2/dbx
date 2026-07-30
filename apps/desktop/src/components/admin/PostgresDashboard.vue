@@ -9,23 +9,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import MetricCard from "@/components/common/MetricCard.vue";
 import MetricLineChart from "@/components/chart/MetricLineChart.vue";
 import * as api from "@/lib/backend/api";
-import {
-  computePgTps,
-  computeRate,
-  formatBytesPerSec,
-  formatNumber,
-  formatRate,
-  formatUptime,
-  isPgStatusCompatibilityError,
-  MAX_SAMPLES,
-  parsePgStatusRow,
-  pgCacheHitRatio,
-  PG_STATUS_LEGACY_SQL,
-  PG_STATUS_SQL,
-  PG_VARIABLES_SQL,
-  statusNumber,
-  type StatusSample,
-} from "@/lib/database/postgresServerStatus";
+import { computePgTps, computeRate, formatBytesPerSec, formatNumber, formatRate, formatUptime, MAX_SAMPLES, parsePgStatusRow, pgCacheHitRatio, resolveServerDashboardDriverForConnection, statusNumber, type StatusSample } from "@/lib/database/postgresServerStatus";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
 
 const props = defineProps<{
@@ -58,7 +42,9 @@ const {
 const fallbackStatusSql = ref<string | null>(null);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
-const connectionName = computed(() => connectionStore.getConfig(props.connectionId)?.name ?? "");
+const connection = computed(() => connectionStore.getConfig(props.connectionId));
+const statusDriver = computed(() => resolveServerDashboardDriverForConnection(connection.value));
+const connectionName = computed(() => connection.value?.name ?? "");
 const latest = computed(() => samples.value[samples.value.length - 1]);
 const previous = computed(() => (samples.value.length >= 2 ? samples.value[samples.value.length - 2] : undefined));
 
@@ -138,8 +124,10 @@ function formatClock(at: number): string {
 }
 
 async function fetchVariables() {
+  const activeDriver = statusDriver.value;
+  if (!activeDriver) return;
   try {
-    const result = await api.executeQuery(props.connectionId, "", PG_VARIABLES_SQL, undefined, undefined, { maxRows: 2000 });
+    const result = await api.executeQuery(props.connectionId, "", activeDriver.variablesSql, undefined, undefined, { maxRows: 2000 });
     variables.value = parsePgStatusRow(result);
   } catch {
     // Non-fatal: cards that depend on variables (max_connections/version) degrade.
@@ -147,20 +135,22 @@ async function fetchVariables() {
 }
 
 async function fetchStatus(options: { silent?: boolean } = {}) {
+  const activeDriver = statusDriver.value;
+  if (!activeDriver) return;
   if (fetching.value) return;
   fetching.value = true;
   if (!options.silent) loading.value = true;
   error.value = "";
   try {
     await connectionStore.ensureConnected(props.connectionId);
-    const sql = fallbackStatusSql.value ?? PG_STATUS_SQL;
+    const sql = fallbackStatusSql.value ?? activeDriver.statusSql;
     let result;
     try {
       result = await api.executeQuery(props.connectionId, "", sql, undefined, undefined, { maxRows: 2000 });
     } catch (queryError) {
-      if (fallbackStatusSql.value || !isPgStatusCompatibilityError(queryError)) throw queryError;
-      result = await api.executeQuery(props.connectionId, "", PG_STATUS_LEGACY_SQL, undefined, undefined, { maxRows: 2000 });
-      fallbackStatusSql.value = PG_STATUS_LEGACY_SQL;
+      if (fallbackStatusSql.value || !activeDriver.fallbackStatusSql || !activeDriver.shouldUseFallbackStatusSql?.(queryError)) throw queryError;
+      result = await api.executeQuery(props.connectionId, "", activeDriver.fallbackStatusSql, undefined, undefined, { maxRows: 2000 });
+      fallbackStatusSql.value = activeDriver.fallbackStatusSql;
     }
     const sample: StatusSample = { at: Date.now(), status: parsePgStatusRow(result) };
     const next = [...samples.value, sample];
@@ -212,8 +202,8 @@ onUnmounted(stopAutoRefresh);
     <div class="flex h-11 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
       <Gauge class="h-4 w-4 text-primary" />
       <div class="truncate text-sm font-semibold">{{ t("serverDashboard.title") }}</div>
-      <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px]">{{ connectionName }}</Badge>
-      <Badge v-if="serverVersion" variant="secondary" class="h-5 rounded-md px-1.5 text-[11px]">{{ serverVersion }}</Badge>
+      <Badge variant="outline" class="h-5 max-w-48 truncate rounded-md px-1.5 text-[11px]" :title="connectionName">{{ connectionName }}</Badge>
+      <Badge v-if="serverVersion" variant="secondary" class="h-5 max-w-64 truncate rounded-md px-1.5 text-[11px]" :title="serverVersion">{{ serverVersion }}</Badge>
       <div class="ml-auto flex items-center gap-2">
         <span class="text-xs text-muted-foreground">{{ t("serverDashboard.autoRefresh") }}</span>
         <Select :model-value="String(autoRefreshInterval)" @update:model-value="onIntervalChange">

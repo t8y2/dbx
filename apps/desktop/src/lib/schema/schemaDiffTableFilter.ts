@@ -41,9 +41,19 @@ export function matchesSchemaDiffTableFilter(tableName: string, filter: Compiled
   return includeMatches && !excludeMatches;
 }
 
-export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter): FilteredSchemaDiffTables {
+export function isSchemaDiffView(table: Pick<TableInfo, "table_type">): boolean {
+  return table.table_type.toUpperCase().replace(/\s+/g, "_").includes("VIEW");
+}
+
+function isSchemaDiffObjectEnabled(table: TableInfo, options: Pick<SchemaDiffCompareOptions, "tables" | "views">): boolean {
+  return isSchemaDiffView(table) ? options.views : options.tables;
+}
+
+export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter, options: Pick<SchemaDiffCompareOptions, "tables" | "views"> = { tables: true, views: true }): FilteredSchemaDiffTables {
+  const includeTable = (table: TableInfo) => isSchemaDiffObjectEnabled(table, options) && matchesSchemaDiffTableFilter(table.name, filter);
+
   return {
-    sourceTables: sourceTables.filter((table) => matchesSchemaDiffTableFilter(table.name, filter)),
-    targetTables: targetTables.filter((table) => matchesSchemaDiffTableFilter(table.name, filter)),
+    sourceTables: sourceTables.filter(includeTable),
+    targetTables: targetTables.filter(includeTable),
   };
 }

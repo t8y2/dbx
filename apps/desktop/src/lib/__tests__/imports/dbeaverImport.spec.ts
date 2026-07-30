@@ -24,6 +24,32 @@ function layoutLabels(layout: SidebarLayout, connectionNames: Map<string, string
 }
 
 describe("DBeaver folder import", () => {
+  it("imports a SQLite file path without treating it as a schema", async () => {
+    const [connection] = await parseDbeaverConnections(
+      payload({
+        connections: {
+          sqlite: {
+            id: "sqlite",
+            name: "Local SQLite",
+            provider: "sqlite",
+            driver: "sqlite_jdbc",
+            configuration: {
+              url: "jdbc:sqlite:/tmp/app.sqlite",
+              database: "/tmp/app.sqlite",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(connection).toMatchObject({
+      name: "Local SQLite",
+      db_type: "sqlite",
+      host: "/tmp/app.sqlite",
+    });
+    expect(connection?.database).toBeUndefined();
+  });
+
   it("keeps parseDbeaverConnections compatible when no folders exist", async () => {
     const connections = await parseDbeaverConnections(payload({ connections: { root: mysqlConnection("root", "Root") } }));
 

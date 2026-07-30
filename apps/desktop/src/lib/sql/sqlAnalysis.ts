@@ -246,7 +246,7 @@ function parseStarSelectColumn(col: string, sources?: EditableQuerySource[]): Ed
       expression: col,
     };
   }
-  const starMatch = col.match(/^((?:[A-Za-z_][\w$]*|"[^"]+"|`[^`]+`|\[[^\]]+\]))\s*\.\s*\*$/);
+  const starMatch = col.match(/^((?:[\p{ID_Start}_][\p{ID_Continue}$]*|"[^"]+"|`[^`]+`|\[[^\]]+\]))\s*\.\s*\*$/u);
   if (!starMatch) return null;
   const qualifier = readIdentifier(starMatch[1]!, 0);
   if (!qualifier) return null;
@@ -272,7 +272,7 @@ function parseComputedSelectColumn(col: string): EditableQueryColumn | null {
 }
 
 function parseExpressionAlias(col: string): { expression: string; resultName: string } | null {
-  const asMatch = col.match(/\bAS\s+((?:"[^"]+")|(?:`[^`]+`)|(?:\[[^\]]+\])|(?:[A-Za-z_][\w$]*))\s*$/i);
+  const asMatch = col.match(/\bAS\s+((?:"[^"]+")|(?:`[^`]+`)|(?:\[[^\]]+\])|(?:[\p{ID_Start}_][\p{ID_Continue}$]*))\s*$/iu);
   if (asMatch?.index === undefined) return null;
   const alias = readIdentifier(asMatch[1], 0);
   if (!alias || alias.end !== asMatch[1].length) return null;
@@ -426,7 +426,7 @@ function readIdentifier(text: string, start: number): { value: string; quoted: b
     }
     return null;
   }
-  const match = text.slice(pos).match(/^[A-Za-z_][\w$]*/);
+  const match = text.slice(pos).match(/^[\p{ID_Start}_][\p{ID_Continue}$]*/u);
   return match ? { value: match[0], quoted: false, end: pos + match[0].length } : null;
 }
 
@@ -484,7 +484,7 @@ function findTopLevelKeyword(sql: string, keyword: string, start: number): numbe
 }
 
 function isIdentifierChar(ch: string): boolean {
-  return /[\w$]/.test(ch);
+  return /[\p{ID_Continue}$]/u.test(ch);
 }
 
 function escapeRegExp(value: string): string {

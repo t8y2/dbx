@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 class InformixAgentTest {
     @Test
     void buildsJdbcUrlWithExplicitInformixServerAndLocaleParameters() {
-        String url = InformixAgent.buildJdbcUrl(
+        String url = InformixAgent.jdbcUrl(
             new ConnectParams(
                 "172.26.128.159",
                 20013,
@@ -34,7 +34,7 @@ class InformixAgentTest {
 
     @Test
     void fallsBackToHostAsInformixServerWhenNoExplicitServerIsConfigured() {
-        String url = InformixAgent.buildJdbcUrl(
+        String url = InformixAgent.jdbcUrl(
             new ConnectParams(
                 "informix-host",
                 9088,
@@ -55,7 +55,7 @@ class InformixAgentTest {
 
     @Test
     void fallsBackToInformixServerNameWhenHostIsAnIpAddress() {
-        String url = InformixAgent.buildJdbcUrl(
+        String url = InformixAgent.jdbcUrl(
             new ConnectParams(
                 "172.26.128.159",
                 20013,
@@ -88,7 +88,7 @@ class InformixAgentTest {
         );
         params.setInformix_server("ol_informix1410");
 
-        String url = InformixAgent.buildJdbcUrl(params);
+        String url = InformixAgent.jdbcUrl(params);
 
         Assertions.assertEquals(
             "jdbc:informix-sqli://172.26.128.159:20013/testdb:INFORMIXSERVER=ol_informix1410;CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8",
@@ -98,7 +98,7 @@ class InformixAgentTest {
 
     @Test
     void usesSysmasterWhenDatabaseIsBlank() {
-        String url = InformixAgent.buildJdbcUrl(
+        String url = InformixAgent.jdbcUrl(
             new ConnectParams(
                 "informix-host",
                 9088,

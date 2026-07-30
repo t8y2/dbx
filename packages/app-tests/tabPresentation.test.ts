@@ -1,7 +1,20 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { activeResultRun, databaseDisplayNameForTab, executionSummaryItems, middleEllipsis, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, tabDisplayTitle, tabModeLabel, tabularResultItems } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
+import {
+  activeResultRun,
+  databaseDisplayNameForTab,
+  executionSummaryItems,
+  middleEllipsis,
+  nextExecutionSummaryView,
+  resultGridCacheKey,
+  resultRunItems,
+  resultSourceRange,
+  resultSqlForGrid,
+  tabDisplayTitle,
+  tabModeLabel,
+  tabularResultItems,
+} from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
@@ -120,6 +133,26 @@ test("zookeeper tabs use key browser labels", () => {
     const tab = queryTab({ mode: "zookeeper", database: "", title: "ZooKeeper Keys" });
     assert.equal(tabDisplayTitle(tab, t), "ZK Prod@keys");
     assert.equal(tabModeLabel(tab, t), "ZooKeeper");
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("HBase tabs identify the table and namespace", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    name: "HBase Dev",
+    db_type: "hbase",
+    port: 8080,
+  });
+  const t = (key: string) => key;
+
+  try {
+    const tab = queryTab({ mode: "hbase", database: "analytics", title: "events", sql: "events" });
+    assert.equal(tabDisplayTitle(tab, t), "events@analytics");
+    assert.equal(tabModeLabel(tab, t), "HBase");
   } finally {
     restoreStorage();
   }
@@ -302,6 +335,36 @@ test("execution summary items include table and non-table statement results", ()
       { index: 0, hasTabularResult: false, returnedColumns: 0, returnedRows: 0, isError: false },
       { index: 1, hasTabularResult: true, returnedColumns: 1, returnedRows: 0, isError: false },
       { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, isError: true },
+    ],
+  );
+});
+
+test("execution summary items preserve live statuses and unexecuted statements", () => {
+  const sql = "INSERT 1;\nINSERT 2;\nINSERT 3";
+  const items = executionSummaryItems({
+    batchSqlExecution: {
+      executionId: "run-1",
+      submittedSql: sql,
+      editorFingerprint: "fingerprint",
+      sourceOffset: 0,
+      completed: 2,
+      total: 3,
+      startedAt: 1,
+      finishedAt: 2,
+      items: [
+        { statementIndex: 0, sql: "INSERT 1", from: 0, to: 8, status: "success", affectedRows: 1, executionTimeMs: 3 },
+        { statementIndex: 1, sql: "INSERT 2", from: 10, to: 18, status: "error", error: "duplicate", executionTimeMs: 2 },
+        { statementIndex: 2, sql: "INSERT 3", from: 20, to: 28, status: "skipped" },
+      ],
+    },
+  });
+
+  assert.deepEqual(
+    items.map(({ statementIndex, status, affectedRows, error }) => ({ statementIndex, status, affectedRows, error })),
+    [
+      { statementIndex: 0, status: "success", affectedRows: 1, error: undefined },
+      { statementIndex: 1, status: "error", affectedRows: 0, error: "duplicate" },
+      { statementIndex: 2, status: "skipped", affectedRows: 0, error: undefined },
     ],
   );
 });

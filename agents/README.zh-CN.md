@@ -51,6 +51,26 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 
 多数 Java agent 以 JRE 21 为目标。原生 agent（如 `oracle`、`kingbase` 和 `xugu`）不需要 JRE。对 Java agent，DBX 会自动下载并管理 JRE 21 安装。
 
+## JDBC 连接池
+
+所有多会话 Java JDBC agent 都通过 `AbstractJdbcAgent` 在同一个 Agent 运行时内共享 HikariCP 连接池。普通元数据请求和短查询按请求借还连接；分页游标和显式会话态 SQL 会固定连接，直到游标或逻辑会话关闭。带有会话状态的连接会直接淘汰，不会复用于其他会话。各 Agent 特有的 URL、传输协议兜底、加密文件和原生驱动行为通过共享生命周期钩子保留。
+
+默认每个不可变连接身份最多建立 8 个物理连接，最小空闲连接数为 0。该默认值在限制短查询连接压力的同时，允许最多 8 个分页游标或会话态逻辑会话并发固定连接。可通过 JVM system property 或环境变量覆盖：
+
+| System property | 环境变量 | 默认值 |
+|---|---|---:|
+| `dbx.agent.jdbc.pool.enabled` | `DBX_AGENT_JDBC_POOL_ENABLED` | `true` |
+| `dbx.agent.jdbc.pool.maximumPoolSize` | `DBX_AGENT_JDBC_POOL_MAXIMUM_POOL_SIZE` | `8` |
+| `dbx.agent.jdbc.pool.minimumIdle` | `DBX_AGENT_JDBC_POOL_MINIMUM_IDLE` | `0` |
+| `dbx.agent.jdbc.pool.connectionTimeoutMillis` | `DBX_AGENT_JDBC_POOL_CONNECTION_TIMEOUT_MILLIS` | `30000` |
+| `dbx.agent.jdbc.pool.validationTimeoutMillis` | `DBX_AGENT_JDBC_POOL_VALIDATION_TIMEOUT_MILLIS` | `5000` |
+| `dbx.agent.jdbc.pool.idleTimeoutMillis` | `DBX_AGENT_JDBC_POOL_IDLE_TIMEOUT_MILLIS` | `120000` |
+| `dbx.agent.jdbc.pool.maxLifetimeMillis` | `DBX_AGENT_JDBC_POOL_MAX_LIFETIME_MILLIS` | `1800000` |
+| `dbx.agent.jdbc.pool.retireMillis` | `DBX_AGENT_JDBC_POOL_RETIRE_MILLIS` | `300000` |
+
+HikariCP 会直接打进启用连接池的 Agent JAR。已经使用 DBX 托管 JRE 21 的安装无需重新安装或替换 JRE。
+如遇特定老驱动兼容问题，可设置 `DBX_AGENT_JDBC_POOL_ENABLED=false`，让该运行时回退到原来的“每个逻辑会话一个连接”行为。
+
 ## 选择驱动实现语言
 
 对于新 agent，只要存在成熟、许可证兼容的原生驱动，优先选择**原生（Go 或 Rust）驱动**而非 Java/JDBC agent。原生 agent 以单一自包含可执行文件发布，无需 JRE，可显著降低内存占用和启动时间 —— 完全避开 Java agent 即便空闲也要付出的 JVM 基线开销。

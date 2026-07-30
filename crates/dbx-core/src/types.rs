@@ -103,6 +103,7 @@ pub enum ObjectSourceKind {
     Function,
     Trigger,
     Sequence,
+    Synonym,
     Package,
     PackageBody,
     Type,
@@ -215,6 +216,7 @@ pub struct CompletionAssistantCandidate {
     pub parent_name: Option<String>,
     pub comment: Option<String>,
     pub data_type: Option<String>,
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,7 +384,7 @@ pub struct OwnerInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::ObjectInfo;
+    use super::{ObjectInfo, ObjectSourceKind};
 
     #[test]
     fn list_objects_payload_preserves_optional_validity() {
@@ -392,5 +394,13 @@ mod tests {
 
         assert_eq!(objects[0].valid, Some(false));
         assert_eq!(objects[0].object_type, "TRIGGER");
+    }
+
+    #[test]
+    fn object_source_kind_accepts_synonym_wire_value() {
+        let kind: ObjectSourceKind = serde_json::from_str("\"SYNONYM\"").unwrap();
+
+        assert_eq!(kind, ObjectSourceKind::Synonym);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"SYNONYM\"");
     }
 }

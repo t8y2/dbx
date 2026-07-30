@@ -78,6 +78,11 @@ public final class SparkAgent extends AbstractJdbcAgent {
     protected void afterConnect(ConnectParams params, Connection connection) throws Exception {
         String catalog = extractCatalogParam(params.getUrl_params());
         configuredCatalog = catalog;
+    }
+
+    @Override
+    protected void afterPhysicalConnect(ConnectParams params, Connection connection) throws Exception {
+        String catalog = extractCatalogParam(params.getUrl_params());
         if (catalog != null && !catalog.isEmpty()) {
             try (java.sql.Statement stmt = connection.createStatement()) {
                 stmt.execute("USE " + JdbcIdentifiers.INSTANCE.backtick(catalog));
@@ -224,9 +229,7 @@ public final class SparkAgent extends AbstractJdbcAgent {
     }
 
     private void useSchema(String schema) throws Exception {
-        try (java.sql.Statement stmt = requireConnected().createStatement()) {
-            stmt.execute(setSchemaSQL(schema));
-        }
+        applySchemaContext(requireConnected(), schema);
     }
 
     private List<ColumnInfo> getColumnsFromDescribe(String schema, String table) throws Exception {

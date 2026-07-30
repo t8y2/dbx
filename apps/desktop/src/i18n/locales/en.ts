@@ -3913,6 +3913,8 @@ export default {
     fileProgress: "File {current} of {total}",
     fileColumn: "File",
     totalFiles: "{count} files",
+    expandSummary: "Expand summary",
+    restoreSummary: "Restore summary",
   },
   sqlFileTree: {
     title: "SQL Files",

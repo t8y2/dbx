@@ -21,7 +21,7 @@ import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connect
 import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
+import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Maximize2, Minimize2, Play, Square, X } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -107,6 +107,9 @@ interface PerFileSummary {
 const perFileResults = ref<PerFileSummary[]>([]);
 const currentFileIndex = ref(-1);
 const currentFileName = ref("");
+// Keep the regular execution flow compact, but let large batches use most of
+// the viewport without opening a second, nested dialog.
+const summaryExpanded = ref(false);
 function resetPerFileState() {
   perFileResults.value = [];
   currentFileIndex.value = -1;
@@ -219,6 +222,7 @@ function resetExecution() {
   terminalStatus.value = "idle";
   terminalError.value = "";
   refreshedTarget.value = false;
+  summaryExpanded.value = false;
   resetPerFileState();
 }
 
@@ -544,7 +548,7 @@ watch(
 
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
-    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 min-w-0 flex-col overflow-hidden sm:max-w-[860px]" :trap-focus="false" @interact-outside.prevent>
+    <DialogScrollContent :class="['flex min-h-0 min-w-0 flex-col overflow-hidden', summaryExpanded ? 'max-h-[calc(var(--dbx-viewport-height)-2rem)] sm:max-w-[min(96vw,1180px)]' : 'max-h-[calc(var(--dbx-viewport-height)-6rem)] sm:max-w-[860px]']" :trap-focus="false" @interact-outside.prevent>
       <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <FileCode class="w-4 h-4" />
@@ -693,7 +697,17 @@ watch(
           </div>
 
           <template v-if="!running && previews.length > 1 && perFileResults.length > 0">
-            <div class="max-h-[min(22vh,200px)] min-w-0 overflow-y-auto rounded-md border text-xs">
+            <div class="flex items-center justify-between gap-3">
+              <div class="text-xs font-medium text-muted-foreground">
+                {{ t("sqlFile.totalFiles", { count: perFileResults.length }) }}
+              </div>
+              <Button variant="outline" size="sm" class="h-7 shrink-0 px-2 text-xs" :aria-pressed="summaryExpanded" @click="summaryExpanded = !summaryExpanded">
+                <Minimize2 v-if="summaryExpanded" class="mr-1 h-3.5 w-3.5" />
+                <Maximize2 v-else class="mr-1 h-3.5 w-3.5" />
+                {{ summaryExpanded ? t("sqlFile.restoreSummary") : t("sqlFile.expandSummary") }}
+              </Button>
+            </div>
+            <div :class="summaryExpanded ? 'max-h-[min(56vh,600px)]' : 'max-h-[min(22vh,200px)]'" class="min-w-0 overflow-y-auto rounded-md border text-xs">
               <!-- Keep aggregate columns readable when a file name is long. -->
               <table class="w-full table-fixed">
                 <colgroup>
@@ -703,13 +717,13 @@ watch(
                   <col class="w-[4.5rem]" />
                   <col class="w-[5.5rem]" />
                 </colgroup>
-                <thead class="sticky top-0 z-10 bg-muted/40">
+                <thead class="sticky top-0 z-10 border-b border-border bg-muted text-foreground shadow-[0_1px_4px_rgb(0_0_0_/_0.06)]">
                   <tr>
-                    <th class="px-2.5 py-1.5 text-left font-medium text-muted-foreground">{{ t("sqlFile.fileColumn") }}</th>
-                    <th class="px-2 py-1.5 text-right font-medium text-muted-foreground whitespace-nowrap">{{ t("sqlFile.statement") }}</th>
-                    <th class="px-2 py-1.5 text-right font-medium text-muted-foreground whitespace-nowrap">{{ t("sqlFile.succeeded") }}</th>
-                    <th class="px-2 py-1.5 text-right font-medium text-muted-foreground whitespace-nowrap">{{ t("sqlFile.failed") }}</th>
-                    <th class="px-2.5 py-1.5 text-right font-medium text-muted-foreground whitespace-nowrap">{{ t("sqlFile.affectedRows") }}</th>
+                    <th class="px-2.5 py-2 text-left font-semibold">{{ t("sqlFile.fileColumn") }}</th>
+                    <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.statement") }}</th>
+                    <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.succeeded") }}</th>
+                    <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.failed") }}</th>
+                    <th class="px-2.5 py-2 text-right font-semibold whitespace-nowrap">{{ t("sqlFile.affectedRows") }}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -721,7 +735,7 @@ watch(
                     <td class="px-2.5 py-1.5 text-right tabular-nums">{{ item.affectedRows.toLocaleString() }}</td>
                   </tr>
                 </tbody>
-                <tfoot class="sticky bottom-0 z-10 border-t-2 border-primary/35 bg-primary/10 font-semibold text-foreground shadow-[0_-2px_6px_rgb(0_0_0_/_0.08)]">
+                <tfoot class="sticky bottom-0 z-10 border-t-2 border-primary/35 bg-muted font-semibold text-foreground shadow-[0_-2px_6px_rgb(0_0_0_/_0.08)]">
                   <tr>
                     <th scope="row" class="px-2.5 py-2 text-left">{{ t("sqlFile.totalFiles", { count: perFileResults.length }) }}</th>
                     <td class="px-2 py-2 text-right tabular-nums font-bold">{{ progress?.statementIndex ?? 0 }}</td>

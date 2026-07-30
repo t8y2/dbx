@@ -3389,6 +3389,8 @@ export default withEnglishFallback({
     fileProgress: "第 {current}/{total} 個檔案",
     fileColumn: "檔案",
     totalFiles: "{count} 個檔案",
+    expandSummary: "展開統計表",
+    restoreSummary: "還原統計表",
     runInBackground: "背景執行",
   },
   diff: {

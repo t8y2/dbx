@@ -3719,6 +3719,8 @@ export default withEnglishFallback({
     fileProgress: "Archivo {current} de {total}",
     fileColumn: "Archivo",
     totalFiles: "{count} archivos",
+    expandSummary: "Expandir resumen",
+    restoreSummary: "Restaurar resumen",
   },
   diff: {
     title: "Comparar esquemas",

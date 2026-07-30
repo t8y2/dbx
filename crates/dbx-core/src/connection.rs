@@ -304,6 +304,17 @@ pub fn metadata_connection_config(config: &ConnectionConfig) -> ConnectionConfig
 }
 
 pub fn database_connection_config(config: &ConnectionConfig, database: Option<&str>) -> ConnectionConfig {
+    database_connection_config_with_catalog(config, database, None)
+}
+
+/// Like [`database_connection_config`], but optionally injects a Doris/StarRocks
+/// `catalog=<name>` URL parameter so mysql_async emits `SET catalog` during
+/// connection setup (before any `USE <database>`).
+pub fn database_connection_config_with_catalog(
+    config: &ConnectionConfig,
+    database: Option<&str>,
+    catalog: Option<&str>,
+) -> ConnectionConfig {
     let mut db_config = if database.is_some() { config.clone() } else { metadata_connection_config(config) };
     if let Some(db) = database {
         if !matches!(
@@ -317,7 +328,33 @@ pub fn database_connection_config(config: &ConnectionConfig, database: Option<&s
             db_config.database = Some(db.to_string());
         }
     }
+    if let Some(catalog) = catalog.map(str::trim).filter(|catalog| !catalog.is_empty()) {
+        db_config.url_params = Some(upsert_connection_url_param(db_config.url_params.as_deref(), "catalog", catalog));
+    }
     db_config
+}
+
+/// Insert or replace a single `key=value` entry in a connection URL-params string.
+pub fn upsert_connection_url_param(params: Option<&str>, key: &str, value: &str) -> String {
+    let key = key.trim();
+    let value = value.trim();
+    let key_lower = key.to_ascii_lowercase();
+    let encoded_value = percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let mut parts: Vec<String> = params
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|part| !part.trim().is_empty())
+        .filter(|part| {
+            part.split_once('=')
+                .map(|(existing_key, _)| existing_key.trim().to_ascii_lowercase() != key_lower)
+                .unwrap_or(true)
+        })
+        .map(str::to_string)
+        .collect();
+    parts.push(format!("{key}={encoded_value}"));
+    parts.join("&")
 }
 
 pub fn prestosql_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str, port: u16) -> ConnectionConfig {
@@ -1138,13 +1175,22 @@ impl AppState {
         self.get_or_create_pool_for_session(connection_id, database, None).await
     }
 
+    pub async fn get_or_create_pool_with_catalog(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        catalog: Option<&str>,
+    ) -> Result<String, String> {
+        self.get_or_create_pool_for_session_with_catalog(connection_id, database, catalog, None).await
+    }
+
     pub async fn get_or_create_pool_for_connection_attempt(
         &self,
         connection_id: &str,
         database: Option<&str>,
         attempt: u64,
     ) -> Result<String, String> {
-        self.get_or_create_pool_for_session_inner(connection_id, database, None, Some(attempt)).await
+        self.get_or_create_pool_for_session_inner(connection_id, database, None, None, Some(attempt)).await
     }
 
     pub async fn get_or_create_pool_for_session(
@@ -1153,13 +1199,24 @@ impl AppState {
         database: Option<&str>,
         client_session_id: Option<&str>,
     ) -> Result<String, String> {
-        self.get_or_create_pool_for_session_inner(connection_id, database, client_session_id, None).await
+        self.get_or_create_pool_for_session_with_catalog(connection_id, database, None, client_session_id).await
+    }
+
+    pub async fn get_or_create_pool_for_session_with_catalog(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        catalog: Option<&str>,
+        client_session_id: Option<&str>,
+    ) -> Result<String, String> {
+        self.get_or_create_pool_for_session_inner(connection_id, database, catalog, client_session_id, None).await
     }
 
     async fn get_or_create_pool_for_session_inner(
         &self,
         connection_id: &str,
         database: Option<&str>,
+        catalog: Option<&str>,
         client_session_id: Option<&str>,
         connection_attempt: Option<u64>,
     ) -> Result<String, String> {
@@ -1170,8 +1227,9 @@ impl AppState {
         validate_connection_url_params(&config)?;
         let db_type = Some(config.db_type);
         let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
+        let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
 
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, database, catalog, false);
         let pool_key = session_scoped_pool_key_for(Some(&config), base_pool_key.clone(), client_session_id);
 
         loop {
@@ -1198,7 +1256,7 @@ impl AppState {
             break;
         }
 
-        let db_config = database_connection_config(&config, database);
+        let db_config = database_connection_config_with_catalog(&config, database, catalog);
 
         validate_h2_file_connection(&db_config)?;
         self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
@@ -2384,12 +2442,23 @@ impl AppState {
         database: Option<&str>,
         client_session_id: Option<&str>,
     ) -> Result<String, String> {
+        self.reconnect_pool_for_session_with_catalog(connection_id, database, None, client_session_id).await
+    }
+
+    pub async fn reconnect_pool_for_session_with_catalog(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        catalog: Option<&str>,
+        client_session_id: Option<&str>,
+    ) -> Result<String, String> {
         let config = {
             let configs = self.configs.read().await;
             configs.get(connection_id).cloned()
         };
         let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, true);
+        let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
+        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, database, catalog, true);
         let pool_key = session_scoped_pool_key_for(config.as_ref(), base_pool_key, client_session_id);
         if self.uses_forwarded_transport(connection_id).await {
             self.remove_connection_pools(connection_id).await;
@@ -2403,7 +2472,7 @@ impl AppState {
                 close_pool_kind_with_timeout(pool_key.clone(), pool).await;
             }
         }
-        self.get_or_create_pool_for_session(connection_id, database, client_session_id).await
+        self.get_or_create_pool_for_session_with_catalog(connection_id, database, catalog, client_session_id).await
     }
 
     pub async fn close_client_session_pool(
@@ -3559,6 +3628,16 @@ fn base_pool_key_for(
     database: Option<&str>,
     include_elasticsearch_single_pool: bool,
 ) -> String {
+    base_pool_key_for_with_catalog(db_type, connection_id, database, None, include_elasticsearch_single_pool)
+}
+
+fn base_pool_key_for_with_catalog(
+    db_type: Option<DatabaseType>,
+    connection_id: &str,
+    database: Option<&str>,
+    catalog: Option<&str>,
+    include_elasticsearch_single_pool: bool,
+) -> String {
     let is_single_connection_pool = db_type.as_ref().is_some_and(|db_type| {
         let is_single = database_capabilities::is_single_connection_pool(db_type)
             || (include_elasticsearch_single_pool
@@ -3573,13 +3652,17 @@ fn base_pool_key_for(
         is_single && (!database_capabilities::is_agent_type(db_type) || shares_database_pool_with_connection(db_type))
     });
 
-    if is_single_connection_pool {
+    let key = if is_single_connection_pool {
         connection_id.to_string()
     } else {
         match database.filter(|db| !db.trim().is_empty()) {
             Some(db) => format!("{connection_id}:{db}"),
             None => connection_id.to_string(),
         }
+    };
+    match catalog.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(catalog) => format!("{key}:catalog:{catalog}"),
+        None => key,
     }
 }
 
@@ -3784,12 +3867,13 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        metadata_connection_config, mysql_metadata_fallback_url, mysql_pool_setup_queries,
-        oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
-        validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        database_connection_config_with_catalog, metadata_connection_config, mysql_metadata_fallback_url,
+        mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries,
+        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
+        sqlserver_uses_legacy_driver, task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3862,6 +3946,38 @@ mod tests {
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[test]
+    fn upsert_connection_url_param_inserts_and_replaces_catalog() {
+        assert_eq!(upsert_connection_url_param(None, "catalog", "paimon"), "catalog=paimon");
+        assert_eq!(
+            upsert_connection_url_param(Some("charset=utf8mb4"), "catalog", "hive_catalog"),
+            "charset=utf8mb4&catalog=hive%5Fcatalog"
+        );
+        assert_eq!(
+            upsert_connection_url_param(Some("catalog=old&charset=utf8mb4"), "catalog", "new_cat"),
+            "charset=utf8mb4&catalog=new%5Fcat"
+        );
+    }
+
+    #[test]
+    fn database_connection_config_with_catalog_keeps_database_for_use_after_set_catalog() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::StarRocks;
+        let db_config = database_connection_config_with_catalog(&config, Some("ads"), Some("paimon_catalog"));
+        assert_eq!(db_config.database.as_deref(), Some("ads"));
+        assert_eq!(db_config.url_params.as_deref(), Some("catalog=paimon%5Fcatalog"));
+        let url = db_config.connection_url();
+        assert!(url.contains("/ads"), "url should include database for USE setup: {url}");
+        assert!(url.contains("catalog=paimon%5Fcatalog"), "url should include catalog param: {url}");
+    }
+
+    #[test]
+    fn metadata_connection_config_clears_starrocks_default_database() {
+        let mut config = mysql_config(Some("ads"));
+        config.db_type = DatabaseType::StarRocks;
+        assert_eq!(metadata_connection_config(&config).database, None);
     }
 
     #[test]

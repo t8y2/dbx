@@ -725,6 +725,32 @@ describe("connectionStore completion assistant", () => {
     expect(listDatabases).toHaveBeenCalledTimes(52);
   });
 
+  it("invalidates cached completion databases for a connection", async () => {
+    const listDatabases = vi
+      .fn()
+      .mockResolvedValueOnce([{ name: "Archive" }])
+      .mockResolvedValueOnce([{ name: "Reporting" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    expect(await store.listCompletionDatabases("sqlserver-1")).toEqual(["Archive"]);
+    expect(await store.listCompletionDatabases("sqlserver-1")).toEqual(["Archive"]);
+
+    store.invalidateCompletionCache("sqlserver-1");
+
+    expect(await store.listCompletionDatabases("sqlserver-1")).toEqual(["Reporting"]);
+    expect(listDatabases).toHaveBeenCalledTimes(2);
+  });
+
   it("evicts old completion schema entries", async () => {
     const listSchemas = vi.fn(async (_connectionId: string, database: string) => [`schema_${database}`]);
 

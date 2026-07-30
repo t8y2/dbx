@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget } from "@/lib/database/databaseNamespaceCreation";
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
-import { isSchemaAware, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 
 describe("schema awareness", () => {
   it("keeps SQLite database aliases separate from schema-capable databases", () => {
@@ -17,6 +17,14 @@ describe("database and schema qualifiers", () => {
 
   it.each(["mysql", "postgres", "oracle", "snowflake"] as const)("does not widen unverified three-part completion for %s", (databaseType) => {
     expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(false);
+  });
+
+  it.each(["mysql", "sqlite", "sqlserver"] as const)("suggests database names for %s", (databaseType) => {
+    expect(supportsDatabaseNameCompletion(databaseType)).toBe(true);
+  });
+
+  it.each(["postgres", "oracle", "snowflake", "trino", "prestosql"] as const)("does not add database name completion for %s", (databaseType) => {
+    expect(supportsDatabaseNameCompletion(databaseType)).toBe(false);
   });
 });
 

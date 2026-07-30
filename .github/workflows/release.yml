@@ -102,7 +102,17 @@ jobs:
             exit 0
           fi
           git commit -m "chore(jdbc): bump plugin version [skip ci]"
-          git push origin HEAD:main
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Unable to push JDBC plugin version bump after ${attempt} attempts."
+              exit 1
+            fi
+            git fetch origin main --no-tags
+            git rebase origin/main
+          done
 
   build:
     needs: release-ready

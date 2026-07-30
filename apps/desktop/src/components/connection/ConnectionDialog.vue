@@ -4812,8 +4812,8 @@ function openExternalUrl(url: string) {
               </TabsList>
             </div>
 
-            <TabsContent value="connection" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2 pb-2">
+            <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto pt-4 pr-2 pb-2">
                 <div v-if="!isJdbcConnection && form.db_type !== 'nacos'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
@@ -6251,8 +6251,8 @@ function openExternalUrl(url: string) {
               </div>
             </TabsContent>
 
-            <TabsContent v-if="supportsTlsToggle" value="tls" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
+            <TabsContent v-if="supportsTlsToggle" value="tls" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
                 <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
@@ -6551,8 +6551,8 @@ function openExternalUrl(url: string) {
               </div>
             </TabsContent>
 
-            <TabsContent value="advanced" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2">
+            <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto pt-4 pr-2">
                 <div v-if="showGaussdbIdentifierQuoteStyle" class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbIdentifierQuoteStyle") }}</Label>
                   <div class="col-span-3 grid gap-1">
@@ -6654,8 +6654,8 @@ function openExternalUrl(url: string) {
               </div>
             </TabsContent>
 
-            <TabsContent v-if="canUseTransportLayers" value="transport" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
+            <TabsContent v-if="canUseTransportLayers" value="transport" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
                 <div class="connection-label-wide-grid grid min-w-0 grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.sshHops") }}</Label>
                   <div class="col-span-3 grid min-w-0 gap-3">

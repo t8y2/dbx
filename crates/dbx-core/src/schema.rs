@@ -316,7 +316,7 @@ pub async fn list_doris_catalog_databases_core(
             return Ok(vec![]);
         }
     };
-    if catalog == "internal" {
+    if catalog == "internal" || catalog.eq_ignore_ascii_case("default_catalog") {
         return Ok(filter_mysql_system_databases_for_config(databases, db_config.as_ref()));
     }
     Ok(databases)
@@ -460,7 +460,8 @@ pub async fn resolve_external_doris_catalog(
     catalog: Option<&str>,
 ) -> Option<String> {
     let catalog = catalog?.trim();
-    if catalog.is_empty() || catalog == "internal" {
+    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") || catalog.eq_ignore_ascii_case("default_catalog")
+    {
         return None;
     }
     let config = connection_config(state, connection_id).await?;

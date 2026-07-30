@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   redisGetValue: vi.fn(),
+  redisGetStreamEntries: vi.fn(),
   redisGetStreamGroups: vi.fn(),
   redisGetStreamConsumers: vi.fn(),
   redisGetStreamPending: vi.fn(),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => ({
   redisGetValue: mocks.redisGetValue,
+  redisGetStreamEntries: mocks.redisGetStreamEntries,
   redisGetStreamGroups: mocks.redisGetStreamGroups,
   redisGetStreamConsumers: mocks.redisGetStreamConsumers,
   redisGetStreamPending: mocks.redisGetStreamPending,
@@ -40,11 +42,7 @@ vi.mock("vue-virtual-scroller", async () => {
   const DynamicScroller = defineComponent({
     props: { items: { type: Array, default: () => [] } },
     setup(props, { slots }) {
-      return () =>
-        h(
-          "div",
-          (props.items as unknown[]).map((item, index) => slots.default?.({ item, active: true, index })),
-        );
+      return () => h("div", [...(props.items as unknown[]).map((item, index) => slots.default?.({ item, active: true, index })), ...(slots.after?.() ?? [])]);
     },
   });
   const DynamicScrollerItem = defineComponent({
@@ -84,13 +82,17 @@ async function settle() {
   await nextTick();
 }
 
-function streamValue() {
+function streamEntry(id: string) {
+  return { id, fields: [{ field: "event", value: "login" }] };
+}
+
+function streamValue(entries = [] as ReturnType<typeof streamEntry>[], nextCursor?: string, total = entries.length) {
   return {
     key_display: "orders",
     key_raw: "b3JkZXJz",
     ttl: -1,
     redis_type: "stream",
-    data: { kind: "stream" as const, entries: [] },
+    data: { kind: "stream" as const, entries, total, ...(nextCursor ? { next_cursor: nextCursor } : {}) },
   };
 }
 
@@ -158,6 +160,21 @@ function openGroups(host: HTMLElement) {
 }
 
 describe("RedisValueViewer stream monitoring", () => {
+  it("loads more Stream entries from the returned cursor", async () => {
+    mocks.redisGetValue.mockResolvedValue(streamValue([streamEntry("1714470000000-0")], "1714470000000-0"));
+    mocks.redisGetStreamEntries.mockResolvedValue({ entries: [streamEntry("1714470000001-0")] });
+    const host = mountViewer();
+    await settle();
+
+    expect(host.querySelectorAll("[data-redis-stream-entry]")).toHaveLength(1);
+    host.querySelector<HTMLButtonElement>("[data-redis-stream-entries-more]")!.click();
+    await settle();
+
+    expect(mocks.redisGetStreamEntries).toHaveBeenCalledWith("redis-1", 2, "b3JkZXJz", "1714470000000-0");
+    expect(host.querySelectorAll("[data-redis-stream-entry]")).toHaveLength(2);
+    expect(host.querySelector("[data-redis-stream-entries-more]")).toBeNull();
+  });
+
   it("renders large counter values transported as decimal strings", async () => {
     const unsafeMetric = "9007199254740992";
     mocks.redisGetValue.mockResolvedValue(streamValue());

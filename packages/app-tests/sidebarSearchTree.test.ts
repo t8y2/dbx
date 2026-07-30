@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, reuseLiveSidebarTreeNodes } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("preserves loaded table children when the table itself matches search", () => {
@@ -348,6 +348,76 @@ test("filters the sidebar by node type without a text query", () => {
     schemas?.map((node) => node.children),
     [[], []],
   );
+});
+
+test("preserves an expanded type-filtered table after the text query is cleared", () => {
+  const table: TreeNode = {
+    id: "conn:db:orders",
+    label: "orders",
+    type: "table",
+    connectionId: "conn",
+    database: "inventory",
+    isExpanded: true,
+    children: [
+      {
+        id: "conn:db:orders:__columns",
+        label: "tree.columns",
+        type: "group-columns",
+        connectionId: "conn",
+        database: "inventory",
+        tableName: "orders",
+        isExpanded: false,
+        children: [],
+      },
+    ],
+  };
+
+  const [filteredTable] = filterSidebarTree([table], "", new Set(), new Set(["table"]));
+
+  assert.equal(filteredTable, table);
+  assert.equal(filteredTable?.isExpanded, true);
+  assert.equal(filteredTable?.children?.[0]?.type, "group-columns");
+});
+
+test("indexed table search reuses loaded live node state before type filtering", () => {
+  const liveTable: TreeNode = {
+    id: "conn:db:orders",
+    label: "orders",
+    type: "table",
+    connectionId: "conn",
+    database: "inventory",
+    isExpanded: true,
+    isLoading: true,
+    children: [
+      {
+        id: "conn:db:orders:__columns",
+        label: "tree.columns",
+        type: "group-columns",
+        connectionId: "conn",
+        database: "inventory",
+        tableName: "orders",
+        children: [],
+      },
+    ],
+  };
+  const indexedTable: TreeNode = { ...liveTable, isExpanded: false, isLoading: false, children: [] };
+  const indexedOnly: TreeNode = {
+    id: "conn:db:archive",
+    label: "archive",
+    type: "table",
+    connectionId: "conn",
+    database: "inventory",
+    children: [],
+  };
+
+  const merged = reuseLiveSidebarTreeNodes([indexedTable, indexedOnly], [liveTable]);
+  const filtered = filterSidebarTree(merged, "", new Set(), new Set(["table"]));
+
+  assert.equal(filtered[0], liveTable);
+  assert.equal(filtered[0]?.children?.[0]?.type, "group-columns");
+  assert.equal(filtered[0]?.isExpanded, true);
+  assert.equal(filtered[0]?.isLoading, true);
+  assert.equal(filtered[1], indexedOnly);
 });
 
 test("combines text search with the selected node types", () => {

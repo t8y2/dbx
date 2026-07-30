@@ -1012,7 +1012,7 @@ fn generate_postgres_sequence_owner_ddl(sequence: &PostgresExportSequence, schem
     Some(format!(
         "ALTER SEQUENCE {} OWNED BY {}.{}",
         postgres_sequence_qualified_name(schema, &sequence.name),
-        crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres),
+        crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres, None),
         quote_identifier(owner_column, &DatabaseType::Postgres)
     ))
 }
@@ -1026,7 +1026,7 @@ fn generate_postgres_sequence_setval_sql(sequence: &PostgresExportSequence, sche
     let sequence_literal = quote_postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name));
     match (sequence.owner_table.as_deref(), sequence.owner_column.as_deref()) {
         (Some(owner_table), Some(owner_column)) => {
-            let owner_table = crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres);
+            let owner_table = crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres, None);
             let owner_column = quote_identifier(owner_column, &DatabaseType::Postgres);
             Some(format!(
                 "SELECT setval({sequence_literal}, GREATEST(COALESCE(MAX({owner_column}), {last_value}), {last_value}), true) FROM {owner_table}"
@@ -1269,7 +1269,7 @@ fn record_export_error(file: &mut std::fs::File, fail_on_error: bool, message: S
 
 fn database_export_select_sql(columns: &[String], table: &str, schema: &str, db_type: &DatabaseType) -> String {
     let columns = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
-    let table = crate::transfer::qualified_table(table, schema, db_type);
+    let table = crate::transfer::qualified_table(table, schema, db_type, None);
     format!("SELECT {columns} FROM {table}")
 }
 
@@ -1283,7 +1283,8 @@ fn write_database_export_rows(
     schema: &str,
     db_type: &DatabaseType,
 ) -> Result<(), String> {
-    let mut insert_sql = crate::transfer::generate_insert_typed(columns, column_types, rows, table, schema, db_type);
+    let mut insert_sql =
+        crate::transfer::generate_insert_typed(columns, column_types, rows, table, schema, db_type, None);
     if *db_type == DatabaseType::Dameng && selected_columns_include_identity_extras(columns, column_extras) {
         insert_sql = wrap_dameng_identity_insert_sql(&insert_sql, table, schema);
     }
@@ -1829,7 +1830,7 @@ pub async fn export_database_sql_core(
                     )
                     .await?;
                 } else {
-                    let count_query = crate::transfer::count_sql(table_name, &request.schema, &db_type);
+                    let count_query = crate::transfer::count_sql(table_name, &request.schema, &db_type, None);
                     let total_rows = match crate::transfer::execute_read_on_pool(state, &pool_key, &count_query).await {
                         Ok(result) => {
                             let count = result.rows.first().and_then(|row| row.first()).and_then(|value| match value {
@@ -2137,7 +2138,7 @@ fn filter_export_table_infos(
 }
 
 fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseType) -> String {
-    format!("DROP TABLE IF EXISTS {};", crate::transfer::qualified_table(table_name, schema, db_type))
+    format!("DROP TABLE IF EXISTS {};", crate::transfer::qualified_table(table_name, schema, db_type, None))
 }
 
 fn build_database_export_object_source_sql(

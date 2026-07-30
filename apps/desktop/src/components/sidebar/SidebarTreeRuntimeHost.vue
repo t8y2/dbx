@@ -630,18 +630,19 @@ async function toggle() {
       const collectionRef = (node.meta as { collectionId?: string } | undefined)?.collectionId ?? node.label;
       const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "vector");
       queryStore.updateSql(tab, collectionRef);
-      api
-        .vectorGetCollectionDetail(node.connectionId, node.database || "default", collectionRef)
-        .then((info) => {
-          if (info.dimension != null) {
+      if (connectionStore.getConfig(node.connectionId)?.db_type !== "milvus") {
+        api
+          .vectorGetCollectionDetail(node.connectionId, node.database || "default", collectionRef)
+          .then((info) => {
+            if (info.dimension == null) return;
             if (node.meta) {
               (node.meta as Record<string, unknown>).dimension = info.dimension;
             } else {
               node.meta = { dimension: info.dimension } as any;
             }
-          }
-        })
-        .catch(() => {});
+          })
+          .catch(() => {});
+      }
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       if (node.catalog && node.catalog !== "internal") {
         await connectionStore.loadDorisCatalogTables(node);

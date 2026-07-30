@@ -73,6 +73,15 @@ describe("dataTabOpenPolicy", () => {
     expect(canApplyDataTabMetadata(tab, usersTarget, new AbortController().signal)).toBe(true);
   });
 
+  it("uses restored table metadata as the schema identity fallback", () => {
+    const tab = dataTab("users", "users");
+    tab.schema = undefined;
+    tab.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
+
+    expect(canApplyDataTabMetadata(tab, usersTarget, new AbortController().signal)).toBe(true);
+    expect(findExistingDataTabCandidate([tab], usersTarget, { openMode: "default", reuseDataTab: false })).toEqual({ tab, match: "same-table" });
+  });
+
   it("rejects metadata after its request is cancelled", () => {
     const tab = dataTab("users", "users");
     tab.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };

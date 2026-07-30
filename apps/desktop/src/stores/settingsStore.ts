@@ -346,6 +346,9 @@ export const TABLE_FONT_SIZE_DEFAULT = 13;
 const DISCONNECT_TAB_HANDLING_MODES = ["close-tabs", "keep-tabs-clear-results", "keep-tabs-keep-results"] as const;
 export type DisconnectTabHandlingMode = (typeof DISCONNECT_TAB_HANDLING_MODES)[number];
 
+const CLICK_TABLE_NAVIGATION_TARGETS = ["data", "ddl"] as const;
+export type ClickTableNavigationTarget = (typeof CLICK_TABLE_NAVIGATION_TARGETS)[number];
+
 export interface CustomThemeColors {
   keyword: string;
   field: string;
@@ -505,6 +508,7 @@ export interface EditorSettings {
   objectBrowserViewMode: "list" | "grid";
   sqlVariableSyntaxOverrides: SqlVariableSyntaxOverrides;
   continueOnErrorOnBatch: boolean;
+  clickTableNavigationTarget: ClickTableNavigationTarget;
 }
 
 export interface ToolbarItems {
@@ -680,6 +684,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   objectBrowserViewMode: "list",
   sqlVariableSyntaxOverrides: {},
   continueOnErrorOnBatch: false,
+  clickTableNavigationTarget: "data",
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -765,6 +770,10 @@ function normalizeDisconnectTabHandlingMode(value: unknown, legacyCloseTabsOnDis
     return legacyCloseTabsOnDisconnect ? "close-tabs" : "keep-tabs-clear-results";
   }
   return DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
+}
+
+function normalizeClickTableNavigationTarget(value: unknown): ClickTableNavigationTarget {
+  return value === "data" || value === "ddl" ? value : DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
 }
 
 function normalizeOpenTabsRestoreMode(value: unknown, legacyRestoreOpenTabsOnLaunch?: unknown): OpenTabsRestoreMode {
@@ -1013,6 +1022,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" ? "grid" : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
     sqlVariableSyntaxOverrides: normalizeSqlVariableSyntaxOverrides(settings.sqlVariableSyntaxOverrides),
     continueOnErrorOnBatch: settings.continueOnErrorOnBatch === true,
+    clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
   };
 }
 
@@ -1463,6 +1473,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" ? "grid" : "list";
     if (partial.sqlVariableSyntaxOverrides !== undefined) editorSettings.value.sqlVariableSyntaxOverrides = normalizeSqlVariableSyntaxOverrides(partial.sqlVariableSyntaxOverrides);
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
+    if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
     saveEditorSettings(editorSettings.value);
   }
 

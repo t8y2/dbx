@@ -1259,6 +1259,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "unicode-ident",
  "unicode-width",
  "uuid",
  "webpki-roots 0.26.11",

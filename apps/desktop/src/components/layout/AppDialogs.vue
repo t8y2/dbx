@@ -178,6 +178,7 @@ watch(
     v-model:open="dialogs.showTransferDialog.value"
     :prefill-connection-id="dialogs.transferPrefillConnectionId.value"
     :prefill-database="dialogs.transferPrefillDatabase.value"
+    :prefill-catalog="dialogs.transferPrefillCatalog.value"
     :prefill-schema="dialogs.transferPrefillSchema.value"
     :prefill-tables="dialogs.transferPrefillTables.value"
     :prefill-target-connection-id="dialogs.transferPrefillTargetConnectionId.value"

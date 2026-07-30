@@ -82,6 +82,9 @@ const loading = ref(false);
 const loadingMore = ref(false);
 let loadRequestId = 0;
 const streamTab = ref<"entries" | "groups">("entries");
+const streamEntries = ref<RedisStreamEntry[]>([]);
+const streamEntriesCursor = ref<string | undefined>();
+const streamEntriesLoadingMore = ref(false);
 const streamGroups = ref<RedisStreamGroup[]>([]);
 const streamGroupsLoaded = ref(false);
 const streamGroupsLoading = ref(false);
@@ -112,6 +115,7 @@ let streamGroupsRequestId = 0;
 let streamGroupDetailRequestId = 0;
 let streamConsumersRequestId = 0;
 let streamPendingRequestId = 0;
+let streamEntriesRequestId = 0;
 const editValue = ref("");
 const savingString = ref(false);
 const savingJson = ref(false);
@@ -316,8 +320,8 @@ const metadataSizeLabel = computed(() => {
   return String(size);
 });
 const streamRows = computed<RedisStreamRow[]>(() => {
-  if (data.value?.data.kind !== "stream") return [];
-  return data.value.data.entries.map((entry, index) => ({
+  if (redisKind.value !== "stream") return [];
+  return streamEntries.value.map((entry, index) => ({
     id: `${index}:${entry.id}`,
     index,
     entry,
@@ -434,6 +438,25 @@ type RedisStreamRow = {
   entry: RedisStreamEntry;
 };
 
+function replaceStreamEntries(value: RedisValue) {
+  streamEntriesRequestId++;
+  streamEntriesLoadingMore.value = false;
+  if (value.data.kind === "stream") {
+    streamEntries.value = [...value.data.entries];
+    streamEntriesCursor.value = value.data.next_cursor;
+    return;
+  }
+  streamEntries.value = [];
+  streamEntriesCursor.value = undefined;
+}
+
+function resetStreamEntries() {
+  streamEntriesRequestId++;
+  streamEntries.value = [];
+  streamEntriesCursor.value = undefined;
+  streamEntriesLoadingMore.value = false;
+}
+
 function isSelectedStreamGroup(group: RedisStreamGroup, requestId = streamGroupDetailRequestId): boolean {
   return requestId === streamGroupDetailRequestId && selectedStreamGroup.value?.name.raw_base64 === group.name.raw_base64;
 }
@@ -462,6 +485,25 @@ function resetStreamMonitoring() {
   streamGroupsLoaded.value = false;
   streamGroupsLoading.value = false;
   streamGroupsError.value = "";
+}
+
+async function loadMoreStreamEntries() {
+  const cursor = streamEntriesCursor.value;
+  if (redisKind.value !== "stream" || !cursor || loading.value || streamEntriesLoadingMore.value) return;
+
+  const requestId = ++streamEntriesRequestId;
+  streamEntriesLoadingMore.value = true;
+  try {
+    const page = await api.redisGetStreamEntries(props.connectionId, props.db, props.keyRaw, cursor);
+    if (requestId !== streamEntriesRequestId || redisKind.value !== "stream" || streamEntriesCursor.value !== cursor) return;
+
+    streamEntries.value = [...streamEntries.value, ...page.entries];
+    streamEntriesCursor.value = page.next_cursor;
+  } catch (error) {
+    if (requestId === streamEntriesRequestId) toast(errorMessage(error), 3000);
+  } finally {
+    if (requestId === streamEntriesRequestId) streamEntriesLoadingMore.value = false;
+  }
 }
 
 async function loadStreamGroups(force = false): Promise<boolean> {
@@ -902,6 +944,7 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
       data.value = null;
       collectionItems.value = [];
       scanCursor.value = undefined;
+      resetStreamEntries();
       resetStreamMonitoring();
       stopAutoRefresh();
       emit("deleted", props.keyRaw);
@@ -929,6 +972,7 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
     emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
     collectionItems.value = redisValueCollectionItems(loadedValue);
+    replaceStreamEntries(loadedValue);
     if (loadedValue.data.kind !== "stream") resetStreamMonitoring();
 
     // A foreground load replaces the current value, so it also starts a new
@@ -1050,7 +1094,8 @@ function requestDeleteKey() {
 
 async function copyValue() {
   if (!data.value) return;
-  const text = redisValueCopyText(data.value, collectionItems.value);
+  const value = data.value.data.kind === "stream" ? { ...data.value, data: { ...data.value.data, entries: streamEntries.value } } : data.value;
+  const text = redisValueCopyText(value, collectionItems.value);
   try {
     await copyToClipboard(text);
     toast(t("redis.copied"), 2000);
@@ -1129,7 +1174,7 @@ function generateInsertStatements(): string | null {
       break;
     }
     case "stream": {
-      for (const entry of data.value.data.entries) {
+      for (const entry of streamEntries.value) {
         const fields = entry.fields.map(({ field, value }) => `${escapeRedisArg(field)} ${escapeRedisArg(value)}`).join(" ");
         commands.push(`XADD ${escapeRedisArg(key)} * ${fields}`);
       }
@@ -1772,6 +1817,7 @@ watch(
   () => {
     resetValueSearch();
     valueViewerSearchActive.value = false;
+    resetStreamEntries();
     resetStreamMonitoring();
   },
 );
@@ -2227,9 +2273,6 @@ defineExpose({ focusSearch });
           </div>
 
           <TabsContent value="entries" class="m-0 min-h-0 flex-1 flex flex-col">
-            <div class="px-4 py-1 text-xs text-muted-foreground border-b shrink-0">
-              {{ t("redis.entries", { count: streamRows.length }) }}
-            </div>
             <DynamicScroller class="flex-1 overflow-y-auto" :items="streamRows" :min-item-size="REDIS_STREAM_MIN_ROW_HEIGHT" :buffer="600" key-field="id">
               <template #default="{ item: row, active }">
                 <DynamicScrollerItem :item="row" :active="active" :size-dependencies="[streamFieldCount(row)]" :data-index="row.index">
@@ -2258,6 +2301,14 @@ defineExpose({ focusSearch });
                     </div>
                   </div>
                 </DynamicScrollerItem>
+              </template>
+              <template #after>
+                <div v-if="streamEntriesCursor" class="border-t p-2">
+                  <Button data-redis-stream-entries-more variant="outline" size="sm" class="h-7 w-full text-xs" :disabled="loading || streamEntriesLoadingMore" @click="loadMoreStreamEntries">
+                    <Loader2 v-if="streamEntriesLoadingMore" class="mr-1.5 h-3 w-3 animate-spin" />
+                    {{ t("redis.loadMoreEntries") }}
+                  </Button>
+                </div>
               </template>
             </DynamicScroller>
           </TabsContent>

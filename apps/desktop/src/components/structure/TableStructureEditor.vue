@@ -70,6 +70,7 @@ import {
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
   restoreDamengLengthUnitsAfterSave,
+  sameStructureIndexType,
   splitDataType,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -212,7 +213,7 @@ function indexChanged(index: EditableStructureIndex): boolean {
     !sameList(index.columns, original.columns) ||
     index.isUnique !== original.is_unique ||
     !sameText(index.filter, original.filter) ||
-    !sameText(index.indexType, original.index_type) ||
+    !sameStructureIndexType(index.indexType, original.index_type) ||
     !sameList(index.includedColumns, original.included_columns) ||
     !sameText(index.comment, original.comment)
   );

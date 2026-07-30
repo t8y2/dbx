@@ -13,6 +13,7 @@ const props = withDefaults(
     class?: string;
     inputClass?: string;
     showToggle?: boolean;
+    toggleTabIndex?: number;
     showLabel?: string;
     hideLabel?: string;
   }>(),
@@ -29,7 +30,16 @@ const toggleLabel = computed(() => (visible.value ? props.hideLabel || t("common
 <template>
   <div :class="props.class" class="relative">
     <Input v-model="model" :type="visible ? 'text' : 'password'" :placeholder="placeholder" :disabled="disabled" :class="[props.inputClass, props.showToggle ? 'pr-8' : undefined]" v-bind="$attrs" />
-    <button v-if="props.showToggle" type="button" :disabled="disabled" class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50" :aria-label="toggleLabel" :title="toggleLabel" @click="visible = !visible">
+    <button
+      v-if="props.showToggle"
+      type="button"
+      :disabled="disabled"
+      :tabindex="toggleTabIndex"
+      class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+      :aria-label="toggleLabel"
+      :title="toggleLabel"
+      @click="visible = !visible"
+    >
       <Eye v-if="!visible" class="size-3.5" />
       <EyeOff v-else class="size-3.5" />
     </button>

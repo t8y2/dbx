@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: dbx-release-main
+  group: agents-release
   cancel-in-progress: false
 
 jobs:
@@ -58,15 +58,66 @@ jobs:
 
           node .github/scripts/bump-agent-versions.mjs "${ARGS[@]}"
 
-          if ! git diff --quiet -- agents/versions.json; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add agents/versions.json
-            git commit -m "chore: bump module versions [skip ci]"
+      - name: Create agent version patch
+        run: git diff --binary -- agents/versions.json > agent-version-bump.patch
+
+      - name: Upload agent version patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-version-bump
+          path: agent-version-bump.patch
+          retention-days: 1
+
+  commit-versions:
+    name: Commit agent version bump
+    needs: bump-versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download agent version patch
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-version-bump
+
+      - name: Apply and push agent version bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main --no-tags
+          git switch --detach origin/main
+
+          if [ ! -s agent-version-bump.patch ]; then
+            echo "Agent versions are unchanged."
+            exit 0
+          fi
+
+          if git apply --check agent-version-bump.patch; then
+            git apply --index agent-version-bump.patch
+          elif git apply --reverse --check agent-version-bump.patch; then
+            echo "Agent version bump is already present on main."
+            exit 0
+          else
+            echo "::error::Agent version patch no longer applies cleanly to main."
+            exit 1
+          fi
+
+          git commit -m "chore: bump module versions [skip ci]"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Unable to push agent version bump after ${attempt} attempts."
+              exit 1
+            fi
             git fetch origin main --no-tags
             git rebase origin/main
-            git push origin HEAD:main
-          fi
+          done
 
   build-agents:
     needs: [bump-versions]
@@ -223,12 +274,12 @@ jobs:
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
             extension: ""
-            manylinux_image: quay.io/pypa/manylinux2014_aarch64
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x64
             extension: ""
-            manylinux_image: quay.io/pypa/manylinux2014_x86_64
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64
           - runner: windows-2022
             target: aarch64-pc-windows-msvc
             platform: windows-aarch64
@@ -385,7 +436,7 @@ jobs:
           path: "dbx-jre-*.tar.zst"
 
   release:
-    needs: [bump-versions, build-agents, build-oracle-native, build-xugu-native, build-kingbase-native, build-duckdb-native, build-jre]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-kingbase-native, build-duckdb-native, build-jre]
     runs-on: ubuntu-latest
     steps:
       - name: Create DBX bot release token
@@ -404,6 +455,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           token: ${{ steps.release-token.outputs.token }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -601,6 +653,9 @@ jobs:
           PREV_VERSIONS: ${{ needs.bump-versions.outputs.prev_versions }}
           PREV_TAG: ${{ needs.bump-versions.outputs.prev_tag }}
         run: |
+          set -euo pipefail
+          git rev-parse --verify "${PREV_TAG}^{commit}" > /dev/null
+
           NOTES=""
           DRIVER_NAMES=()
           module_names() {
@@ -715,22 +770,21 @@ jobs:
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded agent-registry.json"
 
-          # Upload all single-driver packages.
-          for f in release/dbx-agent-*.tar.zst; do
-            [ -f "$f" ] || continue
-            aws s3 cp "$f" \
-              "$R2_BUCKET/agents/drivers/$(basename $f)" \
-              --endpoint-url "$R2_ENDPOINT"
-            echo "Uploaded $(basename $f)"
-          done
+          # Upload all single-driver packages concurrently.
+          aws s3 cp release/ "$R2_BUCKET/agents/drivers/" \
+            --recursive \
+            --exclude "*" \
+            --include "dbx-agent-*.tar.zst" \
+            --endpoint-url "$R2_ENDPOINT"
+          echo "Uploaded single-driver packages"
 
-          # Upload JRE — always overwrite to ensure latest modules
-          for f in release/dbx-jre-*.tar.zst; do
-            [ ! -f "$f" ] && continue
-            key="agents/jre/$(basename $f)"
-            aws s3 cp "$f" "$R2_BUCKET/$key" --endpoint-url "$R2_ENDPOINT"
-            echo "Uploaded $(basename $f)"
-          done
+          # Upload JRE packages concurrently, always overwriting the stable names.
+          aws s3 cp release/ "$R2_BUCKET/agents/jre/" \
+            --recursive \
+            --exclude "*" \
+            --include "dbx-jre-*.tar.zst" \
+            --endpoint-url "$R2_ENDPOINT"
+          echo "Uploaded JRE packages"
 
   sync-release-to-cnb:
     name: Sync agents releases to CNB

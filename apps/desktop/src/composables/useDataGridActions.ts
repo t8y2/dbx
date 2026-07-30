@@ -14,7 +14,7 @@ import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from 
 import { loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS } from "@/lib/metadata/tableMetadataCache";
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
-import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 
@@ -137,6 +137,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     if (tab.mode === "data" && tableMetaForDataTab(tab)) {
       tab.whereInput = whereInput ?? "";
+      queryStore.clearInvalidDataTabSort(tab.id);
+      const realColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
+      const incomingSortMissing = realColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, realColumnNames);
+      if (incomingSortMissing) tab.orderByInput = undefined;
       const pageLimit = limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
       const pageOffset = offset ?? 0;
       console.info("[DBX][reloadData:start]", {
@@ -179,7 +183,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       }
       try {
         console.info("[DBX][reloadData:build-sql:start]", { traceId, elapsed: elapsed() });
-        const nextSql = await buildTableSql(tab, { whereInput, orderBy, limit: pageLimit, offset: pageOffset });
+        const nextSql = await buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset });
         console.info("[DBX][reloadData:build-sql:done]", { traceId, elapsed: elapsed() });
         queryStore.updateSql(tab.id, nextSql);
         console.info("[DBX][reloadData:execute:start]", { traceId, elapsed: elapsed() });

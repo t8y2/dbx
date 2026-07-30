@@ -48,8 +48,9 @@ type fakeRows struct {
 }
 
 type fallbackDriverState struct {
-	mu      sync.Mutex
-	queries []string
+	mu                sync.Mutex
+	queries           []string
+	rejectAttidentity bool
 }
 
 type fallbackDriver struct{}
@@ -207,13 +208,20 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			rows:    [][]driver.Value{{"id", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
 		}, nil
 	}
+	if connection.state.rejectAttidentity && strings.Contains(query, "a.attidentity") {
+		return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column a.attidentity does not exist"}
+	}
 	if strings.Contains(query, "sys_get_expr(") {
 		return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function sys_get_expr(pg_node_tree, oid) does not exist"}
 	}
 	if strings.Contains(query, "pg_get_expr(") {
+		var identity driver.Value = "d"
+		if strings.Contains(query, "CAST(NULL AS varchar(1)) AS attidentity") {
+			identity = nil
+		}
 		return &valueRows{
 			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
-			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, "d"}},
+			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -903,6 +911,51 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 	}
 	if sysCalls != 1 || pgCalls != 2 {
 		t.Fatalf("fallback choice was not cached: sys=%d pg=%d queries=%v", sysCalls, pgCalls, state.queries)
+	}
+}
+
+func TestColumnsFallbackWhenCatalogHasNoAttidentityAndCacheChoice(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{rejectAttidentity: true}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+
+	for call := 0; call < 2; call++ {
+		columns, err := server.getColumns("public", "orders")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columns[0].Extra != nil {
+			t.Fatalf("unexpected columns: %#v", columns)
+		}
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	var identityCalls, compatibleCalls, sysCalls, pgCalls int
+	for _, query := range state.queries {
+		if strings.Contains(query, "a.attidentity") {
+			identityCalls++
+		}
+		if strings.Contains(query, "CAST(NULL AS varchar(1)) AS attidentity") {
+			compatibleCalls++
+		}
+		if strings.Contains(query, "sys_get_expr(") {
+			sysCalls++
+		}
+		if strings.Contains(query, "pg_get_expr(") {
+			pgCalls++
+		}
+	}
+	if identityCalls != 1 || compatibleCalls != 3 || sysCalls != 2 || pgCalls != 2 {
+		t.Fatalf("fallback choices were not cached: identity=%d compatible=%d sys=%d pg=%d queries=%v", identityCalls, compatibleCalls, sysCalls, pgCalls, state.queries)
 	}
 }
 

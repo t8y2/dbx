@@ -87,13 +87,7 @@ fn mongo_list_databases_unauthorized(error: &str) -> bool {
 }
 
 fn mongo_collection_info(name: String, kind: mongo_driver::MongoCollectionKind) -> CollectionInfo {
-    CollectionInfo {
-        name: name.clone(),
-        id: name,
-        dimension: None,
-        kind: Some(kind.as_str().to_string()),
-        bucket_name: None,
-    }
+    CollectionInfo { name: name.clone(), id: name, kind: Some(kind.as_str().to_string()), ..Default::default() }
 }
 
 fn sort_mongo_collection_specs(
@@ -125,9 +119,9 @@ fn mongo_bucket_infos(names: &[String]) -> Vec<CollectionInfo> {
         .map(|bucket_name| CollectionInfo {
             name: bucket_name.clone(),
             id: format!("bucket:{bucket_name}"),
-            dimension: None,
             kind: Some("bucket".to_string()),
             bucket_name: Some(bucket_name),
+            ..Default::default()
         })
         .collect()
 }
@@ -221,10 +215,7 @@ pub async fn list_collections_core(
         }
         PoolKind::Elasticsearch(client) => {
             let names = sort_names(elasticsearch_driver::list_indices(client).await?);
-            Ok(names
-                .into_iter()
-                .map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None, kind: None, bucket_name: None })
-                .collect())
+            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
         }
         PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(client, database).await,
         PoolKind::Agent(client) => {

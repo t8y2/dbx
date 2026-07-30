@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1747,6 +1747,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "unicode-ident",
  "unicode-width",
  "utoipa",
  "uuid",
@@ -1758,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.46"
+version = "0.4.47"
 dependencies = [
  "async-trait",
  "dbx-core",

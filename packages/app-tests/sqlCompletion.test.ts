@@ -2371,6 +2371,41 @@ test("schema items include apply value with trailing dot", () => {
   assert.equal(shouldChainSqlCompletionAfterAccept({ type: "table", apply: "users" }), false);
 });
 
+test.each([
+  ["Foo", "FooDB"],
+  ["Bar", "BarDB"],
+])("suggests SQL Server database name %s as a chained qualifier", (prefix, database) => {
+  const sql = `select * from ${prefix}`;
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    schemas: ["FooDB", "BarDB"],
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+  const databaseItem = items.find((item) => item.type === "schema" && item.label === database);
+
+  assert.ok(databaseItem);
+  assert.equal(databaseItem.apply, `${database}.`);
+  assert.equal(shouldChainSqlCompletionAfterAccept(databaseItem), true);
+});
+
+test("suggests SQL Server schemas after a database qualifier", () => {
+  const sql = "select * from BarDB.d";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    schemas: ["dbo", "data"],
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+  const schemaItem = items.find((item) => item.type === "schema" && item.label === "dbo");
+
+  assert.ok(schemaItem);
+  assert.equal(schemaItem.apply, "dbo.");
+  assert.equal(shouldChainSqlCompletionAfterAccept(schemaItem), true);
+});
+
 // --- Quoted identifier fix ---
 
 test("handles quoted identifiers with dots in splitQualifiedName", () => {

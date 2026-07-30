@@ -82,6 +82,21 @@ describe("queryStore database open state", () => {
     expect(store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "iceberg_catalog")).toBe(icebergTabId);
   });
 
+  it("clears the catalog when changing a query tab connection", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const tabId = store.createTab("doris-1", "sales", "Query", "query", undefined, undefined, "hive_catalog");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+
+    store.updateConnection(tabId, "doris-2", "analytics");
+
+    expect(tab.connectionId).toBe("doris-2");
+    expect(tab.catalog).toBeUndefined();
+    expect(tab.database).toBe("analytics");
+    expect(tab.schema).toBeUndefined();
+  });
+
   it("closes data and structure tabs for a dropped table object", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

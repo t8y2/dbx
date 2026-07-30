@@ -78,6 +78,7 @@ describe("queryStore table data refresh", () => {
       columns: [
         { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
         { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        { name: "created_at", data_type: "timestamp", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
       ],
       primaryKeys: ["id"],
     });
@@ -112,7 +113,7 @@ describe("queryStore table data refresh", () => {
       tableName: "users",
       tableType: "TABLE",
       catalog: undefined,
-      columns: ["id", "status"],
+      columns: ["id", "status", "created_at"],
       primaryKeys: ["id"],
       includeRowId: false,
       whereInput: "status = 'ACTIVE'",
@@ -135,7 +136,10 @@ describe("queryStore table data refresh", () => {
         schema: "public",
         tableName: "users",
         tableType: "TABLE",
-        columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        columns: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "created_at", data_type: "timestamp", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+        ],
         primaryKeys: ["id"],
       });
     }
@@ -160,6 +164,185 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(store.tabs.find((tab) => tab.id === firstTabId)?.result?.rows).toEqual([]);
     expect(store.tabs.find((tab) => tab.id === secondTabId)?.result).toBeUndefined();
+  });
+
+  it("clears a structured sort when refreshed table metadata no longer contains its column", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "old_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.whereInput = "id > 0";
+    tab.orderByInput = '"old_name" ASC';
+    tab.resultSortColumn = "old_name";
+    tab.resultSortColumnIndex = 1;
+    tab.resultSortDirection = "asc";
+    tab.resultSortMode = "database";
+    tab.resultSortedSql = 'SELECT * FROM public.users ORDER BY "old_name" ASC';
+    tab.resultLocalSortOriginalRows = [[1, "alpha"]];
+    tab.resultLocalSortOriginalMongoDocuments = [{ id: 1, old_name: "alpha" }];
+    tab.resultLocalSortOriginalMongoCopyDocuments = [{ id: 1, old_name: "alpha" }];
+    tab.resultPageLimit = 25;
+    tab.resultPageOffset = 50;
+
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortColumnIndex).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.resultSortMode).toBeUndefined();
+    expect(tab.resultSortedSql).toBeUndefined();
+    expect(tab.resultLocalSortOriginalRows).toBeUndefined();
+    expect(tab.resultLocalSortOriginalMongoDocuments).toBeUndefined();
+    expect(tab.resultLocalSortOriginalMongoCopyDocuments).toBeUndefined();
+    expect(tab.orderByInput).toBeUndefined();
+    expect(tab.whereInput).toBe("id > 0");
+    expect(tab.resultPageLimit).toBe(25);
+    expect(tab.resultPageOffset).toBe(50);
+  });
+
+  it("preserves manual conditions when metadata changes without an invalid structured sort", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.whereInput = "id > 0";
+    tab.orderByInput = "LOWER(name) ASC";
+
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    expect(tab.whereInput).toBe("id > 0");
+    expect(tab.orderByInput).toBe("LOWER(name) ASC");
+  });
+
+  it("preserves a manual order when only residual structured sort state is invalid", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultSortColumn = "old_name";
+    tab.resultSortColumnIndex = 1;
+    tab.resultSortDirection = "asc";
+    tab.resultSortMode = "database";
+    tab.orderByInput = "LOWER(new_name) ASC";
+
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.orderByInput).toBe("LOWER(new_name) ASC");
+  });
+
+  it("clears quoted sorts after a case-only column rename", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultSortColumn = "DisplayName";
+    tab.resultSortColumnIndex = 1;
+    tab.resultSortDirection = "asc";
+    tab.resultSortMode = "database";
+    tab.orderByInput = '"DisplayName" ASC';
+
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "displayname", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.orderByInput).toBeUndefined();
+  });
+
+  it("drops restored stale sort state before building a table refresh query", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultSortColumn = "old_name";
+    tab.resultSortColumnIndex = 1;
+    tab.resultSortDirection = "asc";
+    tab.resultSortMode = "database";
+    tab.orderByInput = '"old_name" ASC';
+
+    await expect(store.refreshDataTab(tabId)).resolves.toBe(true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: undefined }));
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.orderByInput).toBeUndefined();
+  });
+
+  it("drops a stale generated order even when the structured sort state was already cleared", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.orderByInput = '"old_name" ASC';
+
+    await expect(store.refreshDataTab(tabId)).resolves.toBe(true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: undefined }));
+    expect(tab.orderByInput).toBeUndefined();
   });
 
   it("uses the table-open default when a refreshed data tab has no saved pagination", async () => {

@@ -3040,6 +3040,7 @@ export default withEnglishFallback({
     noPendingEntries: "대기 항목이 없습니다",
     entryId: "항목 ID",
     deliveries: "전달",
+    loadMoreEntries: "항목 더 불러오기",
     loadMorePending: "대기 항목 더 불러오기",
     noExpiry: "만료 없음",
     expiry: "만료",

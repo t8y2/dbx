@@ -758,6 +758,16 @@ export function rehydrateColumnDraftsFromMetadata(draftColumns: EditableStructur
   return [...nextColumns, ...missingMetadataDrafts];
 }
 
+/** Canonicalize index method for structure editor options (e.g. Postgres `btree` → `BTREE`). */
+export function normalizeStructureIndexType(indexType: string | null | undefined): string {
+  return (indexType ?? "").trim().toUpperCase();
+}
+
+/** Case-insensitive index-type equality (draft is uppercased; API may still return lowercase amname). */
+export function sameStructureIndexType(left: string | null | undefined, right: string | null | undefined): boolean {
+  return normalizeStructureIndexType(left) === normalizeStructureIndexType(right);
+}
+
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
   return indexes.map((index) => ({
     id: `existing:${index.name}`,
@@ -767,7 +777,8 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
     isUnique: index.is_unique,
     isPrimary: index.is_primary,
     filter: index.filter ?? "",
-    indexType: index.index_type ?? "",
+    // Match Select options (BTREE/GIN/…); Postgres pg_am.amname is lowercase.
+    indexType: normalizeStructureIndexType(index.index_type),
     includedColumns: index.included_columns ? [...index.included_columns] : [],
     comment: index.comment ?? "",
     original: index,

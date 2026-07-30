@@ -1116,6 +1116,21 @@ export interface VectorCollectionMeta {
   collectionId?: string;
 }
 
+export interface MilvusFieldInfo {
+  name: string;
+  dataType: string;
+  dimension?: number;
+  primaryKey: boolean;
+  autoId: boolean;
+  nullable: boolean;
+  hasDefaultValue: boolean;
+  isFunctionOutput: boolean;
+}
+
+export interface MilvusCollectionSchema {
+  fields: MilvusFieldInfo[];
+}
+
 /** Mongo collection node metadata (not SQL tableType). */
 export type MongoCollectionKind = "collection" | "view" | "timeseries";
 
@@ -1127,6 +1142,7 @@ export interface CollectionInfo {
   name: string;
   id: string;
   dimension?: number;
+  milvusSchema?: MilvusCollectionSchema;
   kind?: MongoCollectionKind | "bucket";
   bucketName?: string;
 }

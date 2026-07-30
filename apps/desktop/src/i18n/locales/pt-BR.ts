@@ -3719,6 +3719,8 @@ export default withEnglishFallback({
     fileProgress: "Arquivo {current} de {total}",
     fileColumn: "Arquivo",
     totalFiles: "{count} arquivos",
+    expandSummary: "Expandir Tabela Estatística",
+    restoreSummary: "Restaurar Tabela Estatística",
   },
   diff: {
     title: "Comparar Esquemas",

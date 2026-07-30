@@ -51,6 +51,26 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 
 Most Java agents target JRE 21. Native agents, such as `duckdb`, `oracle`, `kingbase`, and `xugu`, do not require a JRE. DBX downloads and manages the JRE 21 installation automatically for Java agents.
 
+## JDBC Connection Pooling
+
+All multi-session Java JDBC agents share HikariCP pools inside one Agent runtime through `AbstractJdbcAgent`. Ordinary metadata and short query requests borrow and return a connection, while paged cursors and explicit session-state SQL keep their connection pinned until the cursor or logical session closes. Stateful connections are evicted instead of being reused by another session. Agent-specific URL, transport fallback, encrypted-file, and native-driver behavior is preserved through shared lifecycle hooks.
+
+The default maximum is 8 physical connections per immutable connection identity, with 0 minimum idle connections. This keeps short-query connection pressure bounded while allowing up to 8 concurrently pinned paged cursors or stateful sessions. The defaults can be overridden with JVM system properties or environment variables:
+
+| System property | Environment variable | Default |
+|---|---|---:|
+| `dbx.agent.jdbc.pool.enabled` | `DBX_AGENT_JDBC_POOL_ENABLED` | `true` |
+| `dbx.agent.jdbc.pool.maximumPoolSize` | `DBX_AGENT_JDBC_POOL_MAXIMUM_POOL_SIZE` | `8` |
+| `dbx.agent.jdbc.pool.minimumIdle` | `DBX_AGENT_JDBC_POOL_MINIMUM_IDLE` | `0` |
+| `dbx.agent.jdbc.pool.connectionTimeoutMillis` | `DBX_AGENT_JDBC_POOL_CONNECTION_TIMEOUT_MILLIS` | `30000` |
+| `dbx.agent.jdbc.pool.validationTimeoutMillis` | `DBX_AGENT_JDBC_POOL_VALIDATION_TIMEOUT_MILLIS` | `5000` |
+| `dbx.agent.jdbc.pool.idleTimeoutMillis` | `DBX_AGENT_JDBC_POOL_IDLE_TIMEOUT_MILLIS` | `120000` |
+| `dbx.agent.jdbc.pool.maxLifetimeMillis` | `DBX_AGENT_JDBC_POOL_MAX_LIFETIME_MILLIS` | `1800000` |
+| `dbx.agent.jdbc.pool.retireMillis` | `DBX_AGENT_JDBC_POOL_RETIRE_MILLIS` | `300000` |
+
+HikariCP is shaded into each pooled Agent JAR. Existing installations already using the managed JRE 21 do not need to reinstall or replace the JRE.
+Set `DBX_AGENT_JDBC_POOL_ENABLED=false` for a runtime-level compatibility fallback to the previous one-connection-per-logical-session behavior.
+
 ## Choosing a Driver Language
 
 For new agents, prefer a **native (Go or Rust) driver** over a Java/JDBC agent whenever a mature, license-compatible native driver is available. Native agents ship as a single self-contained executable with no JRE, which significantly reduces memory footprint and startup time — the JVM baseline that every Java agent pays even when idle is avoided entirely.

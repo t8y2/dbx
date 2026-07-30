@@ -2034,6 +2034,93 @@ test("uses dbo as SQL Server metadata schema when query omits schema", async () 
   }
 });
 
+test("uses the qualified SQL Server database as the editable result target", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const sql = "select * from BarDB.dbo.TUser AS ts where UserId = 10279";
+  const columnRequests: Array<{ database: string | null; schema: string | null; table: string | null; catalog: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(sqlServerConn("sqlserver-cross-database"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["ID", "UserId"],
+            rows: [[1, 10279]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            catalog: "BarDB",
+            catalogQuoted: false,
+            schema: "dbo",
+            schemaQuoted: false,
+            tableName: "TUser",
+            tableNameQuoted: false,
+            tableAlias: "ts",
+            selectStar: true,
+            columns: [],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      columnRequests.push({
+        database: params.get("database"),
+        schema: params.get("schema"),
+        table: params.get("table"),
+        catalog: params.get("catalog"),
+      });
+      return new Response(
+        JSON.stringify([
+          { name: "ID", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "UserId", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("sqlserver-cross-database", "FooDB", "Query 1", "query");
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "TUser");
+    assert.deepEqual(columnRequests, [{ database: "BarDB", schema: "dbo", table: "TUser", catalog: "BarDB" }]);
+    assert.equal(tab?.tableMeta?.database, "BarDB");
+    assert.equal(tab?.tableMeta?.catalog, "BarDB");
+    assert.equal(tab?.tableMeta?.schema, "dbo");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("evicting cached tab results releases multi-result payloads and sessions", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

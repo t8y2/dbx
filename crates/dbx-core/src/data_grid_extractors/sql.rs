@@ -229,7 +229,9 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
             || (for_update
                 && context.request.options.sql.skip_computed_columns
                 && info.is_some_and(|column| is_non_identity_generated_column(Some(column))))
-            || (context.request.options.sql.skip_generated_columns && info.is_some_and(is_auto_generated_column))
+            || (context.request.options.sql.skip_generated_columns
+                && info.is_some_and(is_auto_generated_column)
+                && !is_primary_key)
             || (for_update && is_primary_key)
             || (!for_update && context.request.options.sql.exclude_primary_keys_from_insert && is_primary_key);
         if omit {

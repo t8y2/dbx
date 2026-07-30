@@ -1918,6 +1918,78 @@ describe("connectionStore metadata loading", () => {
     expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(false);
   });
 
+  it("does not re-expand a node collapsed while its load is still in flight", async () => {
+    let resolveTables!: (tables: TableInfo[]) => void;
+    const listTables = vi.fn(
+      () =>
+        new Promise<TableInfo[]>((resolve) => {
+          resolveTables = resolve;
+        }),
+    );
+    const listObjects = vi.fn().mockResolvedValue([]);
+    const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
+    const connectDb = vi.fn().mockResolvedValue("mysql-1");
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listTables,
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    const dbNode: TreeNode = {
+      id: test1Id,
+      label: "test1",
+      type: "database",
+      connectionId: connection.id,
+      database: "test1",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [dbNode],
+      },
+    ];
+
+    const loadPromise = store.loadTables(connection.id, "test1");
+    await vi.waitFor(() => expect(listTables).toHaveBeenCalledTimes(1));
+    expect(dbNode.isLoading).toBe(true);
+    expect(dbNode.isExpanded).toBe(false);
+
+    // Simulate the user collapsing the node while the metadata load is still in flight.
+    dbNode.isExpanded = false;
+    store.cancelTreeNodeLoad(dbNode.id);
+
+    resolveTables([{ name: "users", table_type: "TABLE", comment: null }]);
+    await loadPromise;
+
+    // The in-flight load must not re-expand the node, and the spinner must be cleared.
+    expect(dbNode.isLoading).toBe(false);
+    expect(dbNode.isExpanded).toBe(false);
+  });
+
   it("does not apply load-more results after the parent generation is invalidated", async () => {
     const firstPage = Array.from({ length: 201 }, (_, index) => ({
       name: `t_${String(index + 1).padStart(4, "0")}`,

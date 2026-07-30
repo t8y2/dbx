@@ -2810,8 +2810,10 @@ export const useQueryStore = defineStore("query", () => {
   function resolveEditableSourceMetadataTarget(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string): EditableSourceMetadataTarget {
     // Metadata must resolve in the same namespace as the query execution. An
     // empty query-tab database still executes in the connection's default DB,
-    // while database-tree dialects may override it with a qualified source.
-    const metadataDatabase = (connectionUsesDatabaseObjectTreeMode(conn) ? source.schema : undefined) || executionDatabase || conn?.database || tab.database;
+    // while database-tree dialects and SQL Server 3-part names may override it
+    // with a qualified source.
+    const qualifiedSourceDatabase = dbType === "sqlserver" ? source.catalog : connectionUsesDatabaseObjectTreeMode(conn) ? source.schema : undefined;
+    const metadataDatabase = qualifiedSourceDatabase || executionDatabase || conn?.database || tab.database;
     let schema = source.schema || tab.schema;
     if (!schema) {
       if (dbType === "postgres" || dbType === "kwdb") schema = "public";

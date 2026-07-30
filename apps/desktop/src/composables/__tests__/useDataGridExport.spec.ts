@@ -417,6 +417,22 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
   });
 
+  it("keeps an auto-increment primary key when copying only the primary key column as INSERT", () => {
+    const autoIncrementTable: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+        { name: "name", data_type: "varchar", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+
+    const state = createExportState(autoIncrementTable, ["id", "name"], matrix);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
+  });
+
   it("sends only selected values for non-SQL extraction and marks column selections", async () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["Ada"]] };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({

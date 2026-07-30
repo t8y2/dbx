@@ -1,3 +1,7 @@
 dependencies {
     implementation 'com.google.code.gson:gson:2.12.1'
+    compileOnly 'com.zaxxer:HikariCP:7.0.2'
+    testImplementation 'com.zaxxer:HikariCP:7.0.2'
+    testImplementation 'com.h2database:h2:2.3.232'
+    testRuntimeOnly 'org.slf4j:slf4j-nop:2.0.17'
 }

@@ -28,6 +28,8 @@ configure([project(':common'), project(':test-support')]) {
 
 dependencies {
     implementation project(':common')
+    implementation 'com.zaxxer:HikariCP:7.0.2'
+    runtimeOnly 'org.slf4j:slf4j-nop:2.0.17'
 
     // Bundled driver example:
     // implementation 'com.example:example-jdbc:1.2.3'

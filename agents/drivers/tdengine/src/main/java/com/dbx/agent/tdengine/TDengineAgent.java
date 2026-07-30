@@ -1,6 +1,6 @@
 package com.dbx.agent.tdengine;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -46,7 +46,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public final class TDengineAgent extends BaseDatabaseAgent {
+public final class TDengineAgent extends AbstractJdbcAgent {
     private static final long TABLE_CACHE_TTL_MILLIS = 10_000L;
     private static final DateTimeFormatter TDENGINE_TIMESTAMP_FORMAT =
         new DateTimeFormatterBuilder()
@@ -62,32 +62,63 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     private static final Pattern COMPOSITE_KEY_PATTERN =
         Pattern.compile("(?i)\\bCOMPOSITE\\s+KEY\\b");
 
-    private Connection connection;
     private final Object tableCacheLock = new Object();
     private String tableCacheSchema = "";
     private long tableCacheTimeMillis;
     private List<TableInfo> tableCache = Collections.emptyList();
+    private Connection restfulStateConnection;
+    private String restfulOriginalCatalog;
+    private String restfulOriginalDatabase;
 
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return TDengineTransport.WEBSOCKET.driverClass();
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            connection = TDengineConnectionFactory.open(params);
-            clearTableCache();
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        String connectionString = params.getConnection_string() == null ? "" : params.getConnection_string().trim();
+        if (!connectionString.isBlank()) {
+            return TDengineJdbcUrl.sanitizeConnectionString(connectionString);
+        }
+        TDengineJdbcUrl.TransportPreference preference = TDengineJdbcUrl.transportPreference(params.getUrl_params());
+        TDengineTransport transport = preference == TDengineJdbcUrl.TransportPreference.REST
+            ? TDengineTransport.REST
+            : TDengineTransport.WEBSOCKET;
+        return TDengineJdbcUrl.from(params, transport);
     }
 
     @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            try (Connection conn = TDengineConnectionFactory.open(params)) {
-                return conn.isValid(5);
-            }
-        });
+    protected void loadDriver(ConnectParams params) {
+    }
+
+    @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        return TDengineConnectionFactory.open(params);
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        clearTableCache();
+        clearRestfulState();
+    }
+
+    @Override
+    protected void beforePooledConnectionReturn(Connection connection) throws Exception {
+        if (restfulStateConnection != connection) {
+            return;
+        }
+        try {
+            restoreRestfulConnectionState(connection, restfulOriginalCatalog, restfulOriginalDatabase);
+        } finally {
+            clearRestfulState();
+        }
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        clearTableCache();
+        clearRestfulState();
     }
 
     @Override
@@ -215,7 +246,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::tdengineResultValue
+            this::resultValue
         );
         if (mayChangeMetadata(sql)) {
             clearTableCache();
@@ -231,7 +262,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
-            this::tdengineResultValue
+            this::resultValue
         );
     }
 
@@ -243,7 +274,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
-            this::tdengineResultValue
+            this::resultValue
         );
     }
 
@@ -271,11 +302,22 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     }
 
     private String prepareExecutionSchema(String schema) {
-        return unchecked(() -> prepareExecutionSchema(requireConnected(), schema));
+        return unchecked(() -> {
+            Connection connection = requireConnected();
+            if (schema != null
+                && !schema.trim().isEmpty()
+                && unwrapConnection(connection, RestfulConnection.class) != null
+                && restfulStateConnection != connection) {
+                restfulStateConnection = connection;
+                restfulOriginalCatalog = connection.getCatalog();
+                restfulOriginalDatabase = connection.getClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME);
+            }
+            return prepareExecutionSchema(connection, schema);
+        });
     }
 
     static String prepareExecutionSchema(Connection connection, String schema) throws SQLException {
-        if (!(connection instanceof RestfulConnection) || schema == null || schema.trim().isEmpty()) {
+        if (unwrapConnection(connection, RestfulConnection.class) == null || schema == null || schema.trim().isEmpty()) {
             return schema;
         }
 
@@ -286,15 +328,13 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return null;
     }
 
-    @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-            clearTableCache();
-        });
+    static void restoreRestfulConnectionState(Connection connection, String catalog, String database) throws SQLException {
+        connection.setCatalog(catalog);
+        if (database == null) {
+            connection.getClientInfo().remove(TSDBDriver.PROPERTY_KEY_DBNAME);
+        } else {
+            connection.setClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME, database);
+        }
     }
 
     private List<TableInfo> queryTables(String sql, String tableType, boolean includesStableName) throws Exception {
@@ -340,6 +380,12 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             tableCacheTimeMillis = 0L;
             tableCache = Collections.emptyList();
         }
+    }
+
+    private void clearRestfulState() {
+        restfulStateConnection = null;
+        restfulOriginalCatalog = null;
+        restfulOriginalDatabase = null;
     }
 
     private static boolean cacheFresh(long cachedAtMillis) {
@@ -452,7 +498,8 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         }
     }
 
-    private Object tdengineResultValue(ResultSet rs, int index, int sqlType) {
+    @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = switch (sqlType) {
                 case Types.BIGINT -> rs.getLong(index);

@@ -21,15 +21,10 @@ NATIVE_ONLY_AGENT_MODULES = {
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {
     "h2-legacy": "reuses the H2 agent implementation with an isolated legacy driver version",
-    "access": "custom Access metadata and URL behavior pending migration",
-    "dameng": "custom Dameng metadata and DDL pending migration",
-    "db2": "custom DB2 metadata pending migration",
-    "gbase8s": "custom GBase 8s metadata pending migration",
-    "goldendb": "custom GoldenDB metadata pending migration",
-    "informix": "custom Informix metadata pending migration",
-    "neo4j": "custom Neo4j transaction/query behavior pending migration",
-    "sundb": "custom SunDB metadata pending migration",
-    "tdengine": "custom TDengine WebSocket JDBC behavior pending migration",
+    "access": "shared lifecycle with a test-only non-creating Access URL",
+    "dameng": "shared lifecycle with protocol-safe driver loading and native explain access",
+    "informix": "shared lifecycle with contextual connection error reporting",
+    "tdengine": "shared lifecycle with WebSocket-to-REST transport fallback",
 }
 APPROVED_JDBC_BASES = {
     "AbstractJdbcAgent",
@@ -189,6 +184,25 @@ def validate_jdbc_architecture(root: Path, modules: set[str]) -> list[str]:
     return problems
 
 
+def validate_jdbc_pool_coverage(root: Path, modules: set[str]) -> list[str]:
+    build_file = root / "build.gradle"
+    if not build_file.exists():
+        return []
+    match = re.search(
+        r"\bdef\s+pooledJdbcProjects\s*=\s*\[(.*?)\]\s*as\s+Set",
+        build_file.read_text(encoding="utf-8"),
+        flags=re.S,
+    )
+    if match is None:
+        return ["build.gradle: missing pooledJdbcProjects set"]
+    pooled = set(re.findall(r"['\"]([^'\"]+)['\"]", match.group(1)))
+    expected = modules - NON_JDBC_AGENT_MODULES - set(NATIVE_ONLY_AGENT_MODULES)
+    return (
+        [f"JDBC module missing pooled runtime dependency: {module}" for module in sorted(expected - pooled)]
+        + [f"non-JDBC module listed as pooled JDBC runtime: {module}" for module in sorted(pooled - expected)]
+    )
+
+
 def validate_authoring_template(root: Path) -> list[str]:
     template = root / "docs/examples/jdbc-agent-template/src/main/java/com/dbx/agent/template/TemplateAgent.java"
     if not template.exists():
@@ -294,6 +308,7 @@ def validate(root: Path) -> list[str]:
         + validate_source_patterns(root)
         + validate_manifest_fields(root, modules)
         + validate_jdbc_architecture(root, modules)
+        + validate_jdbc_pool_coverage(root, modules)
         + validate_authoring_template(root)
         + validate_release_runtime_keys(root)
         + validate_no_kotlin_residue(root)

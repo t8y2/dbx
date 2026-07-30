@@ -506,7 +506,12 @@ function isGroupLabel(node: TreeNode): boolean {
 async function toggle() {
   const node = activeNode.value;
   if (node.isLoading) {
-    if (!node.isExpanded) {
+    if (node.isExpanded) {
+      node.isExpanded = false;
+      if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+      connectionStore.cancelTreeNodeLoad(node.id);
+      emit("node-toggled", node, true);
+    } else {
       node.isExpanded = true;
       emit("node-toggled", node, false);
     }

@@ -31,18 +31,34 @@ test("complex tree changes retain the full rebuild fallback", () => {
 });
 
 test("tree toggles synchronize filtered node clones with the live sidebar tree", () => {
-  const liveConnection: TreeNode = {
+  const expandedConnection: TreeNode = {
     id: "connection-1",
     label: "Connection 1",
     type: "connection",
     connectionId: "connection-1",
     isExpanded: true,
   };
-  const renderedClone: TreeNode = { ...liveConnection, isExpanded: false };
+  const collapsedClone: TreeNode = { ...expandedConnection, isExpanded: false };
+  const collapsedConnection: TreeNode = {
+    id: "connection-2",
+    label: "Connection 2",
+    type: "connection",
+    connectionId: "connection-2",
+    isExpanded: false,
+  };
+  const expandedClone: TreeNode = { ...collapsedConnection, isExpanded: true };
 
-  assert.equal(syncSidebarTreeNodeExpansion([liveConnection], renderedClone), true);
-  assert.equal(liveConnection.isExpanded, false);
-  assert.equal(syncSidebarTreeNodeExpansion([liveConnection], liveConnection), false);
+  assert.equal(syncSidebarTreeNodeExpansion([expandedConnection], collapsedClone), true);
+  assert.equal(expandedConnection.isExpanded, false);
+  assert.equal(syncSidebarTreeNodeExpansion([collapsedConnection], expandedClone), true);
+  assert.equal(collapsedConnection.isExpanded, true);
+  assert.equal(syncSidebarTreeNodeExpansion([expandedConnection], expandedConnection), false);
+});
+
+test("local table search preserves live expansion state", () => {
+  assert.match(connectionTree, /return \{ \.\.\.node, children: matchingChildren \};/);
+  assert.doesNotMatch(connectionTree, /children: matchingChildren,\s*isExpanded:\s*true/);
+  assert.match(connectionTree, /function onNodeToggled\(node: TreeNode\) \{\s*if \(isTreeSearchFiltering\.value\) return;\s*syncSidebarTreeNodeExpansion/);
 });
 
 test("tree rebuilds keep a context menu only while its target row remains visible", () => {

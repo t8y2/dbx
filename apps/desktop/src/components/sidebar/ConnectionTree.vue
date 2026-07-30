@@ -385,7 +385,7 @@ function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
         : indexed
           ? buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) })
           : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
-    return { ...node, children: matchingChildren, isExpanded: true };
+    return { ...node, children: matchingChildren };
   });
 }
 
@@ -1181,8 +1181,8 @@ function onSearchToggle(node: TreeNode) {
   searchCollapsedIds.value = next;
 }
 
-function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
-  if (isTreeSearchFiltering.value || !wasExpanded) return;
+function onNodeToggled(node: TreeNode) {
+  if (isTreeSearchFiltering.value) return;
   syncSidebarTreeNodeExpansion(store.treeNodes, node);
 }
 

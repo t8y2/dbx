@@ -205,7 +205,7 @@ import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { DataGridSortDirection, DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarCopyCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -1629,6 +1629,23 @@ function clearOrderByInput() {
 watch(orderByInput, (value) => {
   emit("update:orderByInput", value);
 });
+
+watch(
+  () => props.initialOrderByInput ?? "",
+  (value) => {
+    if (value !== orderByInput.value) orderByInput.value = value;
+  },
+);
+
+watch(
+  () => props.tableMeta?.columns.map((column) => column.name),
+  (columns) => {
+    if (!columns?.length || !simpleDataGridOrderByReferencesMissingColumn(orderByInput.value, columns)) return;
+    clearSort();
+    orderByInput.value = "";
+  },
+  { immediate: true },
+);
 
 const isApplyingWhere = ref(false);
 const rowStatusFilter = ref<RowStatusFilter>("all");

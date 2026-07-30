@@ -7,6 +7,23 @@ export interface DataGridSortState {
   direction: DataGridSortDirection;
 }
 
+export function simpleDataGridOrderByColumn(orderBy: string | undefined): string | undefined {
+  const match = orderBy?.trim().match(/^((?:n\.)?(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])+\]|[A-Za-z_][A-Za-z0-9_$]*))\s+(?:ASC|DESC)$/i);
+  if (!match) return undefined;
+  let identifier = match[1]!;
+  if (/^n\./i.test(identifier)) identifier = identifier.slice(2);
+  if (identifier.startsWith('"')) return identifier.slice(1, -1).replace(/""/g, '"');
+  if (identifier.startsWith("`")) return identifier.slice(1, -1).replace(/``/g, "`");
+  if (identifier.startsWith("[")) return identifier.slice(1, -1).replace(/\]\]/g, "]");
+  return identifier;
+}
+
+export function simpleDataGridOrderByReferencesMissingColumn(orderBy: string | undefined, columns: readonly string[]): boolean {
+  const orderByColumn = simpleDataGridOrderByColumn(orderBy);
+  if (!orderByColumn) return false;
+  return !columns.some((column) => column === orderByColumn || column.toLocaleLowerCase() === orderByColumn.toLocaleLowerCase());
+}
+
 export function nextDataGridSortState(current: DataGridSortState, column: string, columnIndex: number): DataGridSortState {
   if (current.column === column && current.columnIndex === columnIndex) {
     if (current.direction === "asc") {

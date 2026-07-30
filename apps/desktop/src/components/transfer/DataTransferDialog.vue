@@ -17,7 +17,7 @@ import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { isSameTransferDatabase, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
-import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
+import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
 import type { CatalogInfo } from "@/types/database";
 import { ArrowRightLeft, ArrowLeftRight, Loader2, Square, CheckSquare } from "@lucide/vue";
@@ -76,7 +76,7 @@ const ownershipDialogOpen = ref(false);
 const ownershipMissingOwners = ref<string[]>([]);
 const ownershipTargetOwner = ref("");
 const pendingOwnershipRequest = ref<api.TransferRequest | null>(null);
-const pendingOwnershipRefresh = ref<{ targetConnection: string; targetDatabase: string; targetSchema: string; shouldRefreshTargetTree: boolean } | null>(null);
+const pendingOwnershipRefresh = ref<{ shouldRefreshTargetTree: boolean } | null>(null);
 
 const filteredTables = computed(() => {
   const q = tableSearch.value.toLowerCase();
@@ -182,8 +182,9 @@ async function loadDatabasesForCatalog(connectionId: string, catalog: string, ta
   if (!connectionId || !catalog) return;
   try {
     await store.ensureConnected(connectionId);
-    const dbs = await api.listDorisCatalogDatabases(connectionId, catalog);
-    const names = dbs.map((db) => db.name);
+    const config = store.getConfig(connectionId);
+    if (!config) return;
+    const names = await fetchCatalogNamespaceOptions(connectionId, catalog, config);
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -474,9 +475,6 @@ async function startTransfer() {
         ownershipTargetOwner.value = preview.targetOwner;
         pendingOwnershipRequest.value = request;
         pendingOwnershipRefresh.value = {
-          targetConnection,
-          targetDatabase: targetDatabaseName,
-          targetSchema: effectiveTargetSchema,
           shouldRefreshTargetTree,
         };
         ownershipDialogOpen.value = true;
@@ -489,16 +487,16 @@ async function startTransfer() {
     }
   }
 
-  runTransfer(request, targetConnection, targetDatabaseName, effectiveTargetSchema, shouldRefreshTargetTree);
+  runTransfer(request, shouldRefreshTargetTree);
 }
 
-function runTransfer(request: api.TransferRequest, targetConnection: string, targetDatabaseName: string, effectiveTargetSchema: string, shouldRefreshTargetTree: boolean) {
+function runTransfer(request: api.TransferRequest, shouldRefreshTargetTree: boolean) {
   isSubmitting.value = true;
-  startDataTransferTask(request, `${request.sourceDatabase} → ${targetDatabaseName}`, {
+  startDataTransferTask(request, `${request.sourceDatabase} → ${request.targetDatabase}`, {
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
-        await store.refreshObjectListTreeNode(targetConnection, targetDatabaseName, effectiveTargetSchema);
+        await store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog);
       }
     },
   });
@@ -518,7 +516,7 @@ function resolveOwnershipDecision(policy: api.TransferOwnershipPolicy | null) {
     isSubmitting.value = false;
     return;
   }
-  runTransfer({ ...request, ownershipPolicy: policy }, refresh.targetConnection, refresh.targetDatabase, refresh.targetSchema, refresh.shouldRefreshTargetTree);
+  runTransfer({ ...request, ownershipPolicy: policy }, refresh.shouldRefreshTargetTree);
 }
 
 function getConnectionName(id: string) {

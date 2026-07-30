@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   databaseAfterCatalogChange,
   databaseOptionsForConnection,
+  fetchCatalogNamespaceOptions,
   fetchNamespaceOptionsForConnection,
   fetchSqlFileTargetOptions,
   namespaceOptionsAreSchemas,
@@ -128,6 +129,19 @@ describe("namespace options", () => {
         visible_databases: ["analytics"],
       }),
     ).toEqual(["analytics"]);
+  });
+
+  it("preserves visible database filtering for catalog-scoped transfer options", async () => {
+    mocks.listDorisCatalogDatabases.mockResolvedValue([{ name: "app" }, { name: "analytics" }]);
+
+    await expect(
+      fetchCatalogNamespaceOptions("connection-1", "hive", {
+        db_type: "starrocks",
+        visible_databases: ["analytics"],
+      }),
+    ).resolves.toEqual(["analytics"]);
+
+    expect(mocks.listDorisCatalogDatabases).toHaveBeenCalledWith("connection-1", "hive");
   });
 
   it("propagates metadata loading errors", async () => {

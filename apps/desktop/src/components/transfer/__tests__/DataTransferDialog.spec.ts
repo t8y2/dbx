@@ -39,4 +39,9 @@ describe("DataTransferDialog transfer prefill", () => {
     expect(dialogSource).toContain("isSameTransferDatabase");
     expect(dialogSource).toContain("const sameSourceAndTarget = sameCatalogAndDatabase && effectiveSourceSchema === effectiveTargetSchema");
   });
+
+  it("keeps catalog filtering and completion refresh catalog-aware", () => {
+    expect(dialogSource).toContain("fetchCatalogNamespaceOptions(connectionId, catalog, config)");
+    expect(dialogSource).toContain("store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog)");
+  });
 });

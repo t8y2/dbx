@@ -35,6 +35,7 @@ export interface ExportTask {
   totalTables?: number;
   currentTable?: string;
   targetConnectionId?: string;
+  targetCatalog?: string;
   targetDatabase?: string;
   targetSchema?: string;
   targetTables?: string[];
@@ -201,6 +202,7 @@ function findActiveOverlappingTransfer(request: api.TransferRequest): string[] {
     if (task.kind !== "data-transfer") continue;
     if (task.status !== "Running" && task.status !== "Writing") continue;
     if (task.targetConnectionId !== request.targetConnectionId) continue;
+    if ((task.targetCatalog ?? "") !== (request.targetCatalog ?? "")) continue;
     if (task.targetDatabase !== request.targetDatabase) continue;
     if (task.targetSchema !== request.targetSchema) continue;
 
@@ -321,6 +323,7 @@ export function useExportTracker() {
     const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
     task.startedAt ??= Date.now();
     task.targetConnectionId = request.targetConnectionId;
+    task.targetCatalog = request.targetCatalog;
     task.targetDatabase = request.targetDatabase;
     task.targetSchema = request.targetSchema;
     task.targetTables = request.tables.map((table) => targetTableName(table, request.targetTableNameCase));

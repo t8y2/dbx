@@ -3849,21 +3849,21 @@ export const useConnectionStore = defineStore("connection", () => {
       if (useCachedChildren(node, options, load)) return;
       const config = getConfig(connectionId);
       const databases = await withMetadataLoadTimeout(connectionId, api.listDorisCatalogDatabases(connectionId, catalog), "databases");
+      const visibleNames = filterDatabaseNamesForConnection(
+        databases.map((database) => database.name),
+        config,
+      );
+      const visibleNameSet = new Set(visibleNames);
+      const visibleDatabases = databases.filter((database) => visibleNameSet.has(database.name));
       let databaseNodes: TreeNode[];
       if (isInternalDorisCatalog(node.catalogType, catalog)) {
         // The internal catalog's databases are rendered as standard database
         // nodes so they reuse the existing table-loading / table-open paths.
         // Detection is type-based (catalogType=`internal`), so StarRocks
         // `default_catalog` routes here too — its tables carry no catalog.
-        const visibleNames = filterDatabaseNamesForConnection(
-          databases.map((database) => database.name),
-          config,
-        );
-        const visibleNameSet = new Set(visibleNames);
-        const visibleDatabases = databases.filter((database) => visibleNameSet.has(database.name));
         databaseNodes = buildDatabaseTreeNodes(connectionId, visibleDatabases, { includeDefaultWhenEmpty: false });
       } else {
-        databaseNodes = sortSidebarDatabases(databases).flatMap((database) => {
+        databaseNodes = sortSidebarDatabases(visibleDatabases).flatMap((database) => {
           const name = database.name.trim();
           if (!name) return [];
           return [
@@ -5128,24 +5128,31 @@ export const useConnectionStore = defineStore("connection", () => {
     await refreshTreeNode(node);
   }
 
-  async function refreshDatabaseTreeNode(connectionId: string, database: string) {
-    const node = findDatabaseTreeNode(treeNodes.value, connectionId, database);
+  async function refreshDatabaseTreeNode(connectionId: string, database: string, catalog?: string) {
+    const node = findDatabaseTreeNode(treeNodes.value, connectionId, database, catalog);
     if (node) {
       await refreshTreeNode(node);
       return;
     }
+    if (catalog) {
+      const catalogNode = findNode(treeNodes.value, dorisCatalogId(connectionId, catalog));
+      if (catalogNode) {
+        await refreshTreeNode(catalogNode);
+        return;
+      }
+    }
     await loadDatabases(connectionId, { force: true });
   }
 
-  async function refreshObjectListTreeNode(connectionId: string, database: string, schema?: string) {
+  async function refreshObjectListTreeNode(connectionId: string, database: string, schema?: string, catalog?: string) {
     invalidateMetadataCaches({ connectionId, database, schema });
-    const shouldRefreshSchemaNode = !!schema;
+    const shouldRefreshSchemaNode = !!schema && !catalog;
     const node = shouldRefreshSchemaNode ? findNode(treeNodes.value, `${connectionId}:${database}:${schema}`) : null;
     if (node) {
       await refreshTreeNode(node);
       return;
     }
-    await refreshDatabaseTreeNode(connectionId, database);
+    await refreshDatabaseTreeNode(connectionId, database, catalog);
   }
 
   function isSchemaAwareDatabase(connectionId: string): boolean {

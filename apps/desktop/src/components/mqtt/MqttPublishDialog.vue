@@ -59,8 +59,13 @@ watch(
 );
 
 async function publish() {
-  if (!topic.value.trim()) {
+  const publishTopic = topic.value.trim();
+  if (!publishTopic) {
     error.value = "主题不能为空";
+    return;
+  }
+  if (publishTopic.includes("#") || publishTopic.includes("+")) {
+    error.value = "发布主题不能包含通配符 # 或 +，请将订阅过滤器改为具体主题后再发送";
     return;
   }
   loading.value = true;
@@ -69,7 +74,7 @@ async function publish() {
   try {
     const payloadBase64 = encodePayload(payloadText.value, encoding.value);
     await mqttPublish(props.connectionId, {
-      topic: topic.value.trim(),
+      topic: publishTopic,
       payloadBase64,
       payloadText: encoding.value === "plaintext" || encoding.value === "json" ? payloadText.value : null,
       qos: qos.value === 0 ? "atmostonce" : qos.value === 1 ? "atleastonce" : "exactlyonce",

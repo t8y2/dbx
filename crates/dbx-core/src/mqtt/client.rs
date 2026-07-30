@@ -1,13 +1,14 @@
 //! MQTT 客户端封装（基于 rumqttc），管理 MQTT broker 的长连接和消息收发。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rumqttc::tokio_rustls::rustls::{
     self,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::CryptoProvider,
+    crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use rumqttc::v5::{
@@ -15,10 +16,10 @@ use rumqttc::v5::{
     MqttOptions as MqttOptionsV5,
 };
 use rumqttc::{
-    mqttbytes::Protocol, AsyncClient as AsyncClientV4, Event as EventV4, Incoming as IncomingV4,
-    MqttOptions as MqttOptionsV4, Outgoing, QoS as QoSV4, TlsConfiguration, Transport,
+    mqttbytes::Protocol, valid_filter, valid_topic, AsyncClient as AsyncClientV4, Event as EventV4,
+    Incoming as IncomingV4, MqttOptions as MqttOptionsV4, Outgoing, QoS as QoSV4, TlsConfiguration, Transport,
 };
-use tokio::sync::{oneshot, Notify, RwLock};
+use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 
 use super::types::{
@@ -44,14 +45,142 @@ struct MqttConnectPlan {
     protocol: Option<Protocol>,
 }
 
+const MQTT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
+type SubscriptionCompletion = oneshot::Sender<Result<(), String>>;
+
+struct PendingSubscribe {
+    sequence: u64,
+    topic: String,
+    qos: MqttQoS,
+    add_to_desired: bool,
+    completion: Option<SubscriptionCompletion>,
+}
+
+struct PendingUnsubscribe {
+    sequence: u64,
+    topic: String,
+    completion: Option<SubscriptionCompletion>,
+}
+
+enum PendingSubscriptionAction {
+    Subscribe(PendingSubscribe),
+    Unsubscribe(PendingUnsubscribe),
+}
+
+impl PendingSubscriptionAction {
+    fn sequence(&self) -> u64 {
+        match self {
+            Self::Subscribe(pending) => pending.sequence,
+            Self::Unsubscribe(pending) => pending.sequence,
+        }
+    }
+
+    fn fail(self, error: &str) {
+        let completion = match self {
+            Self::Subscribe(pending) => pending.completion,
+            Self::Unsubscribe(pending) => pending.completion,
+        };
+        if let Some(completion) = completion {
+            let _ = completion.send(Err(error.to_string()));
+        }
+    }
+}
+
+#[derive(Default)]
+struct SubscriptionRequestTracker {
+    next_sequence: u64,
+    queued_subscribes: VecDeque<PendingSubscribe>,
+    queued_unsubscribes: VecDeque<PendingUnsubscribe>,
+    inflight_subscribes: HashMap<u16, PendingSubscribe>,
+    inflight_unsubscribes: HashMap<u16, PendingUnsubscribe>,
+}
+
+impl SubscriptionRequestTracker {
+    fn next_sequence(&mut self) -> u64 {
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.next_sequence
+    }
+
+    fn mark_subscribe_outgoing(&mut self, pkid: u16) {
+        if self.inflight_subscribes.contains_key(&pkid) {
+            return;
+        }
+        if let Some(pending) = self.queued_subscribes.pop_front() {
+            self.inflight_subscribes.insert(pkid, pending);
+        } else {
+            log::warn!("MQTT SUBSCRIBE 已发送，但未找到对应的本地待确认请求: pkid={pkid}");
+        }
+    }
+
+    fn mark_unsubscribe_outgoing(&mut self, pkid: u16) {
+        if self.inflight_unsubscribes.contains_key(&pkid) {
+            return;
+        }
+        if let Some(pending) = self.queued_unsubscribes.pop_front() {
+            self.inflight_unsubscribes.insert(pkid, pending);
+        } else {
+            log::warn!("MQTT UNSUBSCRIBE 已发送，但未找到对应的本地待确认请求: pkid={pkid}");
+        }
+    }
+
+    fn take_subscribe(&mut self, pkid: u16) -> Option<PendingSubscribe> {
+        self.inflight_subscribes.remove(&pkid)
+    }
+
+    fn take_unsubscribe(&mut self, pkid: u16) -> Option<PendingUnsubscribe> {
+        self.inflight_unsubscribes.remove(&pkid)
+    }
+
+    fn take_inflight(&mut self) -> Vec<PendingSubscriptionAction> {
+        let mut pending = self
+            .inflight_subscribes
+            .drain()
+            .map(|(_, request)| PendingSubscriptionAction::Subscribe(request))
+            .chain(
+                self.inflight_unsubscribes.drain().map(|(_, request)| PendingSubscriptionAction::Unsubscribe(request)),
+            )
+            .collect::<Vec<_>>();
+        pending.sort_by_key(PendingSubscriptionAction::sequence);
+        pending
+    }
+
+    fn take_all(&mut self) -> Vec<PendingSubscriptionAction> {
+        let mut pending = self
+            .queued_subscribes
+            .drain(..)
+            .map(PendingSubscriptionAction::Subscribe)
+            .chain(self.queued_unsubscribes.drain(..).map(PendingSubscriptionAction::Unsubscribe))
+            .collect::<Vec<_>>();
+        pending.extend(self.take_inflight());
+        pending.sort_by_key(PendingSubscriptionAction::sequence);
+        pending
+    }
+
+    fn has_pending_topic(&self, topic: &str) -> bool {
+        self.queued_subscribes.iter().any(|pending| pending.topic == topic)
+            || self.queued_unsubscribes.iter().any(|pending| pending.topic == topic)
+            || self.inflight_subscribes.values().any(|pending| pending.topic == topic)
+            || self.inflight_unsubscribes.values().any(|pending| pending.topic == topic)
+    }
+}
+
 /// 持久化的 MQTT 异步客户端
 pub struct MqttClient {
     /// rumqttc 异步客户端
     backend: MqttBackendClient,
     /// 连接配置
     config: MqttConnectionConfig,
-    /// 当前订阅的 topic 集合
+    /// 当前 broker 已通过 ACK 确认的 topic 集合
     subscriptions: RwLock<Vec<(String, MqttQoS)>>,
+    /// 需要在无会话重连后恢复的 topic 集合
+    desired_subscriptions: RwLock<Vec<(String, MqttQoS)>>,
+    /// 当前连接是否已收到有效 CONNACK
+    connected: AtomicBool,
+    /// 订阅请求与 packet id 的关联状态
+    subscription_requests: Mutex<SubscriptionRequestTracker>,
+    /// 保证本地排队顺序与 rumqttc 请求通道顺序一致
+    subscription_send_lock: Mutex<()>,
     /// 最近接收的消息缓冲区（保留最近 N 条）
     message_buffer: RwLock<Vec<MqttMessage>>,
     /// 最大缓冲消息数
@@ -121,6 +250,10 @@ impl MqttClient {
             backend,
             config,
             subscriptions: RwLock::new(Vec::new()),
+            desired_subscriptions: RwLock::new(Vec::new()),
+            connected: AtomicBool::new(false),
+            subscription_requests: Mutex::new(SubscriptionRequestTracker::default()),
+            subscription_send_lock: Mutex::new(()),
             message_buffer: RwLock::new(Vec::new()),
             max_buffer_size: 200,
             seen_retained: RwLock::new(HashSet::new()),
@@ -142,6 +275,8 @@ impl MqttClient {
                     event = event_loop.poll() => {
                         match event {
                             Ok(EventV4::Incoming(IncomingV4::ConnAck(connack))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.handle_connack(connack.session_present).await;
                                 log::info!(
                                     "MQTT CONNACK 已收到: session_present={}, code={:?}",
                                     connack.session_present,
@@ -161,12 +296,41 @@ impl MqttClient {
                                     publish.retain,
                                 ).await;
                             }
+                            Ok(EventV4::Incoming(IncomingV4::SubAck(suback))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                let result = if suback
+                                    .return_codes
+                                    .iter()
+                                    .all(|code| matches!(code, rumqttc::SubscribeReasonCode::Success(_)))
+                                {
+                                    Ok(())
+                                } else {
+                                    Err("MQTT broker 拒绝了订阅请求".to_string())
+                                };
+                                instance.complete_subscribe_ack(suback.pkid, result).await;
+                            }
+                            Ok(EventV4::Incoming(IncomingV4::UnsubAck(unsuback))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.complete_unsubscribe_ack(unsuback.pkid, Ok(())).await;
+                            }
                             Ok(EventV4::Incoming(IncomingV4::Disconnect)) => {
-                                log::info!("MQTT broker 发送了 DISCONNECT，事件循环退出");
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.handle_connection_lost("broker 主动断开连接").await;
                                 if let Some(tx) = connack_tx.take() {
                                     let _ = tx.send(Err("MQTT broker 在 CONNACK 之前断开了连接".to_string()));
+                                    break;
                                 }
-                                break;
+                                log::warn!("MQTT broker 断开了连接，将在 1 秒后重新连接");
+                                event_loop.clean();
+                                tokio::time::sleep(MQTT_RECONNECT_DELAY).await;
+                            }
+                            Ok(EventV4::Outgoing(Outgoing::Subscribe(pkid))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.mark_subscribe_outgoing(pkid).await;
+                            }
+                            Ok(EventV4::Outgoing(Outgoing::Unsubscribe(pkid))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.mark_unsubscribe_outgoing(pkid).await;
                             }
                             Ok(EventV4::Outgoing(Outgoing::Disconnect)) => {
                                 log::info!("MQTT DISCONNECT 已发送，事件循环退出");
@@ -174,11 +338,15 @@ impl MqttClient {
                             }
                             Ok(_) => {}
                             Err(e) => {
-                                log::warn!("MQTT 事件循环错误: {e}");
+                                if let Some(instance) = instance.upgrade() {
+                                    instance.handle_connection_lost(&e.to_string()).await;
+                                }
                                 if let Some(tx) = connack_tx.take() {
                                     let _ = tx.send(Err(format!("MQTT 连接失败（未收到 CONNACK）: {e}")));
+                                    break;
                                 }
-                                break;
+                                log::warn!("MQTT 连接发生异常，将在 1 秒后重新连接: {e}");
+                                tokio::time::sleep(MQTT_RECONNECT_DELAY).await;
                             }
                         }
                     }
@@ -207,6 +375,8 @@ impl MqttClient {
                     event = event_loop.poll() => {
                         match event {
                             Ok(EventV5::Incoming(IncomingV5::ConnAck(connack))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.handle_connack(connack.session_present).await;
                                 log::info!(
                                     "MQTT v5 CONNACK 已收到: session_present={}, code={:?}",
                                     connack.session_present,
@@ -226,12 +396,60 @@ impl MqttClient {
                                     publish.retain,
                                 ).await;
                             }
-                            Ok(EventV5::Incoming(IncomingV5::Disconnect(_))) => {
-                                log::info!("MQTT v5 broker 发送了 DISCONNECT，事件循环退出");
+                            Ok(EventV5::Incoming(IncomingV5::SubAck(suback))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                let rejected = suback.return_codes.iter().find(|code| {
+                                    !matches!(code, rumqttc::v5::mqttbytes::v5::SubscribeReasonCode::Success(_))
+                                });
+                                let result = rejected.map_or(Ok(()), |reason| {
+                                    let detail = suback
+                                        .properties
+                                        .as_ref()
+                                        .and_then(|properties| properties.reason_string.as_deref())
+                                        .map(|message| format!("，broker 提示：{message}"))
+                                        .unwrap_or_default();
+                                    Err(format!("MQTT v5 broker 拒绝了订阅请求：{reason:?}{detail}"))
+                                });
+                                instance.complete_subscribe_ack(suback.pkid, result).await;
+                            }
+                            Ok(EventV5::Incoming(IncomingV5::UnsubAck(unsuback))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                let rejected = unsuback.reasons.iter().find(|reason| {
+                                    !matches!(
+                                        reason,
+                                        rumqttc::v5::mqttbytes::v5::UnsubAckReason::Success
+                                            | rumqttc::v5::mqttbytes::v5::UnsubAckReason::NoSubscriptionExisted
+                                    )
+                                });
+                                let result = rejected.map_or(Ok(()), |reason| {
+                                    let detail = unsuback
+                                        .properties
+                                        .as_ref()
+                                        .and_then(|properties| properties.reason_string.as_deref())
+                                        .map(|message| format!("，broker 提示：{message}"))
+                                        .unwrap_or_default();
+                                    Err(format!("MQTT v5 broker 拒绝了取消订阅请求：{reason:?}{detail}"))
+                                });
+                                instance.complete_unsubscribe_ack(unsuback.pkid, result).await;
+                            }
+                            Ok(EventV5::Incoming(IncomingV5::Disconnect(disconnect))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.handle_connection_lost("broker 主动断开连接").await;
                                 if let Some(tx) = connack_tx.take() {
                                     let _ = tx.send(Err("MQTT broker 在 CONNACK 之前断开了连接".to_string()));
+                                    break;
                                 }
-                                break;
+                                log::warn!("MQTT v5 broker 断开了连接，将在 1 秒后重新连接: {disconnect:?}");
+                                event_loop.clean();
+                                tokio::time::sleep(MQTT_RECONNECT_DELAY).await;
+                            }
+                            Ok(EventV5::Outgoing(Outgoing::Subscribe(pkid))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.mark_subscribe_outgoing(pkid).await;
+                            }
+                            Ok(EventV5::Outgoing(Outgoing::Unsubscribe(pkid))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.mark_unsubscribe_outgoing(pkid).await;
                             }
                             Ok(EventV5::Outgoing(Outgoing::Disconnect)) => {
                                 log::info!("MQTT v5 DISCONNECT 已发送，事件循环退出");
@@ -239,11 +457,15 @@ impl MqttClient {
                             }
                             Ok(_) => {}
                             Err(e) => {
-                                log::warn!("MQTT v5 事件循环错误: {e}");
+                                if let Some(instance) = instance.upgrade() {
+                                    instance.handle_connection_lost(&e.to_string()).await;
+                                }
                                 if let Some(tx) = connack_tx.take() {
                                     let _ = tx.send(Err(format!("MQTT 连接失败（未收到 CONNACK）: {e}")));
+                                    break;
                                 }
-                                break;
+                                log::warn!("MQTT v5 连接发生异常，将在 1 秒后重新连接: {e}");
+                                tokio::time::sleep(MQTT_RECONNECT_DELAY).await;
                             }
                         }
                     }
@@ -326,6 +548,152 @@ impl MqttClient {
         }
     }
 
+    async fn handle_connack(self: &Arc<Self>, session_present: bool) {
+        self.connected.store(true, Ordering::Release);
+
+        if session_present {
+            let desired = self.desired_subscriptions.read().await.clone();
+            *self.subscriptions.write().await = desired;
+            return;
+        }
+
+        self.subscriptions.write().await.clear();
+        let instance = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let Some(instance) = instance.upgrade() else {
+                return;
+            };
+            instance.restore_desired_subscriptions().await;
+        });
+    }
+
+    async fn handle_connection_lost(&self, reason: &str) {
+        if self.connected.swap(false, Ordering::AcqRel) {
+            log::warn!("MQTT 连接已断开: {reason}");
+        }
+        self.subscriptions.write().await.clear();
+
+        let pending = self.subscription_requests.lock().await.take_inflight();
+        for request in pending {
+            request.fail("MQTT 连接在收到 broker 确认前中断，请重新执行该操作");
+        }
+    }
+
+    async fn restore_desired_subscriptions(&self) {
+        let desired = self.desired_subscriptions.read().await.clone();
+        for (topic, qos) in desired {
+            let has_pending = self.subscription_requests.lock().await.has_pending_topic(&topic);
+            if has_pending {
+                continue;
+            }
+            if let Err(error) = self.queue_subscribe_request(topic.clone(), qos, false, None).await {
+                log::warn!("MQTT 重连后恢复订阅 {topic} 失败: {error}");
+            }
+        }
+    }
+
+    async fn mark_subscribe_outgoing(&self, pkid: u16) {
+        self.subscription_requests.lock().await.mark_subscribe_outgoing(pkid);
+    }
+
+    async fn mark_unsubscribe_outgoing(&self, pkid: u16) {
+        self.subscription_requests.lock().await.mark_unsubscribe_outgoing(pkid);
+    }
+
+    async fn complete_subscribe_ack(&self, pkid: u16, result: Result<(), String>) {
+        let Some(pending) = self.subscription_requests.lock().await.take_subscribe(pkid) else {
+            log::warn!("收到无法关联的 MQTT SUBACK: pkid={pkid}");
+            return;
+        };
+
+        let result = result.map_err(|error| format!("订阅主题“{}”失败：{error}", pending.topic));
+        if result.is_ok() {
+            upsert_subscription(&self.subscriptions, &pending.topic, pending.qos).await;
+            if pending.add_to_desired {
+                upsert_subscription(&self.desired_subscriptions, &pending.topic, pending.qos).await;
+            }
+        } else if let Err(error) = &result {
+            log::warn!("{error}");
+        }
+
+        if let Some(completion) = pending.completion {
+            let _ = completion.send(result);
+        }
+    }
+
+    async fn complete_unsubscribe_ack(&self, pkid: u16, result: Result<(), String>) {
+        let Some(pending) = self.subscription_requests.lock().await.take_unsubscribe(pkid) else {
+            log::warn!("收到无法关联的 MQTT UNSUBACK: pkid={pkid}");
+            return;
+        };
+
+        let result = result.map_err(|error| format!("取消订阅主题“{}”失败：{error}", pending.topic));
+        if result.is_ok() {
+            remove_subscription(&self.subscriptions, &pending.topic).await;
+            remove_subscription(&self.desired_subscriptions, &pending.topic).await;
+        } else if let Err(error) = &result {
+            log::warn!("{error}");
+        }
+
+        if let Some(completion) = pending.completion {
+            let _ = completion.send(result);
+        }
+    }
+
+    async fn queue_subscribe_request(
+        &self,
+        topic: String,
+        qos: MqttQoS,
+        add_to_desired: bool,
+        completion: Option<SubscriptionCompletion>,
+    ) -> Result<(), String> {
+        let _send_guard = self.subscription_send_lock.lock().await;
+        let sequence = {
+            let mut requests = self.subscription_requests.lock().await;
+            if requests.has_pending_topic(&topic) {
+                return Err(format!("主题“{topic}”的订阅操作正在处理中，请稍后再试"));
+            }
+            let sequence = requests.next_sequence();
+            requests.queued_subscribes.push_back(PendingSubscribe {
+                sequence,
+                topic: topic.clone(),
+                qos,
+                add_to_desired,
+                completion,
+            });
+            sequence
+        };
+
+        if let Err(error) = self.backend.subscribe(&topic, mqtt_qos(qos)).await {
+            self.subscription_requests.lock().await.queued_subscribes.retain(|pending| pending.sequence != sequence);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn queue_unsubscribe_request(
+        &self,
+        topic: String,
+        completion: Option<SubscriptionCompletion>,
+    ) -> Result<(), String> {
+        let _send_guard = self.subscription_send_lock.lock().await;
+        let sequence = {
+            let mut requests = self.subscription_requests.lock().await;
+            if requests.has_pending_topic(&topic) {
+                return Err(format!("主题“{topic}”的订阅操作正在处理中，请稍后再试"));
+            }
+            let sequence = requests.next_sequence();
+            requests.queued_unsubscribes.push_back(PendingUnsubscribe { sequence, topic: topic.clone(), completion });
+            sequence
+        };
+
+        if let Err(error) = self.backend.unsubscribe(&topic).await {
+            self.subscription_requests.lock().await.queued_unsubscribes.retain(|pending| pending.sequence != sequence);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// 获取 broker 基本信息
     pub async fn broker_info(&self) -> MqttBrokerInfo {
         let subscriptions = self.subscriptions.read().await;
@@ -337,7 +705,7 @@ impl MqttClient {
         MqttBrokerInfo {
             broker_url: self.config.broker_url(),
             client_id: self.config.client_id.clone(),
-            connected: true,
+            connected: self.connected.load(Ordering::Acquire),
             protocol_version,
             subscription_count: subscriptions.len(),
         }
@@ -345,27 +713,44 @@ impl MqttClient {
 
     /// 订阅 topic
     pub async fn subscribe(&self, topic: &str, qos: MqttQoS) -> Result<(), String> {
-        let rumqttc_qos = mqtt_qos(qos);
-        self.backend.subscribe(topic, rumqttc_qos).await?;
-
-        let mut subscriptions = self.subscriptions.write().await;
-        if !subscriptions.iter().any(|(t, _)| t == topic) {
-            subscriptions.push((topic.to_string(), qos));
+        validate_topic_filter(topic)?;
+        if self
+            .desired_subscriptions
+            .read()
+            .await
+            .iter()
+            .any(|(current, current_qos)| current == topic && *current_qos == qos)
+        {
+            return Ok(());
         }
-        Ok(())
+        if self.subscription_requests.lock().await.has_pending_topic(topic) {
+            return Err(format!("主题“{topic}”的订阅操作正在处理中，请稍后再试"));
+        }
+
+        let (completion, result) = oneshot::channel();
+        self.queue_subscribe_request(topic.to_string(), qos, true, Some(completion)).await?;
+        result.await.map_err(|_| "订阅确认通道已关闭，请检查 MQTT 连接状态".to_string())?
     }
 
     /// 取消订阅 topic
     pub async fn unsubscribe(&self, topic: &str) -> Result<(), String> {
-        self.backend.unsubscribe(topic).await?;
+        validate_topic_filter(topic)?;
+        let exists = self.desired_subscriptions.read().await.iter().any(|(current, _)| current == topic);
+        if !exists {
+            return Ok(());
+        }
+        if self.subscription_requests.lock().await.has_pending_topic(topic) {
+            return Err(format!("主题“{topic}”的订阅操作正在处理中，请稍后再试"));
+        }
 
-        let mut subscriptions = self.subscriptions.write().await;
-        subscriptions.retain(|(t, _)| t != topic);
-        Ok(())
+        let (completion, result) = oneshot::channel();
+        self.queue_unsubscribe_request(topic.to_string(), Some(completion)).await?;
+        result.await.map_err(|_| "取消订阅确认通道已关闭，请检查 MQTT 连接状态".to_string())?
     }
 
     /// 发布消息
     pub async fn publish(&self, request: &MqttPublishRequest) -> Result<(), String> {
+        validate_publish_topic(&request.topic)?;
         let payload = if let Some(ref text) = request.payload_text {
             text.as_bytes().to_vec()
         } else {
@@ -445,6 +830,7 @@ impl MqttClient {
         for (topic, _) in subscriptions.iter() {
             insert_topic_into_tree(&mut root, topic);
         }
+        sort_topic_tree(&mut root);
         root
     }
 
@@ -452,6 +838,12 @@ impl MqttClient {
     /// 调用此方法后不应再使用该客户端。
     pub async fn disconnect(&self) {
         log::info!("MQTT 客户端正在断开连接...");
+        self.connected.store(false, Ordering::Release);
+        self.subscriptions.write().await.clear();
+        let pending = self.subscription_requests.lock().await.take_all();
+        for request in pending {
+            request.fail("MQTT 连接已关闭，操作未完成");
+        }
 
         if let Err(err) = self.backend.disconnect().await {
             log::warn!("MQTT DISCONNECT 请求发送失败: {err}");
@@ -584,20 +976,20 @@ impl ServerCertVerifier for NoCertificateVerification {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -653,41 +1045,82 @@ fn decode_utf8_lossy(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
 }
 
+async fn upsert_subscription(subscriptions: &RwLock<Vec<(String, MqttQoS)>>, topic: &str, qos: MqttQoS) {
+    let mut subscriptions = subscriptions.write().await;
+    if let Some((_, current_qos)) = subscriptions.iter_mut().find(|(current, _)| current == topic) {
+        *current_qos = qos;
+    } else {
+        subscriptions.push((topic.to_string(), qos));
+    }
+}
+
+async fn remove_subscription(subscriptions: &RwLock<Vec<(String, MqttQoS)>>, topic: &str) {
+    subscriptions.write().await.retain(|(current, _)| current != topic);
+}
+
+fn validate_topic_length_and_content(topic: &str, action: &str) -> Result<(), String> {
+    if topic.is_empty() {
+        return Err(format!("{action}主题不能为空，请输入有效的 MQTT 主题"));
+    }
+    if topic.contains('\0') {
+        return Err(format!("{action}主题不能包含空字符"));
+    }
+    if topic.len() > u16::MAX as usize {
+        return Err(format!("{action}主题过长，UTF-8 编码后不能超过 65535 字节"));
+    }
+    Ok(())
+}
+
+fn validate_topic_filter(topic: &str) -> Result<(), String> {
+    validate_topic_length_and_content(topic, "订阅")?;
+    if !valid_filter(topic) {
+        return Err("订阅主题格式无效：通配符 + 必须独占一个层级，通配符 # 必须独占最后一个层级".to_string());
+    }
+    Ok(())
+}
+
+fn validate_publish_topic(topic: &str) -> Result<(), String> {
+    validate_topic_length_and_content(topic, "发布")?;
+    if !valid_topic(topic) {
+        return Err("发布主题不能包含通配符 # 或 +，请填写一个具体主题".to_string());
+    }
+    Ok(())
+}
+
 /// 将 topic 路径插入到树结构中
 fn insert_topic_into_tree(root: &mut MqttTopicNode, topic: &str) {
-    let segments: Vec<&str> = topic.split('/').collect();
-    let mut current: *mut MqttTopicNode = root;
+    let (path_prefix, visible_topic) = topic.strip_prefix('/').map_or(("", topic), |path| ("/", path));
+    let segments: Vec<&str> = visible_topic.split('/').collect();
+    let mut current = root;
 
     for (i, segment) in segments.iter().enumerate() {
-        let full_path = segments[..=i].join("/");
+        let full_path = format!("{path_prefix}{}", segments[..=i].join("/"));
         let is_leaf = i == segments.len() - 1;
 
-        // SAFETY: 我们在单线程上下文中操作，current 始终指向 root 或其子节点
-        let cur = unsafe { &mut *current };
-
-        // 检查是否已存在该子节点
-        let child_idx = cur.children.iter().position(|child| child.name == *segment);
-
-        match child_idx {
-            Some(idx) => {
-                if is_leaf {
-                    cur.children[idx].is_leaf = true;
-                }
-                current = &mut cur.children[idx] as *mut MqttTopicNode;
-            }
+        let child_idx = match current.children.iter().position(|child| child.name == *segment) {
+            Some(index) => index,
             None => {
-                let new_node = MqttTopicNode {
+                current.children.push(MqttTopicNode {
                     name: segment.to_string(),
-                    full_path: full_path.clone(),
+                    full_path,
                     children: Vec::new(),
                     message_count: None,
                     is_leaf,
-                };
-                cur.children.push(new_node);
-                let last_idx = cur.children.len() - 1;
-                current = &mut cur.children[last_idx] as *mut MqttTopicNode;
+                });
+                current.children.len() - 1
             }
+        };
+        if is_leaf {
+            current.children[child_idx].is_leaf = true;
         }
+        current = &mut current.children[child_idx];
+    }
+}
+
+fn sort_topic_tree(node: &mut MqttTopicNode) {
+    node.children.sort_by(|left, right| left.name.cmp(&right.name));
+    for child in &mut node.children {
+        sort_topic_tree(child);
     }
 }
 
@@ -744,6 +1177,40 @@ mod tests {
         assert_eq!(root.children.len(), 1);
         assert_eq!(root.children[0].children.len(), 2);
         assert_eq!(root.children[0].children[0].children.len(), 2);
+    }
+
+    #[test]
+    fn topic_tree_hides_only_the_leading_separator() {
+        let mut root = MqttTopicNode {
+            name: "root".to_string(),
+            full_path: String::new(),
+            children: Vec::new(),
+            message_count: None,
+            is_leaf: false,
+        };
+        insert_topic_into_tree(&mut root, "/device/ctrl/1219/1219000213/#");
+
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "device");
+        assert_eq!(root.children[0].full_path, "/device");
+        assert_eq!(root.children[0].children[0].full_path, "/device/ctrl");
+        assert_eq!(
+            root.children[0].children[0].children[0].children[0].children[0].full_path,
+            "/device/ctrl/1219/1219000213/#"
+        );
+    }
+
+    #[test]
+    fn validates_publish_topics_and_subscription_filters() {
+        assert!(validate_publish_topic("/device/ctrl/1219000213/set").is_ok());
+        assert_eq!(
+            validate_publish_topic("/device/ctrl/1219000213/#").unwrap_err(),
+            "发布主题不能包含通配符 # 或 +，请填写一个具体主题"
+        );
+        assert!(validate_topic_filter("/device/ctrl/1219000213/#").is_ok());
+        assert!(validate_topic_filter("/device/+/status").is_ok());
+        assert!(validate_topic_filter("/device/a#").is_err());
+        assert!(validate_topic_filter("/device/#/status").is_err());
     }
 
     #[test]
@@ -818,6 +1285,70 @@ mod tests {
         await_broker(broker).await;
     }
 
+    #[tokio::test]
+    async fn reconnect_updates_connection_state_and_restores_confirmed_subscriptions() {
+        let (port, disconnect_broker, restored, broker) = spawn_v4_reconnecting_broker().await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+
+        client.subscribe("device/reconnect/#", MqttQoS::AtMostOnce).await.unwrap();
+        assert!(client.broker_info().await.connected);
+        assert_eq!(client.list_topics().await.len(), 1);
+
+        disconnect_broker.send(()).unwrap();
+        wait_for_connection_state(&client, false).await;
+        assert!(client.list_topics().await.is_empty());
+
+        restored.await.unwrap();
+        wait_for_connection_state(&client, true).await;
+        wait_for_topic_count(&client, 1).await;
+
+        client.disconnect().await;
+        await_broker(broker).await;
+    }
+
+    #[tokio::test]
+    async fn subscription_state_changes_only_after_suback_and_unsuback() {
+        let (port, subscribe_seen, allow_suback, unsubscribe_seen, allow_unsuback, broker) =
+            spawn_v4_delayed_ack_broker().await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+
+        let subscribing_client = Arc::clone(&client);
+        let subscribe =
+            tokio::spawn(async move { subscribing_client.subscribe("device/ack/#", MqttQoS::AtLeastOnce).await });
+        subscribe_seen.await.unwrap();
+        assert!(client.list_topics().await.is_empty());
+        allow_suback.send(()).unwrap();
+        subscribe.await.unwrap().unwrap();
+        assert_eq!(client.list_topics().await, vec![("device/ack/#".to_string(), MqttQoS::AtLeastOnce)]);
+
+        let unsubscribing_client = Arc::clone(&client);
+        let unsubscribe = tokio::spawn(async move { unsubscribing_client.unsubscribe("device/ack/#").await });
+        unsubscribe_seen.await.unwrap();
+        assert_eq!(client.list_topics().await.len(), 1);
+        allow_unsuback.send(()).unwrap();
+        unsubscribe.await.unwrap().unwrap();
+        assert!(client.list_topics().await.is_empty());
+
+        client.disconnect().await;
+        await_broker(broker).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_suback_does_not_record_subscription() {
+        let (port, broker) = spawn_v4_rejecting_subscription_broker().await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+
+        let error = client.subscribe("device/rejected/#", MqttQoS::AtMostOnce).await.unwrap_err();
+        assert!(error.contains("拒绝"), "unexpected error: {error}");
+        assert!(client.list_topics().await.is_empty());
+
+        client.disconnect().await;
+        await_broker(broker).await;
+    }
+
     async fn assert_v4_connect_protocol(protocol_version: crate::mqtt::types::MqttProtocolVersion, expected: Protocol) {
         let (port, broker) = spawn_v4_mock_broker(expected, 1).await;
         let config = mqtt_config(port, protocol_version);
@@ -874,6 +1405,155 @@ mod tests {
             }
         });
         (port, handle)
+    }
+
+    async fn spawn_v4_reconnecting_broker(
+    ) -> (u16, oneshot::Sender<()>, oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+        use bytes::BytesMut;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (disconnect_tx, disconnect_rx) = oneshot::channel();
+        let (restored_tx, restored_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut first).await.unwrap();
+            first.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+            acknowledge_v4_subscribe(&mut first, rumqttc::SubscribeReasonCode::Success(QoSV4::AtMostOnce)).await;
+            disconnect_rx.await.unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut second).await.unwrap();
+            second.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+            acknowledge_v4_subscribe(&mut second, rumqttc::SubscribeReasonCode::Success(QoSV4::AtMostOnce)).await;
+            restored_tx.send(()).unwrap();
+
+            let frame = read_mqtt_frame(&mut second).await.unwrap();
+            let mut bytes = BytesMut::from(&frame[..]);
+            let packet = rumqttc::mqttbytes::v4::read(&mut bytes, 1024 * 1024).unwrap();
+            assert!(matches!(packet, rumqttc::mqttbytes::v4::Packet::Disconnect));
+        });
+        (port, disconnect_tx, restored_rx, handle)
+    }
+
+    async fn spawn_v4_delayed_ack_broker() -> (
+        u16,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use bytes::BytesMut;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (subscribe_seen_tx, subscribe_seen_rx) = oneshot::channel();
+        let (allow_suback_tx, allow_suback_rx) = oneshot::channel();
+        let (unsubscribe_seen_tx, unsubscribe_seen_rx) = oneshot::channel();
+        let (allow_unsuback_tx, allow_unsuback_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+
+            let subscribe_pkid = read_v4_subscribe_pkid(&mut stream).await;
+            subscribe_seen_tx.send(()).unwrap();
+            allow_suback_rx.await.unwrap();
+            write_v4_suback(&mut stream, subscribe_pkid, rumqttc::SubscribeReasonCode::Success(QoSV4::AtLeastOnce))
+                .await;
+
+            let frame = read_mqtt_frame(&mut stream).await.unwrap();
+            let mut bytes = BytesMut::from(&frame[..]);
+            let packet = rumqttc::mqttbytes::v4::read(&mut bytes, 1024 * 1024).unwrap();
+            let unsubscribe_pkid = match packet {
+                rumqttc::mqttbytes::v4::Packet::Unsubscribe(unsubscribe) => unsubscribe.pkid,
+                other => panic!("unexpected packet: {other:?}"),
+            };
+            unsubscribe_seen_tx.send(()).unwrap();
+            allow_unsuback_rx.await.unwrap();
+            let mut ack = BytesMut::new();
+            rumqttc::UnsubAck::new(unsubscribe_pkid).write(&mut ack).unwrap();
+            stream.write_all(&ack).await.unwrap();
+
+            let frame = read_mqtt_frame(&mut stream).await.unwrap();
+            assert_eq!(frame, vec![0xe0, 0x00]);
+        });
+        (port, subscribe_seen_rx, allow_suback_tx, unsubscribe_seen_rx, allow_unsuback_tx, handle)
+    }
+
+    async fn spawn_v4_rejecting_subscription_broker() -> (u16, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+            acknowledge_v4_subscribe(&mut stream, rumqttc::SubscribeReasonCode::Failure).await;
+            let frame = read_mqtt_frame(&mut stream).await.unwrap();
+            assert_eq!(frame, vec![0xe0, 0x00]);
+        });
+        (port, handle)
+    }
+
+    async fn acknowledge_v4_subscribe(stream: &mut tokio::net::TcpStream, reason: rumqttc::SubscribeReasonCode) {
+        let pkid = read_v4_subscribe_pkid(stream).await;
+        write_v4_suback(stream, pkid, reason).await;
+    }
+
+    async fn read_v4_subscribe_pkid(stream: &mut tokio::net::TcpStream) -> u16 {
+        use bytes::BytesMut;
+
+        let frame = read_mqtt_frame(stream).await.unwrap();
+        let mut bytes = BytesMut::from(&frame[..]);
+        let packet = rumqttc::mqttbytes::v4::read(&mut bytes, 1024 * 1024).unwrap();
+        match packet {
+            rumqttc::mqttbytes::v4::Packet::Subscribe(subscribe) => subscribe.pkid,
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    async fn write_v4_suback(stream: &mut tokio::net::TcpStream, pkid: u16, reason: rumqttc::SubscribeReasonCode) {
+        use bytes::BytesMut;
+        use tokio::io::AsyncWriteExt;
+
+        let mut ack = BytesMut::new();
+        rumqttc::SubAck::new(pkid, vec![reason]).write(&mut ack).unwrap();
+        stream.write_all(&ack).await.unwrap();
+    }
+
+    async fn wait_for_connection_state(client: &MqttClient, expected: bool) {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if client.broker_info().await.connected == expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("MQTT connected state did not become {expected}"));
+    }
+
+    async fn wait_for_topic_count(client: &MqttClient, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if client.list_topics().await.len() == expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("MQTT topic count did not become {expected}"));
     }
 
     async fn spawn_v5_mock_broker(expected_connections: usize) -> (u16, tokio::task::JoinHandle<()>) {

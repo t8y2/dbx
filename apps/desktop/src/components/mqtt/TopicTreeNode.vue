@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { MqttTopicNode } from "@/types/mqtt";
-import { ChevronRight, ChevronDown } from "@lucide/vue";
-import { ref } from "vue";
+import { ChevronRight, ChevronDown, Trash2 } from "@lucide/vue";
+import { computed, ref } from "vue";
 
 interface Props {
   node: MqttTopicNode;
@@ -14,7 +14,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   select: [topic: string];
   subscribe: [topic: string];
-  unsubscribe: [topic: string];
+  unsubscribe: [topics: string[]];
 }>();
 
 const expanded = ref(props.depth < 2);
@@ -22,6 +22,16 @@ const expanded = ref(props.depth < 2);
 function isSubscribed(topic: string): boolean {
   return props.subscribedTopics.some(([t]) => t === topic);
 }
+
+function collectSubscribedTopics(node: MqttTopicNode): string[] {
+  const topics = node.isLeaf && isSubscribed(node.fullPath) ? [node.fullPath] : [];
+  for (const child of node.children ?? []) {
+    topics.push(...collectSubscribedTopics(child));
+  }
+  return topics;
+}
+
+const topicsToUnsubscribe = computed(() => collectSubscribedTopics(props.node));
 
 function toggle() {
   expanded.value = !expanded.value;
@@ -48,14 +58,16 @@ function toggle() {
         {{ node.name }}
       </span>
 
-      <!-- Subscribe/unsubscribe button (for leaf topics) -->
+      <!-- 分组节点可一次取消其下全部订阅 -->
       <button
-        v-if="node.isLeaf"
-        class="shrink-0 opacity-0 group-hover:opacity-100 text-[10px] px-1 py-0.5 rounded hover:bg-accent transition-opacity"
-        :class="isSubscribed(node.fullPath) ? 'text-red-500' : 'text-green-600'"
-        @click.stop="isSubscribed(node.fullPath) ? emit('unsubscribe', node.fullPath) : emit('subscribe', node.fullPath)"
+        v-if="topicsToUnsubscribe.length"
+        type="button"
+        class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-red-500 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100 focus:opacity-100"
+        :title="topicsToUnsubscribe.length === 1 ? `取消订阅 ${topicsToUnsubscribe[0]}` : `取消此分组下的 ${topicsToUnsubscribe.length} 个订阅`"
+        :aria-label="topicsToUnsubscribe.length === 1 ? `取消订阅 ${topicsToUnsubscribe[0]}` : `取消此分组下的 ${topicsToUnsubscribe.length} 个订阅`"
+        @click.stop="emit('unsubscribe', topicsToUnsubscribe)"
       >
-        {{ isSubscribed(node.fullPath) ? "取消" : "订阅" }}
+        <Trash2 class="h-3 w-3" />
       </button>
     </div>
 

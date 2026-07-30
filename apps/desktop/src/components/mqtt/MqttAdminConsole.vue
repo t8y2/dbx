@@ -59,12 +59,30 @@ async function handleSubscribe(topic: string) {
   }
 }
 
-async function handleUnsubscribe(topic: string) {
-  try {
-    await mqttUnsubscribe(props.connectionId, topic);
-    await refreshData();
-  } catch (e) {
-    error.value = String(e);
+async function handleUnsubscribe(topics: string[]) {
+  const subscribed = new Set(subscribedTopics.value.map(([topic]) => topic));
+  const targets = [...new Set(topics)].filter((topic) => subscribed.has(topic));
+  if (targets.length === 0) {
+    error.value = "未找到可取消的订阅，主题列表可能已经刷新，请重试";
+    return;
+  }
+
+  const prompt = targets.length === 1 ? `确定要取消订阅“${targets[0]}”吗？` : `确定要取消此分组下的 ${targets.length} 个订阅吗？`;
+  if (!window.confirm(prompt)) return;
+
+  const failures: string[] = [];
+  for (const topic of targets) {
+    try {
+      await mqttUnsubscribe(props.connectionId, topic);
+    } catch (e) {
+      failures.push(`${topic}：${String(e)}`);
+    }
+  }
+
+  if (targets.includes(selectedTopic.value)) selectedTopic.value = "";
+  await refreshData();
+  if (failures.length > 0) {
+    error.value = `有 ${failures.length} 个订阅未能取消：${failures.join("；")}`;
   }
 }
 
@@ -165,8 +183,9 @@ onUnmounted(() => {
             @submit.prevent="
               (e) => {
                 const input = (e.target as HTMLFormElement).querySelector('input');
-                if (input?.value) {
-                  handleSubscribe(input.value);
+                const topic = input?.value.trim();
+                if (topic && input) {
+                  handleSubscribe(topic);
                   input.value = '';
                 }
               }

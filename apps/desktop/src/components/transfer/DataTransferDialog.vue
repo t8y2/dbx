@@ -11,6 +11,7 @@ import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import * as api from "@/lib/backend/api";
 import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
 import type { DatabaseType } from "@/types/database";
@@ -559,7 +560,7 @@ function getConnectionName(id: string) {
                 >
                   <template #option-label="{ option, label }">
                     <div class="flex min-w-0 items-center gap-1.5">
-                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                      <DatabaseIcon :db-type="connectionIconType(sqlConnections.find((c) => c.id === option))" class="h-3.5 w-3.5 shrink-0" />
                       <ConnectionGroupBadge :connection-id="option" />
                       <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                     </div>
@@ -638,7 +639,7 @@ function getConnectionName(id: string) {
                 >
                   <template #option-label="{ option, label }">
                     <div class="flex min-w-0 items-center gap-1.5">
-                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                      <DatabaseIcon :db-type="connectionIconType(sqlConnections.find((c) => c.id === option))" class="h-3.5 w-3.5 shrink-0" />
                       <ConnectionGroupBadge :connection-id="option" />
                       <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                     </div>

@@ -12,6 +12,8 @@ import com.dbx.agent.test.JdbcMetadataSqlFake;
 import com.dbx.agent.test.TestSupport;
 import com.taosdata.jdbc.TSDBDriver;
 import com.taosdata.jdbc.rs.RestfulConnection;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
@@ -22,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -355,6 +358,49 @@ class TDengineAgentMetadataTest {
     }
 
     @Test
+    void restExecutionSupportsPooledWrappersAndRestoresOriginalDatabase() throws Exception {
+        Properties properties = new Properties();
+        properties.setProperty(TSDBDriver.PROPERTY_KEY_DBNAME, "original");
+        try (RestfulConnection physical = restfulConnection(properties)) {
+            physical.setCatalog("original");
+            Connection pooled = wrapperConnection(physical);
+
+            Assertions.assertNull(TDengineAgent.prepareExecutionSchema(pooled, "power"));
+            Assertions.assertEquals("power", pooled.getCatalog());
+            Assertions.assertEquals("power", pooled.getClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME));
+
+            TDengineAgent.restoreRestfulConnectionState(pooled, "original", "original");
+            Assertions.assertEquals("original", pooled.getCatalog());
+            Assertions.assertEquals("original", pooled.getClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME));
+        }
+    }
+
+    @Test
+    void hikariCanManageRestfulConnectionsWithoutLosingNativeAccess() throws Exception {
+        RestfulConnection physical = restfulConnection();
+        DataSource dataSource = proxy(DataSource.class, (proxy, method, args) -> {
+            if ("getConnection".equals(method.getName())) {
+                return physical;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        HikariConfig config = new HikariConfig();
+        config.setPoolName("tdengine-rest-test");
+        config.setDataSource(dataSource);
+        config.setMaximumPoolSize(1);
+        config.setMinimumIdle(0);
+        config.setInitializationFailTimeout(-1L);
+
+        try (HikariDataSource pool = new HikariDataSource(config);
+             Connection connection = pool.getConnection()) {
+            Assertions.assertTrue(connection.isWrapperFor(RestfulConnection.class));
+            Assertions.assertSame(physical, connection.unwrap(RestfulConnection.class));
+            Assertions.assertNull(TDengineAgent.prepareExecutionSchema(connection, "power"));
+            Assertions.assertEquals("power", connection.getCatalog());
+        }
+    }
+
+    @Test
     void websocketExecutionKeepsSchemaForUseSqlSwitching() throws Exception {
         Connection connection = JdbcAgentFake.connection();
 
@@ -441,10 +487,14 @@ class TDengineAgentMetadataTest {
     }
 
     private static RestfulConnection restfulConnection() {
+        return restfulConnection(new Properties());
+    }
+
+    private static RestfulConnection restfulConnection(Properties properties) {
         return new RestfulConnection(
             "127.0.0.1",
             "6041",
-            new Properties(),
+            properties,
             "",
             "jdbc:TAOS-RS://127.0.0.1:6041/",
             null,
@@ -452,5 +502,21 @@ class TDengineAgentMetadataTest {
             null,
             null
         );
+    }
+
+    private static Connection wrapperConnection(Connection physical) {
+        return proxy(Connection.class, (proxy, method, args) -> {
+            if ("isWrapperFor".equals(method.getName())) {
+                return ((Class<?>) args[0]).isInstance(physical);
+            }
+            if ("unwrap".equals(method.getName())) {
+                return ((Class<?>) args[0]).cast(physical);
+            }
+            try {
+                return method.invoke(physical, args);
+            } catch (java.lang.reflect.InvocationTargetException error) {
+                throw error.getCause();
+            }
+        });
     }
 }

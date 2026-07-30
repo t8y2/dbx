@@ -43,6 +43,7 @@ class AbstractJdbcAgentTest {
 
         assertNull(agent.getConnection());
         assertEquals(1, tracking.closeCount);
+        assertEquals(1, agent.afterDisconnectCount);
     }
 
     @Test
@@ -110,6 +111,18 @@ class AbstractJdbcAgentTest {
         assertEquals(1, tracking.openCount);
         assertEquals(1, tracking.isValidCount);
         assertEquals(1, tracking.closeCount);
+    }
+
+    @Test
+    void testConnectionCanSkipOpeningAPhysicalConnection() {
+        TrackingConnection tracking = new TrackingConnection();
+        TestAgent agent = new TestAgent(tracking);
+        agent.skipTestConnectionOpen = true;
+
+        assertFalse(agent.testConnection(new ConnectParams()));
+
+        assertEquals(0, tracking.openCount);
+        assertEquals(0, tracking.closeCount);
     }
 
     @Test
@@ -310,6 +323,8 @@ class AbstractJdbcAgentTest {
     private static class TestAgent extends AbstractJdbcAgent {
         private final TrackingConnection tracking;
         private int afterConnectCount;
+        private int afterDisconnectCount;
+        private boolean skipTestConnectionOpen;
 
         private TestAgent(TrackingConnection tracking) {
             this.tracking = tracking;
@@ -332,8 +347,18 @@ class AbstractJdbcAgentTest {
         }
 
         @Override
+        protected Connection openTestConnection(ConnectParams params) {
+            return skipTestConnectionOpen ? null : openConnection(params);
+        }
+
+        @Override
         protected void afterConnect(ConnectParams params, Connection connection) {
             afterConnectCount += 1;
+        }
+
+        @Override
+        protected void afterDisconnect() {
+            afterDisconnectCount += 1;
         }
 
         @Override

@@ -98,7 +98,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
 import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
-import { gaussdbIdentifierQuoteStyle, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
+import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 
 type DbOption = { value: string; label: string };
@@ -452,6 +452,15 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 
 const form = ref(defaultForm());
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const showGaussdbConnectionMode = computed(() => form.value.db_type === "gaussdb");
+const gaussdbDriverMode = computed<GaussdbConnectionMode>({
+  get: () => gaussdbConnectionMode(form.value),
+  set: (mode) => {
+    setGaussdbConnectionMode(form.value, mode);
+    resetTestState();
+  },
+});
+const isGaussdbMJdbcConnection = computed(() => gaussdbDriverMode.value === "m-jdbc");
 const showGaussdbIdentifierQuoteStyle = computed(() => supportsGaussdbIdentifierQuoteStyle(form.value));
 const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
   get: () => gaussdbIdentifierQuoteStyle(form.value),
@@ -1571,6 +1580,17 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
   }
 }
 
+async function ensureRequiredGaussdbMJdbcRuntime(config: ConnectionConfig): Promise<void> {
+  if (gaussdbConnectionMode(config) !== "m-jdbc") return;
+  if (!(config.jdbc_driver_paths ?? []).length) {
+    throw new Error(t("connection.gaussdbMJdbcDriverRequired"));
+  }
+  const status = await api.jdbcPluginStatus();
+  if (status.installed && status.compatible) return;
+  testResult.value = { ok: true, message: t("connection.gaussdbMJdbcPluginInstalling") };
+  await api.installJdbcPlugin();
+}
+
 async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<boolean> {
   if (await api.isAgentInstalled(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY)) return true;
 
@@ -1976,7 +1996,7 @@ watch(
         name: config.name,
         note: config.note || "",
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
-        driver_profile: oceanbasePatch?.driver_profile || profile,
+        driver_profile: oceanbasePatch?.driver_profile || config.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
         url_params: config.url_params || "",
         agent_java_options: config.agent_java_options || [],
@@ -2916,6 +2936,7 @@ async function testConnection() {
   try {
     config = connectionConfigForSubmit(editingId.value || draftTestConnectionId.value);
     await ensureRequiredAgentDriverInstalled(config);
+    await ensureRequiredGaussdbMJdbcRuntime(config);
     await ensureRequiredJdbcxDriverInstalled(config);
     const result = await testConnectionWithTimeout(config, runId);
     if (runId !== testRunId) return;
@@ -3352,7 +3373,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
   }
-  if (jdbcBackedDatabaseTypes.has(config.db_type)) {
+  if (jdbcBackedDatabaseTypes.has(config.db_type) || gaussdbConnectionMode(config) === "m-jdbc") {
     if (config.db_type === "jdbc") {
       if (config.driver_profile === "dremio") {
         applyDremioJdbcMetadata(config);
@@ -3370,12 +3391,19 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       config.connection_string = undefined;
       config.jdbc_driver_class = config.jdbc_driver_class?.trim() || "io.prestosql.jdbc.PrestoDriver";
       applyPrestoSqlBuiltinDriverPathsIfAvailable();
+    } else if (config.db_type === "gaussdb") {
+      config.connection_string = undefined;
+      config.jdbc_driver_class = GAUSSDB_M_JDBC_DRIVER_CLASS;
     }
     config.jdbc_driver_class = config.jdbc_driver_class?.trim() || undefined;
     config.jdbc_driver_paths = jdbcDriverPathsInput.value
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter(Boolean);
+  } else if (config.db_type === "gaussdb") {
+    config.connection_string = undefined;
+    config.jdbc_driver_class = undefined;
+    config.jdbc_driver_paths = [];
   }
   if (config.db_type === "h2") {
     const h2Mode = connectionUrlInput.value.trim() ? h2ConnectionModeForConfig(config) : h2ConnectionMode.value;
@@ -3948,9 +3976,13 @@ async function copyConnectionErrorDetail() {
   }
 }
 
+function openJdbcDriverManager() {
+  emit("openDriverStore", { target: "tab", tab: "jdbc" });
+}
+
 function openJdbcDriverManagerFromError() {
   showConnectionErrorDialog.value = false;
-  emit("openDriverStore", { target: "tab", tab: "jdbc" });
+  openJdbcDriverManager();
 }
 
 function resetForm() {
@@ -4276,11 +4308,13 @@ async function save() {
     if (editingId.value) {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(updated);
+      await ensureRequiredGaussdbMJdbcRuntime(updated);
       await store.updateConnection(updated);
       store.stopEditing();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(config);
+      await ensureRequiredGaussdbMJdbcRuntime(config);
       await store.addConnection(config);
       draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
@@ -6562,6 +6596,60 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto pt-4 pr-2">
+                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbConnectionMode") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbDriverMode">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="native">{{ t("connection.gaussdbConnectionModeNative") }}</SelectItem>
+                        <SelectItem value="m-jdbc">{{ t("connection.gaussdbConnectionModeMJdbc") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : t("connection.gaussdbConnectionModeNativeHint") }}
+                    </p>
+                  </div>
+                </div>
+                <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbMJdbcDriver") }}</Label>
+                  <div class="col-span-3 space-y-2">
+                    <Select v-if="jdbcDriverSelectItems.length > 0" :model-value="selectedJdbcDriverPath" @update:model-value="onJdbcDriverSelect">
+                      <SelectTrigger class="h-9">
+                        <SelectValue :placeholder="t('connection.jdbcDriverSelectPlaceholder')" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="driver in jdbcDriverSelectItems" :key="driver.id" :value="driver.id">
+                          {{ driver.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <div class="flex items-start gap-1">
+                      <textarea
+                        v-model="jdbcDriverPathsInput"
+                        class="flex min-h-12 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        :placeholder="t('connection.gaussdbMJdbcDriverPlaceholder')"
+                      />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button type="button" variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseJdbcDriverPaths">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.jdbcDriverBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3">
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbMJdbcDriverHint") }}</p>
+                      <Button type="button" variant="outline" size="sm" class="shrink-0" @click="openJdbcDriverManager">
+                        <FolderOpen class="h-3.5 w-3.5" />
+                        {{ t("toolbar.driverManager") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
                 <div v-if="showGaussdbIdentifierQuoteStyle" class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbIdentifierQuoteStyle") }}</Label>
                   <div class="col-span-3 grid gap-1">

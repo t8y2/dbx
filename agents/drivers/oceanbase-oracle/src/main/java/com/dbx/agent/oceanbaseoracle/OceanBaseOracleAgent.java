@@ -43,6 +43,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         "REMOTE_SCHEDULER_AGENT", "PDBADMIN", "DGPDB_INT", "OPS$ORACLE",
         "GGSYS", "FLOWS_FILES", "APEX_PUBLIC_USER", "GSMROOTUSER", "SYSRAC"
     );
+    private boolean queryTimeoutChanged;
 
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
@@ -77,6 +78,18 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         // session variable, so synchronize both limits before every execution.
         try (var stmt = connection.createStatement()) {
             stmt.execute(queryTimeoutSql(timeoutSecs));
+            queryTimeoutChanged = true;
+        }
+    }
+
+    @Override
+    protected void beforePooledConnectionReturn(Connection connection) throws SQLException {
+        if (!queryTimeoutChanged) {
+            return;
+        }
+        try (var stmt = connection.createStatement()) {
+            stmt.execute(queryTimeoutSql(0));
+            queryTimeoutChanged = false;
         }
     }
 

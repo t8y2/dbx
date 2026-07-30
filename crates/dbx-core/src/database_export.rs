@@ -305,7 +305,7 @@ fn format_export_sql_literal_for_database(value: &Value, database_type: Option<D
         return number.to_string();
     }
     if let Some(value) = value.as_bool() {
-        if database_type == Some(DatabaseType::Dameng) {
+        if matches!(database_type, Some(DatabaseType::Dameng) | Some(DatabaseType::SqlServer)) {
             return if value { "1" } else { "0" }.to_string();
         }
         return if value { "TRUE" } else { "FALSE" }.to_string();
@@ -2445,6 +2445,45 @@ mod tests {
         assert_eq!(format_export_sql_literal(&json!(42)), "42");
         assert_eq!(format_export_sql_literal(&json!(true)), "TRUE");
         assert_eq!(format_export_sql_literal(&json!("O'Hara")), "'O''Hara'");
+    }
+
+    #[test]
+    fn database_specific_boolean_export_literals() {
+        let sqlserver_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            table_name: Some("flags".to_string()),
+            qualified_table_name: None,
+            columns: vec!["typed_true".to_string(), "untyped_false".to_string(), "typed_null".to_string()],
+            column_types: vec![Some("bit".to_string()), None, Some("bit".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(true), json!(false), Value::Null]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+        let postgres_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("flags".to_string()),
+            qualified_table_name: None,
+            columns: vec!["enabled".to_string(), "disabled".to_string(), "unknown".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(true), json!(false), Value::Null]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sqlserver_statements,
+            vec!["INSERT INTO [dbo].[flags] ([typed_true], [untyped_false], [typed_null]) VALUES (1, 0, NULL);"]
+        );
+        assert_eq!(
+            postgres_statements,
+            vec![
+                "INSERT INTO \"public\".\"flags\" (\"enabled\", \"disabled\", \"unknown\") VALUES (TRUE, FALSE, NULL);"
+            ]
+        );
     }
 
     #[test]

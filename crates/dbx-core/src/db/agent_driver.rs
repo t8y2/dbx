@@ -81,14 +81,25 @@ impl AgentRuntimeClient {
             handshake: AgentHandshake { protocol_version: 0, agent_protocol_version: 0, capabilities: Vec::new() },
         });
         runtime.start_response_reader(stdout);
-        let handshake = runtime
+        let handshake = match runtime
             .call::<AgentHandshake>(
                 AgentMethod::Handshake.as_str(),
                 agent_handshake_params(app_version),
                 Some(Duration::from_secs(RPC_TIMEOUT_SECS)),
                 None,
             )
-            .await?;
+            .await
+        {
+            Ok(handshake) => handshake,
+            Err(error) if is_unsupported_handshake_error(&error) => {
+                runtime.kill();
+                return Err("Agent runtime does not support multi_session protocol v2".to_string());
+            }
+            Err(error) => {
+                runtime.kill();
+                return Err(error);
+            }
+        };
         if handshake.protocol_version < 2 || !handshake.supports(AgentCapability::MultiSession) {
             runtime.kill();
             return Err("Agent runtime does not support multi_session protocol v2".to_string());
@@ -2630,6 +2641,42 @@ for line in sys.stdin:
         assert_eq!(first.unwrap(), 1);
         assert_eq!(second.unwrap(), 2);
         runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_routes_agents_without_handshake_to_legacy_fallback() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-runtime-no-handshake-test-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({
+        'jsonrpc': '2.0',
+        'id': req['id'],
+        'error': {'code': -1, 'message': 'Unknown method: ' + req['method']}
+    }), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let error = match AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        {
+            Ok(runtime) => {
+                runtime.kill();
+                panic!("agent without handshake unexpectedly started as a shared runtime");
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "Agent runtime does not support multi_session protocol v2");
         let _ = std::fs::remove_file(script_path);
     }
 

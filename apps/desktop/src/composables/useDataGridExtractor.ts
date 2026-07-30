@@ -173,12 +173,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     });
   }
 
-  function canCopyWithExtractor(extractor: DataGridCopyExtractorId): boolean {
+  function canCopyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): boolean {
     if (hasUnsupportedDiscreteSelection.value) return false;
     if (!options.hasRowSelection.value && !options.hasCellSelection.value && !options.contextCell.value) return false;
     if (extractorUnavailableForDatabase(extractor, options.databaseType.value)) return false;
     if (extractor === "sql-inserts") {
-      const request = buildRequest(extractor);
+      const request = buildRequest(extractor, extractorOptions);
       return request !== null && options.canCopySqlInsert(request);
     }
     if (extractor === "sql-updates") {
@@ -198,13 +198,13 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return { text, mimeType: "application/javascript", fileExtension: "js", rowCount: rowLimit ?? request.rows.length, columnCount: request.selectedColumnIndexes.length, warnings: undefined, omittedColumns: undefined };
   }
 
-  async function copyWithExtractor(extractor: DataGridCopyExtractorId): Promise<boolean> {
+  async function copyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
     if (hasUnsupportedDiscreteSelection.value) {
       toast(t("grid.copyExtractorUnsupportedSelection"), 5000);
       return false;
     }
-    if (!canCopyWithExtractor(extractor)) return false;
-    const request = buildRequest(extractor);
+    if (!canCopyWithExtractor(extractor, extractorOptions)) return false;
+    const request = buildRequest(extractor, extractorOptions);
     if (!request) return false;
     try {
       const mongoResult = await resolveMongoExtractorResult(extractor, request);

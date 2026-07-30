@@ -170,6 +170,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: true,
   },
+  minimax: {
+    label: "MiniMax",
+    iconSlug: "minimax",
+    provider: "minimax",
+    endpoint: "https://api.minimax.io/v1",
+    model: "MiniMax-M3",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+  },
   ollama: {
     label: "Ollama",
     iconSlug: "ollama",
@@ -299,6 +309,7 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   if (endpoint.includes("deepseek") || model.includes("deepseek")) return "deepseek";
   if (endpoint.includes("dashscope") || endpoint.includes("aliyuncs") || model.includes("qwen")) return "qwen";
   if (endpoint.includes("generativelanguage.googleapis.com") || model.includes("gemini")) return "gemini";
+  if (endpoint.includes("minimax.io") || endpoint.includes("minimaxi.com") || model.includes("minimax")) return "minimax";
   if (endpoint.includes("localhost:11434") || endpoint.includes("127.0.0.1:11434")) return "ollama";
   if (endpoint.includes("openai.com") || model.startsWith("gpt-")) return "openai";
   return "claude";

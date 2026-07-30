@@ -569,6 +569,22 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.resultSortedSql).toBe("SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC");
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
     expect(tab.queryAnalysis).toBeDefined();
+
+    await store.executeTabSql(tabId, "SELECT name FROM users", {
+      resultBaseSql: "SELECT name FROM users",
+      resultSortedSql: tab.resultSortedSql,
+      querySort: {
+        resultColumns: ["name"],
+        columnIndex: 0,
+        column: "name",
+        direction: "asc",
+      },
+      pagination: { offset: 100, limit: 100 },
+    });
+
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
   });
 
   it("clears result sorting when the editor SQL is executed again", async () => {

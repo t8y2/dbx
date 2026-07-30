@@ -1,4 +1,6 @@
-use crate::connection::{connection_url_for_endpoint, database_connection_config, AppState, MysqlMode, PoolKind};
+use crate::connection::{
+    connection_url_for_endpoint, database_connection_config, task_client_session_id, AppState, MysqlMode, PoolKind,
+};
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
@@ -27,6 +29,37 @@ macro_rules! dispatch_mysql {
             $mysql($p $(, $arg)*).await
         }
     };
+}
+
+struct EphemeralAgentMetadataSession {
+    client_session_id: Option<String>,
+    cleanup_guard: Option<crate::connection::ClientSessionPoolCleanupGuard>,
+}
+
+impl EphemeralAgentMetadataSession {
+    async fn open(state: &AppState, connection_id: &str, database: Option<&str>, task_kind: &str) -> Self {
+        let db_config = connection_config(state, connection_id).await;
+        let client_session_id = ephemeral_agent_metadata_session_id(db_config.as_ref(), task_kind);
+        let cleanup_guard = match client_session_id.as_deref() {
+            Some(client_session_id) => {
+                state.client_session_pool_cleanup_guard(connection_id, database, client_session_id).await
+            }
+            None => None,
+        };
+        Self { client_session_id, cleanup_guard }
+    }
+
+    fn client_session_id(&self) -> Option<&str> {
+        self.client_session_id.as_deref()
+    }
+
+    async fn finish(mut self, state: &AppState, connection_id: &str, database: Option<&str>) {
+        if close_ephemeral_agent_metadata_session(state, connection_id, database, self.client_session_id()).await {
+            if let Some(cleanup_guard) = self.cleanup_guard.as_mut() {
+                cleanup_guard.disarm();
+            }
+        }
+    }
 }
 
 macro_rules! try_sqlserver {
@@ -775,10 +808,30 @@ pub async fn list_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
-        list_tables_once(state, connection_id, database, schema, filter, limit, offset, object_types, table_name_filter)
-    })
-    .await
+    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "tables").await;
+    let result = retry_metadata_connection_for_session(
+        state,
+        connection_id,
+        Some(database),
+        metadata_session.client_session_id(),
+        || {
+            list_tables_once(
+                state,
+                connection_id,
+                database,
+                schema,
+                filter,
+                limit,
+                offset,
+                object_types,
+                table_name_filter,
+                metadata_session.client_session_id(),
+            )
+        },
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
 }
 
 /// List vector database collections, returning structured info (name, id, dimension).
@@ -830,8 +883,31 @@ pub async fn get_table_comment_core(
         return Err("Table comments are not available for linked server tables".to_string());
     }
 
-    retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let metadata_session =
+        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "table-comment").await;
+    let result = get_table_comment_core_for_session(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        metadata_session.client_session_id(),
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
+}
+
+async fn get_table_comment_core_for_session(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
+        let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {
@@ -1649,8 +1725,9 @@ async fn list_tables_once(
     offset: Option<usize>,
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
+    client_session_id: Option<&str>,
 ) -> Result<Vec<db::TableInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
 
     {
@@ -1740,6 +1817,7 @@ async fn list_tables_once(
         }
         try_sqlserver!(connections, &pool_key, list_tables, schema, filter, limit, offset);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+            let use_mongodb_collection_listing = uses_mongodb_agent_collection_listing(db_config.as_ref());
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
             let is_tdengine = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Tdengine);
             let use_agent_table_paging = db_config.as_ref().is_some_and(supports_agent_table_paging);
@@ -1753,6 +1831,17 @@ async fn list_tables_once(
             let fallback_config = db_config.clone();
             drop(connections);
             let mut client = client.lock().await;
+            if use_mongodb_collection_listing {
+                let collection_names = client.mongo_list_collections::<Vec<String>>(database).await?;
+                return Ok(filter_mongodb_agent_collections(
+                    collection_names,
+                    filter,
+                    limit,
+                    offset,
+                    object_types,
+                    table_name_filter,
+                ));
+            }
             let agent_filter = if filter_locally_after_comments { None } else { filter };
             let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
             let agent_limit = if filter_locally_after_comments || force_local_table_name_filter {
@@ -2001,6 +2090,24 @@ fn collection_names_to_tables(names: Vec<String>, table_type: &str) -> Vec<db::T
         .collect()
 }
 
+fn filter_mongodb_agent_collections(
+    names: Vec<String>,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+) -> Vec<db::TableInfo> {
+    filter_table_infos(
+        collection_names_to_tables(names, "COLLECTION"),
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+    )
+}
+
 fn filter_table_infos(
     tables: Vec<db::TableInfo>,
     filter: Option<&str>,
@@ -2104,6 +2211,10 @@ fn normalize_table_info_object_type(value: &str) -> String {
 
 fn uses_presto_like_information_schema_tables(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::PrestoSql | DatabaseType::Trino)
+}
+
+fn uses_mongodb_agent_collection_listing(config: Option<&ConnectionConfig>) -> bool {
+    config.is_some_and(|config| config.db_type == DatabaseType::MongoDb)
 }
 
 async fn external_driver_presto_like_tables(
@@ -2350,6 +2461,7 @@ mod tests {
     use super::{
         clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
+        ephemeral_agent_metadata_session_id, filter_mongodb_agent_collections,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
         metadata_name_or_comment_matches, mysql_object_source_ddl_column_index, mysql_object_source_sql,
@@ -2361,7 +2473,8 @@ mod tests {
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
-        visible_schema_filter, TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        uses_mongodb_agent_collection_listing, visible_schema_filter, TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT,
+        TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use std::collections::HashMap;
@@ -2438,6 +2551,20 @@ mod tests {
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[test]
+    fn agent_metadata_uses_unique_ephemeral_sessions_only_for_agents() {
+        let oracle = test_connection_config(DatabaseType::Oracle);
+        let first = ephemeral_agent_metadata_session_id(Some(&oracle), "completion-objects").unwrap();
+        let second = ephemeral_agent_metadata_session_id(Some(&oracle), "completion-objects").unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("completion-objects:"));
+
+        let postgres = test_connection_config(DatabaseType::Postgres);
+        assert!(ephemeral_agent_metadata_session_id(Some(&postgres), "completion-objects").is_none());
+        assert!(ephemeral_agent_metadata_session_id(None, "completion-objects").is_none());
     }
 
     #[test]
@@ -2660,6 +2787,40 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "audit_record");
+    }
+
+    #[test]
+    fn mongodb_agent_collection_listing_only_applies_to_mongodb() {
+        let mongodb = test_connection_config(DatabaseType::MongoDb);
+        let postgres = test_connection_config(DatabaseType::Postgres);
+
+        assert!(uses_mongodb_agent_collection_listing(Some(&mongodb)));
+        assert!(!uses_mongodb_agent_collection_listing(Some(&postgres)));
+        assert!(!uses_mongodb_agent_collection_listing(None));
+    }
+
+    #[test]
+    fn mongodb_agent_collections_preserve_table_list_constraints() {
+        let collection_types = vec!["COLLECTION".to_string()];
+        let names = vec!["audit_log".to_string(), "users".to_string(), "audit_record".to_string()];
+
+        let filtered = filter_mongodb_agent_collections(
+            names.clone(),
+            Some("audit"),
+            Some(1),
+            Some(1),
+            Some(&collection_types),
+            None,
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "audit_record");
+        assert_eq!(filtered[0].table_type, "COLLECTION");
+
+        let table_types = vec!["TABLE".to_string()];
+        let filtered = filter_mongodb_agent_collections(names, None, None, None, Some(&table_types), None);
+
+        assert!(filtered.is_empty());
     }
 
     #[test]
@@ -3521,8 +3682,24 @@ pub async fn list_objects_core(
     });
     let use_oracle_agent_paging =
         db_config.as_ref().is_some_and(is_default_oracle_agent_config) && !filter_locally_after_oracle_comments;
-    retry_metadata_connection(state, connection_id, Some(database), || async {
-        let objects = list_objects_once(state, connection_id, database, schema, filter, limit, offset, object_types)
+    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "objects").await;
+    let result = retry_metadata_connection_for_session(
+        state,
+        connection_id,
+        Some(database),
+        metadata_session.client_session_id(),
+        || async {
+            let objects = list_objects_once(
+                state,
+                connection_id,
+                database,
+                schema,
+                filter,
+                limit,
+                offset,
+                object_types,
+                metadata_session.client_session_id(),
+            )
             .await
             .map(|outcome| {
                 let final_offset = if outcome.paging_applied
@@ -3534,9 +3711,12 @@ pub async fn list_objects_core(
                 };
                 filter_object_infos(outcome.objects, filter, limit, final_offset, object_types)
             })?;
-        Ok(objects)
-    })
-    .await
+            Ok(objects)
+        },
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
 }
 
 pub async fn list_object_statistics_core(
@@ -3557,10 +3737,44 @@ pub async fn list_completion_objects_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
-        list_completion_objects_once(state, connection_id, database, schema)
-    })
-    .await
+    let metadata_session =
+        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "completion-objects").await;
+    let result = retry_metadata_connection_for_session(
+        state,
+        connection_id,
+        Some(database),
+        metadata_session.client_session_id(),
+        || list_completion_objects_once(state, connection_id, database, schema, metadata_session.client_session_id()),
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
+}
+
+fn ephemeral_agent_metadata_session_id(config: Option<&ConnectionConfig>, task_kind: &str) -> Option<String> {
+    config
+        .filter(|config| crate::database_capabilities::is_agent_type(&config.db_type))
+        .map(|_| task_client_session_id(task_kind, &uuid::Uuid::new_v4().to_string()))
+}
+
+async fn close_ephemeral_agent_metadata_session(
+    state: &AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    client_session_id: Option<&str>,
+) -> bool {
+    let Some(client_session_id) = client_session_id else {
+        return true;
+    };
+    match state.close_client_session_pool(connection_id, database, client_session_id).await {
+        Ok(_) => true,
+        Err(error) => {
+            log::warn!(
+                "Failed to close ephemeral Agent metadata session '{client_session_id}' for '{connection_id}': {error}"
+            );
+            false
+        }
+    }
 }
 
 pub async fn completion_assistant_search_core(
@@ -3899,8 +4113,9 @@ async fn list_objects_once(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    client_session_id: Option<&str>,
 ) -> Result<ObjectListOutcome, String> {
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
     let (mysql_limit, mysql_offset) =
         if filter.is_none_or(|value| value.trim().is_empty()) { (limit, offset) } else { (None, None) };
@@ -4095,8 +4310,9 @@ async fn list_completion_objects_once(
     connection_id: &str,
     database: &str,
     schema: &str,
+    client_session_id: Option<&str>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
 
     let connections = state.connections.read().await;
@@ -4187,7 +4403,8 @@ async fn list_completion_objects_once(
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(filter_completion_objects),
         PoolKind::SqlServer(_) => {
             drop(connections);
-            let outcome = list_objects_once(state, connection_id, database, schema, None, None, None, None).await?;
+            let outcome =
+                list_objects_once(state, connection_id, database, schema, None, None, None, None, None).await?;
             Ok(filter_completion_objects(outcome.objects))
         }
         _ => Ok(Vec::new()),
@@ -4286,6 +4503,37 @@ pub async fn get_columns_core_for_session(
     table: &str,
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    if client_session_id.is_none() {
+        let metadata_session =
+            EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "columns").await;
+        if metadata_session.client_session_id().is_some() {
+            let result = get_columns_core_for_session_inner(
+                state,
+                connection_id,
+                database,
+                schema,
+                table,
+                metadata_session.client_session_id(),
+                false,
+            )
+            .await;
+            metadata_session.finish(state, connection_id, Some(database)).await;
+            return result;
+        }
+    }
+    get_columns_core_for_session_inner(state, connection_id, database, schema, table, client_session_id, true).await
+}
+
+async fn get_columns_core_for_session_inner(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+    use_client_session_context: bool,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    let context_session_id = if use_client_session_context { client_session_id } else { None };
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
         let pool_key = state
             .get_or_create_pool_for_session(connection_id, Some(database), client_session_id)
@@ -4302,7 +4550,7 @@ pub async fn get_columns_core_for_session(
                     return external_driver_presto_like_columns(session, config.as_ref(), database, schema, table).await;
                 }
                 let query_oracle_columns_first =
-                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, client_session_id);
+                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, context_session_id);
                 if query_oracle_columns_first {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
@@ -4404,7 +4652,7 @@ pub async fn get_columns_core_for_session(
                 drop(connections);
                 let mut client = client.lock().await;
                 let oracle_sql_config = fallback_config.as_ref().filter(|config| {
-                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, client_session_id)
+                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, context_session_id)
                 });
                 let query_oracle_columns_first = oracle_sql_config.is_some();
                 if let Some(config) = oracle_sql_config {
@@ -4629,8 +4877,30 @@ pub async fn list_indexes_core(
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Ok(vec![]);
     }
-    retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "indexes").await;
+    let result = list_indexes_core_for_session(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        metadata_session.client_session_id(),
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
+}
+
+async fn list_indexes_core_for_session(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Result<Vec<db::IndexInfo>, String> {
+    retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
+        let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {
@@ -4685,8 +4955,31 @@ pub async fn list_foreign_keys_core(
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Ok(vec![]);
     }
-    retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let metadata_session =
+        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "foreign-keys").await;
+    let result = list_foreign_keys_core_for_session(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        metadata_session.client_session_id(),
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
+}
+
+async fn list_foreign_keys_core_for_session(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Result<Vec<db::ForeignKeyInfo>, String> {
+    retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
+        let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {

@@ -39,6 +39,7 @@ import {
   Eraser,
   Columns3,
   PencilRuler,
+  Settings2,
   WandSparkles,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -206,7 +207,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
-import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarCopyCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
+import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
@@ -5279,6 +5280,10 @@ function copyExtractorLabel(extractor: DataGridCopyExtractorId): string {
 }
 
 const selectedCopyExtractor = computed(() => settingsStore.editorSettings.dataGridCopyExtractor);
+const defaultCopyExtractorLabel = computed(() => {
+  if (selectedCopyExtractor.value !== "sql-inserts") return copyExtractorLabel(selectedCopyExtractor.value);
+  return t(settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert ? "grid.copyExtractorSqlInsertsWithoutPrimaryKeys" : "grid.copyExtractorSqlInsertsWithPrimaryKeys");
+});
 const extractorConfigOpen = ref(false);
 const extractorMenuItems = computed(() =>
   DATA_GRID_COPY_EXTRACTOR_IDS.map((extractor) => ({
@@ -5288,23 +5293,23 @@ const extractorMenuItems = computed(() =>
     separatorBefore: DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].separatorBefore,
   })),
 );
-const copyToolbarCapability = computed<DataGridToolbarCopyCapability>(() => ({
-  label: copyExtractorLabel(selectedCopyExtractor.value),
-  tooltip: `${t("grid.copy")} (${shortcutMod}+C)`,
-  currentValue: selectedCopyExtractor.value,
-  disabled: !canCopyWithExtractor(selectedCopyExtractor.value),
-  items: [...extractorMenuItems.value, { value: "__configure__", label: t("grid.copyExtractorConfigure"), separatorBefore: true }],
-  onCopy: async () => {
-    await copyWithExtractor(selectedCopyExtractor.value);
-  },
-  onSelect: (value) => {
-    if (value === "__configure__") {
-      extractorConfigOpen.value = true;
-      return;
-    }
-    settingsStore.updateEditorSettings({ dataGridCopyExtractor: value as DataGridCopyExtractorId });
-  },
-}));
+function openExtractorConfiguration() {
+  extractorConfigOpen.value = true;
+}
+
+function setDefaultCopyExtractor(value: string) {
+  const item = extractorMenuItems.value.find((candidate) => candidate.value === value);
+  if (!item || item.disabled) return;
+  settingsStore.updateEditorSettings({ dataGridCopyExtractor: item.value });
+}
+
+function sqlInsertExtractorOptions(excludePrimaryKeysFromInsert: boolean) {
+  const options = settingsStore.editorSettings.dataGridExtractorOptions;
+  return {
+    ...options,
+    sql: { ...options.sql, excludePrimaryKeysFromInsert },
+  };
+}
 
 function saveExtractorConfiguration(value: { extractor: DataGridCopyExtractorId; options: typeof settingsStore.editorSettings.dataGridExtractorOptions }) {
   settingsStore.updateEditorSettings({ dataGridCopyExtractor: value.extractor, dataGridExtractorOptions: value.options });
@@ -7609,6 +7614,11 @@ defineExpose({
   exportSql,
   exportXlsx,
   exportTxt,
+  defaultCopyExtractor: selectedCopyExtractor,
+  defaultCopyExtractorLabel,
+  copyExtractorMenuItems: extractorMenuItems,
+  setDefaultCopyExtractor,
+  openExtractorConfiguration,
 });
 
 // ---- CustomContextMenu ----
@@ -7649,22 +7659,34 @@ function buildExtractorContextItems(): ContextMenuItem[] {
       items.push({ label: "", separator: true });
     }
     const selected = extractor === selectedCopyExtractor.value;
+    if (extractor === "sql-inserts") {
+      for (const excludePrimaryKeysFromInsert of [false, true]) {
+        const options = sqlInsertExtractorOptions(excludePrimaryKeysFromInsert);
+        items.push({
+          label: t(excludePrimaryKeysFromInsert ? "grid.copyExtractorSqlInsertsWithoutPrimaryKeys" : "grid.copyExtractorSqlInsertsWithPrimaryKeys"),
+          action: () => void copyWithExtractor(extractor, options),
+          disabled: !canCopyWithExtractor(extractor, options),
+          checked: selected && settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === excludePrimaryKeysFromInsert,
+        });
+      }
+      continue;
+    }
     items.push({
-      label: `${selected ? "✓ " : ""}${copyExtractorLabel(extractor)}`,
+      label: copyExtractorLabel(extractor),
       action: () => {
         // One-off copy as the chosen format; do NOT persist it as the default —
         // the saved default stays controlled by the toolbar/settings dialog.
         void copyWithExtractor(extractor);
       },
       disabled: !canCopyWithExtractor(extractor),
+      checked: selected,
     });
   }
   items.push({ label: "", separator: true });
   items.push({
     label: t("grid.copyExtractorConfigure"),
-    action: () => {
-      extractorConfigOpen.value = true;
-    },
+    icon: Settings2,
+    action: openExtractorConfiguration,
   });
   return items;
 }
@@ -7911,7 +7933,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             :compact="compactDataGridToolbar"
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
-            :copy-data="copyToolbarCapability"
             :add-row="addRowToolbarCapability"
             :preview="previewToolbarCapability"
             :save="saveToolbarCapability"

@@ -174,6 +174,32 @@ class ValidateAgentsTest(unittest.TestCase):
                 validate_agents.validate_authoring_template(root),
             )
 
+    def test_jdbc_pool_coverage_requires_every_jdbc_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "build.gradle").write_text(
+                "def pooledJdbcProjects = ['h2'] as Set\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                ["JDBC module missing pooled runtime dependency: access"],
+                validate_agents.validate_jdbc_pool_coverage(root, {"access", "h2", "mongodb"}),
+            )
+
+    def test_jdbc_pool_coverage_rejects_non_jdbc_modules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "build.gradle").write_text(
+                "def pooledJdbcProjects = ['h2', 'mongodb'] as Set\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                ["non-JDBC module listed as pooled JDBC runtime: mongodb"],
+                validate_agents.validate_jdbc_pool_coverage(root, {"h2", "mongodb"}),
+            )
+
     def test_manifest_validation_requires_registry_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

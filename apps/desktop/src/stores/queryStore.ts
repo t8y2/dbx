@@ -3817,7 +3817,10 @@ export const useQueryStore = defineStore("query", () => {
       if (tab.mode === "query") {
         const prepared = await prepareEditableQueryExecution(tab, sqlToExecute, conn, effectiveDbType, executionDatabase, traceId, elapsed);
         sqlToExecute = prepared.sql;
-        queryMetadataSql = prepared.metadataSql;
+        // Database sorting executes a generated wrapper around the user's query.
+        // Keep editability metadata anchored to the original query so the wrapper
+        // does not turn an otherwise editable result into a complex read-only one.
+        queryMetadataSql = options?.resultSortedSql && !options?.querySort ? queryBaseSql : prepared.metadataSql;
         hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
         if (options?.querySort) {
           const sorted = await api.buildSortedQuerySql({

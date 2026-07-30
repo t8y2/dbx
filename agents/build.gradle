@@ -4,6 +4,13 @@ plugins {
 
 def infrastructureProjects = ['common', 'test-support'] as Set
 def legacyStandaloneProjects = ['mongodb', 'kafka', 'rocketmq', 'rabbitmq'] as Set
+def pooledJdbcProjects = [
+    'access', 'bigquery', 'cassandra', 'dameng', 'databend', 'databricks', 'db2', 'exasol',
+    'firebird', 'gbase8a', 'gbase8s', 'goldendb', 'h2', 'h2-legacy', 'highgo', 'hive',
+    'informix', 'iotdb', 'iris', 'kylin', 'neo4j', 'oceanbase-oracle', 'oscar', 'saphana',
+    'snowflake', 'spark', 'sqlserver-legacy', 'sundb', 'tdengine', 'teradata', 'trino', 'uxdb',
+    'vastbase', 'vertica', 'yashandb'
+] as Set
 def agentProjects = subprojects.findAll { !infrastructureProjects.contains(it.name) }
 def jdbcAgentProjects = agentProjects.findAll { !legacyStandaloneProjects.contains(it.name) }
 
@@ -49,5 +56,12 @@ configure(jdbcAgentProjects) {
     dependencies {
         implementation project(':common')
         testImplementation project(':test-support')
+    }
+}
+
+configure(agentProjects.findAll { pooledJdbcProjects.contains(it.name) }) {
+    dependencies {
+        implementation 'com.zaxxer:HikariCP:7.0.2'
+        runtimeOnly 'org.slf4j:slf4j-nop:2.0.17'
     }
 }

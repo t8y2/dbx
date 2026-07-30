@@ -1934,12 +1934,14 @@ test("keeps joined query read-only when multiple source tables are writable cand
   }
 });
 
-test("uses dbo as SQL Server metadata schema when query omits schema", async () => {
+test("uses dbo as SQL Server metadata schema and keeps sorted query results editable", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
   const store = useQueryStore();
   const originalFetch = globalThis.fetch;
+  const baseSql = "select id, name from users";
+  const analyzedSql: string[] = [];
   const columnRequests: Array<{ schema: string | null; table: string | null }> = [];
 
   connectionStore.addEphemeralConnection(sqlServerConn("sqlserver-1"));
@@ -1961,7 +1963,13 @@ test("uses dbo as SQL Server metadata schema when query omits schema", async () 
     }
     if (url === "/api/query/analyze-editability") {
       const body = JSON.parse(String(init?.body ?? "{}"));
-      assert.equal(body.sql, "select id, name from users");
+      analyzedSql.push(body.sql);
+      if (body.sql !== baseSql) {
+        return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response(
         JSON.stringify({
           editable: true,
@@ -2020,14 +2028,27 @@ test("uses dbo as SQL Server metadata schema when query omits schema", async () 
 
   try {
     const tabId = store.createTab("sqlserver-1", "app", "Query 1", "query");
-    await store.executeTabSql(tabId, "select id, name from users");
+    await store.executeTabSql(tabId, baseSql);
 
     const tab = store.tabs.find((item) => item.id === tabId);
     await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "users");
+    assert.deepEqual(analyzedSql, [baseSql]);
     assert.deepEqual(columnRequests, [{ schema: "dbo", table: "users" }]);
     assert.equal(tab?.tableMeta?.schema, "dbo");
     assert.equal(tab?.tableMeta?.columns[0]?.comment, "编号");
     assert.equal(tab?.tableMeta?.columns[1]?.comment, "姓名");
+
+    const sortedSql = "SELECT * FROM (select id, name from users) t([ID], [NAME]) ORDER BY [NAME] ASC;";
+    await store.executeTabSql(tabId, sortedSql, {
+      resultBaseSql: baseSql,
+      resultSortedSql: sortedSql,
+      preserveResultDuringExecution: true,
+    });
+
+    await waitFor(() => analyzedSql.length === 2);
+    assert.deepEqual(analyzedSql, [baseSql, baseSql]);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+    assert.equal(tab?.queryAnalysis?.tableName, "users");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -33,6 +33,8 @@ use crate::task_supervisor::TaskSupervisor;
 pub const JDBC_PLUGIN_NOT_INSTALLED: &str =
     "JDBC plugin is not installed. Install the optional JDBC plugin to use this connection.";
 pub const PRESTOSQL_JDBC_DRIVER_CLASS: &str = "io.prestosql.jdbc.PrestoDriver";
+pub const GAUSSDB_M_JDBC_DRIVER_PROFILE: &str = "gaussdb-m";
+pub const GAUSSDB_M_JDBC_DRIVER_CLASS: &str = "com.huawei.gaussdb.jdbc.Driver";
 const SQLSERVER_LEGACY_DRIVER_INSTALL_HINT: &str =
     "Install the SQL Server legacy compatibility component from Driver Manager, or open the connection settings and enable SQL Server legacy compatibility mode again.";
 const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -278,6 +280,15 @@ pub struct PoolActivityTouch {
     task_supervisor: TaskSupervisor,
 }
 
+pub(crate) struct ClientSessionPoolCleanupGuard {
+    pool_key: String,
+    connections: Arc<RwLock<HashMap<String, PoolKind>>>,
+    pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
+    postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    task_supervisor: TaskSupervisor,
+    armed: bool,
+}
+
 impl Drop for PoolActivityTouch {
     fn drop(&mut self) {
         let pool_key = self.pool_key.clone();
@@ -292,6 +303,34 @@ impl Drop for PoolActivityTouch {
                 return;
             }
             pool_activity.write().await.insert(pool_key, PoolActivity::now());
+        });
+    }
+}
+
+impl ClientSessionPoolCleanupGuard {
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ClientSessionPoolCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let pool_key = self.pool_key.clone();
+        let connections = self.connections.clone();
+        let pool_activity = self.pool_activity.clone();
+        let postgres_cancel_contexts = self.postgres_cancel_contexts.clone();
+        let task_supervisor = self.task_supervisor.clone();
+        task_supervisor.stop(&format!("keepalive:{pool_key}"));
+        task_supervisor.spawn_once(format!("client-session-cleanup:{pool_key}"), move |_| async move {
+            pool_activity.write().await.remove(&pool_key);
+            postgres_cancel_contexts.write().await.remove(&pool_key);
+            let removed = connections.write().await.remove(&pool_key);
+            if let Some(pool) = removed {
+                close_pool_kind_with_timeout(pool_key, pool).await;
+            }
         });
     }
 }
@@ -365,6 +404,46 @@ pub fn prestosql_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str,
     if jdbc_config.jdbc_driver_class.as_deref().is_none_or(|value| value.trim().is_empty()) {
         jdbc_config.jdbc_driver_class = Some(PRESTOSQL_JDBC_DRIVER_CLASS.to_string());
     }
+    jdbc_config
+}
+
+pub fn gaussdb_uses_m_jdbc_driver(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Gaussdb
+        && config
+            .driver_profile
+            .as_deref()
+            .is_some_and(|profile| profile.eq_ignore_ascii_case(GAUSSDB_M_JDBC_DRIVER_PROFILE))
+}
+
+pub fn gaussdb_m_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str, port: u16) -> ConnectionConfig {
+    let mut jdbc_config = config.clone();
+    let mut jdbc_url = format!("jdbc:{}", config.redacted_connection_url_with_host(host, port));
+    let raw_params = config.url_params.as_deref().unwrap_or("").trim().trim_start_matches('?');
+    let explicit_sslmode = raw_params.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        key.trim().eq_ignore_ascii_case("sslmode").then(|| value.trim().to_ascii_lowercase())
+    });
+    let explicit_ssl = raw_params.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        key.trim().eq_ignore_ascii_case("ssl").then(|| value.trim().eq_ignore_ascii_case("true"))
+    });
+    let sslmode = explicit_sslmode.unwrap_or_else(|| {
+        if explicit_ssl == Some(false) {
+            "disable".to_string()
+        } else if config.ssl {
+            "require".to_string()
+        } else {
+            "prefer".to_string()
+        }
+    });
+    let params = upsert_connection_url_param(Some(raw_params), "sslmode", &sslmode);
+    let params = upsert_connection_url_param(Some(&params), "ssl", if sslmode == "disable" { "false" } else { "true" });
+    if !params.is_empty() {
+        jdbc_url.push('?');
+        jdbc_url.push_str(&params);
+    }
+    jdbc_config.connection_string = Some(jdbc_url);
+    jdbc_config.jdbc_driver_class = Some(GAUSSDB_M_JDBC_DRIVER_CLASS.to_string());
     jdbc_config
 }
 
@@ -1303,6 +1382,10 @@ impl AppState {
                     .await?
                 };
                 PoolKind::Mysql(pool, MysqlMode::Bare)
+            }
+            DatabaseType::Gaussdb if gaussdb_uses_m_jdbc_driver(&db_config) => {
+                let jdbc_config = gaussdb_m_jdbc_config_for_endpoint(&db_config, &host, port);
+                self.external_driver_pool("jdbc", &jdbc_config).await?
             }
             DatabaseType::Postgres
             | DatabaseType::Redshift
@@ -2418,7 +2501,10 @@ impl AppState {
                 PoolKind::Agent(client) => {
                     let client = client.clone();
                     drop(connections);
-                    let mut agent = client.lock().await;
+                    let Ok(mut agent) = client.try_lock() else {
+                        log::debug!("Agent connection pool '{pool_key}' is busy; skipping health probe");
+                        return false;
+                    };
                     let timeout = crate::db::connection_timeout();
                     match agent.validate_connection(Some(timeout)).await {
                         Ok(_) => false,
@@ -2513,6 +2599,32 @@ impl AppState {
         };
         close_pool_kind_with_timeout(pool_key, pool).await;
         Ok(true)
+    }
+
+    pub(crate) async fn client_session_pool_cleanup_guard(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: &str,
+    ) -> Option<ClientSessionPoolCleanupGuard> {
+        let config = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).cloned()
+        };
+        let db_type = config.as_ref().map(|config| config.db_type);
+        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let pool_key = session_scoped_pool_key_for(config.as_ref(), base_pool_key.clone(), Some(client_session_id));
+        if pool_key == base_pool_key {
+            return None;
+        }
+        Some(ClientSessionPoolCleanupGuard {
+            pool_key,
+            connections: self.connections.clone(),
+            pool_activity: self.pool_activity.clone(),
+            postgres_cancel_contexts: self.postgres_cancel_contexts.clone(),
+            task_supervisor: self.task_supervisor.clone(),
+            armed: true,
+        })
     }
 
     /// Removes a session-scoped pool immediately and schedules the potentially slow driver
@@ -2779,32 +2891,53 @@ impl AppState {
             .get(connection_id)
             .cloned()
             .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
-        if config.db_type == DatabaseType::Gaussdb {
-            let pool_key = self.get_or_create_pool(connection_id, database).await?;
-            let pool = {
-                let connections = self.connections.read().await;
-                match connections.get(&pool_key) {
-                    Some(PoolKind::Postgres(pool)) => pool.clone(),
-                    _ => return Ok(None),
-                }
-            };
-            return Ok(db::postgres::gaussdb_identifier_quote(&pool).await);
-        }
-        if !database_capabilities::is_agent_type(&config.db_type) {
-            return Ok(None);
-        }
-
         let pool_key = self.get_or_create_pool(connection_id, database).await?;
-        let client = {
+        enum IdentifierQuoteSource {
+            NativeGaussdb(deadpool_postgres::Pool),
+            Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
+            ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
+        }
+        let source = {
             let connections = self.connections.read().await;
             match connections.get(&pool_key) {
-                Some(PoolKind::Agent(client)) => client.clone(),
-                _ => return Ok(None),
+                Some(PoolKind::Postgres(pool)) if config.db_type == DatabaseType::Gaussdb => {
+                    Some(IdentifierQuoteSource::NativeGaussdb(pool.clone()))
+                }
+                Some(PoolKind::Agent(client)) if database_capabilities::is_agent_type(&config.db_type) => {
+                    Some(IdentifierQuoteSource::Agent(client.clone()))
+                }
+                Some(PoolKind::ExternalDriver { config, session, .. }) => {
+                    Some(IdentifierQuoteSource::ExternalDriver { config: config.clone(), session: session.clone() })
+                }
+                _ => None,
             }
         };
-        let mut agent = client.lock().await;
-        let info = agent.connection_info(Some(db::connection_timeout())).await?;
-        Ok(Some(info.identifier_quote))
+        match source {
+            Some(IdentifierQuoteSource::NativeGaussdb(pool)) => Ok(db::postgres::gaussdb_identifier_quote(&pool).await),
+            Some(IdentifierQuoteSource::Agent(client)) => {
+                let mut agent = client.lock().await;
+                let info = agent.connection_info(Some(db::connection_timeout())).await?;
+                Ok(Some(info.identifier_quote))
+            }
+            Some(IdentifierQuoteSource::ExternalDriver { config, session }) => {
+                let response = session
+                    .invoke_with_timeout::<db::QueryResult>(
+                        "executeQuery",
+                        serde_json::json!({
+                            "connection": config.as_ref(),
+                            "sql": db::postgres::GAUSSDB_COMPATIBILITY_SQL,
+                            "database": config.effective_database().unwrap_or(""),
+                            "schema": null,
+                            "maxRows": 1,
+                            "timeoutSecs": 5,
+                        }),
+                        Some(db::connection_timeout()),
+                    )
+                    .await;
+                Ok(response.ok().and_then(|result| gaussdb_identifier_quote_from_query_result(&result)))
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn connection_database_info(
@@ -3285,6 +3418,11 @@ impl AppState {
         let configs = self.configs.read().await;
         configs.get(connection_id).is_some_and(|config| config.has_effective_transport_layers())
     }
+}
+
+fn gaussdb_identifier_quote_from_query_result(result: &db::QueryResult) -> Option<String> {
+    let compatibility_mode = result.rows.first()?.first()?.as_str()?;
+    db::postgres::gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode).map(str::to_string)
 }
 
 enum KeepaliveTarget {
@@ -3911,13 +4049,15 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        database_connection_config_with_catalog, metadata_connection_config, mysql_metadata_fallback_url,
-        mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
-        sqlserver_uses_legacy_driver, task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        PRESTOSQL_JDBC_DRIVER_CLASS,
+        database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
+        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, metadata_connection_config,
+        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql,
+        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
+        redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
+        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, GAUSSDB_M_JDBC_DRIVER_CLASS,
+        GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -4077,6 +4217,74 @@ mod tests {
 
         assert_eq!(jdbc_config.jdbc_driver_class.as_deref(), Some("custom.PrestoDriver"));
         assert_eq!(jdbc_config.jdbc_driver_paths, vec!["D:\\software\\jar\\presto-jdbc-350.jar"]);
+    }
+
+    #[test]
+    fn gaussdb_m_profile_uses_vendor_jdbc_url_and_driver() {
+        let mut config = mysql_config(Some("业务库"));
+        config.db_type = DatabaseType::Gaussdb;
+        config.host = "db.internal".to_string();
+        config.port = 8000;
+        config.driver_profile = Some(GAUSSDB_M_JDBC_DRIVER_PROFILE.to_string());
+        config.url_params = Some("currentSchema=app".to_string());
+
+        assert!(gaussdb_uses_m_jdbc_driver(&config));
+        let jdbc = gaussdb_m_jdbc_config_for_endpoint(&config, "127.0.0.1", 18000);
+        assert_eq!(
+            jdbc.connection_string.as_deref(),
+            Some(
+                "jdbc:gaussdb://127.0.0.1:18000/%E4%B8%9A%E5%8A%A1%E5%BA%93?currentSchema=app&sslmode=prefer&ssl=true"
+            )
+        );
+        assert_eq!(jdbc.jdbc_driver_class.as_deref(), Some(GAUSSDB_M_JDBC_DRIVER_CLASS));
+
+        config.driver_profile = Some("gaussdb".to_string());
+        assert!(!gaussdb_uses_m_jdbc_driver(&config));
+    }
+
+    #[test]
+    fn gaussdb_m_jdbc_url_normalizes_tls_parameters() {
+        let mut config = mysql_config(Some("postgres"));
+        config.db_type = DatabaseType::Gaussdb;
+        config.driver_profile = Some(GAUSSDB_M_JDBC_DRIVER_PROFILE.to_string());
+
+        config.ssl = true;
+        config.url_params = None;
+        assert_eq!(
+            gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
+            Some("jdbc:gaussdb://db.internal:8000/postgres?sslmode=require&ssl=true")
+        );
+
+        config.ssl = false;
+        config.url_params = Some("?sslmode=disable&currentSchema=app".to_string());
+        assert_eq!(
+            gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
+            Some("jdbc:gaussdb://db.internal:8000/postgres?currentSchema=app&sslmode=disable&ssl=false")
+        );
+
+        config.url_params = Some("ssl=true&currentSchema=legacy".to_string());
+        assert_eq!(
+            gaussdb_m_jdbc_config_for_endpoint(&config, "db.internal", 8000).connection_string.as_deref(),
+            Some("jdbc:gaussdb://db.internal:8000/postgres?currentSchema=legacy&sslmode=prefer&ssl=true")
+        );
+    }
+
+    #[test]
+    fn gaussdb_jdbc_compatibility_query_result_selects_identifier_quote() {
+        let result = crate::types::QueryResult {
+            columns: vec!["datcompatibility".to_string()],
+            column_types: vec!["text".to_string()],
+            column_sortables: vec![true],
+            rows: vec![vec![serde_json::json!("M")]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        };
+
+        assert_eq!(gaussdb_identifier_quote_from_query_result(&result).as_deref(), Some("`"));
     }
 
     #[test]
@@ -5332,6 +5540,22 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn busy_agent_pool_skips_health_probe_without_waiting() {
+        let (state, dir) = test_app_state().await;
+        let client =
+            std::sync::Arc::new(tokio::sync::Mutex::new(crate::db::agent_driver::AgentDriverClient::test_stub()));
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Agent(client.clone()));
+        let _busy = client.lock().await;
+
+        let started = Instant::now();
+        assert!(!state.remove_stale_connection_pool("conn").await);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(state.connections.read().await.contains_key("conn"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn detects_database_connection_slot_exhaustion_errors() {
         assert!(super::is_connection_slot_exhausted_error(
@@ -5444,6 +5668,41 @@ for line in sys.stdin:
         assert!(state.detach_client_session_pool("conn", None, "import-1").await.unwrap());
         assert!(!state.connections.read().await.contains_key(pool_key));
         assert!(!state.pool_activity.read().await.contains_key(pool_key));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn client_session_cleanup_guard_detaches_pool_when_request_is_dropped() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool_key = "conn:session:completion-objects_request-1";
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(pool));
+        state.pool_activity.write().await.insert(pool_key.to_string(), super::PoolActivity::now());
+
+        let guard =
+            state.client_session_pool_cleanup_guard("conn", None, "completion-objects:request-1").await.unwrap();
+        drop(guard);
+
+        for _ in 0..100 {
+            if !state.connections.read().await.contains_key(pool_key) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!state.connections.read().await.contains_key(pool_key));
+        assert!(!state.pool_activity.read().await.contains_key(pool_key));
+        for _ in 0..100 {
+            if state.supervised_task_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(state.supervised_task_count(), 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }

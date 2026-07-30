@@ -6,8 +6,11 @@ import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.PrintStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -152,6 +155,36 @@ class CommonJavaCompatibilityTest {
         server.handleRequest("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"close_session\",\"params\":{\"agentSessionId\":\"a\"}}");
         assertEquals(1, created.get(0).disconnectCount);
         assertEquals(0, created.get(1).disconnectCount);
+    }
+
+    @Test
+    void multiSessionServerKeepsProtocolOutputWhenGlobalStdoutChanges() {
+        synchronized (System.class) {
+            InputStream originalInput = System.in;
+            PrintStream originalOutput = System.out;
+            ByteArrayOutputStream protocolBytes = new ByteArrayOutputStream();
+            ByteArrayOutputStream redirectedBytes = new ByteArrayOutputStream();
+            try (PrintStream protocolOutput = new PrintStream(protocolBytes, true, StandardCharsets.UTF_8);
+                 PrintStream redirectedOutput = new PrintStream(redirectedBytes, true, StandardCharsets.UTF_8)) {
+                System.setOut(protocolOutput);
+                MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(MinimalAgent::new);
+                System.setIn(new ByteArrayInputStream(
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"shutdown\",\"params\":{}}\n"
+                        .getBytes(StandardCharsets.UTF_8)
+                ));
+                System.setOut(redirectedOutput);
+
+                server.run();
+
+                String protocol = protocolBytes.toString(StandardCharsets.UTF_8);
+                assertTrue(protocol.contains("{\"ready\":true}"), protocol);
+                assertTrue(protocol.contains("\"id\":1"), protocol);
+                assertEquals("", redirectedBytes.toString(StandardCharsets.UTF_8));
+            } finally {
+                System.setIn(originalInput);
+                System.setOut(originalOutput);
+            }
+        }
     }
 
     @Test

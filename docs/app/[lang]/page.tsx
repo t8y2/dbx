@@ -383,9 +383,11 @@ const i18nText = {
     capabilitiesTitle: "Built for real database work",
     contributorsTitle: "Built by the community",
     contributorsDesc: "DBX is fully open-source. Every feature, fix, and driver starts with a contributor.",
-    sponsorLabel: "Infrastructure Sponsor",
-    sponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
-    sponsorAction: "Visit RainYun",
+    sponsorLabel: "Infrastructure Sponsors",
+    qiniuSponsorDesc: "Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.",
+    qiniuSponsorAction: "Visit Qiniu Cloud",
+    rainyunSponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
+    rainyunSponsorAction: "Visit RainYun",
     footerTitle: "Ready to try DBX?",
     footerDesc: "Use the desktop app for local work, or deploy the Docker version for browser-based access.",
     release: "Latest release",
@@ -409,9 +411,11 @@ const i18nText = {
     capabilitiesTitle: "面向真实数据库工作的能力",
     contributorsTitle: "社区共建",
     contributorsDesc: "DBX 因每一位贡献者而生长",
-    sponsorLabel: "基础设施赞助",
-    sponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
-    sponsorAction: "访问雨云",
+    sponsorLabel: "基础设施赞助商",
+    qiniuSponsorDesc: "七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。",
+    qiniuSponsorAction: "访问七牛云",
+    rainyunSponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
+    rainyunSponsorAction: "访问雨云",
     footerTitle: "准备试试 DBX？",
     footerDesc: "本地工作使用桌面版，需要浏览器访问时部署 Docker 版。",
     release: "最新版本",
@@ -460,6 +464,24 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
   const contributors = contributorsFromActivity(contributorData.contributors);
   const initialDownloadVersion = initialLatestRelease?.version ?? appVersion;
   const testimonialItems = testimonials[l];
+  const sponsorItems = [
+    {
+      name: "RainYun",
+      href: "https://www.rainyun.com/MTE5Mjc4Ng==_",
+      logo: "https://www.rainyun.com/img/logo.d193755d.png",
+      logoClass: "h-10 w-auto max-w-[100px]",
+      description: t.rainyunSponsorDesc,
+      action: t.rainyunSponsorAction,
+    },
+    {
+      name: l === "cn" ? "七牛云" : "Qiniu Cloud",
+      href: "https://www.qiniu.com/",
+      logo: "https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg",
+      logoClass: "h-14 w-14 object-contain",
+      description: t.qiniuSponsorDesc,
+      action: t.qiniuSponsorAction,
+    },
+  ];
 
   return (
     <main className="landing">
@@ -602,17 +624,23 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
 
       {/* Sponsor */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 mt-10 max-[760px]:px-[18px]">
-        <div className="flex items-center justify-between gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[760px]:block">
-          <Link href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank" className="flex shrink-0 items-center justify-center rounded-lg bg-white px-4 py-3 shadow-[0_10px_30px_rgba(15,23,42,0.08)] max-[760px]:w-max">
-            <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="RainYun" className="h-10 w-auto max-w-[150px]" />
-          </Link>
-          <div className="min-w-0 flex-1 max-[760px]:mt-4">
-            <p className="m-0 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorLabel}</p>
-            <p className="mt-1.5 text-sm leading-[1.65] text-landing-muted">{t.sponsorDesc}</p>
-          </div>
-          <Link href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank" className="landing-final-link inline-flex shrink-0 items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650] max-[760px]:mt-4">
-            {t.sponsorAction}
-          </Link>
+        <p className="m-0 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorLabel}</p>
+        <div className="mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
+          {sponsorItems.map((sponsor) => (
+            <div key={sponsor.name} className="flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[560px]:block">
+              <Link href={sponsor.href} target="_blank" className="flex h-20 w-28 shrink-0 items-center justify-center rounded-lg bg-white px-4 py-3 shadow-[0_10px_30px_rgba(15,23,42,0.08)]">
+                <img src={sponsor.logo} alt={sponsor.name} className={sponsor.logoClass} />
+              </Link>
+              <div className="min-w-0 flex-1 max-[560px]:mt-4">
+                <h2 className="text-lg font-[720] text-landing-ink">{sponsor.name}</h2>
+                <p className="mt-1.5 text-sm leading-[1.65] text-landing-muted">{sponsor.description}</p>
+                <Link href={sponsor.href} target="_blank" className="landing-inline-link mt-3 inline-flex items-center gap-[7px] text-sm font-[650]">
+                  {sponsor.action}
+                  <span aria-hidden="true">→</span>
+                </Link>
+              </div>
+            </div>
+          ))}
         </div>
       </RevealSection>
 

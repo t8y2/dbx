@@ -17,6 +17,7 @@ describe("orderAiConfigsForDisplay", () => {
       { id: "gemini", provider: "gemini" },
       { id: "deepseek", provider: "deepseek" },
       { id: "qwen", provider: "qwen" },
+      { id: "minimax", provider: "minimax" },
       { id: "ollama", provider: "ollama" },
       { id: "openai-compatible", provider: "openai-compatible" },
       { id: "codex", provider: "codex-cli" },
@@ -24,7 +25,7 @@ describe("orderAiConfigsForDisplay", () => {
       { id: "custom", provider: "custom" },
     ];
 
-    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "gemini", "deepseek", "qwen", "ollama", "anthropic-compatible", "openai-compatible", "claude-code-1", "codex", "pi", "custom"]);
+    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "gemini", "deepseek", "qwen", "minimax", "ollama", "anthropic-compatible", "openai-compatible", "claude-code-1", "codex", "pi", "custom"]);
   });
 
   it("preserves creation order for configs from the same provider", () => {

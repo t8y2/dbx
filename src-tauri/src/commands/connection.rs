@@ -8,8 +8,9 @@ pub use dbx_core::agent_connection::{
 };
 pub use dbx_core::connection::{
     agent_connect_timeout, connect_bare_metadata_pool, connect_mysql_metadata_pool, connection_url_for_endpoint,
-    metadata_connection_config, prestosql_jdbc_config_for_endpoint, probe_connection_endpoint,
-    redacted_connection_url_for_endpoint, AppState, MysqlMode, PoolKind,
+    gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, metadata_connection_config,
+    prestosql_jdbc_config_for_endpoint, probe_connection_endpoint, redacted_connection_url_for_endpoint, AppState,
+    MysqlMode, PoolKind,
 };
 use dbx_core::database_capabilities;
 use dbx_core::db;
@@ -22,6 +23,10 @@ pub use dbx_core::path_utils::expand_tilde;
 
 const MONGO_LEGACY_DRIVER_PROFILE: &str = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL: &str = "MongoDB (Legacy)";
+
+fn gaussdb_m_jdbc_command_config(config: &ConnectionConfig, host: &str, port: u16) -> Option<ConnectionConfig> {
+    gaussdb_uses_m_jdbc_driver(config).then(|| gaussdb_m_jdbc_config_for_endpoint(config, host, port))
+}
 
 fn mongo_legacy_connect_params(config: &ConnectionConfig, host: &str, port: u16) -> serde_json::Value {
     serde_json::json!({
@@ -165,8 +170,8 @@ mod tests {
     #[cfg(feature = "mq-admin")]
     use super::load_connection_configs;
     use super::{
-        connect_sqlite_from_config, mark_mongo_legacy_driver, mongo_legacy_connect_params, save_connection_configs,
-        MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        connect_sqlite_from_config, gaussdb_m_jdbc_command_config, mark_mongo_legacy_driver,
+        mongo_legacy_connect_params, save_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
@@ -355,6 +360,28 @@ mod tests {
             "pinnedVersion": "3.1"
         }));
         config
+    }
+
+    #[test]
+    fn gaussdb_m_commands_select_vendor_jdbc_config() {
+        let mut config = mongodb_config();
+        config.db_type = DatabaseType::Gaussdb;
+        config.driver_profile = Some("gaussdb-m".to_string());
+        config.host = "gaussdb.internal".to_string();
+        config.port = 8000;
+        config.database = Some("app".to_string());
+        config.url_params = None;
+        config.connection_string = None;
+
+        let jdbc = gaussdb_m_jdbc_command_config(&config, "127.0.0.1", 18000).unwrap();
+        assert_eq!(
+            jdbc.connection_string.as_deref(),
+            Some("jdbc:gaussdb://127.0.0.1:18000/app?sslmode=prefer&ssl=true")
+        );
+        assert_eq!(jdbc.jdbc_driver_class.as_deref(), Some("com.huawei.gaussdb.jdbc.Driver"));
+
+        config.driver_profile = Some("gaussdb".to_string());
+        assert!(gaussdb_m_jdbc_command_config(&config, "127.0.0.1", 18000).is_none());
     }
 
     #[test]
@@ -741,6 +768,7 @@ async fn test_connection_with_info_inner(
     let target = redacted_connection_url_for_endpoint(&config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
     let idle_timeout = std::time::Duration::from_secs(config.idle_timeout_secs);
+    let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
     let mut database_info = None;
     let result = match probe_result {
@@ -816,6 +844,18 @@ async fn test_connection_with_info_inner(
                         Ok("Connection successful".to_string())
                     }
                     Err(e) => Err(e),
+                }
+            }
+            DatabaseType::Gaussdb if gaussdb_m_jdbc_config.is_some() => {
+                match state
+                    .test_external_driver_with_info("jdbc", gaussdb_m_jdbc_config.as_ref().expect("checked above"))
+                    .await
+                {
+                    Ok(details) => {
+                        database_info = details.database_info;
+                        Ok(details.message)
+                    }
+                    Err(err) => Err(err),
                 }
             }
             DatabaseType::Postgres
@@ -1124,6 +1164,7 @@ pub async fn connect_db(
     let url = connection_url_for_endpoint(&db_config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
     let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
+    let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&db_config, &host, port);
 
     let pool = match db_config.db_type {
         DatabaseType::Mysql => {
@@ -1135,6 +1176,9 @@ pub async fn connect_db(
             connect_bare_metadata_pool(&db_config, &host, port, connect_timeout, 3).await?,
             MysqlMode::Bare,
         ),
+        DatabaseType::Gaussdb if gaussdb_m_jdbc_config.is_some() => {
+            state.external_driver_pool("jdbc", gaussdb_m_jdbc_config.as_ref().expect("checked above")).await?
+        }
         DatabaseType::Postgres
         | DatabaseType::Redshift
         | DatabaseType::Gaussdb

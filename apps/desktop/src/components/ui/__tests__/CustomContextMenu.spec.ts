@@ -97,6 +97,36 @@ describe("CustomContextMenu lifecycle", () => {
     app.unmount();
   });
 
+  it("renders checked state after the menu label", async () => {
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            CustomContextMenu,
+            { items: [{ label: "Current", checked: true }, { label: "Other" }] },
+            {
+              default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "context-target", onContextmenu: onContextMenu }, "Target"),
+            },
+          );
+      },
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    container.querySelector("#context-target")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+
+    const current = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("Current"));
+    const other = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("Other"));
+    expect(current?.lastElementChild?.tagName.toLowerCase()).toBe("svg");
+    expect(other?.querySelector("svg")).toBeNull();
+
+    app.unmount();
+  });
+
   it("resolves lazy menu items again for every open", async () => {
     let copied = false;
     const items = vi.fn(() =>

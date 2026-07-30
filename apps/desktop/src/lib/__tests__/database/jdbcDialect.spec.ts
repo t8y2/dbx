@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
+import type { ConnectionConfig } from "@/types/database";
 import {
+  GAUSSDB_M_JDBC_DRIVER_CLASS,
   connectionObjectTreeNodeSchema,
   connectionQueryExecutionSchema,
   connectionShouldLoadIdentifierQuote,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
+  gaussdbConnectionMode,
   gaussdbIdentifierQuoteOverride,
   gaussdbIdentifierQuoteStyle,
   inferJdbcDialect,
+  setGaussdbConnectionMode,
   setGaussdbIdentifierQuoteStyle,
   supportsGaussdbIdentifierQuoteStyle,
 } from "@/lib/database/jdbcDialect";
@@ -134,6 +138,22 @@ describe("jdbc dialect inference", () => {
     };
 
     expect(inferJdbcDialect(damengConnection)).toBe("dameng");
+  });
+});
+
+describe("GaussDB connection mode", () => {
+  it("keeps native connections compatible and configures M mode for the vendor JDBC driver", () => {
+    const connection = { db_type: "gaussdb", driver_profile: "gaussdb", driver_label: "GaussDB" } as ConnectionConfig;
+
+    expect(gaussdbConnectionMode(connection)).toBe("native");
+    setGaussdbConnectionMode(connection, "m-jdbc");
+    expect(connection.driver_profile).toBe("gaussdb-m");
+    expect(connection.jdbc_driver_class).toBe(GAUSSDB_M_JDBC_DRIVER_CLASS);
+    expect(gaussdbIdentifierQuoteOverride(connection)).toBeUndefined();
+
+    setGaussdbConnectionMode(connection, "native");
+    expect(connection.driver_profile).toBe("gaussdb");
+    expect(connection.jdbc_driver_class).toBeUndefined();
   });
 });
 

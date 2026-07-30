@@ -1,5 +1,7 @@
 name: Node Packages Release
 
+# sorchk/dbx fork: only the sorchk/v* tag namespace and the sorchk/dbx repository
+# are allowed to trigger this workflow. upstream v* tags are intentionally ignored.
 on:
   workflow_dispatch:
     inputs:
@@ -8,7 +10,7 @@ on:
         required: true
   push:
     tags:
-      - "v*"
+      - "sorchk/v*"
 
 # Pinned upstream tool versions so the release is reproducible.
 # Bump these together when upgrading zig or cargo-zigbuild.
@@ -30,6 +32,9 @@ concurrency:
 
 jobs:
   prepare:
+    # sorchk/dbx fork: refuse to run on any repository other than sorchk/dbx
+    # (covers the case where someone forks this repo and pushes a tag).
+    if: github.repository == 'sorchk/dbx'
     name: Prepare package release
     runs-on: ubuntu-latest
     outputs:
@@ -73,14 +78,15 @@ jobs:
         id: version
         env:
           # workflow_dispatch: use the manually supplied version.
-          # push tag (e.g. v0.4.4): strip the leading "v" from the tag name.
+          # push tag (e.g. sorchk/v0.5.70): strip the leading "sorchk/v" from the tag name.
           VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
         run: |
           node <<'NODE'
           const fs = require("fs");
 
           const raw = (process.env.VERSION || "").trim();
-          const version = raw.startsWith("v") ? raw.slice(1) : raw;
+          // sorchk/dbx fork: tag names carry a "sorchk/v" prefix, drop it.
+          const version = raw.replace(/^sorchk\//, "").replace(/^v/, "");
           if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
             throw new Error(`Invalid semver version: ${version}`);
           }

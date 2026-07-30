@@ -7545,6 +7545,21 @@ watch(
   { flush: "post" },
 );
 
+async function savePendingChangesForNavigation(): Promise<boolean> {
+  await saveChanges();
+  return !hasPendingChanges.value;
+}
+
+function hasPendingChangesForNavigation(): boolean {
+  commitEdit();
+  return hasPendingChanges.value;
+}
+
+function discardPendingChangesForNavigation(): boolean {
+  discardChanges();
+  return !hasPendingChanges.value;
+}
+
 defineExpose({
   useTransaction,
   transactionActive,
@@ -7580,6 +7595,9 @@ defineExpose({
   exportSql,
   exportXlsx,
   exportTxt,
+  hasPendingChangesForNavigation,
+  savePendingChangesForNavigation,
+  discardPendingChangesForNavigation,
 });
 
 // ---- CustomContextMenu ----

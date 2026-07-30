@@ -113,6 +113,7 @@ interface PendingChangesSnapshot {
   deletedRows: Set<number>;
   editingCell?: { rowId: number; col: number } | null;
   editValue?: string;
+  editingCellDirty?: boolean;
   transactionActive?: boolean;
   scroll?: { top: number; left: number };
   columnCount: number;
@@ -251,6 +252,17 @@ export function captureDataGridPendingSnapshotsForTab(tabId: string): DataGridPe
     });
   }
   return snapshots;
+}
+
+function pendingChangesSnapshotHasDataChanges(snapshot: PendingChangesSnapshot): boolean {
+  return snapshot.newRows.length > 0 || snapshot.dirtyRows.size > 0 || snapshot.deletedRows.size > 0 || !!snapshot.quickEntryDraftRow || snapshot.editingCellDirty === true;
+}
+
+export function hasDataGridPendingChangesForTab(tabId: string): boolean {
+  for (const [key, snapshot] of pendingChangesCache) {
+    if (cacheKeyBelongsToTab(key, tabId) && pendingChangesSnapshotHasDataChanges(snapshot)) return true;
+  }
+  return false;
 }
 
 export function restoreDataGridPendingSnapshotsForTab(tabId: string, transfers: DataGridPendingSnapshotTransfer[]) {
@@ -1588,6 +1600,24 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     },
   );
 
+  function activeEditingCellHasChanges(): boolean {
+    if (!editingCell.value) return false;
+    const { rowId, col } = editingCell.value;
+    const item = getRowItem(rowId) ?? editingSourceRowItem(rowId);
+    if (!item || item.isDeleted) return false;
+    if (item.isDraft) {
+      const oldValue = quickEntryDraftRow.value[col] ?? null;
+      return coerceCellValue(editValue.value, oldValue, col) !== oldValue;
+    }
+    if (item.isNew && item.newIndex !== undefined) {
+      const oldValue = newRows.value[item.newIndex]?.[col];
+      return coerceCellValue(editValue.value, oldValue, col) !== oldValue;
+    }
+    if (item.sourceIndex === undefined) return false;
+    const oldValue = result.value.rows[item.sourceIndex]?.[col];
+    return coerceCellValue(editValue.value, oldValue, col) !== item.data[col];
+  }
+
   function savePendingSnapshot(includeEditing = false, includeScroll = false) {
     const k = cacheKey?.value;
     if (!k) return;
@@ -1609,6 +1639,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       deletedRows: new Set(deletedRows.value),
       editingCell: includeEditing && editingCell.value ? { ...editingCell.value } : null,
       editValue: editValue.value,
+      editingCellDirty: includeEditing && editingCell.value ? activeEditingCellHasChanges() : false,
       transactionActive: transactionActive.value,
       scroll,
       columnCount: result.value.columns.length,

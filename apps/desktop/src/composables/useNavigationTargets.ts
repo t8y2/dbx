@@ -24,7 +24,7 @@ export type NavigationTarget = {
   whereInput?: string;
 };
 
-async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab; replaceActiveInDetached?: boolean } = {}) {
+async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab } = {}) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
@@ -32,10 +32,6 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
 
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
-  if (options.replaceActiveInDetached) {
-    await connectionStore.ensureConnected(target.connectionId);
-    await queryStore.replaceActiveTabForDetachedNavigation();
-  }
   const tableSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
   const tabTitle = target.catalog ? `${target.catalog}.${tableSchema || target.database}.${target.tableName}` : tableSchema ? `${tableSchema}.${target.tableName}` : target.tableName;
   if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {

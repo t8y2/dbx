@@ -45,6 +45,9 @@ defineExpose({
   requestQueryEditorExecuteInNewResultTab: () => contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab(),
   pasteClipboardAsSqlInCondition: () => contentAreaRef.value?.pasteClipboardAsSqlInCondition(),
   applyTableStructureChanges: () => contentAreaRef.value?.applyTableStructureChanges(),
+  hasPendingDataGridChanges: () => contentAreaRef.value?.hasPendingDataGridChanges() ?? false,
+  savePendingDataGridChanges: () => contentAreaRef.value?.savePendingDataGridChanges() ?? Promise.resolve(false),
+  discardPendingDataGridChanges: () => contentAreaRef.value?.discardPendingDataGridChanges() ?? true,
   insertRedisCommand: (command: string) => contentAreaRef.value?.insertRedisCommand(command),
   executeRedisCommand: (command: string) => contentAreaRef.value?.executeRedisCommand(command),
 });

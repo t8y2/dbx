@@ -1,11 +1,15 @@
 import { computed, ref } from "vue";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearDataGridPendingSnapshotsForTab, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, hasDataGridPendingChangesForTab, useDataGridEditor } from "@/composables/useDataGridEditor";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
 }));
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 vi.mock("@/lib/backend/api", () => ({}));
 vi.mock("@/stores/connectionStore", () => ({
@@ -18,7 +22,7 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>) {
+function createEditor(sourceColumns?: Array<string | undefined>, cacheKey?: string) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
@@ -50,6 +54,7 @@ function createEditor(sourceColumns?: Array<string | undefined>) {
     rowStatusFilter: ref("all"),
     pageSize: ref(100),
     currentPage: ref(1),
+    cacheKey: computed(() => cacheKey),
     getRowItem: (rowId) => {
       if (rowId === DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID) {
         return {
@@ -218,5 +223,36 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
       ["Ada", null, null],
       ["Grace", null, null],
     ]);
+  });
+});
+
+describe("useDataGridEditor pending navigation state", () => {
+  it("does not treat a scroll-only snapshot as an unsaved data change", () => {
+    const tabId = "scroll-only-tab";
+    const editor = createEditor(undefined, tabId);
+    editor.newRows.value = [];
+    class FakeElement {
+      scrollTop = 120;
+      scrollLeft = 24;
+    }
+    vi.stubGlobal("HTMLElement", FakeElement);
+    const scroller = new FakeElement();
+    editor.scrollerRef.value = scroller as unknown as HTMLElement;
+
+    editor.savePendingSnapshot(false, true);
+
+    expect(hasDataGridPendingChangesForTab(tabId)).toBe(false);
+    clearDataGridPendingSnapshotsForTab(tabId);
+  });
+
+  it("detects actual cached row changes for detached navigation", () => {
+    const tabId = "dirty-tab";
+    const editor = createEditor(undefined, tabId);
+    editor.newRows.value = [["Ada", null, "Lovelace"]];
+
+    editor.savePendingSnapshot();
+
+    expect(hasDataGridPendingChangesForTab(tabId)).toBe(true);
+    clearDataGridPendingSnapshotsForTab(tabId);
   });
 });

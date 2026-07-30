@@ -92,6 +92,70 @@ describe("detached tab app close checks", () => {
       initialTab: "editor",
     });
   });
+
+  it("waits for detached persistence before reporting a clean close status", async () => {
+    vi.stubGlobal("window", { location: { search: "?dbxDetachedTransfer=transfer-1" } });
+    let finishCheck!: (dirty: boolean) => void;
+    const hasDirtyTabs = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishCheck = resolve;
+        }),
+    );
+    const { listenForDetachedAppCloseChecks } = await import("@/lib/tabs/tabWindow");
+    await listenForDetachedAppCloseChecks(hasDirtyTabs);
+    const listener = mocks.mainWindow.listen.mock.calls.at(-1)?.[1];
+    mocks.emitTo.mockImplementationOnce(async () => {});
+
+    const handling = listener?.({ payload: { requestId: "close-1" } });
+    await Promise.resolve();
+    expect(mocks.emitTo).not.toHaveBeenCalled();
+
+    finishCheck(false);
+    await handling;
+
+    expect(mocks.emitTo).toHaveBeenCalledWith("main", "dbx-detached-tab-app-close-status", {
+      requestId: "close-1",
+      windowLabel: "main",
+      dirty: false,
+    });
+  });
+
+  it("reports the detached window as dirty when its close check fails", async () => {
+    vi.stubGlobal("window", { location: { search: "?dbxDetachedTransfer=transfer-1" } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { listenForDetachedAppCloseChecks } = await import("@/lib/tabs/tabWindow");
+    await listenForDetachedAppCloseChecks(async () => {
+      throw new Error("persistence failed");
+    });
+    const listener = mocks.mainWindow.listen.mock.calls.at(-1)?.[1];
+    mocks.emitTo.mockImplementationOnce(async () => {});
+
+    await listener?.({ payload: { requestId: "close-2" } });
+
+    expect(mocks.emitTo).toHaveBeenCalledWith("main", "dbx-detached-tab-app-close-status", {
+      requestId: "close-2",
+      windowLabel: "main",
+      dirty: true,
+    });
+    expect(warn).toHaveBeenCalledWith("[DBX][detached-tab:app-close-check:error]", expect.any(Error));
+    warn.mockRestore();
+  });
+
+  it("opens the dirty confirmation only after the main window explicitly requests it", async () => {
+    vi.stubGlobal("window", { location: { search: "?dbxDetachedTransfer=transfer-1" } });
+    const onDirtyPrompt = vi.fn();
+    const { listenForDetachedAppCloseChecks } = await import("@/lib/tabs/tabWindow");
+    await listenForDetachedAppCloseChecks(() => true, onDirtyPrompt);
+    const listener = mocks.mainWindow.listen.mock.calls.at(-1)?.[1];
+    mocks.emitTo.mockImplementationOnce(async () => {}).mockImplementationOnce(async () => {});
+
+    await listener?.({ payload: { requestId: "close-check" } });
+    expect(onDirtyPrompt).not.toHaveBeenCalled();
+
+    await listener?.({ payload: { requestId: "close-prompt", prompt: true } });
+    expect(onDirtyPrompt).toHaveBeenCalledOnce();
+  });
 });
 
 describe("detached tab window cleanup", () => {

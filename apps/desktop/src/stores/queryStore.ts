@@ -9,7 +9,7 @@ import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracl
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, resolveMetadataColumnName, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
-import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type SavedOpenTab } from "@/lib/app/openTabsPersistence";
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
@@ -555,8 +555,22 @@ let saveTabsQueue = Promise.resolve();
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistGeneration = 0;
 
-function saveTabs(tabs: QueryTab[], activeTabId: string | null): Promise<void> {
-  const payload = { tabs: serializeOpenTabs(tabs), activeTabId };
+function saveTabs(tabs: QueryTab[], activeTabId: string | null, detachedTabs: Iterable<SavedOpenTab> = []): Promise<void> {
+  const mainTabs = serializeOpenTabs(tabs);
+  const serializedTabs = [...mainTabs];
+  const serializedTabIds = new Set(mainTabs.map((tab) => tab.id));
+  for (const tab of detachedTabs) {
+    // A tab ID has one durable owner even if a stale window update is replayed.
+    if (serializedTabIds.has(tab.id)) continue;
+    serializedTabs.push(tab);
+    serializedTabIds.add(tab.id);
+  }
+  // The main window is the only disk writer. Detached snapshots are merged into
+  // its document so every tab can be recovered in the main window after restart.
+  const payload = {
+    tabs: serializedTabs,
+    activeTabId,
+  };
   saveTabsQueue = saveTabsQueue.catch(() => undefined).then(() => api.saveOpenTabsState(payload));
   return saveTabsQueue;
 }
@@ -632,6 +646,7 @@ export const useQueryStore = defineStore("query", () => {
   const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingTabSessionResets = new Map<string, Promise<void>>();
   const pendingResultRunRestores = new Map<string, string>();
+  const detachedOpenTabsByWindow = new Map<string, SavedOpenTab>();
   let resultCacheTrimScheduled = false;
   let resultCacheTrimRunning = false;
   let resultCacheTrimRequested = false;
@@ -1218,39 +1233,7 @@ export const useQueryStore = defineStore("query", () => {
     scheduleResultCacheMaintenance();
   }
 
-  const _persistSnapshot = computed(() =>
-    tabs.value.map((t) => ({
-      id: t.id,
-      title: t.title,
-      connectionId: t.connectionId,
-      database: t.database,
-      schema: t.schema,
-      sql: t.sql,
-      savedSqlId: t.savedSqlId,
-      externalSqlPath: t.externalSqlPath,
-      lastExecutedSql: t.lastExecutedSql,
-      resultBaseSql: t.resultBaseSql,
-      resultSortedSql: t.resultSortedSql,
-      resultSortColumn: t.resultSortColumn,
-      resultSortColumnIndex: t.resultSortColumnIndex,
-      resultSortDirection: t.resultSortDirection,
-      resultSortMode: t.resultSortMode,
-      orderByInput: t.orderByInput,
-      resultPageLimit: t.resultPageLimit,
-      resultPageOffset: t.resultPageOffset,
-      whereInput: t.whereInput,
-      pinned: t.pinned,
-      mode: t.mode,
-      resultAutoSave: t.resultAutoSave,
-      structureTableName: t.structureTableName,
-      objectBrowser: t.objectBrowser,
-      objectSource: t.objectSource,
-      tableMeta: t.tableMeta,
-      mongoEditTarget: t.mongoEditTarget,
-      resultEvicted: t.resultEvicted,
-      resultCacheKey: t.resultCacheKey,
-    })),
-  );
+  const openTabsPersistSnapshot = computed(() => serializeOpenTabs(tabs.value));
 
   // Detached windows own exactly one transferred tab and must never overwrite
   // the main window's global open-tabs document with their private store.
@@ -1258,7 +1241,7 @@ export const useQueryStore = defineStore("query", () => {
   let openTabsPersistSuspendCount = 0;
   const storePersistGeneration = shouldPersistOpenTabs ? ++persistGeneration : persistGeneration;
   watch(
-    [_persistSnapshot, activeTabId],
+    [openTabsPersistSnapshot, activeTabId],
     () => {
       if (!shouldPersistOpenTabs) return;
       if (openTabsPersistSuspendCount > 0) return;
@@ -1269,7 +1252,7 @@ export const useQueryStore = defineStore("query", () => {
           persistTimer = null;
           return;
         }
-        void saveTabs(tabs.value, activeTabId.value).catch(() => {});
+        void saveTabs(tabs.value, activeTabId.value, detachedOpenTabsByWindow.values()).catch(() => {});
         persistTimer = null;
       }, 300);
     },
@@ -1286,15 +1269,29 @@ export const useQueryStore = defineStore("query", () => {
   // reflects the latest in-memory tabs without waiting for the 300ms debounce.
   // Lets callers (e.g. tests that reload the store) read back persisted state
   // deterministically instead of racing the debounce timer.
-  function flushPendingPersist(): Promise<void> {
+  function flushPendingPersist({ force = false }: { force?: boolean } = {}): Promise<void> {
     if (!shouldPersistOpenTabs) return Promise.resolve();
-    if (openTabsPersistSuspendCount > 0) return Promise.resolve();
+    if (!force && openTabsPersistSuspendCount > 0) return Promise.resolve();
     if (storePersistGeneration !== persistGeneration) return Promise.resolve();
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    return saveTabs(tabs.value, activeTabId.value);
+    return saveTabs(tabs.value, activeTabId.value, detachedOpenTabsByWindow.values());
+  }
+
+  function registerDetachedOpenTab(windowLabel: string, tab: QueryTab) {
+    const persisted = serializeOpenTabs([tab])[0];
+    if (!persisted) throw new Error("Detached tab persistence payload is missing");
+    detachedOpenTabsByWindow.set(windowLabel, persisted);
+  }
+
+  function updateDetachedOpenTab(windowLabel: string, tab: SavedOpenTab) {
+    detachedOpenTabsByWindow.set(windowLabel, tab);
+  }
+
+  function removeDetachedOpenTab(windowLabel: string) {
+    detachedOpenTabsByWindow.delete(windowLabel);
   }
 
   function suspendOpenTabsPersist() {
@@ -1961,13 +1958,13 @@ export const useQueryStore = defineStore("query", () => {
     return true;
   }
 
-  async function replaceActiveTabForDetachedNavigation() {
+  async function replaceActiveTabForDetachedNavigation({ force = false }: { force?: boolean } = {}) {
     if (!isDetachedTabRuntime()) return false;
     const currentId = activeTabId.value || tabs.value[0]?.id;
     if (!currentId) return true;
     // Navigation waits for tab-scoped sessions to close before the replacement
     // starts using the same connection in this WebView.
-    return closeTabAndWait(currentId, { force: true });
+    return closeTabAndWait(currentId, { force });
   }
 
   function takeTabForTransfer(id: string) {
@@ -5167,6 +5164,7 @@ export const useQueryStore = defineStore("query", () => {
     tabs,
     activeTabId,
     isOpenTabsLoaded,
+    openTabsPersistSnapshot,
     initOpenTabs,
     showCloseConfirm,
     pendingCloseTabId,
@@ -5187,6 +5185,9 @@ export const useQueryStore = defineStore("query", () => {
     forceCloseAllPendingTabs,
     cancelClosePendingTab,
     flushPendingPersist,
+    registerDetachedOpenTab,
+    updateDetachedOpenTab,
+    removeDetachedOpenTab,
     suspendOpenTabsPersist,
     resumeOpenTabsPersist,
     saveAndClosePendingTab,

@@ -32,7 +32,7 @@ import { useSqlExecution } from "@/composables/useSqlExecution";
 import { useDialogSources } from "@/composables/useDialogSources";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
-import { captureDataGridPendingSnapshotsForTab, clearDataGridPendingSnapshotsForTab, restoreDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
+import { captureDataGridPendingSnapshotsForTab, clearDataGridPendingSnapshotsForTab, hasDataGridPendingChangesForTab, restoreDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
@@ -93,8 +93,11 @@ import {
   isDetachedTabWindow,
   listenForDetachedAppCloseChecks,
   listenForDetachedTabMainWindowActions,
+  listenForDetachedTabPersistenceUpdates,
   prepareTabWindow,
+  promptDetachedWindowBeforeAppClose,
   receiveDetachedTab,
+  reportDetachedTabPersistence,
   requestDetachedTabMainWindowAction,
   type DetachedTabMainWindowAction,
 } from "@/lib/tabs/tabWindow";
@@ -186,8 +189,13 @@ let unlistenDetachedTabTransfer: UnlistenFn | undefined;
 let unlistenDetachedWindowClose: UnlistenFn | undefined;
 let unlistenDetachedAppCloseCheck: UnlistenFn | undefined;
 let unlistenDetachedMainWindowAction: UnlistenFn | undefined;
+let unlistenDetachedTabPersistence: UnlistenFn | undefined;
 let detachedWindowClosing = false;
 let detachedAppCloseCheckPending = false;
+let stopDetachedPersistenceWatch: ReturnType<typeof watch> | undefined;
+let detachedPersistenceTimer: ReturnType<typeof setTimeout> | undefined;
+let detachedPersistenceQueue = Promise.resolve();
+const detachingTabIds = new Set<string>();
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
@@ -249,6 +257,9 @@ const pendingPrevActiveTabId = ref<string | null>(null);
 const pendingSaveShouldCloseTab = ref(true);
 const pendingAppCloseAction = ref<AppCloseAction | null>(null);
 const pendingCloseActionChoice = ref(false);
+const detachedOwnershipCommitted = ref(false);
+const showDetachedNavigationConfirm = ref(false);
+let pendingDetachedNavigation: (() => Promise<void>) | undefined;
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
 
@@ -376,11 +387,40 @@ function rejectDetachedTabCreation(): boolean {
   return true;
 }
 
+function activeDetachedTabHasPendingGridChanges() {
+  const tabId = activeTab.value?.id;
+  if (!tabId) return false;
+  const activeGridHasChanges = !!contentAreaRef.value?.hasPendingDataGridChanges?.();
+  captureDataGridPendingSnapshotsForTab(tabId);
+  return activeGridHasChanges || hasDataGridPendingChangesForTab(tabId);
+}
+
+async function performDetachedNavigation(action: () => Promise<void>) {
+  const replaced = await queryStore.replaceActiveTabForDetachedNavigation({ force: true });
+  if (replaced) await action();
+}
+
+async function requestDetachedNavigation(action: () => Promise<void>) {
+  const tab = activeTab.value;
+  if (!tab) {
+    await action();
+    return;
+  }
+  if (queryStore.isTabDirty(tab) || activeDetachedTabHasPendingGridChanges()) {
+    // Keep the replacement action dormant until the user explicitly resolves
+    // SQL, structure, and DataGrid edits through Save / Discard / Cancel.
+    pendingDetachedNavigation = () => performDetachedNavigation(action);
+    showDetachedNavigationConfirm.value = true;
+    return;
+  }
+  await performDetachedNavigation(action);
+}
+
 async function openTableTarget(...args: Parameters<typeof openTableTargetInMainWindow>) {
   const [target, options] = args;
   if (isDetachedWindow) {
-    // A detached window keeps one owner by replacing its current tab in place.
-    return openTableTargetInMainWindow(target, { ...options, replaceActiveInDetached: true });
+    await connectionStore.ensureConnected(target.connectionId);
+    return requestDetachedNavigation(() => openTableTargetInMainWindow(target, options));
   }
   return openTableTargetInMainWindow(...args);
 }
@@ -865,14 +905,27 @@ function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions
 }
 
 async function requestAppCloseAfterDetachedCheck(action: AppCloseAction, options: AppCloseRequestOptions) {
+  if (action === "quit" && !isDetachedWindow && detachingTabIds.size > 0) {
+    toast(t("tabs.moveTabWindowBusy"), 5000);
+    return;
+  }
   if (action === "quit" && isDesktop && !isDetachedWindow) {
     if (detachedAppCloseCheckPending) return;
     detachedAppCloseCheckPending = true;
     try {
       const result = await checkDetachedWindowsBeforeAppClose();
-      const blockingWindowLabel = result.dirtyWindowLabels[0] ?? result.unresponsiveWindowLabels[0];
-      if (blockingWindowLabel) {
-        await focusDetachedTabWindow(blockingWindowLabel);
+      const dirtyWindowLabel = result.dirtyWindowLabels[0];
+      if (dirtyWindowLabel) {
+        await focusDetachedTabWindow(dirtyWindowLabel);
+        // Prompt only after focusing the selected dirty child. Opening dialogs
+        // during the broadcast check is unreliable for background WebViews.
+        await promptDetachedWindowBeforeAppClose(dirtyWindowLabel);
+        toast(t("tabs.detachedWindowBlocksAppClose"), 5000);
+        return;
+      }
+      const unresponsiveWindowLabel = result.unresponsiveWindowLabels[0];
+      if (unresponsiveWindowLabel) {
+        await focusDetachedTabWindow(unresponsiveWindowLabel);
         toast(t("tabs.detachedWindowBlocksAppClose"), 5000);
         return;
       }
@@ -967,6 +1020,42 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
     toast(t("savedSql.saveFailed", { message: e?.message || String(e) }), 5000);
     return false;
   }
+}
+
+async function continueDetachedNavigation() {
+  const action = pendingDetachedNavigation;
+  pendingDetachedNavigation = undefined;
+  showDetachedNavigationConfirm.value = false;
+  if (action) await action();
+}
+
+async function saveAndContinueDetachedNavigation() {
+  const tab = activeTab.value;
+  if (!tab) {
+    await continueDetachedNavigation();
+    return;
+  }
+  const hadPendingGridChanges = activeDetachedTabHasPendingGridChanges();
+  if (queryStore.isTabDirty(tab) && !(await saveTabForCloseAll(tab.id))) return;
+  if (queryStore.isTabDirty(tab)) return;
+  if (hadPendingGridChanges && !(await contentAreaRef.value?.savePendingDataGridChanges?.())) return;
+  if (activeDetachedTabHasPendingGridChanges()) return;
+  await continueDetachedNavigation();
+}
+
+async function discardAndContinueDetachedNavigation() {
+  const tab = activeTab.value;
+  if (tab) {
+    queryStore.discardTabChanges(tab.id);
+    contentAreaRef.value?.discardPendingDataGridChanges?.();
+    clearDataGridPendingSnapshotsForTab(tab.id);
+  }
+  await continueDetachedNavigation();
+}
+
+function cancelDetachedNavigation() {
+  pendingDetachedNavigation = undefined;
+  showDetachedNavigationConfirm.value = false;
 }
 
 async function handleSaveAllPendingTabClose() {
@@ -1572,7 +1661,10 @@ async function onEditTableStructure(table: SqlObjectNavigationTarget) {
   if (!target || sqlObjectNavigationSourceKind(table)) return;
   if (isDetachedWindow) {
     await connectionStore.ensureConnected(target.connectionId);
-    await queryStore.replaceActiveTabForDetachedNavigation();
+    await requestDetachedNavigation(async () => {
+      queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
+    });
+    return;
   }
   queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
 }
@@ -2134,6 +2226,50 @@ async function initApp({ restoreOpenTabs = true }: { restoreOpenTabs?: boolean }
   }
 }
 
+function enqueueDetachedPersistenceReport(tab: (typeof queryStore.openTabsPersistSnapshot)[number] | null) {
+  const report = detachedPersistenceQueue.catch(() => undefined).then(() => reportDetachedTabPersistence(tab));
+  detachedPersistenceQueue = report.catch((error) => {
+    console.warn("[DBX][detached-tab:persistence:update:error]", error);
+  });
+  return report;
+}
+
+function scheduleDetachedPersistenceReport() {
+  if (!detachedOwnershipCommitted.value) return;
+  if (detachedPersistenceTimer) clearTimeout(detachedPersistenceTimer);
+  detachedPersistenceTimer = setTimeout(() => {
+    detachedPersistenceTimer = undefined;
+    void enqueueDetachedPersistenceReport(queryStore.openTabsPersistSnapshot[0] ?? null);
+  }, 300);
+}
+
+function startDetachedPersistenceReporter() {
+  if (stopDetachedPersistenceWatch) return;
+  detachedOwnershipCommitted.value = true;
+  stopDetachedPersistenceWatch = watch(() => queryStore.openTabsPersistSnapshot, scheduleDetachedPersistenceReport, { flush: "post" });
+  scheduleDetachedPersistenceReport();
+}
+
+async function flushDetachedPersistenceReport() {
+  if (!detachedOwnershipCommitted.value) return;
+  if (detachedPersistenceTimer) {
+    clearTimeout(detachedPersistenceTimer);
+    detachedPersistenceTimer = undefined;
+  }
+  await enqueueDetachedPersistenceReport(queryStore.openTabsPersistSnapshot[0] ?? null);
+}
+
+async function removeDetachedPersistenceOwner() {
+  stopDetachedPersistenceWatch?.();
+  stopDetachedPersistenceWatch = undefined;
+  if (detachedPersistenceTimer) {
+    clearTimeout(detachedPersistenceTimer);
+    detachedPersistenceTimer = undefined;
+  }
+  await detachedPersistenceQueue.catch(() => undefined);
+  await enqueueDetachedPersistenceReport(null);
+}
+
 async function initDetachedApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initDetachedApp begin");
@@ -2153,8 +2289,14 @@ async function initDetachedApp() {
 }
 
 async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement, releasePreview?: () => void) {
+  if (detachingTabIds.has(tabId)) {
+    releasePreview?.();
+    return;
+  }
+  detachingTabIds.add(tabId);
   let preparedWindow: Awaited<ReturnType<typeof prepareTabWindow>> | undefined;
   let persistSuspended = false;
+  let detachedPersistenceRegistered = false;
   try {
     const tab = queryStore.tabs.find((item) => item.id === tabId);
     if (!tab) return;
@@ -2202,15 +2344,39 @@ async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement
       return;
     }
     try {
+      queryStore.registerDetachedOpenTab(preparedWindow.windowLabel, transferState.tab);
+      detachedPersistenceRegistered = true;
+      // Persist a recovery owner before the provisional child receives the tab.
+      // Every concurrent transfer is therefore represented in subsequent writes.
+      await queryStore.flushPendingPersist({ force: true });
       // Commit ownership only after the child accepts the transfer; otherwise restore it.
-      await preparedWindow.transfer({
-        tab: transferState.tab,
-        ...tabRuntimeState,
-        explainMode: explainMode.value,
-        blockDangerousRedisCommands: blockDangerousRedisCommands.value,
-        dataGridSnapshots,
-      });
+      const transferOutcome = await preparedWindow.transfer(
+        {
+          tab: transferState.tab,
+          ...tabRuntimeState,
+          explainMode: explainMode.value,
+          blockDangerousRedisCommands: blockDangerousRedisCommands.value,
+          dataGridSnapshots,
+        },
+        {
+          onPrepared: async () => {
+            // This durable write is the ownership commit point. It includes the
+            // detached snapshot while main-tab persistence remains suspended.
+            await queryStore.flushPendingPersist({ force: true });
+          },
+        },
+      );
+      if (!transferOutcome.commitAcknowledged) {
+        console.warn("[DBX][detached-tab:ownership-commit:unacknowledged]", {
+          tabId: transferState.tab.id,
+          windowLabel: preparedWindow.windowLabel,
+        });
+      }
     } catch (error) {
+      if (detachedPersistenceRegistered && preparedWindow) {
+        queryStore.removeDetachedOpenTab(preparedWindow.windowLabel);
+        detachedPersistenceRegistered = false;
+      }
       queryStore.restoreTabFromTransfer(transferState);
       await queryStore.resumeOpenTabsPersist().catch(() => {});
       persistSuspended = false;
@@ -2243,24 +2409,39 @@ async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement
     if (persistSuspended) await queryStore.resumeOpenTabsPersist().catch(() => {});
     toast(t("tabs.openTabWindowFailed", { message: e?.message || String(e) }), 5000);
   } finally {
+    detachingTabIds.delete(tabId);
     // Startup errors and early exits must also release the retained drag preview.
     releasePreview?.();
   }
 }
 
-async function closeDetachedTab() {
+async function performDetachedTabClose() {
   if (!isDetachedWindow || detachedWindowClosing) return;
   detachedWindowClosing = true;
   const detachedWindow = isTauriRuntime() ? getCurrentWebviewWindow() : null;
   // Hide immediately for feedback, then force-destroy the WebView on cleanup failure or timeout.
   if (detachedWindow) await detachedWindow.hide().catch(() => {});
   const tabId = queryStore.activeTabId;
+  if (!detachedOwnershipCommitted.value) {
+    // A provisional child must disappear without touching shared sessions; the
+    // source window either still owns the tab or is about to restore it.
+    if (tabId) {
+      queryStore.takeTabForTransfer(tabId);
+      clearDataGridPendingSnapshotsForTab(tabId);
+    }
+    if (detachedWindow) await detachedWindow.destroy().catch(() => {});
+    else window.close();
+    return;
+  }
   if (!detachedWindow) {
     if (tabId) await queryStore.closeTabAndWait(tabId, { force: true }).catch((error) => console.warn("[DBX][detached-tab:cleanup:error]", { tabId, error }));
     window.close();
     return;
   }
   try {
+    // Remove the durable owner before remote session cleanup can time out.
+    // A successfully closed window must never be restored on the next startup.
+    await removeDetachedPersistenceOwner();
     const outcome = await destroyDetachedWindowAfterCleanup(detachedWindow, async () => {
       if (tabId) await queryStore.closeTabAndWait(tabId, { force: true });
     });
@@ -2271,9 +2452,24 @@ async function closeDetachedTab() {
     }
   } catch (error) {
     detachedWindowClosing = false;
+    startDetachedPersistenceReporter();
     await detachedWindow.show().catch(() => {});
     toast(t("tabs.closeTabWindowFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
   }
+}
+
+async function closeDetachedTab() {
+  if (!detachedOwnershipCommitted.value) {
+    await performDetachedTabClose();
+    return;
+  }
+  const tab = activeTab.value;
+  if (tab && (queryStore.isTabDirty(tab) || activeDetachedTabHasPendingGridChanges())) {
+    pendingDetachedNavigation = performDetachedTabClose;
+    showDetachedNavigationConfirm.value = true;
+    return;
+  }
+  await performDetachedTabClose();
 }
 
 function restoreActiveConnectionContext() {
@@ -2362,7 +2558,21 @@ onMounted(async () => {
     });
     // Register lifecycle listeners before optional startup work so a visible
     // shell can always answer close checks and receive ownership immediately.
-    unlistenDetachedAppCloseCheck = await listenForDetachedAppCloseChecks(() => queryStore.hasDirtyTabs);
+    unlistenDetachedAppCloseCheck = await listenForDetachedAppCloseChecks(
+      async () => {
+        const dirty = queryStore.hasDirtyTabs || activeDetachedTabHasPendingGridChanges();
+        if (!dirty) await flushDetachedPersistenceReport();
+        return dirty;
+      },
+      () => {
+        if (!showDetachedNavigationConfirm.value) {
+          // Keep the tab open after Save / Discard. The user can retry app exit,
+          // which then observes the clean child and preserves it for restart.
+          pendingDetachedNavigation = async () => {};
+          showDetachedNavigationConfirm.value = true;
+        }
+      },
+    );
     const detachedInitialization = initDetachedApp();
     unlistenDetachedTabTransfer = await receiveDetachedTab(
       (payload) => {
@@ -2375,14 +2585,27 @@ onMounted(async () => {
         blockDangerousRedisCommands.value = payload.blockDangerousRedisCommands;
         restoreActiveConnectionContext();
         return () => {
+          detachedOwnershipCommitted.value = false;
+          stopDetachedPersistenceWatch?.();
+          stopDetachedPersistenceWatch = undefined;
           queryStore.takeTabForTransfer(payload.tab.id);
           clearDataGridPendingSnapshotsForTab(payload.tab.id);
         };
       },
-      { initialization: detachedInitialization },
+      {
+        initialization: detachedInitialization,
+        onCommitted: startDetachedPersistenceReporter,
+      },
     );
     return;
   }
+  unlistenDetachedTabPersistence = await listenForDetachedTabPersistenceUpdates(async (windowLabel, tab) => {
+    if (tab) queryStore.updateDetachedOpenTab(windowLabel, tab);
+    else queryStore.removeDetachedOpenTab(windowLabel);
+    // Persistence acknowledgements must represent a completed disk write even
+    // while another tab transfer temporarily suspends normal main-tab writes.
+    await queryStore.flushPendingPersist({ force: true });
+  });
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   if (isDesktop) {
@@ -2449,6 +2672,9 @@ onUnmounted(() => {
   unlistenDetachedAppCloseCheck?.();
   unlistenDetachedMainWindowAction?.();
   stopDialogBackdropSync();
+  unlistenDetachedTabPersistence?.();
+  stopDetachedPersistenceWatch?.();
+  if (detachedPersistenceTimer) clearTimeout(detachedPersistenceTimer);
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {
@@ -2462,8 +2688,8 @@ onUnmounted(() => {
 
 <template>
   <!-- Keep a visible shell while the full App runtime initializes and waits for tab ownership. -->
-  <DetachedWindowShell v-if="isDetachedWindow && !activeTab && !setupRequired && (!needsAuth || authenticated)" />
-  <template v-else-if="isDetachedWindow && activeTab && !setupRequired && (!needsAuth || authenticated)">
+  <DetachedWindowShell v-if="isDetachedWindow && (!activeTab || !detachedOwnershipCommitted) && !setupRequired && (!needsAuth || authenticated)" />
+  <template v-else-if="isDetachedWindow && activeTab && detachedOwnershipCommitted && !setupRequired && (!needsAuth || authenticated)">
     <TooltipProvider :delay-duration="300">
       <DetachedTabWindow
         ref="contentAreaRef"
@@ -2585,6 +2811,28 @@ onUnmounted(() => {
       @open-database-search-target="openDatabaseSearchTarget"
       @open-diagram-target="openDiagramTarget"
     />
+    <Dialog
+      :open="showDetachedNavigationConfirm"
+      @update:open="
+        (open) => {
+          if (!open) cancelDetachedNavigation();
+        }
+      "
+    >
+      <DialogContent class="min-w-0 sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{{ t("editor.unsavedChangesTitle") }}</DialogTitle>
+        </DialogHeader>
+        <p class="wrap-anywhere text-sm text-muted-foreground">
+          {{ t("editor.unsavedChangesMessage", { title: activeTab ? tabDisplayTitle(activeTab, t) : "" }) }}
+        </p>
+        <DialogFooter>
+          <Button variant="outline" @click="cancelDetachedNavigation">{{ t("common.cancel") }}</Button>
+          <Button variant="secondary" @click="void discardAndContinueDetachedNavigation()">{{ t("editor.discardChanges") }}</Button>
+          <Button @click="void saveAndContinueDetachedNavigation()">{{ t("savedSql.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <Teleport to="body">
       <Transition name="toast">
         <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 w-max max-w-[90vw] sm:max-w-3xl mx-auto z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text whitespace-pre-wrap break-words">

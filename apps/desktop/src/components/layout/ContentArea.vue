@@ -98,6 +98,9 @@ type DataGridHandle = {
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: () => boolean;
   openCellDetailSearch: () => boolean;
+  hasPendingChangesForNavigation: () => boolean;
+  savePendingChangesForNavigation: () => Promise<boolean>;
+  discardPendingChangesForNavigation: () => boolean;
   visibleColumnCount: number;
   displayableColumnCount: number;
   hiddenColumnCount: number;
@@ -910,6 +913,18 @@ function applyTableStructureChanges() {
   return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
 }
 
+function hasPendingDataGridChanges() {
+  return dataGridRef.value?.hasPendingChangesForNavigation() ?? false;
+}
+
+function savePendingDataGridChanges() {
+  return dataGridRef.value?.savePendingChangesForNavigation() ?? Promise.resolve(false);
+}
+
+function discardPendingDataGridChanges() {
+  return dataGridRef.value?.discardPendingChangesForNavigation() ?? true;
+}
+
 async function insertRedisCommand(command: string): Promise<boolean> {
   if (props.activeTab.mode !== "redis") return false;
   return (await redisKeyBrowserRef.value?.insertCommand?.(command)) ?? false;
@@ -920,7 +935,21 @@ async function executeRedisCommand(command: string): Promise<boolean> {
   return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
 }
 
-defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, requestQueryEditorExecuteInNewResultTab, pasteClipboardAsSqlInCondition, applyTableStructureChanges, insertRedisCommand, executeRedisCommand });
+defineExpose({
+  focusSearch,
+  refreshData,
+  refreshQueryEditorCompletionCache,
+  handleModRTarget,
+  requestQueryEditorExecute,
+  requestQueryEditorExecuteInNewResultTab,
+  pasteClipboardAsSqlInCondition,
+  applyTableStructureChanges,
+  hasPendingDataGridChanges,
+  savePendingDataGridChanges,
+  discardPendingDataGridChanges,
+  insertRedisCommand,
+  executeRedisCommand,
+});
 </script>
 
 <template>

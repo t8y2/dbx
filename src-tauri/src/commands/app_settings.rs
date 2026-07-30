@@ -8,8 +8,8 @@ use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
-    apply_debug_log_level, apply_desktop_settings, hide_main_window_for_close, refresh_native_menus, request_app_close,
-    AppLocaleState, CloseBehaviorState,
+    apply_debug_log_level, apply_desktop_settings, clear_startup_probe_after_frontend_ready,
+    hide_main_window_for_close, refresh_native_menus, request_app_close, AppLocaleState, CloseBehaviorState,
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
@@ -101,6 +101,7 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
     let state =
         app.try_state::<CloseBehaviorState>().ok_or_else(|| "close behavior state is unavailable".to_string())?;
     state.set_frontend_ready(true);
+    clear_startup_probe_after_frontend_ready();
     Ok(())
 }
 

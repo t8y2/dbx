@@ -625,6 +625,25 @@ fn should_continue_batch_after_error(continue_on_error: bool, action: PoolErrorA
     continue_on_error && action == PoolErrorAction::Keep
 }
 
+fn options_for_sequential_statements(
+    options: &QueryExecutionOptions,
+    statement_count: usize,
+    db_type: Option<DatabaseType>,
+) -> QueryExecutionOptions {
+    let mut statement_options = options.clone();
+    if statement_count <= 1 || db_type != Some(DatabaseType::Kingbase) || statement_options.result_session_id.is_some()
+    {
+        return statement_options;
+    }
+
+    if let Some(page_size) = statement_options.page_size.take() {
+        let page_size = page_size.max(1);
+        statement_options.max_rows =
+            Some(statement_options.max_rows.map_or(page_size, |max_rows| max_rows.min(page_size)));
+    }
+    statement_options
+}
+
 fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> bool {
     let Some(db_type) = db_type else {
         return false;
@@ -1771,6 +1790,11 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
         .await;
     }
 
+    // Kingbase Go keeps one physical connection per Agent session, so an open
+    // result cursor prevents the next statement from acquiring that connection.
+    // Multi-result execution therefore reads a bounded first page for each
+    // Kingbase statement without retaining cursors.
+    let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
     let mut results = Vec::with_capacity(statements.len());
     for (statement_index, stmt) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
@@ -1784,7 +1808,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
             stmt,
             schema,
             cancel_token.clone(),
-            options.clone(),
+            statement_options.clone(),
         )
         .await
         {
@@ -4798,6 +4822,63 @@ mod tests {
         let params = agent_close_query_session_params("session-1");
 
         assert_eq!(params["sessionId"], "session-1");
+    }
+
+    #[test]
+    fn multi_statement_execution_does_not_retain_query_cursors() {
+        let options = QueryExecutionOptions {
+            max_rows: Some(100_000),
+            fetch_size: Some(100),
+            page_size: Some(100),
+            timeout_secs: Some(30),
+            ..Default::default()
+        };
+
+        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Kingbase));
+
+        assert_eq!(adjusted.page_size, None);
+        assert_eq!(adjusted.max_rows, Some(100));
+        assert_eq!(adjusted.fetch_size, Some(100));
+        assert_eq!(adjusted.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn multi_statement_execution_preserves_smaller_row_limit() {
+        let options = QueryExecutionOptions { max_rows: Some(25), page_size: Some(100), ..Default::default() };
+
+        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Kingbase));
+
+        assert_eq!(adjusted.page_size, None);
+        assert_eq!(adjusted.max_rows, Some(25));
+    }
+
+    #[test]
+    fn single_statement_and_existing_cursor_execution_keep_paging_options() {
+        let first_page = QueryExecutionOptions { max_rows: Some(100_000), page_size: Some(100), ..Default::default() };
+        let next_page = QueryExecutionOptions {
+            max_rows: Some(100_000),
+            page_size: Some(100),
+            result_session_id: Some("session-1".to_string()),
+            ..Default::default()
+        };
+
+        let single = options_for_sequential_statements(&first_page, 1, Some(DatabaseType::Kingbase));
+        let existing_cursor = options_for_sequential_statements(&next_page, 2, Some(DatabaseType::Kingbase));
+
+        assert_eq!(single.page_size, Some(100));
+        assert_eq!(single.max_rows, Some(100_000));
+        assert_eq!(existing_cursor.page_size, Some(100));
+        assert_eq!(existing_cursor.result_session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn other_databases_keep_multi_statement_cursor_options() {
+        let options = QueryExecutionOptions { max_rows: Some(100_000), page_size: Some(100), ..Default::default() };
+
+        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Oracle));
+
+        assert_eq!(adjusted.page_size, Some(100));
+        assert_eq!(adjusted.max_rows, Some(100_000));
     }
 
     #[test]

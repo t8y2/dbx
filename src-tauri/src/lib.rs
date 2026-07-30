@@ -1765,6 +1765,7 @@ pub fn run() {
             commands::redis_cmd::redis_scan_keys_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
+            commands::redis_cmd::redis_get_ttl,
             commands::redis_cmd::redis_get_stream_entries,
             commands::redis_cmd::redis_get_stream_groups,
             commands::redis_cmd::redis_get_stream_consumers,

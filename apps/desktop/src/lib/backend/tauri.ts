@@ -2090,6 +2090,10 @@ export async function redisGetValue(connectionId: string, db: number, keyRaw: st
   return invoke("redis_get_value", { connectionId, db, keyRaw });
 }
 
+export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {
+  return invoke("redis_get_ttl", { connectionId, db, keyRaw });
+}
+
 export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
   return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor });
 }

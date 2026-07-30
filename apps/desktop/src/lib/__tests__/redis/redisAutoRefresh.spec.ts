@@ -1,32 +1,31 @@
 import { describe, expect, it } from "vitest";
 
-import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
+import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
 
 describe("computeAutoRefreshTick", () => {
   it("returns idle when auto-refresh is disabled", () => {
-    expect(computeAutoRefreshTick(false, 10, false)).toEqual({ type: "idle" });
-    // countdown value and loading flag don't matter when disabled
-    expect(computeAutoRefreshTick(false, 0, false)).toEqual({ type: "idle" });
-    expect(computeAutoRefreshTick(false, 5, true)).toEqual({ type: "idle" });
+    expect(computeAutoRefreshTick(false, 10)).toEqual({ type: "idle" });
+    expect(computeAutoRefreshTick(false, 0)).toEqual({ type: "idle" });
+    expect(computeAutoRefreshTick(false, 5)).toEqual({ type: "idle" });
   });
 
-  it("returns decrement while more than one second remains", () => {
-    expect(computeAutoRefreshTick(true, 10, false)).toEqual({ type: "decrement" });
-    // decrement even when loading — countdown should keep ticking
-    expect(computeAutoRefreshTick(true, 3, true)).toEqual({ type: "decrement" });
+  it("returns decrement while a positive TTL remains", () => {
+    expect(computeAutoRefreshTick(true, 10)).toEqual({ type: "decrement" });
+    expect(computeAutoRefreshTick(true, 1)).toEqual({ type: "decrement" });
   });
 
-  it("refreshes on the expiry tick instead of exposing a zero countdown", () => {
-    expect(computeAutoRefreshTick(true, 1, false)).toEqual({ type: "refresh" });
-    expect(computeAutoRefreshTick(true, 0, false)).toEqual({ type: "refresh" });
-    expect(computeAutoRefreshTick(true, -1, false)).toEqual({ type: "refresh" });
+  it("stops decrementing after the TTL has reached zero", () => {
+    expect(computeAutoRefreshTick(true, 0)).toEqual({ type: "idle" });
+    expect(computeAutoRefreshTick(true, -1)).toEqual({ type: "idle" });
   });
+});
 
-  it("does not start another refresh when a load is already in flight", () => {
-    expect(computeAutoRefreshTick(true, 1, true)).toEqual({ type: "decrement" });
-    // This prevents concurrent load() calls
-    expect(computeAutoRefreshTick(true, 0, true)).toEqual({ type: "idle" });
-    expect(computeAutoRefreshTick(true, -1, true)).toEqual({ type: "idle" });
+describe("normalizeRedisAutoRefreshInterval", () => {
+  it("uses the default for invalid values and clamps arbitrary input to safe seconds", () => {
+    expect(normalizeRedisAutoRefreshInterval("invalid")).toBe(DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS);
+    expect(normalizeRedisAutoRefreshInterval(0)).toBe(1);
+    expect(normalizeRedisAutoRefreshInterval(1.9)).toBe(1);
+    expect(normalizeRedisAutoRefreshInterval(9_999)).toBe(3600);
   });
 });
 

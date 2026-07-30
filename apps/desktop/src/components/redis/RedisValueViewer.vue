@@ -4,7 +4,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Clock } from "@lucide/vue";
+import { Check, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
@@ -24,7 +25,7 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { createShikiJsonHighlighter, type JsonHighlighter } from "@/lib/common/shikiJsonHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
-import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
+import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
@@ -74,6 +75,11 @@ const emit = defineEmits<{ deleted: [keyRaw: string]; loaded: [value: RedisValue
 
 const REDIS_JSON_WRAP_STORAGE_KEY = "dbx-redis-json-word-wrap";
 const REDIS_VALUE_FORMAT_STORAGE_KEY = "dbx-redis-value-format";
+// Versioned after moving the setting into the refresh menu so the previous
+// always-on default does not carry into the new manual-refresh default.
+const REDIS_AUTO_REFRESH_ENABLED_STORAGE_KEY = "dbx-redis-auto-refresh-enabled-v2";
+const REDIS_AUTO_REFRESH_INTERVAL_STORAGE_KEY = "dbx-redis-auto-refresh-interval-seconds-v2";
+const REDIS_AUTO_REFRESH_INTERVAL_OPTIONS = [1, 3, 5, 10] as const;
 const REDIS_COLLECTION_ROW_HEIGHT = 32;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 
@@ -158,57 +164,113 @@ const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<JsonHighlighter>();
 
-// Auto-refresh
-const autoRefreshEnabled = ref(true);
+// Auto-refresh keeps the displayed TTL moving locally and periodically asks
+// Redis for the authoritative value. The two timers stay separate so a short
+// polling interval never causes a full key-value reload.
+const autoRefreshEnabled = ref(readRedisAutoRefreshEnabled());
+const autoRefreshIntervalSeconds = ref(readRedisAutoRefreshInterval());
 const countdownTtl = ref(0);
+const refreshingTtl = ref(false);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let countdownTimer: ReturnType<typeof setInterval> | null = null;
+let ttlRefreshRequestId = 0;
 
-function toggleAutoRefresh() {
-  autoRefreshEnabled.value = !autoRefreshEnabled.value;
-  if (autoRefreshEnabled.value) {
-    startAutoRefresh();
-  } else {
-    stopAutoRefresh();
+function disableAutoRefresh() {
+  autoRefreshEnabled.value = false;
+  persistRedisAutoRefreshEnabled(false);
+  stopAutoRefresh();
+}
+
+function selectAutoRefreshInterval(interval: number) {
+  autoRefreshIntervalSeconds.value = interval;
+  persistRedisAutoRefreshInterval(interval);
+  if (!autoRefreshEnabled.value) {
+    autoRefreshEnabled.value = true;
+    persistRedisAutoRefreshEnabled(true);
   }
+  startAutoRefresh();
 }
 
 function startAutoRefresh() {
   stopAutoRefresh();
-  if (data.value && data.value.ttl > 0) {
-    countdownTtl.value = data.value.ttl;
+  if (!autoRefreshEnabled.value || !data.value) return;
+  if (shouldStopAutoRefresh(data.value.ttl)) {
+    // A non-expiring or missing key has no TTL to poll. Keep the persisted
+    // preference, but make the visible state match the stopped timers.
+    autoRefreshEnabled.value = false;
+    return;
   }
-  autoRefreshTimer = setInterval(() => {
-    const action = computeAutoRefreshTick(autoRefreshEnabled.value, countdownTtl.value, loading.value);
+
+  countdownTtl.value = data.value.ttl;
+  countdownTimer = setInterval(() => {
+    const action = computeAutoRefreshTick(autoRefreshEnabled.value, countdownTtl.value);
     if (action.type === "decrement") {
       countdownTtl.value--;
-      return;
-    }
-    if (action.type === "refresh") {
-      // Do not let a background refresh overwrite a Redis value draft.
-      if (hasUnsavedRedisDraft.value) return;
-      load({ preserveDraft: true })
-        .then((applied) => {
-          if (!applied || !autoRefreshEnabled.value) return;
-          if (!data.value || shouldStopAutoRefresh(data.value.ttl)) {
-            stopAutoRefresh();
-            autoRefreshEnabled.value = false;
-          }
-        })
-        .catch(() => {
-          // Network / connection error — stop auto-refresh to avoid tight retry loop
-          if (autoRefreshEnabled.value) {
-            stopAutoRefresh();
-            autoRefreshEnabled.value = false;
-          }
-        });
     }
   }, 1000);
+
+  autoRefreshTimer = setInterval(() => void refreshTtl(), autoRefreshIntervalSeconds.value * 1000);
+}
+
+async function refreshTtl() {
+  if (refreshingTtl.value || loading.value || editingTtl.value || savingTtl.value || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value) return;
+
+  const requestId = ++ttlRefreshRequestId;
+  refreshingTtl.value = true;
+  try {
+    const ttl = await api.redisGetTtl(props.connectionId, props.db, props.keyRaw);
+    // A draft may be created while the request is in flight. Never apply even
+    // a missing-key response after the user has started editing.
+    if (requestId !== ttlRefreshRequestId || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value) return;
+
+    if (ttl === -2) {
+      data.value = null;
+      collectionItems.value = [];
+      scanCursor.value = undefined;
+      resetStreamEntries();
+      resetStreamMonitoring();
+      stopAutoRefresh();
+      emit("deleted", props.keyRaw);
+      return;
+    }
+
+    const refreshedValue = { ...data.value, ttl };
+    data.value = refreshedValue;
+    emit("loaded", refreshedValue);
+    if (shouldStopAutoRefresh(ttl)) {
+      stopAutoRefresh();
+      // An external PERSIST makes this key non-expiring. As with a polling
+      // error, do not overwrite the user's saved preference, but do not show
+      // auto-refresh as active after its timers have stopped.
+      autoRefreshEnabled.value = false;
+      return;
+    }
+    countdownTtl.value = ttl;
+  } catch {
+    // A failed background read must not retry in a tight loop. Manual refresh
+    // remains available and starts a fresh polling lifecycle on success.
+    if (requestId === ttlRefreshRequestId) {
+      stopAutoRefresh();
+      // The user did not turn the preference off, so do not persist this
+      // transient failure. The visible state must still match the stopped
+      // timers and let one click restart polling.
+      autoRefreshEnabled.value = false;
+    }
+  } finally {
+    if (requestId === ttlRefreshRequestId) refreshingTtl.value = false;
+  }
 }
 
 function stopAutoRefresh() {
+  ttlRefreshRequestId++;
+  refreshingTtl.value = false;
   if (autoRefreshTimer !== null) {
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
+  }
+  if (countdownTimer !== null) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
   }
 }
 
@@ -773,6 +835,39 @@ function readRedisJsonWordWrap(): boolean {
     return localStorage.getItem(REDIS_JSON_WRAP_STORAGE_KEY) !== "false";
   } catch {
     return true;
+  }
+}
+
+function readRedisAutoRefreshEnabled(): boolean {
+  try {
+    return localStorage.getItem(REDIS_AUTO_REFRESH_ENABLED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function persistRedisAutoRefreshEnabled(enabled: boolean) {
+  try {
+    localStorage.setItem(REDIS_AUTO_REFRESH_ENABLED_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Keep the preference for this component if storage is unavailable.
+  }
+}
+
+function readRedisAutoRefreshInterval(): number {
+  try {
+    const stored = localStorage.getItem(REDIS_AUTO_REFRESH_INTERVAL_STORAGE_KEY);
+    return stored === null ? DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS : normalizeRedisAutoRefreshInterval(stored);
+  } catch {
+    return DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS;
+  }
+}
+
+function persistRedisAutoRefreshInterval(interval: number) {
+  try {
+    localStorage.setItem(REDIS_AUTO_REFRESH_INTERVAL_STORAGE_KEY, String(interval));
+  } catch {
+    // Keep the current interval if storage is unavailable.
   }
 }
 
@@ -1897,7 +1992,39 @@ defineExpose({ focusSearch });
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <Button data-redis-value-refresh variant="ghost" size="icon" class="h-7 w-7 shrink-0 animate-none" :disabled="hasUnsavedRedisDraft" @click="refreshValueAndStreamGroups"><RefreshCw class="h-3.5 w-3.5 animate-none" /></Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger as-child>
+              <Button
+                data-redis-value-refresh
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7 shrink-0 animate-none"
+                :class="autoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : ''"
+                :title="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('grid.refresh')"
+                :aria-label="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('grid.refresh')"
+                :aria-pressed="autoRefreshEnabled"
+                ><RefreshCw class="h-3.5 w-3.5 animate-none"
+              /></Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" class="w-40">
+              <DropdownMenuItem class="gap-2" :disabled="hasUnsavedRedisDraft" @select="refreshValueAndStreamGroups">
+                <RefreshCw class="h-3.5 w-3.5" />
+                {{ t("grid.refresh") }}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>{{ t("redis.autoRefresh") }}</DropdownMenuLabel>
+              <DropdownMenuItem class="gap-2" @select="disableAutoRefresh">
+                <Check v-if="!autoRefreshEnabled" class="h-3.5 w-3.5" />
+                <span v-else class="h-3.5 w-3.5" />
+                {{ t("serverDashboard.off") }}
+              </DropdownMenuItem>
+              <DropdownMenuItem v-for="interval in REDIS_AUTO_REFRESH_INTERVAL_OPTIONS" :key="interval" class="gap-2" @select="selectAutoRefreshInterval(interval)">
+                <Check v-if="autoRefreshEnabled && autoRefreshIntervalSeconds === interval" class="h-3.5 w-3.5" />
+                <span v-else class="h-3.5 w-3.5" />
+                {{ interval }}s
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
@@ -1929,9 +2056,6 @@ defineExpose({ focusSearch });
             <DateTimePicker v-else-if="ttlExpiryMode === 'at'" v-model="ttlExpireAt" compact :locale="locale" :disabled="savingTtl" />
             <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="savingTtl" :title="t('grid.save')" :aria-label="t('grid.save')" @click="saveTtl"><Save class="h-3 w-3" /></Button>
           </div>
-          <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :class="{ 'text-primary bg-accent': autoRefreshEnabled }" :title="t('redis.autoRefresh')" @click="toggleAutoRefresh">
-            <Clock class="h-3.5 w-3.5" />
-          </Button>
         </div>
       </div>
 

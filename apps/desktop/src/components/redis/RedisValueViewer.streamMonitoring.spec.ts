@@ -159,6 +159,15 @@ function openGroups(host: HTMLElement) {
   host.querySelector<HTMLButtonElement>("[data-redis-stream-groups-tab]")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
 }
 
+async function refreshValue(host: HTMLElement) {
+  host.querySelector<HTMLButtonElement>("[data-redis-value-refresh]")!.click();
+  await settle();
+  const refreshItem = document.querySelector<HTMLElement>("[data-slot='dropdown-menu-content'] [data-slot='dropdown-menu-item']");
+  expect(refreshItem).not.toBeNull();
+  refreshItem!.click();
+  await settle();
+}
+
 describe("RedisValueViewer stream monitoring", () => {
   it("loads more Stream entries from the returned cursor", async () => {
     mocks.redisGetValue.mockResolvedValue(streamValue([streamEntry("1714470000000-0")], "1714470000000-0"));
@@ -347,8 +356,7 @@ describe("RedisValueViewer stream monitoring", () => {
     host.querySelector<HTMLButtonElement>("[data-redis-stream-consumer-row]")!.click();
     await settle();
 
-    host.querySelector<HTMLButtonElement>("[data-redis-value-refresh]")!.click();
-    await settle();
+    await refreshValue(host);
 
     expect(mocks.redisGetValue).toHaveBeenCalledTimes(2);
     expect(mocks.redisGetStreamGroups).toHaveBeenCalledTimes(2);
@@ -372,8 +380,7 @@ describe("RedisValueViewer stream monitoring", () => {
     host.querySelector<HTMLButtonElement>("[data-redis-stream-consumer-row]")!.click();
     await settle();
 
-    host.querySelector<HTMLButtonElement>("[data-redis-value-refresh]")!.click();
-    await settle();
+    await refreshValue(host);
 
     expect(mocks.redisGetStreamConsumers).toHaveBeenCalledTimes(2);
     expect(host.querySelector("[data-redis-stream-consumer-crumb]")).toBeNull();
@@ -399,8 +406,7 @@ describe("RedisValueViewer stream monitoring", () => {
     host.querySelector<HTMLElement>("[data-redis-stream-group-row]")!.click();
     await settle();
 
-    host.querySelector<HTMLButtonElement>("[data-redis-value-refresh]")!.click();
-    await settle();
+    await refreshValue(host);
 
     expect(mocks.redisGetStreamGroups).toHaveBeenCalledTimes(2);
     expect(host.querySelector("[data-redis-stream-group-detail]")).toBeNull();

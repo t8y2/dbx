@@ -48,17 +48,35 @@ test("tree toggles synchronize filtered node clones with the live sidebar tree",
   };
   const expandedClone: TreeNode = { ...collapsedConnection, isExpanded: true };
 
-  assert.equal(syncSidebarTreeNodeExpansion([expandedConnection], collapsedClone), true);
+  assert.equal(syncSidebarTreeNodeExpansion([expandedConnection], collapsedClone, false), true);
   assert.equal(expandedConnection.isExpanded, false);
-  assert.equal(syncSidebarTreeNodeExpansion([collapsedConnection], expandedClone), true);
+  assert.equal(syncSidebarTreeNodeExpansion([collapsedConnection], expandedClone, true), true);
   assert.equal(collapsedConnection.isExpanded, true);
-  assert.equal(syncSidebarTreeNodeExpansion([expandedConnection], expandedConnection), false);
+  assert.equal(syncSidebarTreeNodeExpansion([expandedConnection], expandedConnection, true), false);
+});
+
+test("async tree expansion does not restore a stale rendered clone state", () => {
+  const liveDatabase: TreeNode = {
+    id: "connection-1:database-1",
+    label: "Database 1",
+    type: "database",
+    connectionId: "connection-1",
+    database: "database-1",
+    isExpanded: false,
+    children: [],
+  };
+  const staleRenderedClone: TreeNode = { ...liveDatabase, children: [] };
+
+  liveDatabase.isExpanded = true;
+
+  assert.equal(syncSidebarTreeNodeExpansion([liveDatabase], staleRenderedClone, true), false);
+  assert.equal(liveDatabase.isExpanded, true);
 });
 
 test("local table search preserves live expansion state", () => {
   assert.match(connectionTree, /return \{ \.\.\.node, children: matchingChildren \};/);
   assert.doesNotMatch(connectionTree, /children: matchingChildren,\s*isExpanded:\s*true/);
-  assert.match(connectionTree, /function onNodeToggled\(node: TreeNode\) \{\s*if \(isTreeSearchFiltering\.value\) return;\s*syncSidebarTreeNodeExpansion/);
+  assert.match(connectionTree, /function onNodeToggled\(node: TreeNode, wasExpanded: boolean\) \{\s*if \(isTreeSearchFiltering\.value\) return;\s*syncSidebarTreeNodeExpansion\(store\.treeNodes, node, !wasExpanded\)/);
 });
 
 test("tree rebuilds keep a context menu only while its target row remains visible", () => {

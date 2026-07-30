@@ -1184,9 +1184,9 @@ function onSearchToggle(node: TreeNode) {
   searchCollapsedIds.value = next;
 }
 
-function onNodeToggled(node: TreeNode) {
+function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
   if (isTreeSearchFiltering.value) return;
-  syncSidebarTreeNodeExpansion(store.treeNodes, node);
+  syncSidebarTreeNodeExpansion(store.treeNodes, node, !wasExpanded);
 }
 
 function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void) {

@@ -372,6 +372,8 @@ async function startExecution() {
     if (!confirmed) return;
   }
 
+  resetPerFileState();
+  refreshedTarget.value = false;
   const batchId = uuid();
   executionId.value = batchId;
   running.value = true;

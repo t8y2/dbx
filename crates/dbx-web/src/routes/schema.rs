@@ -474,9 +474,16 @@ pub async fn get_ddl(
         .await
         .map_err(AppError::from)?
     } else {
-        dbx_core::schema::get_table_ddl_core(&state.app, &q.connection_id, database, schema, table, q.object_type)
-            .await
-            .map_err(AppError::from)?
+        dbx_core::schema::get_table_ddl_for_export_core(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            table,
+            q.object_type,
+        )
+        .await
+        .map_err(AppError::from)?
     };
     Ok(Json(result))
 }

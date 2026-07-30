@@ -441,7 +441,8 @@ pub async fn get_table_ddl(
         dbx_core::schema::get_table_display_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
             .await
     } else {
-        dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table, object_type).await
+        dbx_core::schema::get_table_ddl_for_export_core(&state, &connection_id, &database, &schema, &table, object_type)
+            .await
     }
 }
 

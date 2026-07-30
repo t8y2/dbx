@@ -374,7 +374,10 @@ mod tests {
         config.connection_string = None;
 
         let jdbc = gaussdb_m_jdbc_command_config(&config, "127.0.0.1", 18000).unwrap();
-        assert_eq!(jdbc.connection_string.as_deref(), Some("jdbc:gaussdb://127.0.0.1:18000/app"));
+        assert_eq!(
+            jdbc.connection_string.as_deref(),
+            Some("jdbc:gaussdb://127.0.0.1:18000/app?sslmode=prefer&ssl=true")
+        );
         assert_eq!(jdbc.jdbc_driver_class.as_deref(), Some("com.huawei.gaussdb.jdbc.Driver"));
 
         config.driver_profile = Some("gaussdb".to_string());

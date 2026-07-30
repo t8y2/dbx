@@ -311,7 +311,7 @@ async fn resolve_transfer_target_table_name(
         crate::schema::list_doris_catalog_tables_core(
             state,
             &request.target_connection_id,
-            &catalog,
+            catalog,
             &request.target_database,
             Some(&requested_name),
             Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),

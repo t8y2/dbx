@@ -134,6 +134,31 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
     tools
 }
 
+/// Tools for an SSH-backed AI Agent run. Ask mode receives no tools and uses
+/// only the terminal context supplied in the prompt.
+pub fn ssh_tools() -> Vec<ToolDefinition> {
+    vec![ToolDefinition {
+        name: "execute_ssh_command",
+        description: "Execute one non-interactive shell command on the active SSH host and return stdout, stderr, and the exit code. Use the shortest command that answers the user's request. Never request passwords or include secrets in commands.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute on the SSH host"
+                },
+                "timeout_secs": {
+                    "type": "number",
+                    "description": "Command timeout in seconds (default 30, max 300)"
+                }
+            },
+            "required": ["command"]
+        }),
+        read_only: false,
+        parallel_ok: false,
+    }]
+}
+
 /// list_tables tool definition.
 fn list_tables_tool() -> ToolDefinition {
     ToolDefinition {
@@ -315,8 +340,10 @@ pub async fn execute_tool(
     database: &str,
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
+    ssh_profile_id: Option<&str>,
 ) -> ToolResult {
     let result = match tool_call.name.as_str() {
+        "execute_ssh_command" => execute_ssh_command(tool_call, state, ssh_profile_id).await,
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, db_type).await,
         "get_columns" => execute_get_columns(tool_call, state, connection_id, database, db_type).await,
         "execute_query" => {
@@ -368,6 +395,57 @@ pub async fn execute_tool(
             explain_data: None,
         },
     }
+}
+
+async fn execute_ssh_command(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    ssh_profile_id: Option<&str>,
+) -> Result<String, String> {
+    let profile_id = ssh_profile_id.ok_or_else(|| "No SSH profile is active for this Agent run".to_string())?;
+    let policy = state.storage.load_mcp_global_policy().await?.policy();
+    if !policy.allow_ssh_commands {
+        return Err(
+            "SSH_COMMAND_EXECUTION_DISABLED: SSH remote command execution is disabled in DBX Settings. Ask mode remains available."
+                .to_string(),
+        );
+    }
+    let command = tool_call
+        .arguments
+        .get("command")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "command is required".to_string())?;
+    let timeout_secs = tool_call.arguments.get("timeout_secs").and_then(|value| value.as_u64()).unwrap_or(30);
+    let profile = state
+        .storage
+        .load_ssh_profiles()
+        .await?
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "SSH profile was not found".to_string())?;
+    let result = state
+        .ssh_terminal
+        .execute_command(&profile, state.storage.data_dir().join("known_hosts"), command, timeout_secs)
+        .await?;
+    let mut sections = vec![format!(
+        "Exit code: {}",
+        result.exit_code.map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
+    )];
+    if let Some(signal) = result.signal {
+        sections.push(format!("Signal: {signal}"));
+    }
+    if !result.stdout.is_empty() {
+        sections.push(format!("stdout:\n{}", result.stdout));
+    }
+    if !result.stderr.is_empty() {
+        sections.push(format!("stderr:\n{}", result.stderr));
+    }
+    if result.truncated {
+        sections.push("Output was truncated at 1 MiB.".to_string());
+    }
+    Ok(sections.join("\n\n"))
 }
 
 async fn execute_list_tables(
@@ -948,6 +1026,32 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
         assert_eq!(names, vec!["list_collections", "browse_collection"]);
+    }
+
+    #[test]
+    fn ssh_agent_exposes_only_the_scoped_command_tool() {
+        let tools = ssh_tools();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+
+        assert_eq!(names, vec!["execute_ssh_command"]);
+        assert!(!tools[0].parallel_ok);
+    }
+
+    #[tokio::test]
+    async fn ssh_agent_command_execution_is_denied_by_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "ssh-policy-test".to_string(),
+            name: "execute_ssh_command".to_string(),
+            arguments: serde_json::json!({ "command": "uname -s" }),
+            provider_payload: None,
+        };
+
+        let error = execute_ssh_command(&call, &state, Some("missing-profile")).await.unwrap_err();
+
+        assert!(error.starts_with("SSH_COMMAND_EXECUTION_DISABLED:"));
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub struct AgentLoopContext {
     pub connection_id: String,
     pub database: String,
     pub db_type: DatabaseType,
+    pub ssh_profile_id: Option<String>,
     pub cli_mcp_server_command: Option<CliAgentCommandSpec>,
     pub sql_permissions: agent_tools::AgentSqlPermissions,
     /// Turn limit for this run, already clamped by the settings layer.
@@ -153,27 +154,34 @@ pub async fn run_agent_loop(
             allow_writes: agent_ctx.sql_permissions.allow_writes,
             allow_dangerous: agent_ctx.sql_permissions.allow_dangerous,
             confirmed_write_sql: agent_ctx.sql_permissions.confirmed_write_sql.clone(),
+            ssh_target: agent_ctx.ssh_profile_id.is_some(),
             mcp_server_command: agent_ctx.cli_mcp_server_command.clone(),
         };
         if matches!(config.provider, AiProvider::ClaudeCodeCli) {
-            let prompt = crate::ai_claude_code_cli::build_claude_code_prompt(
+            let prompt = crate::ai_claude_code_cli::build_claude_code_prompt_for_target(
                 system_prompt,
                 messages,
                 agent_ctx.sql_permissions.allow_writes,
+                agent_ctx.ssh_profile_id.is_some(),
             );
             return crate::ai_claude_code_cli::run_claude_code_agent(config, &prompt, options, cancelled, on_event)
                 .await;
         }
         if matches!(config.provider, AiProvider::PiAgentCli) {
-            let prompt = crate::ai_pi_agent_cli::build_pi_agent_prompt(
+            let prompt = crate::ai_pi_agent_cli::build_pi_agent_prompt_for_target(
                 system_prompt,
                 messages,
                 agent_ctx.sql_permissions.allow_writes,
+                agent_ctx.ssh_profile_id.is_some(),
             );
             return crate::ai_pi_agent_cli::run_pi_agent(config, &prompt, options, cancelled, on_event).await;
         }
-        let prompt =
-            crate::ai_codex_cli::build_codex_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
+        let prompt = crate::ai_codex_cli::build_codex_prompt_for_target(
+            system_prompt,
+            messages,
+            agent_ctx.sql_permissions.allow_writes,
+            agent_ctx.ssh_profile_id.is_some(),
+        );
         return crate::ai_codex_cli::run_codex_agent(config, &prompt, options, cancelled, on_event).await;
     }
 
@@ -202,7 +210,13 @@ pub async fn run_agent_loop(
         )
         .await;
     }
-    let tools = if is_agent_mode {
+    let tools = if agent_ctx.ssh_profile_id.is_some() {
+        if is_agent_mode {
+            agent_tools::ssh_tools()
+        } else {
+            Vec::new()
+        }
+    } else if is_agent_mode {
         agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions.clone())
     } else {
         agent_tools::read_only_tools(agent_ctx.db_type)
@@ -437,6 +451,7 @@ pub async fn run_agent_loop(
         let db2 = agent_ctx.database.clone();
         let db_type = agent_ctx.db_type;
         let sql_permissions = agent_ctx.sql_permissions.clone();
+        let ssh_profile_id = agent_ctx.ssh_profile_id.clone();
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
@@ -460,7 +475,10 @@ pub async fn run_agent_loop(
                 let conn = conn2.clone();
                 let db = db2.clone();
                 let perms = sql_permissions.clone();
-                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, perms).await }
+                let ssh_profile_id = ssh_profile_id.clone();
+                async move {
+                    agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, perms, ssh_profile_id.as_deref()).await
+                }
             })
             .collect();
         let parallel_results = join_all(parallel_futures).await;
@@ -469,8 +487,18 @@ pub async fn run_agent_loop(
         let mut sequential_results = Vec::with_capacity(sequential_indices.len());
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
-            sequential_results
-                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions.clone()).await);
+            sequential_results.push(
+                agent_tools::execute_tool(
+                    &tc,
+                    &state2,
+                    &conn2,
+                    &db2,
+                    &db_type,
+                    sql_permissions.clone(),
+                    ssh_profile_id.as_deref(),
+                )
+                .await,
+            );
         }
 
         // Merge results back into original order

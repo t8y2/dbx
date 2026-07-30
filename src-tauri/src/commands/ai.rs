@@ -150,8 +150,12 @@ pub async fn ai_agent_stream(
         state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
     );
 
-    let parsed_db_type: DatabaseType =
-        serde_json::from_str(&format!("\"{}\"", db_type)).map_err(|_| format!("Unknown database type: {db_type}"))?;
+    let ssh_profile_id = (db_type == "ssh").then(|| connection_id.clone());
+    let parsed_db_type: DatabaseType = if ssh_profile_id.is_some() {
+        DatabaseType::Sqlite
+    } else {
+        serde_json::from_str(&format!("\"{}\"", db_type)).map_err(|_| format!("Unknown database type: {db_type}"))?
+    };
 
     let cli_mcp_server_command = if is_cli_provider(&request.config.provider) {
         let (program, args) = super::mcp::resolve_mcp_server_command().await?;
@@ -160,12 +164,13 @@ pub async fn ai_agent_stream(
         None
     };
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
-    let production_database = state
-        .configs
-        .read()
-        .await
-        .get(&connection_id)
-        .is_some_and(|config| dbx_core::production_safety::is_production_database(config, &database));
+    let production_database = ssh_profile_id.is_none()
+        && state
+            .configs
+            .read()
+            .await
+            .get(&connection_id)
+            .is_some_and(|config| dbx_core::production_safety::is_production_database(config, &database));
     let max_agent_turns = state.storage.load_max_agent_turns().await.unwrap_or_else(|err| {
         log::warn!("Failed to load max_agent_turns setting, using default: {err}");
         dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS
@@ -196,6 +201,7 @@ pub async fn ai_agent_stream(
         connection_id,
         database,
         db_type: parsed_db_type,
+        ssh_profile_id,
         cli_mcp_server_command,
         sql_permissions,
         max_agent_turns,

@@ -629,6 +629,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: false,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: Some(vec![existing.id.clone()]),
             })
             .await
@@ -666,6 +667,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: false,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: Some(vec![removed.id.clone()]),
             })
             .await
@@ -694,6 +696,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: true,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: None,
             })
             .await

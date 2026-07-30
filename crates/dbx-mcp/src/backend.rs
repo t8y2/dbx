@@ -148,6 +148,10 @@ pub trait DbxBackend: Send + Sync {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
     }
+    async fn bridge_request_text(&self, path: &str, body: Value) -> Result<String, String> {
+        let _ = (path, body);
+        Err("DBX is not running. Please start DBX first.".to_string())
+    }
 }
 
 pub struct LocalBackend {
@@ -324,7 +328,8 @@ impl DbxBackend for LocalBackend {
     ) -> ToolResult {
         let call =
             ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
-        agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions).await
+        agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions, None)
+            .await
     }
 
     async fn execute_query(
@@ -642,6 +647,23 @@ impl DbxBackend for LocalBackend {
             .map_err(|_| "DBX is not running. Please start DBX first.".to_string())?;
         if response.status().is_success() {
             Ok(())
+        } else {
+            Err(response.text().await.unwrap_or_else(|_| "DBX bridge request failed.".to_string()))
+        }
+    }
+
+    async fn bridge_request_text(&self, path: &str, body: Value) -> Result<String, String> {
+        let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
+            .await
+            .map_err(|_| "DBX is not running. Please start DBX first.".to_string())?;
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}{}", port.trim(), path))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| "DBX is not running. Please start DBX first.".to_string())?;
+        if response.status().is_success() {
+            response.text().await.map_err(|error| error.to_string())
         } else {
             Err(response.text().await.unwrap_or_else(|_| "DBX bridge request failed.".to_string()))
         }
@@ -1478,7 +1500,13 @@ mod tests {
     use super::*;
 
     fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
-        McpGlobalPolicyState { configured, read_only, allow_dangerous_sql: false, allowed_connection_ids: None }
+        McpGlobalPolicyState {
+            configured,
+            read_only,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        }
     }
 
     #[test]

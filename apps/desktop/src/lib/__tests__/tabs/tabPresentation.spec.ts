@@ -6,6 +6,7 @@ import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const translations: Record<string, string> = {
+  "tabs.tooltipTitle": "Title:",
   "tabs.tooltipConnection": "Connection:",
   "tabs.tooltipGroup": "Group:",
   "tabs.tooltipDatabase": "Database:",
@@ -134,6 +135,10 @@ describe("query result labels", () => {
 });
 
 describe("tab group presentation", () => {
+  it("keeps SSH tooltips independent from database connection metadata", () => {
+    expect(tabTooltipLines(queryTab({ title: "Development", connectionId: "", database: "", mode: "ssh", sshProfileId: "ssh-profile-1" }), translate)).toEqual([{ label: "Title:", value: "Development" }]);
+  });
+
   it("adds the full, live group path to tab tooltips", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig];

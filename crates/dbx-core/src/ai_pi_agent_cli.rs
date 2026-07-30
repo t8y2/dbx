@@ -4,8 +4,8 @@ use crate::ai::{
     AGENT_CANCELLED_ERROR,
 };
 use crate::ai_cli_agent::{
-    build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env, CliAgentCommandSpec,
-    CliAgentRunOptions,
+    build_cli_agent_prompt, build_cli_agent_prompt_for_target, cli_command, dbx_mcp_enabled_tools_for_target,
+    dbx_mcp_scope_env, CliAgentCommandSpec, CliAgentRunOptions,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -472,6 +472,15 @@ pub fn build_pi_agent_prompt(system_prompt: &str, messages: &[crate::ai::AiMessa
     build_cli_agent_prompt("Pi Coding Agent", system_prompt, messages, allow_write_sql)
 }
 
+pub fn build_pi_agent_prompt_for_target(
+    system_prompt: &str,
+    messages: &[crate::ai::AiMessage],
+    allow_write_sql: bool,
+    ssh_target: bool,
+) -> String {
+    build_cli_agent_prompt_for_target("Pi Coding Agent", system_prompt, messages, allow_write_sql, ssh_target)
+}
+
 fn configure_pi_bridge(
     process: &mut Command,
     runtime: &PiIsolatedRuntime,
@@ -488,7 +497,7 @@ fn configure_pi_bridge(
     );
     process.env(
         "DBX_PI_ENABLED_TOOLS",
-        serde_json::to_string(&dbx_mcp_enabled_tools(options.agent_mode))
+        serde_json::to_string(&dbx_mcp_enabled_tools_for_target(options.agent_mode, options.ssh_target))
             .map_err(|error| format!("[piAgentRunFailed] {error}"))?,
     );
     process.env("DBX_PI_BRIDGE_READY_FILE", &runtime.ready_path);
@@ -829,6 +838,7 @@ mod tests {
             allow_writes: true,
             allow_dangerous: false,
             confirmed_write_sql: None,
+            ssh_target: false,
             mcp_server_command: Some(CliAgentCommandSpec {
                 program: "/usr/local/bin/dbx-mcp-server".to_string(),
                 args: vec!["--stdio".to_string()],

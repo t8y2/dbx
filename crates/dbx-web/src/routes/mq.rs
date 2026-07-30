@@ -1561,6 +1561,7 @@ mod tests {
         McpGlobalPolicy {
             read_only: false,
             allow_dangerous_sql: true,
+            allow_ssh_commands: false,
             allowed_connection_ids: Some(vec![connection_id.to_string()]),
         }
     }

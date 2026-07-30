@@ -16,6 +16,7 @@ use crate::connection_secrets::{
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
+use crate::ssh_terminal::SshProfile;
 use crate::storage::{DesktopSettings, Storage};
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
@@ -97,6 +98,10 @@ pub struct SyncSnapshot {
     /// predates tunnel profiles — applying it leaves local profiles alone.
     #[serde(default)]
     pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
+    /// Standalone SSH terminal profiles (secrets scrubbed). `None` means the
+    /// snapshot predates SSH terminals and leaves local profiles unchanged.
+    #[serde(default)]
+    pub ssh_profiles: Option<Vec<SshProfile>>,
     pub sidebar_layout: Option<serde_json::Value>,
     pub pinned_tree_node_ids: Vec<String>,
     pub saved_sql: SavedSqlLibrary,
@@ -129,6 +134,9 @@ pub struct SensitiveSyncPayload {
     /// Full tunnel profiles including their secrets.
     #[serde(default)]
     pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
+    /// Full standalone SSH terminal profiles including encrypted credentials.
+    #[serde(default)]
+    pub ssh_profiles: Option<Vec<SshProfile>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,9 +186,10 @@ pub async fn build_sync_snapshot(
 ) -> Result<SyncSnapshot, String> {
     let mut connections = storage.load_connections().await?;
     let mut tunnel_profiles = storage.load_tunnel_profiles().await?;
+    let mut ssh_profiles = storage.load_ssh_profiles().await?;
     let encrypted_secrets = match normalized_passphrase(secrets_passphrase) {
         Some(passphrase) => Some(encrypt_sensitive_payload(
-            &build_sensitive_payload(storage, &connections, &tunnel_profiles).await?,
+            &build_sensitive_payload(storage, &connections, &tunnel_profiles, &ssh_profiles).await?,
             passphrase,
         )?),
         None => None,
@@ -191,6 +200,9 @@ pub async fn build_sync_snapshot(
     for profile in &mut tunnel_profiles {
         profile.scrub_secrets();
     }
+    for profile in &mut ssh_profiles {
+        *profile = profile.scrubbed_for_storage();
+    }
 
     Ok(SyncSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
@@ -198,6 +210,7 @@ pub async fn build_sync_snapshot(
         app_version: app_version.into(),
         connections,
         tunnel_profiles: Some(tunnel_profiles),
+        ssh_profiles: Some(ssh_profiles),
         sidebar_layout: storage.load_sidebar_layout().await?,
         pinned_tree_node_ids: storage.load_pinned_tree_node_ids().await?,
         saved_sql: storage.load_saved_sql_library().await?,
@@ -245,6 +258,9 @@ pub async fn apply_sync_snapshot(
     storage.save_connection_metadata_preserving_secrets(&connections).await?;
     if let Some(profiles) = &snapshot.tunnel_profiles {
         storage.save_tunnel_profiles_preserving_secrets(profiles).await?;
+    }
+    if let Some(profiles) = &snapshot.ssh_profiles {
+        storage.save_ssh_profiles_preserving_secrets(profiles).await?;
     }
     if let Some(layout) = &snapshot.sidebar_layout {
         storage.save_sidebar_layout(layout).await?;
@@ -621,6 +637,7 @@ async fn build_sensitive_payload(
     storage: &Storage,
     connections: &[ConnectionConfig],
     tunnel_profiles: &[TransportLayerConfig],
+    ssh_profiles: &[SshProfile],
 ) -> Result<SensitiveSyncPayload, String> {
     let mut connection_secrets = Vec::new();
     for config in connections {
@@ -673,6 +690,7 @@ async fn build_sensitive_payload(
         ai_configs: Some(storage.load_ai_configs().await.unwrap_or_default()),
         ai_config: None,
         tunnel_profiles: Some(tunnel_profiles.to_vec()),
+        ssh_profiles: Some(ssh_profiles.to_vec()),
     })
 }
 
@@ -826,6 +844,9 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
     }
     if let Some(profiles) = &payload.tunnel_profiles {
         storage.save_tunnel_profiles(profiles).await?;
+    }
+    if let Some(profiles) = &payload.ssh_profiles {
+        storage.replace_ssh_profiles(profiles).await?;
     }
     Ok(())
 }
@@ -1072,6 +1093,7 @@ mod tests {
     use crate::models::connection::{
         default_redis_key_separator, ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
+    use crate::ssh_terminal::{SshAuthMethod, SshProfile, BUILTIN_SSH_TERMINAL_DRIVER_ID};
     use crate::storage::Storage;
 
     fn make_test_config(name: &str, is_default: bool) -> AiConfigItem {
@@ -1375,6 +1397,7 @@ mod tests {
     fn encrypted_sensitive_payload_round_trips() {
         let payload = SensitiveSyncPayload {
             tunnel_profiles: None,
+            ssh_profiles: None,
             connection_secrets: vec![
                 ConnectionSecretSnapshot {
                     connection_id: "c1".to_string(),
@@ -1401,6 +1424,7 @@ mod tests {
     fn encrypted_sensitive_payload_rejects_wrong_passphrase() {
         let payload = SensitiveSyncPayload {
             tunnel_profiles: None,
+            ssh_profiles: None,
             connection_secrets: vec![ConnectionSecretSnapshot {
                 connection_id: "c1".to_string(),
                 key: "password".to_string(),
@@ -1558,6 +1582,38 @@ mod tests {
         assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![profile]);
     }
 
+    #[tokio::test]
+    async fn sync_snapshot_round_trips_standalone_ssh_profiles() {
+        let storage = Storage::open(&temp_db_path("ssh-profiles-src")).await.unwrap();
+        let profile = SshProfile {
+            id: "ssh-profile-1".to_string(),
+            name: "Application host".to_string(),
+            driver_id: BUILTIN_SSH_TERMINAL_DRIVER_ID.to_string(),
+            host: "server.example.com".to_string(),
+            port: 22,
+            username: "deploy".to_string(),
+            auth_method: SshAuthMethod::Password,
+            password: "ssh-secret".to_string(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            ssh_agent_sock_path: String::new(),
+            connect_timeout_secs: 10,
+            terminal_type: "xterm-256color".to_string(),
+        };
+        storage.save_ssh_profile(&profile).await.unwrap();
+
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("sync-pass")).await.unwrap();
+        let public_profiles = snapshot.ssh_profiles.as_ref().expect("SSH profiles in snapshot");
+        assert_eq!(public_profiles[0].password, "");
+        assert!(!serde_json::to_string(&snapshot).unwrap().contains("ssh-secret"));
+
+        let target = Storage::open(&temp_db_path("ssh-profiles-dst")).await.unwrap();
+        apply_sync_snapshot(&target, &snapshot, ApplySnapshotOptions { secrets_passphrase: Some("sync-pass") })
+            .await
+            .unwrap();
+        assert_eq!(target.load_ssh_profiles().await.unwrap(), vec![profile]);
+    }
+
     // ---- AI configs sync tests ----
 
     #[tokio::test]
@@ -1570,6 +1626,7 @@ mod tests {
             ai_configs: None,
             ai_config: None,
             tunnel_profiles: None,
+            ssh_profiles: None,
         };
         apply_sensitive_payload(&storage, &payload).await.unwrap();
         let loaded = storage.load_ai_configs().await.unwrap();
@@ -1590,6 +1647,7 @@ mod tests {
             ai_configs: Some(vec![]),
             ai_config: None,
             tunnel_profiles: None,
+            ssh_profiles: None,
         };
         apply_sensitive_payload(&storage, &payload).await.unwrap();
         let loaded = storage.load_ai_configs().await.unwrap();
@@ -1606,6 +1664,7 @@ mod tests {
             ai_configs: Some(vec![cfg]),
             ai_config: None,
             tunnel_profiles: None,
+            ssh_profiles: None,
         };
         apply_sensitive_payload(&storage, &payload).await.unwrap();
         let loaded = storage.load_ai_configs().await.unwrap();
@@ -1626,6 +1685,7 @@ mod tests {
             ai_configs: None,
             ai_config: Some(legacy_config),
             tunnel_profiles: None,
+            ssh_profiles: None,
         };
 
         apply_sensitive_payload(&storage, &payload).await.unwrap();

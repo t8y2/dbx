@@ -118,6 +118,7 @@ const LoginPage = defineAsyncComponent(() => import("@/components/auth/LoginPage
 const QuickOpenDialog = defineAsyncComponent(() => import("@/components/quick-open/QuickOpenDialog.vue"));
 const QueryEditorDdlViewDialog = defineAsyncComponent(() => import("@/components/objects/DdlViewDialog.vue"));
 const QueryEditorObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
+const SshTerminalView = defineAsyncComponent(() => import("@/components/ssh/SshTerminalView.vue"));
 
 type AiAssistantHandle = {
   triggerAction: (action: AiAction, instruction?: string) => void;
@@ -225,6 +226,18 @@ const pendingAppCloseAction = ref<AppCloseAction | null>(null);
 const pendingCloseActionChoice = ref(false);
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
+const mountedSshTabIds = ref<string[]>([]);
+const mountedSshTabs = computed(() => queryStore.tabs.filter((tab) => tab.mode === "ssh" && !!tab.sshProfileId && mountedSshTabIds.value.includes(tab.id)));
+
+watch(
+  [activeTab, () => queryStore.tabs.map((tab) => tab.id)],
+  ([tab, existingIds]) => {
+    const nextIds = mountedSshTabIds.value.filter((id) => existingIds.includes(id));
+    if (tab?.mode === "ssh" && tab.sshProfileId && !nextIds.includes(tab.id)) nextIds.push(tab.id);
+    mountedSshTabIds.value = nextIds;
+  },
+  { immediate: true },
+);
 
 const activeConnection = computed(() => {
   const tab = activeTab.value;
@@ -2231,6 +2244,7 @@ onUnmounted(() => {
             @start-resize="startSidebarResize"
             @collapse="setSidebarOpen(false)"
             @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
+            @open-ssh="(profileId, title) => queryStore.openSshTerminal(profileId, title)"
           />
           <div v-show="!sidebarOpen" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
             <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('sidebar.expand')" :aria-label="t('sidebar.expand')" @click="setSidebarOpen(true)">
@@ -2313,8 +2327,10 @@ onUnmounted(() => {
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"
                 />
+                <SshTerminalView v-for="tab in mountedSshTabs" v-show="activeTab.id === tab.id" :key="tab.id" :profile-id="tab.sshProfileId!" :active="activeTab.id === tab.id && !driverStoreActive && !settingsStore.settingsPageActive" />
                 <KeepAlive :max="4">
                   <ContentArea
+                    v-if="activeTab.mode !== 'ssh'"
                     ref="contentAreaRef"
                     :key="activeTab.id"
                     :active-tab="activeTab"

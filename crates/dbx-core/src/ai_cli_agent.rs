@@ -20,6 +20,7 @@ pub struct CliAgentRunOptions {
     /// When present, write/DDL execute_query calls in the MCP subprocess must
     /// match this SQL after trimming only surrounding whitespace.
     pub confirmed_write_sql: Option<String>,
+    pub ssh_target: bool,
     pub mcp_server_command: Option<CliAgentCommandSpec>,
 }
 
@@ -63,6 +64,13 @@ pub fn dbx_mcp_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
     tools
 }
 
+pub fn dbx_mcp_enabled_tools_for_target(agent_mode: bool, ssh_target: bool) -> Vec<&'static str> {
+    if ssh_target {
+        return if agent_mode { vec!["dbx_execute_ssh_command"] } else { Vec::new() };
+    }
+    dbx_mcp_enabled_tools(agent_mode)
+}
+
 pub fn dbx_mcp_scope_env(options: &CliAgentRunOptions) -> Vec<(&'static str, String)> {
     let mut env = vec![
         ("DBX_MCP_ALLOW_WRITES", if options.allow_writes { "1" } else { "0" }.to_string()),
@@ -70,6 +78,7 @@ pub fn dbx_mcp_scope_env(options: &CliAgentRunOptions) -> Vec<(&'static str, Str
         ("DBX_MCP_SCOPE_CONNECTION_ID", options.connection_id.clone()),
         ("DBX_MCP_SCOPE_CONNECTION_NAME", options.connection_name.clone()),
         ("DBX_MCP_SCOPE_DATABASE", options.database.clone()),
+        ("DBX_MCP_SCOPE_KIND", if options.ssh_target { "ssh" } else { "database" }.to_string()),
     ];
     if let Some(ref sql) = options.confirmed_write_sql {
         env.push(("DBX_MCP_CONFIRMED_WRITE_SQL", sql.clone()));
@@ -91,6 +100,7 @@ mod scope_env_tests {
             allow_writes: true,
             allow_dangerous: true,
             confirmed_write_sql: Some("DELETE FROM sessions WHERE id = 7".to_string()),
+            ssh_target: false,
             mcp_server_command: None,
         };
 
@@ -139,6 +149,33 @@ pub fn build_cli_agent_prompt(
         sections.push(String::new());
     }
 
+    sections.join("\n")
+}
+
+pub fn build_cli_agent_prompt_for_target(
+    provider_label: &str,
+    system_prompt: &str,
+    messages: &[AiMessage],
+    allow_write_sql: bool,
+    ssh_target: bool,
+) -> String {
+    if !ssh_target {
+        return build_cli_agent_prompt(provider_label, system_prompt, messages, allow_write_sql);
+    }
+    let mut sections = vec![
+        format!("You are running inside DBX Desktop as the {provider_label} CLI provider."),
+        "Use only the scoped DBX MCP SSH tool when the system instructions require a remote operation. Do not use a local shell or modify local files.".to_string(),
+        String::new(),
+        "## System instructions".to_string(),
+        system_prompt.to_string(),
+        String::new(),
+        "## Conversation".to_string(),
+    ];
+    for message in messages {
+        sections.push(format!("### {}", message.role));
+        sections.push(message.content.clone());
+        sections.push(String::new());
+    }
     sections.join("\n")
 }
 

@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
+import SshSidebarSection from "@/components/ssh/SshSidebarSection.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   startResize: [event: MouseEvent];
   collapse: [];
   "open-settings": [initialTab: string];
+  openSsh: [profileId: string, title: string];
 }>();
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
@@ -246,6 +248,7 @@ defineExpose({ focusSearch });
       <div class="flex-1 min-h-0">
         <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" />
       </div>
+      <SshSidebarSection @open="(profileId, title) => emit('openSsh', profileId, title)" />
     </div>
     <div class="panel-resize-handle panel-resize-handle--right" @mousedown="emit('startResize', $event)" />
     <Dialog v-model:open="showDeleteSelectedConfirm">

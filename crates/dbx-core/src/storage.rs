@@ -21,6 +21,7 @@ use crate::history::{
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
+use crate::ssh_terminal::SshProfile;
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
@@ -35,6 +36,8 @@ const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
+    "ssh_profiles",
+    "ssh_profile_secrets",
     "history",
     "ai_conversations",
     "mq_token_records",
@@ -183,6 +186,8 @@ pub struct McpGlobalPolicy {
     pub read_only: bool,
     #[serde(default)]
     pub allow_dangerous_sql: bool,
+    #[serde(default)]
+    pub allow_ssh_commands: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
 }
 
@@ -192,6 +197,7 @@ pub struct McpGlobalPolicyState {
     pub configured: bool,
     pub read_only: bool,
     pub allow_dangerous_sql: bool,
+    pub allow_ssh_commands: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
 }
 
@@ -200,6 +206,7 @@ impl McpGlobalPolicyState {
         McpGlobalPolicy {
             read_only: self.read_only,
             allow_dangerous_sql: self.allow_dangerous_sql,
+            allow_ssh_commands: self.allow_ssh_commands,
             allowed_connection_ids: self.allowed_connection_ids.clone(),
         }
     }
@@ -295,6 +302,16 @@ const SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS tunnel_profiles (
         id TEXT PRIMARY KEY,
         config_json TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS ssh_profiles (
+        id TEXT PRIMARY KEY,
+        config_json TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS ssh_profile_secrets (
+        profile_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        secret TEXT NOT NULL,
+        PRIMARY KEY (profile_id, key)
     )",
     "CREATE TABLE IF NOT EXISTS ai_conversations (
         id TEXT PRIMARY KEY,
@@ -1362,6 +1379,168 @@ fn merge_missing_tunnel_profile_secrets(profile: &mut TransportLayerConfig, prev
     }
 }
 
+// SSH terminal profiles are independent from database tunnel profiles. Their
+// non-secret configuration remains portable while credentials are kept out of
+// config_json so exports, diagnostics, and sync snapshots cannot expose them.
+
+impl Storage {
+    pub async fn load_ssh_profiles(&self) -> Result<Vec<SshProfile>, String> {
+        let rows: Vec<(String, Option<String>, Option<String>)> = self
+            .with_conn(|conn| {
+                let config_rows = {
+                    let mut stmt = conn
+                        .prepare("SELECT id, config_json FROM ssh_profiles ORDER BY lower(json_extract(config_json, '$.name')), id")
+                        .map_err(|error| error.to_string())?;
+                    let rows = stmt
+                        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                        .map_err(|error| error.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+                };
+
+                config_rows
+                    .into_iter()
+                    .map(|(id, json)| {
+                        let password = conn
+                            .query_row(
+                                "SELECT secret FROM ssh_profile_secrets WHERE profile_id = ?1 AND key = 'password'",
+                                [&id],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()
+                            .map_err(|error| error.to_string())?;
+                        let key_passphrase = conn
+                            .query_row(
+                                "SELECT secret FROM ssh_profile_secrets WHERE profile_id = ?1 AND key = 'key_passphrase'",
+                                [&id],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()
+                            .map_err(|error| error.to_string())?;
+                        Ok((json, password, key_passphrase))
+                    })
+                    .collect()
+            })
+            .await?;
+
+        rows.into_iter()
+            .map(|(json, password, key_passphrase)| {
+                let mut profile = serde_json::from_str::<SshProfile>(&json)
+                    .map_err(|error| format!("Failed to deserialize SSH profile: {error}"))?;
+                profile.password = password.unwrap_or_default();
+                profile.key_passphrase = key_passphrase.unwrap_or_default();
+                Ok(profile)
+            })
+            .collect()
+    }
+
+    pub async fn save_ssh_profile(&self, profile: &SshProfile) -> Result<SshProfile, String> {
+        let profile = profile.without_irrelevant_secrets();
+        profile.validate()?;
+        let stored_json = serde_json::to_string(&profile.scrubbed_for_storage()).map_err(|error| error.to_string())?;
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            tx.execute(
+                "INSERT OR REPLACE INTO ssh_profiles (id, config_json) VALUES (?1, ?2)",
+                params![profile.id, stored_json],
+            )
+            .map_err(|error| error.to_string())?;
+            persist_ssh_profile_secret_in_tx(&tx, &profile.id, "password", &profile.password)?;
+            persist_ssh_profile_secret_in_tx(&tx, &profile.id, "key_passphrase", &profile.key_passphrase)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(profile)
+        })
+        .await
+    }
+
+    /// Replaces the SSH profile catalog while preserving local secrets when
+    /// the incoming profiles are the scrubbed public half of a sync snapshot.
+    pub async fn save_ssh_profiles_preserving_secrets(&self, profiles: &[SshProfile]) -> Result<(), String> {
+        let existing: HashMap<String, SshProfile> =
+            self.load_ssh_profiles().await?.into_iter().map(|profile| (profile.id.clone(), profile)).collect();
+        let mut merged = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let mut profile = profile.clone();
+            if let Some(previous) = existing.get(&profile.id) {
+                if profile.password.is_empty() {
+                    profile.password = previous.password.clone();
+                }
+                if profile.key_passphrase.is_empty() {
+                    profile.key_passphrase = previous.key_passphrase.clone();
+                }
+            }
+            let profile = profile.without_irrelevant_secrets();
+            profile.validate_metadata()?;
+            merged.push(profile);
+        }
+
+        self.replace_ssh_profiles(&merged).await
+    }
+
+    /// Replaces SSH profiles including their secrets. Used only after a sync
+    /// secrets payload has been decrypted successfully.
+    pub async fn replace_ssh_profiles(&self, profiles: &[SshProfile]) -> Result<(), String> {
+        let mut rows = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let profile = profile.without_irrelevant_secrets();
+            profile.validate_metadata()?;
+            let stored_json =
+                serde_json::to_string(&profile.scrubbed_for_storage()).map_err(|error| error.to_string())?;
+            rows.push((profile, stored_json));
+        }
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            tx.execute("DELETE FROM ssh_profiles", []).map_err(|error| error.to_string())?;
+            tx.execute("DELETE FROM ssh_profile_secrets", []).map_err(|error| error.to_string())?;
+            for (profile, stored_json) in &rows {
+                tx.execute(
+                    "INSERT INTO ssh_profiles (id, config_json) VALUES (?1, ?2)",
+                    params![profile.id, stored_json],
+                )
+                .map_err(|error| error.to_string())?;
+                persist_ssh_profile_secret_in_tx(&tx, &profile.id, "password", &profile.password)?;
+                persist_ssh_profile_secret_in_tx(&tx, &profile.id, "key_passphrase", &profile.key_passphrase)?;
+            }
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    pub async fn delete_ssh_profile(&self, profile_id: &str) -> Result<bool, String> {
+        let profile_id = profile_id.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let removed = tx
+                .execute("DELETE FROM ssh_profiles WHERE id = ?1", [&profile_id])
+                .map_err(|error| error.to_string())?
+                > 0;
+            tx.execute("DELETE FROM ssh_profile_secrets WHERE profile_id = ?1", [&profile_id])
+                .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(removed)
+        })
+        .await
+    }
+}
+
+fn persist_ssh_profile_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    profile_id: &str,
+    key: &str,
+    secret: &str,
+) -> Result<(), String> {
+    if secret.is_empty() {
+        tx.execute("DELETE FROM ssh_profile_secrets WHERE profile_id = ?1 AND key = ?2", params![profile_id, key])
+            .map_err(|error| error.to_string())?;
+    } else {
+        tx.execute(
+            "INSERT OR REPLACE INTO ssh_profile_secrets (profile_id, key, secret) VALUES (?1, ?2, ?3)",
+            params![profile_id, key, secret],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 // App Settings
 
 impl Storage {
@@ -1439,6 +1618,7 @@ impl Storage {
                         configured: false,
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
+                        allow_ssh_commands: policy.allow_ssh_commands,
                         allowed_connection_ids: policy.allowed_connection_ids,
                     });
                 };
@@ -1450,6 +1630,7 @@ impl Storage {
                         configured: false,
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
+                        allow_ssh_commands: policy.allow_ssh_commands,
                         allowed_connection_ids: policy.allowed_connection_ids,
                     });
                 };
@@ -1459,6 +1640,7 @@ impl Storage {
                     configured: true,
                     read_only: policy.read_only,
                     allow_dangerous_sql: policy.allow_dangerous_sql,
+                    allow_ssh_commands: policy.allow_ssh_commands,
                     allowed_connection_ids: policy.allowed_connection_ids,
                 })
             })
@@ -3675,6 +3857,7 @@ mod tests {
         ConnectionConfig, DatabaseConnectionInfo, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::saved_sql::SavedSqlFile;
+    use crate::ssh_terminal::{SshAuthMethod, SshProfile, BUILTIN_SSH_TERMINAL_DRIVER_ID};
     use rusqlite::Connection;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3714,6 +3897,75 @@ mod tests {
             rollback_sql: None,
             details_json: None,
         }
+    }
+
+    fn ssh_terminal_profile(id: &str) -> SshProfile {
+        SshProfile {
+            id: id.to_string(),
+            name: "Local SSH".to_string(),
+            driver_id: BUILTIN_SSH_TERMINAL_DRIVER_ID.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 22,
+            username: "tester".to_string(),
+            auth_method: SshAuthMethod::KeyPassword,
+            password: "password-secret".to_string(),
+            key_path: "/tmp/test-key".to_string(),
+            key_passphrase: "key-secret".to_string(),
+            ssh_agent_sock_path: String::new(),
+            connect_timeout_secs: 10,
+            terminal_type: "xterm-256color".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_profiles_store_restore_and_delete_secrets_separately() {
+        let path = temp_db_path("ssh-profile-secrets");
+        let storage = Storage::open(&path).await.unwrap();
+        let profile = ssh_terminal_profile("ssh-local");
+        storage.save_ssh_profile(&profile).await.unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let config_json: String = conn
+            .query_row("SELECT config_json FROM ssh_profiles WHERE id = 'ssh-local'", [], |row| row.get(0))
+            .unwrap();
+        assert!(!config_json.contains("password-secret"));
+        assert!(!config_json.contains("key-secret"));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ssh_profile_secrets WHERE profile_id = 'ssh-local'", [], |row| row
+                .get::<_, i64>(0),)
+                .unwrap(),
+            2
+        );
+        drop(conn);
+
+        assert_eq!(storage.load_ssh_profiles().await.unwrap(), vec![profile.clone()]);
+
+        let mut agent_profile = profile;
+        agent_profile.auth_method = SshAuthMethod::Agent;
+        agent_profile.ssh_agent_sock_path = "/tmp/test-agent.sock".to_string();
+        let saved = storage.save_ssh_profile(&agent_profile).await.unwrap();
+        assert!(saved.password.is_empty());
+        assert!(saved.key_passphrase.is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ssh_profile_secrets WHERE profile_id = 'ssh-local'", [], |row| row
+                .get::<_, i64>(0),)
+                .unwrap(),
+            0
+        );
+        drop(conn);
+
+        assert!(storage.delete_ssh_profile("ssh-local").await.unwrap());
+        let conn = Connection::open(&path).unwrap();
+        let profile_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM ssh_profiles WHERE id = 'ssh-local'", [], |row| row.get(0)).unwrap();
+        let secret_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ssh_profile_secrets WHERE profile_id = 'ssh-local'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((profile_count, secret_count), (0, 0));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -4473,6 +4725,7 @@ mod tests {
                 configured: false,
                 read_only: false,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: None,
             }
         );
@@ -4482,6 +4735,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: true,
                 allow_dangerous_sql: true,
+                allow_ssh_commands: true,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
             })
             .await
@@ -4493,6 +4747,7 @@ mod tests {
                 configured: true,
                 read_only: true,
                 allow_dangerous_sql: true,
+                allow_ssh_commands: true,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
             }
         );
@@ -4573,6 +4828,7 @@ mod tests {
         let policy = storage.load_mcp_global_policy().await.unwrap();
         assert!(policy.configured);
         assert!(!policy.allow_dangerous_sql);
+        assert!(!policy.allow_ssh_commands);
     }
 
     #[tokio::test]
@@ -4587,6 +4843,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: false,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: Some(vec![kept.id.clone()]),
             })
             .await
@@ -4610,6 +4867,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: true,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: None,
             })
             .await

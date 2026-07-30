@@ -441,6 +441,7 @@ pub async fn ai_agent_stream(
         database: body.database,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,
+        ssh_profile_id: None,
         sql_permissions,
         max_agent_turns,
     };

@@ -72,6 +72,7 @@ pub mod sql_risk;
 pub mod sqlite_backup;
 pub(crate) mod sqlserver_temporal;
 pub mod ssh_config;
+pub mod ssh_terminal;
 pub mod state_persistence;
 pub mod storage;
 pub mod table_export;

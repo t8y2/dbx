@@ -193,6 +193,7 @@ pub struct AppState {
     pub tunnels: TunnelManager,
     pub proxy_tunnels: ProxyTunnelManager,
     pub http_tunnels: HttpTunnelManager,
+    pub ssh_terminal: crate::ssh_terminal::SshTerminalService,
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub agent_manager: crate::agent_manager::AgentManager,
@@ -759,6 +760,7 @@ impl AppState {
             tunnels: TunnelManager::new(data_dir),
             proxy_tunnels: ProxyTunnelManager::new(),
             http_tunnels: HttpTunnelManager::new(),
+            ssh_terminal: crate::ssh_terminal::SshTerminalService::new(),
             storage,
             plugins: PluginRegistry::new(plugin_dir),
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(

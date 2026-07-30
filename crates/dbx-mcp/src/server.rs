@@ -119,6 +119,14 @@ pub struct ExecuteRedisCommandRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExecuteSshCommandRequest {
+    #[schemars(description = "Non-interactive shell command to execute on the scoped SSH host")]
+    pub command: String,
+    #[schemars(description = "Timeout in seconds (default 30, max 300)")]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SchemaContextRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
@@ -160,6 +168,7 @@ pub struct McpScope {
     pub connection_ids: Vec<String>,
     pub connection_name: Option<String>,
     pub database: Option<String>,
+    pub target_kind: Option<String>,
 }
 
 struct ResolvedConnection {
@@ -179,6 +188,7 @@ impl McpScope {
             connection_ids,
             connection_name: non_empty_env("DBX_MCP_SCOPE_CONNECTION_NAME"),
             database: non_empty_env("DBX_MCP_SCOPE_DATABASE"),
+            target_kind: non_empty_env("DBX_MCP_SCOPE_KIND"),
         }
     }
 
@@ -213,6 +223,26 @@ impl DbxMcpServer {
         if web_mode || scope.enabled() {
             tool_router.disable_route("dbx_open_table");
             tool_router.disable_route("dbx_execute_and_show");
+        }
+        if scope.target_kind.as_deref() == Some("ssh") {
+            for route in [
+                "dbx_list_connections",
+                "dbx_list_tables",
+                "dbx_describe_table",
+                "dbx_execute_query",
+                "dbx_execute_redis_command",
+                "dbx_get_schema_context",
+                "dbx_add_connection",
+                "dbx_remove_connection",
+                "dbx_open_table",
+                "dbx_execute_and_show",
+                "dbx_open_session",
+                "dbx_close_session",
+            ] {
+                tool_router.disable_route(route);
+            }
+        } else {
+            tool_router.disable_route("dbx_execute_ssh_command");
         }
         Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
     }
@@ -509,6 +539,44 @@ impl DbxMcpServer {
         {
             Ok(result) => text(format_redis_result(&result)),
             Err(error) => backend_tool_error("REDIS_COMMAND_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_execute_ssh_command",
+        description = "Execute one non-interactive command on the SSH host scoped by DBX Desktop"
+    )]
+    async fn execute_ssh_command(&self, Parameters(request): Parameters<ExecuteSshCommandRequest>) -> CallToolResult {
+        if self.scope.target_kind.as_deref() != Some("ssh") {
+            return tool_error("SSH_SCOPE_REQUIRED", "This MCP session is not scoped to an SSH host.");
+        }
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if !policy.allow_ssh_commands {
+            return tool_error(
+                "SSH_COMMAND_EXECUTION_DISABLED",
+                "SSH remote command execution is disabled in DBX Settings. Enable it explicitly before using this tool.",
+            );
+        }
+        let Some(profile_id) = self.scope.connection_ids.first() else {
+            return tool_error("SSH_PROFILE_REQUIRED", "No SSH profile is scoped for this MCP session.");
+        };
+        match self
+            .backend
+            .bridge_request_text(
+                "/ssh/execute-command",
+                json!({
+                    "profile_id": profile_id,
+                    "command": request.command,
+                    "timeout_secs": request.timeout_secs.unwrap_or(30).clamp(1, 300),
+                }),
+            )
+            .await
+        {
+            Ok(result) => text(result),
+            Err(error) => backend_tool_error("SSH_COMMAND_ERROR", error),
         }
     }
 
@@ -1342,6 +1410,45 @@ mod tests {
     }
 
     #[test]
+    fn ssh_scoped_server_exposes_the_remote_command_tool() {
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend::default()),
+            McpScope {
+                connection_ids: vec!["ssh-local".to_string()],
+                target_kind: Some("ssh".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+        let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["dbx_execute_ssh_command"]);
+    }
+
+    #[tokio::test]
+    async fn ssh_command_execution_is_denied_by_default() {
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend::default()),
+            McpScope {
+                connection_ids: vec!["ssh-local".to_string()],
+                target_kind: Some("ssh".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let result = server
+            .execute_ssh_command(Parameters(ExecuteSshCommandRequest {
+                command: "uname -s".to_string(),
+                timeout_secs: None,
+            }))
+            .await;
+
+        assert!(result.is_error == Some(true));
+        assert!(result_text(&result).contains("SSH_COMMAND_EXECUTION_DISABLED"));
+    }
+
+    #[test]
     fn scoped_connection_ids_are_deduplicated_and_take_precedence_over_name() {
         assert_eq!(scoped_connection_ids(Some(" first, second,first ,, ")), vec!["first", "second"]);
 
@@ -1351,6 +1458,7 @@ mod tests {
             connection_ids: vec!["first".to_string()],
             connection_name: Some("scope-name".to_string()),
             database: None,
+            target_kind: None,
         };
 
         assert!(scope.matches(&first));
@@ -1402,7 +1510,12 @@ mod tests {
     fn local_mongo_aggregate_cannot_write_to_a_production_database() {
         let mut mongo = connection("mongo", "mongo", "mongodb", "staging");
         mongo.production_databases = vec!["production".to_string()];
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
 
         let error = validate_mongo_command(
             &mongo,
@@ -1439,8 +1552,12 @@ mod tests {
         assert_eq!(normalize_confirmed_write_sql(Some(" \n ".to_string())), None);
 
         let read_only = ConnectionConfig { read_only: true, ..connection("readonly", "readonly", "postgres", "app") };
-        let writable_policy =
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let writable_policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
         let read_only_error =
             validate_sql_policy(&read_only, &writable_policy, "app", "DELETE FROM sessions", false).unwrap_err();
         assert!(result_text(&read_only_error).contains("CONNECTION_READ_ONLY"));
@@ -1489,7 +1606,12 @@ mod tests {
 
         // 1. mcp_permissions (Redis/Mongo path) must NOT elevate allow_dangerous.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
         let permissions = mcp_permissions(&connection, &policy);
         assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
         assert!(permissions.allow_writes);
@@ -1512,8 +1634,12 @@ mod tests {
 
         // 4. Confirmed SQL must not bypass global read_only.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let read_only_policy =
-            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let read_only_policy = McpGlobalPolicy {
+            read_only: true,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
         let error = validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)", false)
             .unwrap_err();
         assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
@@ -1522,7 +1648,12 @@ mod tests {
     #[test]
     fn use_statements_require_a_session() {
         let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
 
         let blocked = validate_sql_policy(&starrocks, &policy, "default_catalog", "USE analytics", false).unwrap_err();
         assert!(result_text(&blocked).contains("SQL_BLOCKED"));

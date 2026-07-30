@@ -39,6 +39,7 @@ export interface DesktopSettings {
 export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
+  allowSshCommands: boolean;
   allowedConnectionIds: string[] | null;
   configured: boolean;
 }
@@ -75,6 +76,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
 export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   readOnly: false,
   allowDangerousSql: false,
+  allowSshCommands: false,
   allowedConnectionIds: null,
   configured: false,
 };
@@ -84,6 +86,7 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
   return {
     readOnly: policy?.readOnly === true,
     allowDangerousSql: policy?.allowDangerousSql === true,
+    allowSshCommands: policy?.allowSshCommands === true,
     allowedConnectionIds,
     configured: policy?.configured === true,
   };
@@ -1182,6 +1185,7 @@ export const useSettingsStore = defineStore("settings", () => {
       await api.saveMcpGlobalPolicy({
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
+        allowSshCommands: next.allowSshCommands,
         allowedConnectionIds: next.allowedConnectionIds,
       });
     } catch (error) {

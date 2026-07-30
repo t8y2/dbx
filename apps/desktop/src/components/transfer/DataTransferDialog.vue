@@ -16,7 +16,7 @@ import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
-import { isSameTransferDatabase } from "@/lib/database/dataTransferSelection";
+import { isSameTransferDatabase, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
 import type { CatalogInfo } from "@/types/database";
@@ -29,6 +29,7 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
+  prefillCatalog?: string;
 }>();
 
 const store = useConnectionStore();
@@ -95,6 +96,8 @@ const canStart = computed(
     !!sourceDatabase.value &&
     !!targetConnectionId.value &&
     !!targetDatabase.value &&
+    (sourceCatalogs.value.length <= 1 || !!sourceCatalog.value) &&
+    (targetCatalogs.value.length <= 1 || !!targetCatalog.value) &&
     selectedTables.value.size > 0 &&
     !isSameTransferDatabase(
       { connectionId: sourceConnectionId.value, catalog: sourceCatalog.value, catalogs: sourceCatalogs.value, database: sourceDatabase.value },
@@ -347,6 +350,9 @@ watch(
         sourceConnectionId.value = props.prefillConnectionId;
         if (isCatalogCapable(props.prefillConnectionId)) {
           await loadCatalogs(props.prefillConnectionId, "source");
+          if (props.prefillCatalog) {
+            sourceCatalog.value = props.prefillCatalog;
+          }
           if (sourceCatalog.value) {
             await loadDatabasesForCatalog(props.prefillConnectionId, sourceCatalog.value, "source");
           }
@@ -408,11 +414,11 @@ async function startTransfer() {
     sourceConnectionId: sourceConnectionId.value,
     sourceDatabase: sourceDatabaseName,
     sourceSchema: effectiveSourceSchema,
-    sourceCatalog: sourceCatalog.value || undefined,
+    sourceCatalog: normalizeTransferCatalog(sourceCatalog.value, sourceCatalogs.value) || undefined,
     targetConnectionId: targetConnection,
     targetDatabase: targetDatabaseName,
     targetSchema: effectiveTargetSchema,
-    targetCatalog: targetCatalog.value || undefined,
+    targetCatalog: normalizeTransferCatalog(targetCatalog.value, targetCatalogs.value) || undefined,
     tables: [...selectedTables.value],
     createTable: createTable.value,
     mode: transferMode.value,

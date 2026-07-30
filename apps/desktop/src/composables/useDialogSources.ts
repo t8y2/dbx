@@ -23,6 +23,7 @@ const pendingImportContent = ref("");
 
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
+const transferPrefillCatalog = ref("");
 const schemaDiffPrefillConnectionId = ref("");
 const schemaDiffPrefillDatabase = ref("");
 const schemaDiffPrefillSchema = ref("");
@@ -77,6 +78,7 @@ export function useDialogSources() {
         if (v) {
           transferPrefillConnectionId.value = v.connectionId;
           transferPrefillDatabase.value = v.database;
+          transferPrefillCatalog.value = v.catalog ?? "";
           showTransferDialog.value = true;
           connectionStore.transferSource = null;
         }
@@ -307,6 +309,7 @@ export function useDialogSources() {
     pendingImportContent,
     transferPrefillConnectionId,
     transferPrefillDatabase,
+    transferPrefillCatalog,
     schemaDiffPrefillConnectionId,
     schemaDiffPrefillDatabase,
     schemaDiffPrefillSchema,

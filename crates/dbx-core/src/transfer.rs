@@ -120,37 +120,70 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
 
 /// Resolve an optional catalog for external-catalog routing in the transfer
 /// pipeline.  Returns `Some(catalog)` only when:
-///   - the catalog is non-empty and not `"internal"`, AND
+///   - the catalog is non-empty and not a built-in catalog name, AND
 ///   - the database type is Doris/StarRocks (the only engines that support
 ///     external catalogs).
-/// Used by `resolve_transfer_target_table_name` and the source-DDL path
-/// to dispatch to the 3-part catalog-aware metadata functions instead of
-/// the default-catalog lookup.
+///
+/// Built-in catalogs: Doris `internal`, StarRocks `default_catalog`. Prefer
+/// [`resolve_external_transfer_catalog_for_config`] when a full connection
+/// config is available (also matches `driver_profile=starrocks|doris`).
 pub fn resolve_external_transfer_catalog<'a>(catalog: Option<&'a str>, db_type: &DatabaseType) -> Option<&'a str> {
-    let catalog = catalog?;
-    let catalog = catalog.trim();
-    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") {
-        return None;
-    }
+    let catalog = normalize_external_catalog_name(catalog)?;
     match db_type {
         DatabaseType::Doris | DatabaseType::StarRocks => Some(catalog),
         _ => None,
     }
 }
 
+/// Like [`resolve_external_transfer_catalog`], but also treats MySQL connections
+/// with a Doris/StarRocks `driver_profile` as catalog-capable.
+pub fn resolve_external_transfer_catalog_for_config<'a>(
+    catalog: Option<&'a str>,
+    config: &crate::models::connection::ConnectionConfig,
+) -> Option<&'a str> {
+    let catalog = normalize_external_catalog_name(catalog)?;
+    if crate::schema::is_doris_family_catalog_capable_config(config) {
+        Some(catalog)
+    } else {
+        None
+    }
+}
+
+fn normalize_external_catalog_name(catalog: Option<&str>) -> Option<&str> {
+    let catalog = catalog?.trim();
+    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") || catalog.eq_ignore_ascii_case("default_catalog")
+    {
+        return None;
+    }
+    Some(catalog)
+}
+
+/// Create (or reuse) a transfer pool for the given connection/database/catalog.
+///
+/// For Doris/StarRocks external catalogs the pool is created **without** a
+/// default database and with `catalog=<name>` in the connection URL params so
+/// mysql_async runs `SET catalog` during setup. All transfer SQL uses 3-part
+/// qualified names (`catalog.database.table`) and does not rely on `USE`.
+pub async fn ensure_transfer_pool(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    catalog: Option<&str>,
+) -> Result<String, String> {
+    let config = {
+        let configs = state.configs.read().await;
+        configs.get(connection_id).cloned().ok_or_else(|| format!("Connection config not found: {connection_id}"))?
+    };
+    if let Some(catalog) = resolve_external_transfer_catalog_for_config(catalog, &config) {
+        state.get_or_create_pool_with_catalog(connection_id, None, Some(catalog)).await
+    } else {
+        state.get_or_create_pool(connection_id, Some(database)).await
+    }
+}
+
 pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
     // Only use 3-part catalog-qualified names for Doris/StarRocks external catalogs.
-    let effective_catalog = catalog.and_then(|c| {
-        let c = c.trim();
-        if c.is_empty() || c.eq_ignore_ascii_case("internal") {
-            None
-        } else {
-            match db_type {
-                DatabaseType::Doris | DatabaseType::StarRocks => Some(c),
-                _ => None,
-            }
-        }
-    });
+    let effective_catalog = resolve_external_transfer_catalog(catalog, db_type);
     qualified_transfer_table(table, schema, db_type, effective_catalog)
 }
 
@@ -2942,8 +2975,14 @@ async fn execute_on_pool_with_options(
                     state.remove_pool_by_key(&current_pool_key).await;
                     return result;
                 };
+                let catalog = catalog_from_pool_key(&current_pool_key).map(str::to_string);
                 current_pool_key = state
-                    .reconnect_pool_for_session(connection_id, database.as_deref(), client_session_id.as_deref())
+                    .reconnect_pool_for_session_with_catalog(
+                        connection_id,
+                        database.as_deref(),
+                        catalog.as_deref(),
+                        client_session_id.as_deref(),
+                    )
                     .await?;
             }
             PoolErrorAction::ReconnectAndRetry => {
@@ -3101,13 +3140,14 @@ async fn execute_on_pool_once(
 }
 
 fn database_from_pool_key(pool_key: &str) -> Option<&str> {
-    pool_key
-        .split_once(":session:")
-        .map(|(base, _)| base)
-        .unwrap_or(pool_key)
-        .split_once(':')
-        .map(|(_, database)| database)
-        .filter(|database| !database.is_empty())
+    let base = pool_key.split_once(":session:").map(|(base, _)| base).unwrap_or(pool_key);
+    let base = base.split_once(":catalog:").map(|(base, _)| base).unwrap_or(base);
+    base.split_once(':').map(|(_, database)| database).filter(|database| !database.is_empty())
+}
+
+fn catalog_from_pool_key(pool_key: &str) -> Option<&str> {
+    let base = pool_key.split_once(":session:").map(|(base, _)| base).unwrap_or(pool_key);
+    base.split_once(":catalog:").map(|(_, catalog)| catalog).filter(|catalog| !catalog.is_empty())
 }
 
 pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
@@ -3191,11 +3231,11 @@ pub async fn get_columns_for_transfer(
     match pool {
         PoolKind::Mysql(p, _) => {
             let p = p.clone();
-            let catalog = catalog.map(|c| c.to_string());
+            let catalog = normalize_external_catalog_name(catalog).map(str::to_string);
             drop(connections);
-            if let Some(ref catalog) = catalog {
+            if let Some(catalog) = catalog {
                 // Use 3-part qualified column lookup for Doris/StarRocks external catalogs
-                db::doris::get_catalog_columns(&p, catalog, &schema, &table).await
+                db::doris::get_catalog_columns(&p, &catalog, &schema, &table).await
             } else {
                 db::mysql::get_columns(&p, &schema, &table).await
             }
@@ -6874,6 +6914,77 @@ SELECT 1 FROM dual"#
         assert_eq!(database_from_pool_key("conn:analytics"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn:analytics:session:editor-1"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn"), None);
+        assert_eq!(database_from_pool_key("conn:analytics:catalog:hive"), Some("analytics"));
+        assert_eq!(database_from_pool_key("conn:catalog:hive"), None);
+        assert_eq!(catalog_from_pool_key("conn:catalog:hive"), Some("hive"));
+        assert_eq!(catalog_from_pool_key("conn:ads:catalog:paimon"), Some("paimon"));
+        assert_eq!(catalog_from_pool_key("conn:ads"), None);
+    }
+
+    #[test]
+    fn resolve_external_transfer_catalog_skips_builtin_catalogs() {
+        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::StarRocks), Some("hive"));
+        assert_eq!(resolve_external_transfer_catalog(Some("default_catalog"), &DatabaseType::StarRocks), None);
+        assert_eq!(resolve_external_transfer_catalog(Some("internal"), &DatabaseType::Doris), None);
+        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::Mysql), None);
+    }
+
+    #[test]
+    fn resolve_external_transfer_catalog_for_config_accepts_starrocks_driver_profile() {
+        let config = crate::models::connection::ConnectionConfig {
+            id: "sr".to_string(),
+            name: "sr".to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Mysql,
+            driver_profile: Some("starrocks".to_string()),
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: "127.0.0.1".to_string(),
+            port: 9030,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            visible_databases: None,
+            visible_schemas: None,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 5,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+        };
+        assert_eq!(resolve_external_transfer_catalog_for_config(Some("paimon"), &config), Some("paimon"));
+        assert_eq!(resolve_external_transfer_catalog_for_config(Some("default_catalog"), &config), None);
     }
 
     #[test]

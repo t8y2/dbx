@@ -19,6 +19,7 @@ use rumqttc::{
     mqttbytes::Protocol, valid_filter, valid_topic, AsyncClient as AsyncClientV4, Event as EventV4,
     Incoming as IncomingV4, MqttOptions as MqttOptionsV4, Outgoing, QoS as QoSV4, TlsConfiguration, Transport,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 
@@ -46,8 +47,10 @@ struct MqttConnectPlan {
 }
 
 const MQTT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const RETAINED_DEDUP_CAPACITY: usize = 512;
 
 type SubscriptionCompletion = oneshot::Sender<Result<(), String>>;
+type PublishCompletion = oneshot::Sender<Result<(), String>>;
 
 struct PendingSubscribe {
     sequence: u64,
@@ -61,6 +64,134 @@ struct PendingUnsubscribe {
     sequence: u64,
     topic: String,
     completion: Option<SubscriptionCompletion>,
+}
+
+struct PendingPublish {
+    sequence: u64,
+    qos: QoSV4,
+    message: MqttMessage,
+    completion: Option<PublishCompletion>,
+}
+
+impl PendingPublish {
+    fn fail(&mut self, error: &str) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(Err(error.to_string()));
+        }
+    }
+}
+
+#[derive(Default)]
+struct PublishRequestTracker {
+    next_sequence: u64,
+    queued: VecDeque<PendingPublish>,
+    inflight: HashMap<u16, PendingPublish>,
+    orphaned_queued: usize,
+    orphaned_inflight: HashSet<u16>,
+}
+
+impl PublishRequestTracker {
+    fn queue(&mut self, qos: QoSV4, message: MqttMessage, completion: PublishCompletion) -> u64 {
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let sequence = self.next_sequence;
+        self.queued.push_back(PendingPublish { sequence, qos, message, completion: Some(completion) });
+        sequence
+    }
+
+    fn remove_queued(&mut self, sequence: u64) {
+        self.queued.retain(|pending| pending.sequence != sequence);
+    }
+
+    fn mark_outgoing(&mut self, pkid: u16) -> Option<PendingPublish> {
+        if pkid != 0 && (self.inflight.contains_key(&pkid) || self.orphaned_inflight.contains(&pkid)) {
+            return None;
+        }
+        if self.orphaned_queued > 0 {
+            self.orphaned_queued -= 1;
+            if pkid != 0 {
+                self.orphaned_inflight.insert(pkid);
+            }
+            return None;
+        }
+        let Some(pending) = self.queued.pop_front() else {
+            log::warn!("MQTT PUBLISH 已发送，但未找到对应的本地待确认请求: pkid={pkid}");
+            return None;
+        };
+        if pending.qos == QoSV4::AtMostOnce {
+            return Some(pending);
+        }
+        self.inflight.insert(pkid, pending);
+        None
+    }
+
+    fn take_acknowledged(&mut self, pkid: u16) -> Option<PendingPublish> {
+        if self.orphaned_inflight.remove(&pkid) {
+            return None;
+        }
+        self.inflight.remove(&pkid)
+    }
+
+    fn fail_next_queued(&mut self, error: &str) {
+        if let Some(mut pending) = self.queued.pop_front() {
+            pending.fail(error);
+        } else {
+            log::warn!("MQTT 事件循环拒绝了 PUBLISH，但没有找到对应的本地请求: {error}");
+        }
+    }
+
+    fn take_for_connection_loss(&mut self) -> Vec<PendingPublish> {
+        self.orphaned_queued = self.orphaned_queued.saturating_add(self.queued.len());
+        let mut pending = self.queued.drain(..).collect::<Vec<_>>();
+        for (pkid, request) in self.inflight.drain() {
+            self.orphaned_inflight.insert(pkid);
+            pending.push(request);
+        }
+        pending.sort_by_key(|request| request.sequence);
+        pending
+    }
+    fn take_all(&mut self) -> Vec<PendingPublish> {
+        let mut pending = self.queued.drain(..).collect::<Vec<_>>();
+        pending.extend(self.inflight.drain().map(|(_, request)| request));
+        pending.sort_by_key(|request| request.sequence);
+        pending
+    }
+}
+
+struct RetainedDedup {
+    capacity: usize,
+    order: VecDeque<(String, [u8; 32])>,
+    entries: HashSet<(String, [u8; 32])>,
+}
+
+impl RetainedDedup {
+    fn new(capacity: usize) -> Self {
+        Self { capacity, order: VecDeque::with_capacity(capacity), entries: HashSet::with_capacity(capacity) }
+    }
+
+    fn insert(&mut self, topic: &str, payload: &[u8]) -> bool {
+        let digest: [u8; 32] = Sha256::digest(payload).into();
+        let key = (topic.to_string(), digest);
+        if !self.entries.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key);
+        while self.order.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    fn clear_filter(&mut self, filter: &str) {
+        self.order.retain(|(topic, _)| !topic_matches_filter(topic, filter));
+        self.entries.retain(|(topic, _)| !topic_matches_filter(topic, filter));
+    }
+
+    fn clear(&mut self) {
+        self.order.clear();
+        self.entries.clear();
+    }
 }
 
 enum PendingSubscriptionAction {
@@ -173,6 +304,8 @@ pub struct MqttClient {
     config: MqttConnectionConfig,
     /// 当前 broker 已通过 ACK 确认的 topic 集合
     subscriptions: RwLock<Vec<(String, MqttQoS)>>,
+    /// broker 最近一次实际授予的 QoS，用于恢复持久会话的显示状态
+    granted_subscriptions: RwLock<Vec<(String, MqttQoS)>>,
     /// 需要在无会话重连后恢复的 topic 集合
     desired_subscriptions: RwLock<Vec<(String, MqttQoS)>>,
     /// 当前连接是否已收到有效 CONNACK
@@ -181,12 +314,16 @@ pub struct MqttClient {
     subscription_requests: Mutex<SubscriptionRequestTracker>,
     /// 保证本地排队顺序与 rumqttc 请求通道顺序一致
     subscription_send_lock: Mutex<()>,
+    /// 发布请求与 PUBLISH/PUBACK/PUBCOMP 的关联状态
+    publish_requests: Mutex<PublishRequestTracker>,
+    /// 保证本地发布排队顺序与 rumqttc 请求通道顺序一致
+    publish_send_lock: Mutex<()>,
     /// 最近接收的消息缓冲区（保留最近 N 条）
     message_buffer: RwLock<Vec<MqttMessage>>,
     /// 最大缓冲消息数
     max_buffer_size: usize,
-    /// 已见过的保留消息的 (topic, payload_base64) 哈希集合，用于去重
-    seen_retained: RwLock<HashSet<(String, String)>>,
+    /// 当前订阅生命周期内已见过的保留消息指纹
+    seen_retained: RwLock<RetainedDedup>,
     /// 事件循环后台任务的 JoinHandle，用于优雅关闭时等待任务结束
     event_loop_handle: RwLock<Option<JoinHandle<()>>>,
     /// 通知事件循环强制退出的信号
@@ -197,6 +334,9 @@ impl MqttClient {
     /// 创建新的 MQTT 客户端并建立连接。
     /// 等待 CONNACK 确认连接成功，超时时间由 `config.connect_timeout_secs` 指定。
     pub async fn connect(config: MqttConnectionConfig) -> Result<Arc<Self>, String> {
+        if !(1024..=268_435_455).contains(&config.max_packet_size_bytes) {
+            return Err("MQTT 最大报文大小必须在 1024 到 268435455 字节之间".to_string());
+        }
         let plan = build_connect_plan(&config);
         match plan.backend {
             MqttBackendKind::V4 => Self::connect_v4(config, plan).await,
@@ -209,6 +349,7 @@ impl MqttClient {
         let connect_timeout = Duration::from_secs(config.connect_timeout_secs);
         let mut mqtt_options = MqttOptionsV4::new(&client_id, &plan.broker_addr, config.port);
         mqtt_options.set_keep_alive(Duration::from_secs(config.keep_alive_secs));
+        mqtt_options.set_max_packet_size(config.max_packet_size_bytes, config.max_packet_size_bytes);
         mqtt_options.set_transport(plan.transport);
         if let Some(protocol) = plan.protocol {
             mqtt_options.set_protocol(protocol);
@@ -229,6 +370,7 @@ impl MqttClient {
         let connect_timeout = Duration::from_secs(config.connect_timeout_secs);
         let mut mqtt_options = MqttOptionsV5::new(&client_id, &plan.broker_addr, config.port);
         mqtt_options.set_keep_alive(Duration::from_secs(config.keep_alive_secs));
+        mqtt_options.set_max_packet_size(Some(config.max_packet_size_bytes as u32));
         mqtt_options.set_transport(plan.transport);
         apply_credentials_v5(&mut mqtt_options, &config.auth);
 
@@ -250,13 +392,16 @@ impl MqttClient {
             backend,
             config,
             subscriptions: RwLock::new(Vec::new()),
+            granted_subscriptions: RwLock::new(Vec::new()),
             desired_subscriptions: RwLock::new(Vec::new()),
             connected: AtomicBool::new(false),
             subscription_requests: Mutex::new(SubscriptionRequestTracker::default()),
             subscription_send_lock: Mutex::new(()),
+            publish_requests: Mutex::new(PublishRequestTracker::default()),
+            publish_send_lock: Mutex::new(()),
             message_buffer: RwLock::new(Vec::new()),
             max_buffer_size: 200,
-            seen_retained: RwLock::new(HashSet::new()),
+            seen_retained: RwLock::new(RetainedDedup::new(RETAINED_DEDUP_CAPACITY)),
             event_loop_handle: RwLock::new(None),
             shutdown_notify,
         })
@@ -298,16 +443,22 @@ impl MqttClient {
                             }
                             Ok(EventV4::Incoming(IncomingV4::SubAck(suback))) => {
                                 let Some(instance) = instance.upgrade() else { break };
-                                let result = if suback
-                                    .return_codes
-                                    .iter()
-                                    .all(|code| matches!(code, rumqttc::SubscribeReasonCode::Success(_)))
-                                {
-                                    Ok(())
-                                } else {
-                                    Err("MQTT broker 拒绝了订阅请求".to_string())
+                                let result = match suback.return_codes.as_slice() {
+                                    [rumqttc::SubscribeReasonCode::Success(qos)] => Ok(mqtt_qos_from_v4(*qos)),
+                                    [rumqttc::SubscribeReasonCode::Failure] => {
+                                        Err("MQTT broker 拒绝了订阅请求".to_string())
+                                    }
+                                    _ => Err("MQTT broker 返回的 SUBACK 数量与订阅请求不一致".to_string()),
                                 };
                                 instance.complete_subscribe_ack(suback.pkid, result).await;
+                            }
+                            Ok(EventV4::Incoming(IncomingV4::PubAck(puback))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.complete_publish_ack(puback.pkid).await;
+                            }
+                            Ok(EventV4::Incoming(IncomingV4::PubComp(pubcomp))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.complete_publish_ack(pubcomp.pkid).await;
                             }
                             Ok(EventV4::Incoming(IncomingV4::UnsubAck(unsuback))) => {
                                 let Some(instance) = instance.upgrade() else { break };
@@ -324,6 +475,10 @@ impl MqttClient {
                                 event_loop.clean();
                                 tokio::time::sleep(MQTT_RECONNECT_DELAY).await;
                             }
+                            Ok(EventV4::Outgoing(Outgoing::Publish(pkid))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.mark_publish_outgoing(pkid).await;
+                            }
                             Ok(EventV4::Outgoing(Outgoing::Subscribe(pkid))) => {
                                 let Some(instance) = instance.upgrade() else { break };
                                 instance.mark_subscribe_outgoing(pkid).await;
@@ -339,6 +494,14 @@ impl MqttClient {
                             Ok(_) => {}
                             Err(e) => {
                                 if let Some(instance) = instance.upgrade() {
+                                    if matches!(
+                                        &e,
+                                        rumqttc::ConnectionError::MqttState(
+                                            rumqttc::StateError::OutgoingPacketTooLarge { .. }
+                                        )
+                                    ) {
+                                        instance.fail_next_queued_publish(&format!("发布消息失败：{e}")).await;
+                                    }
                                     instance.handle_connection_lost(&e.to_string()).await;
                                 }
                                 if let Some(tx) = connack_tx.take() {
@@ -398,19 +561,30 @@ impl MqttClient {
                             }
                             Ok(EventV5::Incoming(IncomingV5::SubAck(suback))) => {
                                 let Some(instance) = instance.upgrade() else { break };
-                                let rejected = suback.return_codes.iter().find(|code| {
-                                    !matches!(code, rumqttc::v5::mqttbytes::v5::SubscribeReasonCode::Success(_))
-                                });
-                                let result = rejected.map_or(Ok(()), |reason| {
-                                    let detail = suback
-                                        .properties
-                                        .as_ref()
-                                        .and_then(|properties| properties.reason_string.as_deref())
-                                        .map(|message| format!("，broker 提示：{message}"))
-                                        .unwrap_or_default();
-                                    Err(format!("MQTT v5 broker 拒绝了订阅请求：{reason:?}{detail}"))
-                                });
+                                let result = match suback.return_codes.as_slice() {
+                                    [rumqttc::v5::mqttbytes::v5::SubscribeReasonCode::Success(qos)] => {
+                                        Ok(mqtt_qos_from_v5(*qos))
+                                    }
+                                    [reason] => {
+                                        let detail = suback
+                                            .properties
+                                            .as_ref()
+                                            .and_then(|properties| properties.reason_string.as_deref())
+                                            .map(|message| format!("，broker 提示：{message}"))
+                                            .unwrap_or_default();
+                                        Err(format!("MQTT v5 broker 拒绝了订阅请求：{reason:?}{detail}"))
+                                    }
+                                    _ => Err("MQTT v5 broker 返回的 SUBACK 数量与订阅请求不一致".to_string()),
+                                };
                                 instance.complete_subscribe_ack(suback.pkid, result).await;
+                            }
+                            Ok(EventV5::Incoming(IncomingV5::PubAck(puback))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.complete_publish_ack(puback.pkid).await;
+                            }
+                            Ok(EventV5::Incoming(IncomingV5::PubComp(pubcomp))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.complete_publish_ack(pubcomp.pkid).await;
                             }
                             Ok(EventV5::Incoming(IncomingV5::UnsubAck(unsuback))) => {
                                 let Some(instance) = instance.upgrade() else { break };
@@ -443,6 +617,10 @@ impl MqttClient {
                                 event_loop.clean();
                                 tokio::time::sleep(MQTT_RECONNECT_DELAY).await;
                             }
+                            Ok(EventV5::Outgoing(Outgoing::Publish(pkid))) => {
+                                let Some(instance) = instance.upgrade() else { break };
+                                instance.mark_publish_outgoing(pkid).await;
+                            }
                             Ok(EventV5::Outgoing(Outgoing::Subscribe(pkid))) => {
                                 let Some(instance) = instance.upgrade() else { break };
                                 instance.mark_subscribe_outgoing(pkid).await;
@@ -458,6 +636,14 @@ impl MqttClient {
                             Ok(_) => {}
                             Err(e) => {
                                 if let Some(instance) = instance.upgrade() {
+                                    if matches!(
+                                        &e,
+                                        rumqttc::v5::ConnectionError::MqttState(
+                                            rumqttc::v5::StateError::OutgoingPacketTooLarge { .. }
+                                        )
+                                    ) {
+                                        instance.fail_next_queued_publish(&format!("发布消息失败：{e}")).await;
+                                    }
                                     instance.handle_connection_lost(&e.to_string()).await;
                                 }
                                 if let Some(tx) = connack_tx.take() {
@@ -524,8 +710,7 @@ impl MqttClient {
 
         if retain {
             let mut seen = instance.seen_retained.write().await;
-            let key = (topic.clone(), payload_base64.clone());
-            if !seen.insert(key) {
+            if !seen.insert(&topic, payload) {
                 return;
             }
         }
@@ -552,8 +737,8 @@ impl MqttClient {
         self.connected.store(true, Ordering::Release);
 
         if session_present {
-            let desired = self.desired_subscriptions.read().await.clone();
-            *self.subscriptions.write().await = desired;
+            let granted = self.granted_subscriptions.read().await.clone();
+            *self.subscriptions.write().await = granted;
             return;
         }
 
@@ -576,6 +761,10 @@ impl MqttClient {
         let pending = self.subscription_requests.lock().await.take_inflight();
         for request in pending {
             request.fail("MQTT 连接在收到 broker 确认前中断，请重新执行该操作");
+        }
+        let mut pending_publishes = self.publish_requests.lock().await.take_for_connection_loss();
+        for publish in &mut pending_publishes {
+            publish.fail(&format!("发布消息未完成：MQTT 协议处理或连接失败（{reason}），请确认 broker 状态后重试"));
         }
     }
 
@@ -600,24 +789,62 @@ impl MqttClient {
         self.subscription_requests.lock().await.mark_unsubscribe_outgoing(pkid);
     }
 
-    async fn complete_subscribe_ack(&self, pkid: u16, result: Result<(), String>) {
+    async fn mark_publish_outgoing(&self, pkid: u16) {
+        let pending = self.publish_requests.lock().await.mark_outgoing(pkid);
+        if let Some(pending) = pending {
+            self.complete_publish(pending).await;
+        }
+    }
+
+    async fn complete_publish_ack(&self, pkid: u16) {
+        let pending = self.publish_requests.lock().await.take_acknowledged(pkid);
+        if let Some(pending) = pending {
+            self.complete_publish(pending).await;
+        } else {
+            log::warn!("收到无法关联的 MQTT 发布确认: pkid={pkid}");
+        }
+    }
+
+    async fn complete_publish(&self, mut pending: PendingPublish) {
+        let mut buffer = self.message_buffer.write().await;
+        buffer.push(pending.message);
+        if buffer.len() > self.max_buffer_size {
+            buffer.remove(0);
+        }
+        if let Some(completion) = pending.completion.take() {
+            let _ = completion.send(Ok(()));
+        }
+    }
+
+    async fn fail_next_queued_publish(&self, error: &str) {
+        self.publish_requests.lock().await.fail_next_queued(error);
+    }
+
+    async fn complete_subscribe_ack(&self, pkid: u16, result: Result<MqttQoS, String>) {
         let Some(pending) = self.subscription_requests.lock().await.take_subscribe(pkid) else {
             log::warn!("收到无法关联的 MQTT SUBACK: pkid={pkid}");
             return;
         };
 
-        let result = result.map_err(|error| format!("订阅主题“{}”失败：{error}", pending.topic));
-        if result.is_ok() {
-            upsert_subscription(&self.subscriptions, &pending.topic, pending.qos).await;
-            if pending.add_to_desired {
-                upsert_subscription(&self.desired_subscriptions, &pending.topic, pending.qos).await;
+        let granted_qos = result.map_err(|error| format!("订阅主题“{}”失败：{error}", pending.topic));
+        let completion_result = match granted_qos {
+            Ok(granted_qos) => {
+                upsert_subscription(&self.subscriptions, &pending.topic, granted_qos).await;
+                upsert_subscription(&self.granted_subscriptions, &pending.topic, granted_qos).await;
+                self.seen_retained.write().await.clear_filter(&pending.topic);
+                if pending.add_to_desired {
+                    upsert_subscription(&self.desired_subscriptions, &pending.topic, pending.qos).await;
+                }
+                Ok(())
             }
-        } else if let Err(error) = &result {
-            log::warn!("{error}");
-        }
+            Err(error) => {
+                log::warn!("{error}");
+                Err(error)
+            }
+        };
 
         if let Some(completion) = pending.completion {
-            let _ = completion.send(result);
+            let _ = completion.send(completion_result);
         }
     }
 
@@ -630,7 +857,9 @@ impl MqttClient {
         let result = result.map_err(|error| format!("取消订阅主题“{}”失败：{error}", pending.topic));
         if result.is_ok() {
             remove_subscription(&self.subscriptions, &pending.topic).await;
+            remove_subscription(&self.granted_subscriptions, &pending.topic).await;
             remove_subscription(&self.desired_subscriptions, &pending.topic).await;
+            self.seen_retained.write().await.clear_filter(&pending.topic);
         } else if let Err(error) = &result {
             log::warn!("{error}");
         }
@@ -748,7 +977,7 @@ impl MqttClient {
         result.await.map_err(|_| "取消订阅确认通道已关闭，请检查 MQTT 连接状态".to_string())?
     }
 
-    /// 发布消息
+    /// 发布消息；QoS 0 等待写入网络，QoS 1/2 分别等待 PUBACK/PUBCOMP。
     pub async fn publish(&self, request: &MqttPublishRequest) -> Result<(), String> {
         validate_publish_topic(&request.topic)?;
         let payload = if let Some(ref text) = request.payload_text {
@@ -759,12 +988,17 @@ impl MqttClient {
                 .decode(&request.payload_base64)
                 .map_err(|e| format!("Base64 解码失败: {e}"))?
         };
+        let packet_size =
+            mqtt_publish_packet_size(&request.topic, payload.len(), request.qos, self.config.protocol_version);
+        if packet_size > self.config.max_packet_size_bytes {
+            return Err(format!(
+                "发布消息失败：报文大小约为 {packet_size} 字节，超过当前连接允许的 {} 字节，请调整最大报文大小或缩小消息负载",
+                self.config.max_packet_size_bytes
+            ));
+        }
 
         let qos = mqtt_qos(request.qos);
-        self.backend.publish(&request.topic, qos, request.retain, payload.clone()).await?;
-
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-        let payload_text = request.payload_text.clone();
         let payload_base64 = if request.payload_text.is_some() {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(&payload)
@@ -774,18 +1008,22 @@ impl MqttClient {
         let sent_msg = MqttMessage {
             topic: request.topic.clone(),
             payload_base64,
-            payload_text,
+            payload_text: request.payload_text.clone(),
             qos: qos_to_u8(qos),
             retain: request.retain,
             received_at_ms: now_ms,
             direction: MqttMessageDirection::Sent,
         };
-        let mut buffer = self.message_buffer.write().await;
-        buffer.push(sent_msg);
-        if buffer.len() > self.max_buffer_size {
-            buffer.remove(0);
+
+        let _send_guard = self.publish_send_lock.lock().await;
+        let (completion, result) = oneshot::channel();
+        let sequence = self.publish_requests.lock().await.queue(qos, sent_msg, completion);
+        if let Err(error) = self.backend.publish(&request.topic, qos, request.retain, payload).await {
+            self.publish_requests.lock().await.remove_queued(sequence);
+            return Err(error);
         }
-        Ok(())
+        drop(_send_guard);
+        result.await.map_err(|_| "发布确认通道已关闭，请检查 MQTT 连接状态".to_string())?
     }
 
     /// 获取已订阅的 topic 列表
@@ -812,8 +1050,8 @@ impl MqttClient {
 
     /// 清空消息缓冲区
     pub async fn clear_messages(&self) {
-        let mut buffer = self.message_buffer.write().await;
-        buffer.clear();
+        self.message_buffer.write().await.clear();
+        self.seen_retained.write().await.clear();
     }
 
     /// 从 topic 列表构建 topic 树
@@ -840,9 +1078,15 @@ impl MqttClient {
         log::info!("MQTT 客户端正在断开连接...");
         self.connected.store(false, Ordering::Release);
         self.subscriptions.write().await.clear();
+        self.granted_subscriptions.write().await.clear();
+        self.seen_retained.write().await.clear();
         let pending = self.subscription_requests.lock().await.take_all();
         for request in pending {
             request.fail("MQTT 连接已关闭，操作未完成");
+        }
+        let mut pending_publishes = self.publish_requests.lock().await.take_all();
+        for publish in &mut pending_publishes {
+            publish.fail("MQTT 连接已关闭，发布操作未完成");
         }
 
         if let Err(err) = self.backend.disconnect().await {
@@ -1007,6 +1251,43 @@ fn apply_credentials_v5(options: &mut MqttOptionsV5, auth: &MqttAuth) {
     if let MqttAuth::Password { username, password } = auth {
         options.set_credentials(username, password);
     }
+}
+
+fn mqtt_qos_from_v4(qos: QoSV4) -> MqttQoS {
+    match qos {
+        QoSV4::AtMostOnce => MqttQoS::AtMostOnce,
+        QoSV4::AtLeastOnce => MqttQoS::AtLeastOnce,
+        QoSV4::ExactlyOnce => MqttQoS::ExactlyOnce,
+    }
+}
+
+fn mqtt_qos_from_v5(qos: QoSV5) -> MqttQoS {
+    match qos {
+        QoSV5::AtMostOnce => MqttQoS::AtMostOnce,
+        QoSV5::AtLeastOnce => MqttQoS::AtLeastOnce,
+        QoSV5::ExactlyOnce => MqttQoS::ExactlyOnce,
+    }
+}
+
+fn mqtt_publish_packet_size(
+    topic: &str,
+    payload_len: usize,
+    qos: MqttQoS,
+    protocol: super::types::MqttProtocolVersion,
+) -> usize {
+    let variable_header = 2 + topic.len() + usize::from(qos != MqttQoS::AtMostOnce) * 2;
+    let properties = usize::from(matches!(protocol, super::types::MqttProtocolVersion::V5));
+    let remaining_len = variable_header + properties + payload_len;
+    1 + mqtt_remaining_length_bytes(remaining_len) + remaining_len
+}
+
+fn mqtt_remaining_length_bytes(mut value: usize) -> usize {
+    let mut bytes = 1;
+    while value >= 128 {
+        value /= 128;
+        bytes += 1;
+    }
+    bytes
 }
 
 fn mqtt_qos(qos: MqttQoS) -> QoSV4 {
@@ -1336,6 +1617,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_larger_than_rumqttc_default_waits_until_written() {
+        let payload = "x".repeat(12 * 1024);
+        let (port, publish_seen, broker) = spawn_v4_publish_broker(payload.len(), false).await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+        let request = publish_request("device/large", &payload, MqttQoS::AtMostOnce);
+
+        client.publish(&request).await.unwrap();
+        publish_seen.await.unwrap();
+        assert_eq!(client.get_messages(None, 10).await.len(), 1);
+
+        client.disconnect().await;
+        await_broker(broker).await;
+    }
+
+    #[tokio::test]
+    async fn qos1_publish_completes_only_after_puback() {
+        let payload = "confirmed";
+        let (port, publish_seen, allow_puback, broker) = spawn_v4_delayed_puback_broker().await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+        let request = publish_request("device/confirmed", payload, MqttQoS::AtLeastOnce);
+
+        let publishing_client = Arc::clone(&client);
+        let publish = tokio::spawn(async move { publishing_client.publish(&request).await });
+        publish_seen.await.unwrap();
+        assert!(!publish.is_finished());
+        assert!(client.get_messages(None, 10).await.is_empty());
+        allow_puback.send(()).unwrap();
+        publish.await.unwrap().unwrap();
+        assert_eq!(client.get_messages(None, 10).await.len(), 1);
+
+        client.disconnect().await;
+        await_broker(broker).await;
+    }
+
+    #[tokio::test]
+    async fn broker_packet_limit_error_is_returned_and_not_recorded() {
+        let (port, broker) = spawn_v5_small_packet_limit_broker().await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V5);
+        let client = MqttClient::connect(config).await.unwrap();
+        let request = publish_request("device/too-large", &"x".repeat(128), MqttQoS::AtMostOnce);
+
+        let error = client.publish(&request).await.unwrap_err();
+        assert!(error.contains("maximum packet size"), "unexpected error: {error}");
+        assert!(client.get_messages(None, 10).await.is_empty());
+
+        drop(client);
+        await_broker(broker).await;
+    }
+    #[tokio::test]
+    async fn publish_connection_error_is_returned_and_not_recorded() {
+        let (port, broker) = spawn_v4_publish_disconnect_broker().await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+        let request = publish_request("device/failure", "not-confirmed", MqttQoS::AtLeastOnce);
+
+        let error = client.publish(&request).await.unwrap_err();
+        assert!(error.contains("发布消息未完成"), "unexpected error: {error}");
+        assert!(client.get_messages(None, 10).await.is_empty());
+
+        drop(client);
+        await_broker(broker).await;
+    }
+    #[tokio::test]
+    async fn suback_records_broker_granted_qos() {
+        let (port, broker) = spawn_v4_granted_subscription_broker(QoSV4::AtMostOnce).await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+
+        client.subscribe("device/downgraded/#", MqttQoS::ExactlyOnce).await.unwrap();
+        assert_eq!(client.list_topics().await, vec![("device/downgraded/#".to_string(), MqttQoS::AtMostOnce)]);
+
+        client.disconnect().await;
+        await_broker(broker).await;
+    }
+
+    #[tokio::test]
+    async fn retained_dedup_resets_for_resubscribe_and_clear() {
+        let (port, send_after_clear, broker) = spawn_v4_retained_lifecycle_broker().await;
+        let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
+        let client = MqttClient::connect(config).await.unwrap();
+
+        client.subscribe("retained/#", MqttQoS::AtMostOnce).await.unwrap();
+        wait_for_message_count(&client, 2).await;
+        let initial = client.get_messages(None, 10).await;
+        assert_eq!(initial.iter().filter(|message| message.payload_text.as_deref() == Some("v1")).count(), 1);
+        assert!(initial.iter().any(|message| message.payload_text.as_deref() == Some("v2")));
+
+        client.unsubscribe("retained/#").await.unwrap();
+        client.subscribe("retained/#", MqttQoS::AtMostOnce).await.unwrap();
+        wait_for_message_count(&client, 3).await;
+        assert_eq!(
+            client
+                .get_messages(None, 10)
+                .await
+                .iter()
+                .filter(|message| message.payload_text.as_deref() == Some("v1"))
+                .count(),
+            2
+        );
+
+        client.clear_messages().await;
+        send_after_clear.send(()).unwrap();
+        wait_for_message_count(&client, 1).await;
+        assert_eq!(client.get_messages(None, 10).await[0].payload_text.as_deref(), Some("v1"));
+
+        client.disconnect().await;
+        await_broker(broker).await;
+    }
+
+    #[test]
+    fn reconnect_replayed_publish_cannot_complete_a_new_request() {
+        let mut tracker = PublishRequestTracker::default();
+        let old_message = test_message("old");
+        let (old_completion, mut old_result) = oneshot::channel();
+        tracker.queue(QoSV4::AtLeastOnce, old_message, old_completion);
+        tracker.mark_outgoing(7);
+
+        let mut failed = tracker.take_for_connection_loss();
+        failed[0].fail("连接中断");
+        assert_eq!(old_result.try_recv().unwrap(), Err("连接中断".to_string()));
+
+        let (new_completion, mut new_result) = oneshot::channel();
+        tracker.queue(QoSV4::AtLeastOnce, test_message("new"), new_completion);
+        assert!(tracker.mark_outgoing(7).is_none());
+        assert!(tracker.take_acknowledged(7).is_none());
+        assert!(matches!(new_result.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+
+        tracker.mark_outgoing(8);
+        let pending = tracker.take_acknowledged(8).unwrap();
+        assert_eq!(pending.message.topic, "new");
+    }
+
+    fn test_message(topic: &str) -> MqttMessage {
+        MqttMessage {
+            topic: topic.to_string(),
+            payload_base64: String::new(),
+            payload_text: None,
+            qos: 1,
+            retain: false,
+            received_at_ms: 0,
+            direction: MqttMessageDirection::Sent,
+        }
+    }
+    #[test]
+    fn retained_dedup_is_bounded() {
+        let mut seen = RetainedDedup::new(2);
+        assert!(seen.insert("topic/1", b"payload"));
+        assert!(seen.insert("topic/2", b"payload"));
+        assert!(seen.insert("topic/3", b"payload"));
+        assert_eq!(seen.entries.len(), 2);
+        assert!(seen.insert("topic/1", b"payload"));
+    }
+    #[tokio::test]
     async fn rejected_suback_does_not_record_subscription() {
         let (port, broker) = spawn_v4_rejecting_subscription_broker().await;
         let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
@@ -1487,6 +1923,175 @@ mod tests {
         (port, subscribe_seen_rx, allow_suback_tx, unsubscribe_seen_rx, allow_unsuback_tx, handle)
     }
 
+    fn publish_request(topic: &str, payload: &str, qos: MqttQoS) -> MqttPublishRequest {
+        MqttPublishRequest {
+            topic: topic.to_string(),
+            payload_base64: String::new(),
+            payload_text: Some(payload.to_string()),
+            qos,
+            retain: false,
+        }
+    }
+
+    async fn spawn_v4_publish_broker(
+        expected_payload_len: usize,
+        acknowledge: bool,
+    ) -> (u16, oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+        use bytes::BytesMut;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+            let publish = read_v4_publish(&mut stream).await;
+            assert_eq!(publish.payload.len(), expected_payload_len);
+            seen_tx.send(()).unwrap();
+            if acknowledge {
+                let mut ack = BytesMut::new();
+                rumqttc::PubAck::new(publish.pkid).write(&mut ack).unwrap();
+                stream.write_all(&ack).await.unwrap();
+            }
+            assert_eq!(read_mqtt_frame(&mut stream).await.unwrap(), vec![0xe0, 0x00]);
+        });
+        (port, seen_rx, handle)
+    }
+
+    async fn spawn_v4_delayed_puback_broker(
+    ) -> (u16, oneshot::Receiver<()>, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        use bytes::BytesMut;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = oneshot::channel();
+        let (allow_tx, allow_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+            let publish = read_v4_publish(&mut stream).await;
+            assert_eq!(publish.qos, QoSV4::AtLeastOnce);
+            seen_tx.send(()).unwrap();
+            allow_rx.await.unwrap();
+            let mut ack = BytesMut::new();
+            rumqttc::PubAck::new(publish.pkid).write(&mut ack).unwrap();
+            stream.write_all(&ack).await.unwrap();
+            assert_eq!(read_mqtt_frame(&mut stream).await.unwrap(), vec![0xe0, 0x00]);
+        });
+        (port, seen_rx, allow_tx, handle)
+    }
+
+    async fn spawn_v5_small_packet_limit_broker() -> (u16, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            // CONNACK 的 Maximum Packet Size 属性将 broker 接收上限设为 32 字节。
+            stream.write_all(&[0x20, 0x08, 0x00, 0x00, 0x05, 0x27, 0x00, 0x00, 0x00, 0x20]).await.unwrap();
+            expect_stream_closed(&mut stream).await;
+        });
+        (port, handle)
+    }
+    async fn spawn_v4_publish_disconnect_broker() -> (u16, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+            let publish = read_v4_publish(&mut stream).await;
+            assert_eq!(publish.qos, QoSV4::AtLeastOnce);
+        });
+        (port, handle)
+    }
+    async fn spawn_v4_granted_subscription_broker(granted: QoSV4) -> (u16, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+            acknowledge_v4_subscribe(&mut stream, rumqttc::SubscribeReasonCode::Success(granted)).await;
+            assert_eq!(read_mqtt_frame(&mut stream).await.unwrap(), vec![0xe0, 0x00]);
+        });
+        (port, handle)
+    }
+
+    async fn spawn_v4_retained_lifecycle_broker() -> (u16, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        use bytes::BytesMut;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (after_clear_tx, after_clear_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_mqtt_frame(&mut stream).await.unwrap();
+            stream.write_all(&[0x20, 0x02, 0x00, 0x00]).await.unwrap();
+
+            acknowledge_v4_subscribe(&mut stream, rumqttc::SubscribeReasonCode::Success(QoSV4::AtMostOnce)).await;
+            write_v4_retained(&mut stream, "retained/value", b"v1").await;
+            write_v4_retained(&mut stream, "retained/value", b"v1").await;
+            write_v4_retained(&mut stream, "retained/value", b"v2").await;
+
+            let frame = read_mqtt_frame(&mut stream).await.unwrap();
+            let mut bytes = BytesMut::from(&frame[..]);
+            let packet = rumqttc::mqttbytes::v4::read(&mut bytes, 1024 * 1024).unwrap();
+            let unsubscribe_pkid = match packet {
+                rumqttc::mqttbytes::v4::Packet::Unsubscribe(unsubscribe) => unsubscribe.pkid,
+                other => panic!("unexpected packet: {other:?}"),
+            };
+            let mut ack = BytesMut::new();
+            rumqttc::UnsubAck::new(unsubscribe_pkid).write(&mut ack).unwrap();
+            stream.write_all(&ack).await.unwrap();
+
+            acknowledge_v4_subscribe(&mut stream, rumqttc::SubscribeReasonCode::Success(QoSV4::AtMostOnce)).await;
+            write_v4_retained(&mut stream, "retained/value", b"v1").await;
+            after_clear_rx.await.unwrap();
+            write_v4_retained(&mut stream, "retained/value", b"v1").await;
+            assert_eq!(read_mqtt_frame(&mut stream).await.unwrap(), vec![0xe0, 0x00]);
+        });
+        (port, after_clear_tx, handle)
+    }
+
+    async fn read_v4_publish(stream: &mut tokio::net::TcpStream) -> rumqttc::Publish {
+        use bytes::BytesMut;
+
+        let frame = read_mqtt_frame(stream).await.unwrap();
+        let mut bytes = BytesMut::from(&frame[..]);
+        match rumqttc::mqttbytes::v4::read(&mut bytes, 32 * 1024 * 1024).unwrap() {
+            rumqttc::mqttbytes::v4::Packet::Publish(publish) => publish,
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    async fn write_v4_retained(stream: &mut tokio::net::TcpStream, topic: &str, payload: &[u8]) {
+        use bytes::BytesMut;
+        use tokio::io::AsyncWriteExt;
+
+        let mut publish = rumqttc::Publish::new(topic, QoSV4::AtMostOnce, payload);
+        publish.retain = true;
+        let mut bytes = BytesMut::new();
+        publish.write(&mut bytes).unwrap();
+        stream.write_all(&bytes).await.unwrap();
+    }
     async fn spawn_v4_rejecting_subscription_broker() -> (u16, tokio::task::JoinHandle<()>) {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -1543,6 +2148,18 @@ mod tests {
         .unwrap_or_else(|_| panic!("MQTT connected state did not become {expected}"));
     }
 
+    async fn wait_for_message_count(client: &MqttClient, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if client.get_messages(None, expected + 10).await.len() == expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("MQTT message count did not become {expected}"));
+    }
     async fn wait_for_topic_count(client: &MqttClient, expected: usize) {
         tokio::time::timeout(Duration::from_secs(4), async {
             loop {

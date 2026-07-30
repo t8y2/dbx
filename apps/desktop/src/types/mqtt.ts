@@ -24,6 +24,7 @@ export interface MqttConnectionConfig {
   auth: MqttAuth;
   keepAliveSecs: number;
   connectTimeoutSecs: number;
+  maxPacketSizeBytes: number;
   wsPath?: string;
 }
 

@@ -659,6 +659,7 @@ const mqttTls = ref(false);
 const mqttTlsSkipVerify = ref(false);
 const mqttKeepAliveSecs = ref(60);
 const mqttConnectTimeoutSecs = ref(30);
+const mqttMaxPacketSizeBytes = ref(16 * 1024 * 1024);
 
 const nacosPrimaryAddressLabel = computed(() => {
   if (nacosImplementation.value === "rnacos") return t("connection.nacosPrimaryAddressRNacos");
@@ -1203,6 +1204,7 @@ function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
   mqttTlsSkipVerify.value = config?.tlsSkipVerify || false;
   mqttKeepAliveSecs.value = Math.max(1, config?.keepAliveSecs || 60);
   mqttConnectTimeoutSecs.value = Math.max(1, config?.connectTimeoutSecs || 30);
+  mqttMaxPacketSizeBytes.value = Math.min(268435455, Math.max(1024, config?.maxPacketSizeBytes || 16 * 1024 * 1024));
   const auth = config?.auth;
   if (auth && auth.kind === "password") {
     mqttAuthKind.value = "password";
@@ -1237,6 +1239,7 @@ function buildMqttExternalConfig(): MqttConnectionConfig {
     auth,
     keepAliveSecs: Math.max(1, mqttKeepAliveSecs.value),
     connectTimeoutSecs: Math.max(1, mqttConnectTimeoutSecs.value),
+    maxPacketSizeBytes: Math.min(268435455, Math.max(1024, mqttMaxPacketSizeBytes.value)),
     wsPath: mqttTransportMode.value === "websocket" ? mqttWsPath.value || "/mqtt" : undefined,
   };
 }
@@ -5946,6 +5949,10 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mqttConnectTimeout") }}</Label>
                     <Input v-model.number="mqttConnectTimeoutSecs" type="number" class="col-span-3 w-32" min="1" max="300" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">最大报文（字节）</Label>
+                    <Input v-model.number="mqttMaxPacketSizeBytes" type="number" class="col-span-3 w-40" min="1024" max="268435455" />
                   </div>
                 </template>
 

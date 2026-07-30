@@ -82,6 +82,9 @@ pub struct MqttConnectionConfig {
     /// 连接超时（秒），默认 30
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_secs: u64,
+    /// 单个 MQTT 报文的最大字节数，默认 16 MiB
+    #[serde(default = "default_max_packet_size")]
+    pub max_packet_size_bytes: usize,
     /// WebSocket 路径（仅 WebSocket 传输时使用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ws_path: Option<String>,
@@ -93,6 +96,10 @@ fn default_keep_alive() -> u64 {
 
 fn default_connect_timeout() -> u64 {
     30
+}
+
+fn default_max_packet_size() -> usize {
+    16 * 1024 * 1024
 }
 
 impl Default for MqttConnectionConfig {
@@ -108,6 +115,7 @@ impl Default for MqttConnectionConfig {
             auth: MqttAuth::default(),
             keep_alive_secs: default_keep_alive(),
             connect_timeout_secs: default_connect_timeout(),
+            max_packet_size_bytes: default_max_packet_size(),
             ws_path: None,
         }
     }
@@ -124,6 +132,9 @@ impl MqttConnectionConfig {
         }
         if parsed.client_id.trim().is_empty() {
             return Err("MQTT Client ID 不能为空".to_string());
+        }
+        if !(1024..=268_435_455).contains(&parsed.max_packet_size_bytes) {
+            return Err("MQTT 最大报文大小必须在 1024 到 268435455 字节之间".to_string());
         }
         Ok(parsed)
     }

@@ -24,6 +24,14 @@ test("SQL file execution dialog keeps actions visible within narrow viewports", 
   assert.match(dialogSource, /<DialogFooter class="shrink-0">/);
 });
 
+test("SQL file execution summary reserves space for aggregate columns", () => {
+  assert.match(dialogSource, /v-if="!running && previews\.length > 1 && perFileResults\.length > 0"/);
+  assert.doesNotMatch(dialogSource, /terminalStatus === 'done' && previews\.length > 1 && perFileResults\.length > 0/);
+  assert.match(dialogSource, /<table class="w-full table-fixed">/);
+  assert.match(dialogSource, /<colgroup>[\s\S]*<col \/>[\s\S]*<col class="w-\[4\.5rem\]" \/>[\s\S]*<col class="w-\[5\.5rem\]" \/>[\s\S]*<\/colgroup>/);
+  assert.match(dialogSource, /<td class="px-2\.5 py-1\.5 truncate" :title="item\.fileName">/);
+});
+
 test("SQL file execution dialog preserves cancel, close, and retry actions", () => {
   assert.match(dialogSource, /<template v-if="running">[\s\S]*@click="open = false"[\s\S]*@click="cancelExecution"/);
   assert.match(dialogSource, /<template v-else>[\s\S]*@click="open = false"[\s\S]*:disabled="!canStart" @click="startExecution"/);

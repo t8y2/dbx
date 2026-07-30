@@ -692,9 +692,17 @@ watch(
             <span class="truncate">{{ t("sqlFile.fileProgress", { current: currentFileIndex + 1, total: previews.length }) }} — {{ currentFileName }}</span>
           </div>
 
-          <template v-if="!running && terminalStatus === 'done' && previews.length > 1 && perFileResults.length > 0">
+          <template v-if="!running && previews.length > 1 && perFileResults.length > 0">
             <div class="max-h-[min(22vh,200px)] min-w-0 overflow-y-auto rounded-md border text-xs">
-              <table class="w-full">
+              <!-- Keep aggregate columns readable when a file name is long. -->
+              <table class="w-full table-fixed">
+                <colgroup>
+                  <col />
+                  <col class="w-[4.5rem]" />
+                  <col class="w-[4.5rem]" />
+                  <col class="w-[4.5rem]" />
+                  <col class="w-[5.5rem]" />
+                </colgroup>
                 <thead class="sticky top-0 z-10 bg-muted/40">
                   <tr>
                     <th class="px-2.5 py-1.5 text-left font-medium text-muted-foreground">{{ t("sqlFile.fileColumn") }}</th>
@@ -706,7 +714,7 @@ watch(
                 </thead>
                 <tbody>
                   <tr v-for="(item, index) in perFileResults" :key="index" class="border-t">
-                    <td class="px-2.5 py-1.5 max-w-[240px] truncate" :title="item.fileName">{{ item.fileName }}</td>
+                    <td class="px-2.5 py-1.5 truncate" :title="item.fileName">{{ item.fileName }}</td>
                     <td class="px-2 py-1.5 text-right tabular-nums">{{ item.statementIndex }}</td>
                     <td class="px-2 py-1.5 text-right tabular-nums text-green-600">{{ item.successCount }}</td>
                     <td class="px-2 py-1.5 text-right tabular-nums" :class="{ 'text-destructive': item.failureCount > 0 }">{{ item.failureCount }}</td>

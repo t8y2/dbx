@@ -36,7 +36,7 @@ describe("DataTransferDialog transfer prefill", () => {
   });
 
   it("allows a transfer between different schemas in the same database", () => {
-    expect(dialogSource).toContain("const sameSourceAndTarget = sourceConnectionId.value === targetConnectionId.value");
-    expect(dialogSource).toContain("effectiveSourceSchema === effectiveTargetSchema");
+    expect(dialogSource).toContain("isSameTransferDatabase");
+    expect(dialogSource).toContain("const sameSourceAndTarget = sameCatalogAndDatabase && effectiveSourceSchema === effectiveTargetSchema");
   });
 });

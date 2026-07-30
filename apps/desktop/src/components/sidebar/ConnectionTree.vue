@@ -26,6 +26,8 @@ import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
+import FavoriteEditDialog from "./FavoriteEditDialog.vue";
+import { useFavoriteEditDialog } from "@/composables/useFavoriteEditDialog";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -1587,6 +1589,33 @@ onUnmounted(() => {
   if (sidebarCommentMeasureFrame) window.cancelAnimationFrame(sidebarCommentMeasureFrame);
   if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
 });
+
+// The favorites edit dialog is a module-level singleton inside
+// `useFavoriteEditDialog`. The sidebar tree runtime host opens the dialog
+// (new group / edit note) by mutating that state, so this parent component
+// just needs to render the dialog and route the submit back to the
+// connection store.
+const favoriteEditDialog = useFavoriteEditDialog();
+const favoriteEditDialogState = computed(() => favoriteEditDialog.state.value);
+
+function onFavoriteEditSubmit(value: string) {
+  const state = favoriteEditDialogState.value;
+  if (!state || !state.open) return;
+  const trimmed = value.trim();
+  try {
+    if (state.mode === "note") {
+      if (state.favoriteKey) {
+        store.updateFavoriteNote(state.favoriteKey, trimmed);
+      }
+    } else if (state.groupId) {
+      store.renameFavoriteGroup(state.groupId, trimmed);
+    } else if (state.connectionId && state.database !== undefined) {
+      store.createFavoriteGroup(state.connectionId, state.database, trimmed);
+    }
+  } finally {
+    favoriteEditDialog.close();
+  }
+}
 
 defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
 </script>

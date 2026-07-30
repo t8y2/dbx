@@ -1018,6 +1018,47 @@ export const useConnectionStore = defineStore("connection", () => {
     return favoritesController.getFavoriteNote(key);
   }
 
+  /** Look up the database-stored comment for the source tree node backing
+   *  a favorited item. The cloned node rendered under the favorites group
+   *  carries a snapshot of the source node's `comment` taken at cloning
+   *  time; if the user favorites a table before the backend finished
+   *  loading its comment metadata, that snapshot is empty and the
+   *  trailing area / tooltip would otherwise show nothing. Walking the
+   *  source tree here makes the latest comment available regardless of
+   *  when the clone was created. Returns `null` for unfavorited types
+   *  or when the source tree has not been loaded yet. */
+  function getSourceCommentForFavorite(node: TreeNode): string | null {
+    if (!node.connectionId) return null;
+    if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return null;
+    if (node.comment) return node.comment;
+    // The clone's `favoritedFromId` is the original id (or the original's
+    // own `favoritedFromId`, when the input is itself a previously-cloned
+    // row carried over from a prior render). Walk the source tree to find
+    // the matching source node. The favorites placeholder lives as a
+    // child of the database ahead of the schema/tables, so the walker
+    // encounters clone rows first — match strictly on `id` to skip those
+    // and continue down to the real source node. The original's `id` is
+    // exactly `stableSourceId`; a clone's `id` is
+    // `${stableSourceId}::fav_clone::<groupId>` so `candidate.id ===
+    // stableSourceId` reliably distinguishes the two.
+    const stableSourceId = node.favoritedFromId ?? node.id;
+    const visit = (nodes: readonly TreeNode[]): TreeNode | null => {
+      for (const candidate of nodes) {
+        if (candidate.id === stableSourceId && candidate.type === node.type) {
+          return candidate;
+        }
+        if (candidate.children) {
+          const found = visit(candidate.children);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    const source = visit(treeNodes.value);
+    if (!source) return null;
+    return source.comment ?? null;
+  }
+
   /** Returns the group a favorited key belongs to, or `null` if ungrouped. */
   function getFavoriteGroupForKey(key: string): FavoriteGroup | null {
     return favoritesController.getFavoriteGroupForKey(key);
@@ -5885,6 +5926,7 @@ export const useConnectionStore = defineStore("connection", () => {
     setFavoriteGroupCollapsed,
     deleteFavoriteGroup,
     getFavoriteNote,
+    getSourceCommentForFavorite,
     getFavoriteItemForKey,
     favoriteKeyForNode,
     favoriteKeyForTreeNodeId,

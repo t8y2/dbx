@@ -60,6 +60,7 @@ import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
+import { treeNodeFavoriteKey } from "@/lib/app/favoritesTree";
 // --- Drag and Drop ---
 import { useDragSort, type DropPosition } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
@@ -444,17 +445,28 @@ const detailTooltip = computed(() => {
   }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
   const isFavoritable = node.type === "table" || node.type === "view" || node.type === "materialized_view";
-  if (!comment && !isFavoritable) return null;
-  if (comment && node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column") return null;
+  // Favorited items render as clones under the favorites group; the clone
+  // carries the source node's `comment` at cloning time and is not
+  // re-snapshotted when the source tree's comment metadata finishes
+  // loading. Fall back to the live source tree so the tooltip always shows
+  // the latest comment, not the stale snapshot.
+  const liveComment = comment ?? (isFavoritable ? connectionStore.getSourceCommentForFavorite(node) : null);
+  if (!liveComment && !isFavoritable) return null;
+  if (liveComment && node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column") return null;
   const rows: DetailTooltipRow[] = [{ label: t("connection.name"), value: visibleLabel(node) }];
-  if (comment) {
-    rows.push({ label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true });
+  if (liveComment) {
+    rows.push({ label: t("structureEditor.comment"), value: cleanTooltipValue(liveComment), multiline: true });
   }
   // Show the favorited item's note alongside the comment. This is the only
   // way users see notes in the tree without adding a second line per row,
   // which would push the existing comment out of the layout.
   if (isFavoritable && node.connectionId) {
-    const note = connectionStore.getFavoriteNote(`${node.connectionId}:fav:v1:${encodeURIComponent(JSON.stringify([node.database || "", node.schema || "", node.catalog || "", node.type, node.objectName || node.tableName || node.label, node.signature || "", node.id]))}`);
+    // Use the canonical key builder so the lookup matches the key that the
+    // favorites controller wrote. The cloned nodes rendered under the
+    // favorites group carry a synthetic id (e.g. `original::fav_clone::gid`)
+    // and stash the real id in `favoritedFromId`; only `treeNodeFavoriteKey`
+    // knows to fall back to that field.
+    const note = connectionStore.getFavoriteNote(treeNodeFavoriteKey(node));
     if (note) {
       rows.push({ label: t("contextMenu.favoritesGroup.noteLabel"), value: cleanTooltipValue(note), multiline: true });
     }
@@ -571,7 +583,24 @@ const isNodeDefaultDatabase = computed(
 
 const trailingComment = computed(() => {
   if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
-  return sidebarTreeNodeComment(activeNode.value);
+  const node = activeNode.value;
+  // For favorited tables/views, prefer the user-supplied note in the
+  // trailing area so the curated note is visible inline (the tooltip is
+  // hover-only, and the favorites group has no obvious way to surface the
+  // note otherwise — the cloned rows there can otherwise show nothing
+  // when the source tree hasn't loaded yet). Falling back to the database
+  // comment keeps the trailing area useful for favorited items that don't
+  // have a user note yet. The comment lookup itself goes through the
+  // source tree so a freshly-loaded comment is reflected even when the
+  // clone was created before the metadata was available.
+  if (node.connectionId) {
+    const key = connectionStore.getFavoriteKeyForNode(node);
+    if (key) {
+      const note = connectionStore.getFavoriteNote(key);
+      if (note) return note;
+    }
+  }
+  return sidebarTreeNodeComment(node) ?? connectionStore.getSourceCommentForFavorite(node);
 });
 
 /** Name of the favorites group this node belongs to, or `null` when it is

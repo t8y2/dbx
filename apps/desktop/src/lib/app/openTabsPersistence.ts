@@ -142,7 +142,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
   }));
 }
 
-function isSavedOpenTab(value: unknown): value is SavedOpenTab {
+export function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   if (!value || typeof value !== "object") return false;
   const tab = value as Record<string, unknown>;
   return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && (typeof tab.sql === "string" || typeof tab.savedSqlId === "string");

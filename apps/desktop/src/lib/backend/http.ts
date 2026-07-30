@@ -1486,6 +1486,7 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
 export interface OpenTabsStatePayload {
   tabs: unknown[];
   activeTabId: string | null;
+  detachedTabOwners?: Array<{ windowLabel: string; tabId: string }>;
 }
 
 export async function loadEditorSettings(): Promise<unknown | null> {
@@ -1504,6 +1505,7 @@ export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> 
     ? {
         tabs: payload.tabs,
         activeTabId: typeof payload.activeTabId === "string" ? payload.activeTabId : null,
+        detachedTabOwners: Array.isArray(payload.detachedTabOwners) ? payload.detachedTabOwners : undefined,
       }
     : null;
 }

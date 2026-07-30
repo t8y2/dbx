@@ -91,6 +91,7 @@ import {
   destroyDetachedWindowAfterCleanup,
   focusDetachedTabWindow,
   isDetachedTabWindow,
+  listDetachedTabWindowLabels,
   listenForDetachedAppCloseChecks,
   listenForDetachedTabMainWindowActions,
   listenForDetachedTabPersistenceUpdates,
@@ -2204,7 +2205,21 @@ async function initApp({ restoreOpenTabs = true }: { restoreOpenTabs?: boolean }
     await connectionStore.initFromDisk();
     console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     if (restoreOpenTabs) {
-      await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
+      let detachedWindowLabels: string[] | null = [];
+      if (isDesktop) {
+        try {
+          detachedWindowLabels = await listDetachedTabWindowLabels();
+        } catch (error) {
+          // Unknown is not equivalent to empty. Preserve persisted child owners
+          // rather than creating duplicate owners after a transient Tauri error.
+          detachedWindowLabels = null;
+          console.warn("[DBX][detached-tab:window-enumeration:error]", error);
+        }
+      }
+      await queryStore.initOpenTabs({
+        validConnectionIds: connectionStore.connections.map((connection) => connection.id),
+        detachedWindowLabels,
+      });
       console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
     }
     await settingsStore.initDesktopSettings().catch(() => {});
@@ -2226,8 +2241,8 @@ async function initApp({ restoreOpenTabs = true }: { restoreOpenTabs?: boolean }
   }
 }
 
-function enqueueDetachedPersistenceReport(tab: (typeof queryStore.openTabsPersistSnapshot)[number] | null) {
-  const report = detachedPersistenceQueue.catch(() => undefined).then(() => reportDetachedTabPersistence(tab));
+function enqueueDetachedPersistenceReport(tab: (typeof queryStore.openTabsPersistSnapshot)[number] | null, removedTabId?: string) {
+  const report = detachedPersistenceQueue.catch(() => undefined).then(() => reportDetachedTabPersistence(tab, removedTabId));
   detachedPersistenceQueue = report.catch((error) => {
     console.warn("[DBX][detached-tab:persistence:update:error]", error);
   });
@@ -2243,11 +2258,19 @@ function scheduleDetachedPersistenceReport() {
   }, 300);
 }
 
-function startDetachedPersistenceReporter() {
+async function startDetachedPersistenceReporter() {
   if (stopDetachedPersistenceWatch) return;
   detachedOwnershipCommitted.value = true;
   stopDetachedPersistenceWatch = watch(() => queryStore.openTabsPersistSnapshot, scheduleDetachedPersistenceReport, { flush: "post" });
-  scheduleDetachedPersistenceReport();
+  try {
+    // The commit acknowledgement must follow a durable owner update. This also
+    // lets a recreated main store reconcile legacy or provisional ownership
+    // before the child reports transfer completion.
+    await flushDetachedPersistenceReport();
+  } catch (error) {
+    scheduleDetachedPersistenceReport();
+    console.warn("[DBX][detached-tab:persistence:commit:error]", error);
+  }
 }
 
 async function flushDetachedPersistenceReport() {
@@ -2259,7 +2282,7 @@ async function flushDetachedPersistenceReport() {
   await enqueueDetachedPersistenceReport(queryStore.openTabsPersistSnapshot[0] ?? null);
 }
 
-async function removeDetachedPersistenceOwner() {
+async function removeDetachedPersistenceOwner(tabId?: string) {
   stopDetachedPersistenceWatch?.();
   stopDetachedPersistenceWatch = undefined;
   if (detachedPersistenceTimer) {
@@ -2267,7 +2290,7 @@ async function removeDetachedPersistenceOwner() {
     detachedPersistenceTimer = undefined;
   }
   await detachedPersistenceQueue.catch(() => undefined);
-  await enqueueDetachedPersistenceReport(null);
+  await enqueueDetachedPersistenceReport(null, tabId);
 }
 
 async function initDetachedApp() {
@@ -2346,8 +2369,8 @@ async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement
     try {
       queryStore.registerDetachedOpenTab(preparedWindow.windowLabel, transferState.tab);
       detachedPersistenceRegistered = true;
-      // Persist a recovery owner before the provisional child receives the tab.
-      // Every concurrent transfer is therefore represented in subsequent writes.
+      // Persist an ownerless recovery snapshot before the provisional child
+      // receives the tab. A main reload can reclaim it until commit completes.
       await queryStore.flushPendingPersist({ force: true });
       // Commit ownership only after the child accepts the transfer; otherwise restore it.
       const transferOutcome = await preparedWindow.transfer(
@@ -2360,8 +2383,8 @@ async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement
         },
         {
           onPrepared: async () => {
-            // This durable write is the ownership commit point. It includes the
-            // detached snapshot while main-tab persistence remains suspended.
+            // This durable write keeps the recovery snapshot current while
+            // main-tab persistence remains suspended.
             await queryStore.flushPendingPersist({ force: true });
           },
         },
@@ -2441,7 +2464,7 @@ async function performDetachedTabClose() {
   try {
     // Remove the durable owner before remote session cleanup can time out.
     // A successfully closed window must never be restored on the next startup.
-    await removeDetachedPersistenceOwner();
+    await removeDetachedPersistenceOwner(tabId ?? undefined);
     const outcome = await destroyDetachedWindowAfterCleanup(detachedWindow, async () => {
       if (tabId) await queryStore.closeTabAndWait(tabId, { force: true });
     });
@@ -2599,12 +2622,12 @@ onMounted(async () => {
     );
     return;
   }
-  unlistenDetachedTabPersistence = await listenForDetachedTabPersistenceUpdates(async (windowLabel, tab) => {
+  unlistenDetachedTabPersistence = await listenForDetachedTabPersistenceUpdates(async (windowLabel, tab, removedTabId) => {
     if (tab) queryStore.updateDetachedOpenTab(windowLabel, tab);
-    else queryStore.removeDetachedOpenTab(windowLabel);
+    else queryStore.removeDetachedOpenTab(windowLabel, removedTabId);
     // Persistence acknowledgements must represent a completed disk write even
     // while another tab transfer temporarily suspends normal main-tab writes.
-    await queryStore.flushPendingPersist({ force: true });
+    await queryStore.flushPendingPersist({ force: true, waitForOpenTabsLoad: true });
   });
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);

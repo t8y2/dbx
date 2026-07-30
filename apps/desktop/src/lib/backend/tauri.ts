@@ -552,6 +552,7 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
 export interface OpenTabsStatePayload {
   tabs: unknown[];
   activeTabId: string | null;
+  detachedTabOwners?: Array<{ windowLabel: string; tabId: string }>;
 }
 
 export async function loadEditorSettings(): Promise<unknown | null> {

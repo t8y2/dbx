@@ -9,7 +9,7 @@ import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracl
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, resolveMetadataColumnName, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
-import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type SavedOpenTab } from "@/lib/app/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, isSavedOpenTab, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type SavedOpenTab } from "@/lib/app/openTabsPersistence";
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
@@ -555,21 +555,49 @@ let saveTabsQueue = Promise.resolve();
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistGeneration = 0;
 
-function saveTabs(tabs: QueryTab[], activeTabId: string | null, detachedTabs: Iterable<SavedOpenTab> = []): Promise<void> {
+interface PersistedDetachedTabOwner {
+  windowLabel: string;
+  tabId: string;
+}
+
+interface PersistedOpenTabsPayload {
+  tabs?: unknown;
+  activeTabId?: unknown;
+  detachedTabOwners?: unknown;
+}
+
+interface DetachedOpenTabOwner {
+  tab: SavedOpenTab;
+  committed: boolean;
+}
+
+function saveTabs(tabs: QueryTab[], activeTabId: string | null, detachedTabs: Iterable<readonly [string, DetachedOpenTabOwner]> = []): Promise<void> {
   const mainTabs = serializeOpenTabs(tabs);
-  const serializedTabs = [...mainTabs];
-  const serializedTabIds = new Set(mainTabs.map((tab) => tab.id));
-  for (const tab of detachedTabs) {
-    // A tab ID has one durable owner even if a stale window update is replayed.
-    if (serializedTabIds.has(tab.id)) continue;
-    serializedTabs.push(tab);
-    serializedTabIds.add(tab.id);
+  const detachedTabsById = new Map<string, { windowLabel: string; owner: DetachedOpenTabOwner }>();
+  for (const [windowLabel, owner] of detachedTabs) {
+    detachedTabsById.set(owner.tab.id, { windowLabel, owner });
   }
+  // A live detached owner is authoritative if a stale main-store copy with the
+  // same ID survives a WebView reload or races an ownership update.
+  const serializedTabs = mainTabs.filter((tab) => !detachedTabsById.has(tab.id));
+  serializedTabs.push(...[...detachedTabsById.values()].map(({ owner }) => owner.tab));
   // The main window is the only disk writer. Detached snapshots are merged into
   // its document so every tab can be recovered in the main window after restart.
   const payload = {
     tabs: serializedTabs,
     activeTabId,
+    // Provisional transfers intentionally remain ownerless on disk. If the
+    // source WebView reloads before commit, the new main store reclaims the tab.
+    detachedTabOwners: [...detachedTabsById.values()].flatMap(({ windowLabel, owner }) =>
+      owner.committed
+        ? [
+            {
+              windowLabel,
+              tabId: owner.tab.id,
+            },
+          ]
+        : [],
+    ),
   };
   saveTabsQueue = saveTabsQueue.catch(() => undefined).then(() => api.saveOpenTabsState(payload));
   return saveTabsQueue;
@@ -587,7 +615,7 @@ function clearLegacySavedTabs() {
   safeLocalStorageRemove(ACTIVE_TAB_STORAGE_KEY);
 }
 
-function restoreSavedTabsFromPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined, options: { validConnectionIds?: Iterable<string> } = {}): { tabs: QueryTab[]; activeTabId: string | null } {
+function restoreSavedTabsFromPayload(payload: PersistedOpenTabsPayload | null | undefined, options: { validConnectionIds?: Iterable<string> } = {}): { tabs: QueryTab[]; activeTabId: string | null } {
   const restoreMode = useSettingsStore().editorSettings.openTabsRestoreMode;
   if (restoreMode === "none") return { tabs: [], activeTabId: null };
   return restoreOpenTabsPayload(payload, {
@@ -646,7 +674,13 @@ export const useQueryStore = defineStore("query", () => {
   const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingTabSessionResets = new Map<string, Promise<void>>();
   const pendingResultRunRestores = new Map<string, string>();
-  const detachedOpenTabsByWindow = new Map<string, SavedOpenTab>();
+  const detachedOpenTabsByWindow = new Map<string, DetachedOpenTabOwner>();
+  const knownDetachedTabIdsByWindow = new Map<string, string>();
+  const observedDetachedOwnerWindowLabels = new Set<string>();
+  let resolveOpenTabsLoaded: () => void = () => {};
+  const openTabsLoaded = new Promise<void>((resolve) => {
+    resolveOpenTabsLoaded = resolve;
+  });
   let resultCacheTrimScheduled = false;
   let resultCacheTrimRunning = false;
   let resultCacheTrimRequested = false;
@@ -1181,9 +1215,17 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function markOpenTabsLoaded() {
+    if (isOpenTabsLoaded.value) return;
+    isOpenTabsLoaded.value = true;
+    resolveOpenTabsLoaded();
+  }
+
   function scheduleResultCacheMaintenance() {
     const maintain = () => {
-      const liveKeys = tabs.value.flatMap((tab) => [tab.resultCacheKey, ...(tab.resultRuns?.map((run) => run.resultCacheKey) ?? [])]).filter((key): key is string => !!key);
+      const mainLiveKeys = tabs.value.flatMap((tab) => [tab.resultCacheKey, ...(tab.resultRuns?.map((run) => run.resultCacheKey) ?? [])]);
+      const detachedLiveKeys = [...detachedOpenTabsByWindow.values()].flatMap(({ tab }) => [tab.resultCacheKey, ...(tab.resultRuns?.map((run) => run.resultCacheKey) ?? [])]);
+      const liveKeys = [...mainLiveKeys, ...detachedLiveKeys].filter((key): key is string => !!key);
       void pruneTabResultSnapshots(liveKeys).catch((error) => console.warn("[DBX][result-cache:maintenance:error]", error));
     };
     if (typeof requestIdleCallback !== "undefined") requestIdleCallback(maintain, { timeout: 5000 });
@@ -1191,19 +1233,59 @@ export const useQueryStore = defineStore("query", () => {
     else setTimeout(maintain, 0);
   }
 
-  async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
+  function restoreLiveDetachedOwners(payload: PersistedOpenTabsPayload, detachedWindowLabels: Iterable<string> | null): Set<string> {
+    const liveWindowLabels = detachedWindowLabels ? new Set(detachedWindowLabels) : null;
+    const tabsById = new Map((Array.isArray(payload.tabs) ? payload.tabs : []).filter(isSavedOpenTab).map((tab) => [tab.id, tab]));
+    // A child update can arrive while the recreated main store is still loading
+    // disk state. Preserve that newer in-memory snapshot instead of replacing it
+    // with the older persisted copy during owner reconciliation.
+    const claimedTabIds = new Set([...detachedOpenTabsByWindow.values()].map(({ tab }) => tab.id));
+    const owners = Array.isArray(payload.detachedTabOwners) ? payload.detachedTabOwners : [];
+    for (const value of owners) {
+      if (!value || typeof value !== "object") continue;
+      const owner = value as Partial<PersistedDetachedTabOwner>;
+      if (typeof owner.windowLabel !== "string" || typeof owner.tabId !== "string") continue;
+      knownDetachedTabIdsByWindow.set(owner.windowLabel, owner.tabId);
+      // A child update or close observed during startup is newer than disk. A
+      // close tombstone must also prevent the stale persisted tab from returning.
+      if (observedDetachedOwnerWindowLabels.has(owner.windowLabel)) {
+        claimedTabIds.add(owner.tabId);
+        continue;
+      }
+      // Unknown enumeration state is handled conservatively: keep persisted
+      // owners detached until their absence can be proven on a later startup.
+      if (liveWindowLabels && !liveWindowLabels.has(owner.windowLabel)) continue;
+      claimedTabIds.add(owner.tabId);
+      if (detachedOpenTabsByWindow.has(owner.windowLabel)) continue;
+      const tab = tabsById.get(owner.tabId);
+      if (!tab) continue;
+      detachedOpenTabsByWindow.set(owner.windowLabel, { tab, committed: true });
+    }
+    return claimedTabIds;
+  }
+
+  async function initOpenTabs(options: { validConnectionIds?: Iterable<string>; detachedWindowLabels?: Iterable<string> | null } = {}) {
     if (isOpenTabsLoaded.value) return;
-    const saved = await api.loadOpenTabsState().catch(() => null);
+    // A read failure is not an empty document. Propagate it so startup cannot
+    // overwrite recoverable tabs with an incomplete in-memory snapshot.
+    const saved = await api.loadOpenTabsState();
     if (saved?.tabs && Array.isArray(saved.tabs)) {
-      const restored = restoreSavedTabsFromPayload(saved, options);
+      const liveDetachedTabIds = restoreLiveDetachedOwners(saved, options.detachedWindowLabels === undefined ? [] : options.detachedWindowLabels);
+      const restored = restoreSavedTabsFromPayload(
+        {
+          ...saved,
+          tabs: saved.tabs.filter((tab) => !isSavedOpenTab(tab) || !liveDetachedTabIds.has(tab.id)),
+        },
+        options,
+      );
       applyRestoredOpenTabs(restored);
       if (useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so stale saved payloads should not
         // reappear if the user later changes the setting.
         clearLegacySavedTabs();
-        await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
+        await saveTabs(tabs.value, activeTabId.value, detachedOpenTabsByWindow.entries()).catch(() => undefined);
       }
-      isOpenTabsLoaded.value = true;
+      markOpenTabsLoaded();
       scheduleResultCacheMaintenance();
       return;
     }
@@ -1216,7 +1298,7 @@ export const useQueryStore = defineStore("query", () => {
         // Restore is explicitly disabled, so keeping the legacy startup payload
         // would resurrect old tabs if the user later changes the setting.
         clearLegacySavedTabs();
-        isOpenTabsLoaded.value = true;
+        markOpenTabsLoaded();
         scheduleResultCacheMaintenance();
         return;
       }
@@ -1229,7 +1311,7 @@ export const useQueryStore = defineStore("query", () => {
         /* keep legacy values for a later migration attempt */
       }
     }
-    isOpenTabsLoaded.value = true;
+    markOpenTabsLoaded();
     scheduleResultCacheMaintenance();
   }
 
@@ -1252,7 +1334,7 @@ export const useQueryStore = defineStore("query", () => {
           persistTimer = null;
           return;
         }
-        void saveTabs(tabs.value, activeTabId.value, detachedOpenTabsByWindow.values()).catch(() => {});
+        void saveTabs(tabs.value, activeTabId.value, detachedOpenTabsByWindow.entries()).catch(() => {});
         persistTimer = null;
       }, 300);
     },
@@ -1269,29 +1351,49 @@ export const useQueryStore = defineStore("query", () => {
   // reflects the latest in-memory tabs without waiting for the 300ms debounce.
   // Lets callers (e.g. tests that reload the store) read back persisted state
   // deterministically instead of racing the debounce timer.
-  function flushPendingPersist({ force = false }: { force?: boolean } = {}): Promise<void> {
+  function flushPendingPersist({ force = false, waitForOpenTabsLoad = false }: { force?: boolean; waitForOpenTabsLoad?: boolean } = {}): Promise<void> {
     if (!shouldPersistOpenTabs) return Promise.resolve();
+    // Persistence updates can arrive from a surviving child before the recreated
+    // main store has loaded its existing document. Never acknowledge a write
+    // built from an incomplete main-tab snapshot.
+    if (waitForOpenTabsLoad && !isOpenTabsLoaded.value) return openTabsLoaded.then(() => flushPendingPersist({ force, waitForOpenTabsLoad }));
     if (!force && openTabsPersistSuspendCount > 0) return Promise.resolve();
     if (storePersistGeneration !== persistGeneration) return Promise.resolve();
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    return saveTabs(tabs.value, activeTabId.value, detachedOpenTabsByWindow.values());
+    return saveTabs(tabs.value, activeTabId.value, detachedOpenTabsByWindow.entries());
+  }
+
+  function setDetachedOpenTabOwner(windowLabel: string, tab: SavedOpenTab, committed: boolean, observed: boolean) {
+    if (observed) observedDetachedOwnerWindowLabels.add(windowLabel);
+    for (const [existingWindowLabel, existingOwner] of detachedOpenTabsByWindow) {
+      if (existingWindowLabel !== windowLabel && existingOwner.tab.id === tab.id) detachedOpenTabsByWindow.delete(existingWindowLabel);
+    }
+    detachedOpenTabsByWindow.set(windowLabel, { tab, committed });
+    knownDetachedTabIdsByWindow.set(windowLabel, tab.id);
+    // Legacy documents and late child reports can leave the same tab restored
+    // in main. Moving it out must not close sessions still owned by the child.
+    if (committed && takeTabForTransfer(tab.id)) clearDataGridPendingSnapshotsForTab(tab.id);
   }
 
   function registerDetachedOpenTab(windowLabel: string, tab: QueryTab) {
     const persisted = serializeOpenTabs([tab])[0];
     if (!persisted) throw new Error("Detached tab persistence payload is missing");
-    detachedOpenTabsByWindow.set(windowLabel, persisted);
+    setDetachedOpenTabOwner(windowLabel, persisted, false, false);
   }
 
   function updateDetachedOpenTab(windowLabel: string, tab: SavedOpenTab) {
-    detachedOpenTabsByWindow.set(windowLabel, tab);
+    setDetachedOpenTabOwner(windowLabel, tab, true, true);
   }
 
-  function removeDetachedOpenTab(windowLabel: string) {
+  function removeDetachedOpenTab(windowLabel: string, removedTabId?: string) {
+    observedDetachedOwnerWindowLabels.add(windowLabel);
     detachedOpenTabsByWindow.delete(windowLabel);
+    const ownedTabId = removedTabId ?? knownDetachedTabIdsByWindow.get(windowLabel);
+    knownDetachedTabIdsByWindow.delete(windowLabel);
+    if (ownedTabId && takeTabForTransfer(ownedTabId)) clearDataGridPendingSnapshotsForTab(ownedTabId);
   }
 
   function suspendOpenTabsPersist() {
@@ -2004,7 +2106,7 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value = [tab];
     activeTabId.value = tab.id;
     activeTabHistory.value = [tab.id];
-    isOpenTabsLoaded.value = true;
+    markOpenTabsLoaded();
     touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
   }
 

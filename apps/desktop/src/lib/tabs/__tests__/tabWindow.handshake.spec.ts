@@ -353,4 +353,49 @@ describe("detached tab startup handshake", () => {
     expect(mocks.mainWindow.destroy).toHaveBeenCalledOnce();
     unlisten();
   });
+
+  it("rolls back a provisional child when the source WebView disappears before deciding", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", "/?dbxDetachedTransfer=transfer-source-reload");
+    const rollback = vi.fn(async () => {});
+    const onReceive = vi.fn(() => rollback);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { receiveDetachedTab } = await import("@/lib/tabs/tabWindow");
+    const unlisten = await receiveDetachedTab(onReceive);
+
+    mocks.listeners.get("dbx-detached-tab-transfer-transfer-source-reload")?.({
+      payload: {
+        transferId: "transfer-source-reload",
+        tab: {
+          id: "query-source-reload",
+          title: "Query",
+          connectionId: "connection-1",
+          database: "app",
+          sql: "select 1",
+          mode: "query",
+          isExecuting: false,
+        },
+        activeOutputView: "result",
+        selectedSql: "",
+        cursorPos: 0,
+        explainMode: "explain",
+        blockDangerousRedisCommands: true,
+        dataGridSnapshots: [],
+      },
+    });
+    await vi.waitFor(() => expect(onReceive).toHaveBeenCalledOnce());
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(mocks.mainWindow.destroy).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      "[DBX][detached-tab:decision:timeout]",
+      expect.objectContaining({
+        transferId: "transfer-source-reload",
+      }),
+    );
+    warn.mockRestore();
+    unlisten();
+  });
 });

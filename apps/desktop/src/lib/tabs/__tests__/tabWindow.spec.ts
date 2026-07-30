@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => {
     }),
   };
   const detachedWindows = [{ label: "detached-tab-query-1" }, { label: "detached-tab-query-2" }];
+  const getAllWebviewWindows = vi.fn(async () => detachedWindows);
   const emitTo = vi.fn(async (label: string, _event: string, payload: { requestId: string }) => {
     statusListener?.({
       payload: {
@@ -22,7 +23,7 @@ const mocks = vi.hoisted(() => {
       },
     });
   });
-  return { detachedWindows, emitTo, mainWindow, unlisten };
+  return { detachedWindows, emitTo, getAllWebviewWindows, mainWindow, unlisten };
 });
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -30,7 +31,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
-  getAllWebviewWindows: vi.fn(async () => mocks.detachedWindows),
+  getAllWebviewWindows: mocks.getAllWebviewWindows,
   getCurrentWebviewWindow: vi.fn(() => mocks.mainWindow),
   WebviewWindow: class {
     static getByLabel = vi.fn(async (label: string) => (label === "main" ? mocks.mainWindow : null));
@@ -53,6 +54,8 @@ describe("detached tab app close checks", () => {
     mocks.unlisten.mockClear();
     mocks.mainWindow.show.mockClear();
     mocks.mainWindow.setFocus.mockClear();
+    mocks.getAllWebviewWindows.mockReset();
+    mocks.getAllWebviewWindows.mockResolvedValue(mocks.detachedWindows);
   });
 
   it("notifies the main window when the detached shell is renderable", async () => {
@@ -77,6 +80,13 @@ describe("detached tab app close checks", () => {
     });
     expect(mocks.emitTo).toHaveBeenCalledTimes(2);
     expect(mocks.unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("does not treat a detached-window enumeration failure as an empty list", async () => {
+    mocks.getAllWebviewWindows.mockRejectedValueOnce(new Error("window enumeration failed"));
+    const { listDetachedTabWindowLabels } = await import("@/lib/tabs/tabWindow");
+
+    await expect(listDetachedTabWindowLabels()).rejects.toThrow("window enumeration failed");
   });
 
   it("forwards main-only actions without loading their UI in the detached window", async () => {

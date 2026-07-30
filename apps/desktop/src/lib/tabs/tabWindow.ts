@@ -14,7 +14,7 @@ const APP_CLOSE_CHECK_EVENT = "dbx-detached-tab-app-close-check";
 const APP_CLOSE_STATUS_EVENT = "dbx-detached-tab-app-close-status";
 const MAIN_WINDOW_ACTION_EVENT = "dbx-detached-tab-main-window-action";
 const PERSISTENCE_UPDATE_EVENT = "dbx-detached-tab-persistence-update";
-const PERSISTENCE_ACK_TIMEOUT_MS = 5_000;
+const PERSISTENCE_ACK_TIMEOUT_MS = 15_000;
 const DETACHED_RECOVERY_STORAGE_PREFIX = "dbx-detached-tab-recovery:";
 const openingWindows = new Map<string, Promise<PreparedTabWindow>>();
 
@@ -45,6 +45,7 @@ interface DetachedTabPersistenceUpdate {
   requestId: string;
   windowLabel: string;
   tab: SavedOpenTab | null;
+  removedTabId?: string;
 }
 
 interface DetachedTabPersistenceAcknowledgement {
@@ -237,6 +238,18 @@ async function createEventWaiter<T>(target: WebviewWindow, eventName: string, ti
   };
 }
 
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function waitForWindowCreation(window: WebviewWindow): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     void window.once("tauri://created", () => resolve());
@@ -313,23 +326,19 @@ async function prepareTauriTabWindow(tabId: string, title: string, options: Prep
     windowLabel: label,
     async transfer(payload: Omit<DetachedTabTransferPayload, "transferId">, transferOptions = {}) {
       if (completed) throw new Error("Detached tab transfer already completed");
-      const [preparedWaiter, committedWaiter] = await Promise.all([
-        createEventWaiter<TransferPrepared>(mainWindow, transferEventName("prepared", transferId), "Detached tab window did not prepare the tab"),
-        createEventWaiter<TransferSignal>(mainWindow, transferEventName("committed", transferId), "Detached tab window did not confirm the ownership commit"),
-      ]);
-      // Either waiter may be cancelled before its sequential await begins.
+      const preparedWaiter = await createEventWaiter<TransferPrepared>(mainWindow, transferEventName("prepared", transferId), "Detached tab window did not prepare the tab");
       void preparedWaiter.promise.catch(() => {});
-      void committedWaiter.promise.catch(() => {});
       try {
         await emitTo(label, transferEventName("transfer", transferId), { transferId, ...payload } satisfies DetachedTabTransferPayload);
         const prepared = await preparedWaiter.promise;
         if (!prepared.ok) throw new Error(prepared.message || "Detached tab window rejected the tab");
-        // Persist the target owner before publishing the irreversible commit.
-        // Failures before this point can still restore the source tab safely.
-        await transferOptions.onPrepared?.();
+        // Persist a recovery snapshot before publishing the irreversible commit.
+        // The formal detached owner is recorded after the child reports commit.
+        if (transferOptions.onPrepared) {
+          await withTimeout(transferOptions.onPrepared(), TRANSFER_TIMEOUT_MS, "Timed out while persisting the detached tab recovery snapshot");
+        }
       } catch (error) {
         preparedWaiter.cancel();
-        committedWaiter.cancel();
         await emitTo(label, transferEventName("decision", transferId), {
           transferId,
           decision: "abort",
@@ -337,19 +346,24 @@ async function prepareTauriTabWindow(tabId: string, title: string, options: Prep
         throw error;
       }
 
-      // The source window is authoritative once its durable ownership update
-      // succeeds. A missing final acknowledgement must never restore a second
-      // live owner; the persisted tab is recovered on the next startup.
-      completed = true;
+      // Once commit is published, a missing final acknowledgement cannot prove
+      // that the child rejected it. Keep the recovery snapshot instead of
+      // restoring a possible second live owner.
       let commitAcknowledged = false;
+      const committedWaiter = await createEventWaiter<TransferSignal>(mainWindow, transferEventName("committed", transferId), "Detached tab window did not confirm the ownership commit");
+      void committedWaiter.promise.catch(() => {});
+      let commitPublished = false;
       try {
         await emitTo(label, transferEventName("decision", transferId), {
           transferId,
           decision: "commit",
         } satisfies TransferDecision);
+        commitPublished = true;
+        completed = true;
         await committedWaiter.promise;
         commitAcknowledged = true;
       } catch (error) {
+        if (!commitPublished) throw error;
         console.warn("[DBX][detached-tab:commit-ack:error]", { transferId, windowLabel: label, error });
       } finally {
         committedWaiter.cancel();
@@ -406,6 +420,7 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
   const currentWindow = getCurrentWebviewWindow();
   let accepting = false;
   let unlistenDecision: UnlistenFn | undefined;
+  let decisionTimer: ReturnType<typeof setTimeout> | undefined;
   const unlisten = await currentWindow.listen<DetachedTabTransferPayload>(transferEventName("transfer", transferId), async (event) => {
     if (accepting || event.payload.transferId !== transferId) return;
     accepting = true;
@@ -414,6 +429,8 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
     const rollbackAndDestroy = async () => {
       if (decisionSettled) return;
       decisionSettled = true;
+      if (decisionTimer) clearTimeout(decisionTimer);
+      decisionTimer = undefined;
       unlistenDecision?.();
       await rollbackReceive?.();
       await currentWindow.destroy().catch(() => {});
@@ -431,6 +448,8 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
           return;
         }
         decisionSettled = true;
+        if (decisionTimer) clearTimeout(decisionTimer);
+        decisionTimer = undefined;
         unlistenDecision?.();
         // sessionStorage survives a WebView reload during development, allowing
         // the committed child to recover without asking the source to transfer again.
@@ -438,6 +457,10 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
         await options.onCommitted?.();
         await emitTo("main", transferEventName("committed", transferId), { transferId } satisfies TransferSignal).catch(() => {});
       });
+      decisionTimer = setTimeout(() => {
+        console.warn("[DBX][detached-tab:decision:timeout]", { transferId, windowLabel: currentWindow.label });
+        void rollbackAndDestroy();
+      }, TRANSFER_TIMEOUT_MS * 2);
     } catch (error) {
       await emitTo("main", transferEventName("prepared", transferId), {
         transferId,
@@ -466,21 +489,24 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
       return () => {
         unlisten();
         unlistenDecision?.();
+        if (decisionTimer) clearTimeout(decisionTimer);
       };
     }
     await emitTo("main", transferEventName("transfer-ready", transferId), { transferId } satisfies TransferSignal);
     return () => {
       unlisten();
       unlistenDecision?.();
+      if (decisionTimer) clearTimeout(decisionTimer);
     };
   } catch (error) {
     unlisten();
     unlistenDecision?.();
+    if (decisionTimer) clearTimeout(decisionTimer);
     throw error;
   }
 }
 
-export async function reportDetachedTabPersistence(tab: SavedOpenTab | null): Promise<void> {
+export async function reportDetachedTabPersistence(tab: SavedOpenTab | null, removedTabId?: string): Promise<void> {
   const transferId = detachedTransferId();
   if (!isTauriRuntime() || !transferId) throw new Error("Detached tab transfer context is missing");
   const currentWindow = getCurrentWebviewWindow();
@@ -493,6 +519,7 @@ export async function reportDetachedTabPersistence(tab: SavedOpenTab | null): Pr
       requestId,
       windowLabel: currentWindow.label,
       tab,
+      ...(tab === null && removedTabId ? { removedTabId } : {}),
     } satisfies DetachedTabPersistenceUpdate);
     const acknowledgement = await acknowledgementWaiter.promise;
     if (!acknowledgement.ok) throw new Error(acknowledgement.message || "Main window rejected detached tab persistence");
@@ -503,13 +530,13 @@ export async function reportDetachedTabPersistence(tab: SavedOpenTab | null): Pr
   }
 }
 
-export async function listenForDetachedTabPersistenceUpdates(onUpdate: (windowLabel: string, tab: SavedOpenTab | null) => void | Promise<void>): Promise<UnlistenFn> {
+export async function listenForDetachedTabPersistenceUpdates(onUpdate: (windowLabel: string, tab: SavedOpenTab | null, removedTabId?: string) => void | Promise<void>): Promise<UnlistenFn> {
   if (!isTauriRuntime()) return () => {};
   return getCurrentWebviewWindow().listen<DetachedTabPersistenceUpdate>(PERSISTENCE_UPDATE_EVENT, async (event) => {
     const update = event.payload;
     let acknowledgement: DetachedTabPersistenceAcknowledgement;
     try {
-      await onUpdate(update.windowLabel, update.tab);
+      await onUpdate(update.windowLabel, update.tab, update.removedTabId);
       acknowledgement = { requestId: update.requestId, ok: true };
     } catch (error) {
       acknowledgement = {
@@ -598,6 +625,11 @@ export async function checkDetachedWindowsBeforeAppClose(): Promise<DetachedAppC
     dirtyWindowLabels: [...dirtyWindowLabels],
     unresponsiveWindowLabels: [...unresponsiveWindowLabels],
   };
+}
+
+export async function listDetachedTabWindowLabels(): Promise<string[]> {
+  if (!isTauriRuntime()) return [];
+  return (await getAllWebviewWindows()).map((window) => window.label).filter((label) => label.startsWith("detached-tab-"));
 }
 
 export async function promptDetachedWindowBeforeAppClose(windowLabel: string): Promise<void> {

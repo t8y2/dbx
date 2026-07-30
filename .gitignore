@@ -50,6 +50,10 @@ Thumbs.db
 # Temp
 tmp/
 
+# Code review tool artifacts
+review_diff.json
+review_classified.json
+
 # Logs
 *.log
 

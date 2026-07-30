@@ -25,6 +25,28 @@ use super::file_validator::validate_file_path;
 
 pub type MySqlPool = mysql_async::Pool;
 const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
+const MYSQL_SQL_PACKET_MARGIN_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MySqlCatalogDialect {
+    Doris,
+    StarRocks,
+}
+
+pub(crate) fn mysql_catalog_dialect(
+    db_type: DatabaseType,
+    driver_profile: Option<&str>,
+) -> Option<MySqlCatalogDialect> {
+    match db_type {
+        DatabaseType::Doris => Some(MySqlCatalogDialect::Doris),
+        DatabaseType::StarRocks => Some(MySqlCatalogDialect::StarRocks),
+        _ => match driver_profile.map(str::to_ascii_lowercase).as_deref() {
+            Some("doris" | "selectdb") => Some(MySqlCatalogDialect::Doris),
+            Some("starrocks") => Some(MySqlCatalogDialect::StarRocks),
+            _ => None,
+        },
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MySqlQueryDialect {
@@ -1012,7 +1034,6 @@ fn mysql_setup_queries_for_database_with_mode(
     setup_mode: MySqlSetupMode,
 ) -> Vec<String> {
     let charset = mysql_connection_charset(url).unwrap_or("utf8mb4");
-    let catalog = mysql_connection_catalog(url);
     let database = setup_database.map(ToOwned::to_owned).or_else(|| mysql_connection_database(url));
     let mut queries = Vec::new();
     if let Some(database) = database.as_deref() {
@@ -1031,20 +1052,49 @@ fn mysql_setup_queries_for_database_with_mode(
     if let Some(query) = setup_mode.group_concat_max_len_query() {
         queries.push(query);
     }
-    // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
-    // catalog. `SET catalog` must run *before* `USE <database>` (the database
-    // lives in the external catalog and is unknown to the default one).
-    // mysql_async drains the setup list back-to-front (Vec::pop), so push it
-    // last to make it execute first. The handshake does not send the database
-    // as schema (see `mysql_async_url`, which strips the path when a catalog is
-    // configured), so the connection establishes in the default catalog and
-    // this setup query is what switches it. The pool re-runs these queries
-    // after every connection reset, so the catalog stays current.
-    if let Some(catalog) = catalog.as_deref() {
-        queries.push(format!("SET catalog = {}", quote_identifier(catalog)));
-    }
     queries.extend(extra_setup_queries.iter().cloned());
     queries
+}
+
+fn catalog_switch_query(dialect: MySqlCatalogDialect, catalog: &str) -> String {
+    let catalog = quote_identifier(catalog);
+    match dialect {
+        MySqlCatalogDialect::Doris => format!("SWITCH {catalog}"),
+        MySqlCatalogDialect::StarRocks => format!("SET CATALOG {catalog}"),
+    }
+}
+
+pub(crate) fn catalog_setup_query_for_url(dialect: MySqlCatalogDialect, url: &str) -> Option<String> {
+    mysql_connection_catalog(url).map(|catalog| catalog_switch_query(dialect, &catalog))
+}
+
+pub(crate) fn catalog_database_context_queries(
+    dialect: Option<MySqlCatalogDialect>,
+    catalog: Option<&str>,
+    database: &str,
+) -> Result<Vec<String>, String> {
+    let Some(catalog) = catalog.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let dialect = dialect.ok_or("Catalog selection is only supported for Doris and StarRocks")?;
+    let mut queries = Vec::with_capacity(2);
+    queries.push(catalog_switch_query(dialect, catalog));
+    if !database.trim().is_empty() {
+        queries.push(format!("USE {}", quote_identifier(database)));
+    }
+    Ok(queries)
+}
+
+pub(crate) async fn apply_catalog_database_context(
+    conn: &mut mysql_async::Conn,
+    dialect: Option<MySqlCatalogDialect>,
+    catalog: Option<&str>,
+    database: &str,
+) -> Result<(), String> {
+    for query in catalog_database_context_queries(dialect, catalog, database)? {
+        conn.query_drop(&query).await.map_err(|error| format!("Failed to select query catalog/database: {error}"))?;
+    }
+    Ok(())
 }
 
 fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
@@ -1125,8 +1175,8 @@ fn mysql_connection_database(url: &str) -> Option<String> {
 
 /// Extracts an opt-in `catalog=<name>` URL parameter. dbx strips it from the
 /// URL before handing it to mysql_async (see `is_dbx_handled_mysql_url_param`)
-/// and instead emits `SET catalog = <name>` during connection setup. This is
-/// how StarRocks/Doris connections reach an external catalog such as Paimon.
+/// and emits the database-specific catalog switch during connection setup.
+/// This is how StarRocks/Doris connections reach an external catalog such as Paimon.
 fn mysql_connection_catalog(url: &str) -> Option<String> {
     let (_, query) = url.split_once('?')?;
     let query = query.split('#').next().unwrap_or(query);
@@ -1594,7 +1644,7 @@ fn mysql_url_param_value_is_true(value: &str) -> bool {
 /// Strips the database path from a `mysql://[user[:pass]@]host[:port][/path]`
 /// URL, returning only the scheme and authority. Used so mysql_async does not
 /// send the database as the schema during the MySQL handshake (StarRocks would
-/// reject an external-catalog database before `SET catalog` runs in setup).
+/// reject an external-catalog database before the catalog switch runs in setup).
 fn strip_mysql_url_path(base: &str) -> &str {
     let Some(rest) = base.strip_prefix("mysql://") else {
         return base;
@@ -3606,6 +3656,23 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<Qu
     execute_query_with_max_rows(pool, sql, bare, None, MySqlQueryDialect::default()).await
 }
 
+pub async fn max_allowed_packet(pool: &MySqlPool) -> Result<u64, String> {
+    let mut conn = get_conn_with_health_check(pool).await?;
+    conn.query_first::<u64, _>("SELECT @@max_allowed_packet")
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "MySQL did not return @@max_allowed_packet".to_string())
+}
+
+pub(crate) fn mysql_sql_statement_hard_limit(max_allowed_packet: u64) -> Option<usize> {
+    let packet_bytes = usize::try_from(max_allowed_packet).ok()?;
+    if packet_bytes == 0 {
+        return None;
+    }
+    let margin = (packet_bytes / 10).clamp(1024, MYSQL_SQL_PACKET_MARGIN_MAX_BYTES).min(packet_bytes / 2);
+    packet_bytes.checked_sub(margin).filter(|limit| *limit > 0)
+}
+
 pub async fn execute_query_with_max_rows(
     pool: &MySqlPool,
     sql: &str,
@@ -4109,8 +4176,45 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_sql_statement_limit_reserves_packet_headroom() {
+        let packet_bytes = 64 * 1024 * 1024;
+        let hard_limit = mysql_sql_statement_hard_limit(packet_bytes).unwrap();
+
+        assert!(hard_limit < packet_bytes as usize);
+        assert!(hard_limit >= packet_bytes as usize * 9 / 10);
+        assert_eq!(mysql_sql_statement_hard_limit(0), None);
+        assert_eq!(mysql_sql_statement_hard_limit(4096), Some(3072));
+    }
     use crate::db::connection_timeout;
     use mysql_async::consts::ColumnFlags;
+    #[test]
+    fn catalog_database_context_uses_database_specific_syntax_before_database() {
+        assert_eq!(
+            catalog_database_context_queries(Some(MySqlCatalogDialect::Doris), Some("paimon`catalog"), "bi").unwrap(),
+            vec!["SWITCH `paimon``catalog`", "USE `bi`"]
+        );
+        assert_eq!(
+            catalog_database_context_queries(Some(MySqlCatalogDialect::StarRocks), Some("paimon`catalog"), "bi")
+                .unwrap(),
+            vec!["SET CATALOG `paimon``catalog`", "USE `bi`"]
+        );
+        assert_eq!(
+            catalog_database_context_queries(Some(MySqlCatalogDialect::Doris), None, "").unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(catalog_database_context_queries(None, Some("paimon_catalog"), "bi").is_err());
+    }
+
+    #[test]
+    fn catalog_dialect_supports_native_and_profile_connections() {
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Doris, None), Some(MySqlCatalogDialect::Doris));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::StarRocks, None), Some(MySqlCatalogDialect::StarRocks));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Mysql, Some("selectdb")), Some(MySqlCatalogDialect::Doris));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Mysql, Some("STARROCKS")), Some(MySqlCatalogDialect::StarRocks));
+        assert_eq!(mysql_catalog_dialect(DatabaseType::Mysql, None), None);
+    }
 
     fn mysql_test_object(name: &str, object_type: &str) -> ObjectInfo {
         ObjectInfo {
@@ -5316,7 +5420,7 @@ mod tests {
     }
 
     #[test]
-    fn mysql_compatible_setup_queries_keep_catalog_and_extra_queries() {
+    fn mysql_compatible_setup_queries_leave_catalog_to_database_specific_setup() {
         let extra = vec!["SET ob_query_timeout = 30000000".to_string()];
         let queries = mysql_setup_queries_with_mode(
             "mysql://root:secret@localhost:9030/clip?catalog=paimon_catalog",
@@ -5324,15 +5428,19 @@ mod tests {
             MySqlSetupMode::Compatible,
         );
 
-        assert_eq!(
-            queries,
-            vec![
-                "USE `clip`",
-                "SET NAMES utf8mb4",
-                "SET catalog = `paimon_catalog`",
-                "SET ob_query_timeout = 30000000"
-            ]
+        assert_eq!(queries, vec!["USE `clip`", "SET NAMES utf8mb4", "SET ob_query_timeout = 30000000"]);
+    }
+
+    #[test]
+    fn mysql_setup_appends_database_specific_catalog_for_reverse_execution() {
+        let extra = vec!["SWITCH `paimon_catalog`".to_string()];
+        let queries = mysql_setup_queries_with_mode(
+            "mysql://root:secret@localhost:9030/clip?catalog=paimon_catalog",
+            &extra,
+            MySqlSetupMode::Compatible,
         );
+
+        assert_eq!(queries, vec!["USE `clip`", "SET NAMES utf8mb4", "SWITCH `paimon_catalog`"]);
     }
 
     #[test]
@@ -5703,38 +5811,21 @@ mod tests {
     }
 
     #[test]
-    fn mysql_setup_queries_switch_catalog_when_present() {
-        // `SET catalog` is pushed last so mysql_async's back-to-front setup
-        // execution (Vec::pop) runs it before `USE <database>`.
+    fn catalog_setup_query_for_url_uses_database_specific_syntax() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/clip?catalog=paimon_catalog", &[]),
-            vec![
-                "USE `clip`",
-                "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
-                "SET catalog = `paimon_catalog`"
-            ]
+            catalog_setup_query_for_url(MySqlCatalogDialect::Doris, "mysql://host:3306/clip?catalog=paimon_catalog"),
+            Some("SWITCH `paimon_catalog`".to_string())
         );
-    }
-
-    #[test]
-    fn mysql_setup_queries_switch_catalog_without_database() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog", &[]),
-            vec!["SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576", "SET catalog = `paimon_catalog`"]
+            catalog_setup_query_for_url(
+                MySqlCatalogDialect::StarRocks,
+                "mysql://host:3306/clip?catalog=paimon_catalog"
+            ),
+            Some("SET CATALOG `paimon_catalog`".to_string())
         );
-    }
-
-    #[test]
-    fn mysql_setup_queries_decodes_catalog_parameter() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog", &[]),
-            vec![
-                "USE `db`",
-                "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
-                "SET catalog = `my_catalog`"
-            ]
+            catalog_setup_query_for_url(MySqlCatalogDialect::Doris, "mysql://host:3306/db?catalog=my%5Fcatalog"),
+            Some("SWITCH `my_catalog`".to_string())
         );
     }
 

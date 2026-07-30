@@ -2,10 +2,33 @@ import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import type { ConnectionConfig } from "@/types/database";
+import { isInternalDorisCatalog } from "@/lib/database/databaseFeatureSupport";
+import type { CatalogInfo, ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
 type NamespaceOptionsConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "visible_databases" | "visible_schemas">;
+export function catalogDatabaseOptionsKey(connectionId: string, catalog: string): string {
+  return `${connectionId}:${catalog}`;
+}
+
+export function queryCatalogSelectorVisible(catalogs: CatalogInfo[]): boolean {
+  return catalogs.some((catalog) => !isInternalDorisCatalog(catalog.catalog_type, catalog.name));
+}
+
+export function selectedQueryCatalogName(catalogs: CatalogInfo[], tabCatalog?: string): string {
+  if (tabCatalog) return tabCatalog;
+  return catalogs.find((catalog) => isInternalDorisCatalog(catalog.catalog_type, catalog.name))?.name ?? "";
+}
+
+export function normalizedQueryTabCatalog(catalogs: CatalogInfo[], selectedCatalog: string): string | undefined {
+  if (!selectedCatalog) return undefined;
+  const catalog = catalogs.find((candidate) => candidate.name === selectedCatalog);
+  return catalog && isInternalDorisCatalog(catalog.catalog_type, catalog.name) ? undefined : selectedCatalog;
+}
+
+export function databaseAfterCatalogChange(currentDatabase: string, databaseOptions: string[]): string {
+  return databaseOptions.includes(currentDatabase) ? currentDatabase : "";
+}
 
 export function databaseOptionsForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> | undefined): string[] {
   const names = filterDatabaseNamesForConnection(databaseNames, connection);
@@ -42,6 +65,12 @@ export function useDatabaseOptions() {
 
   const databaseOptions = ref<Record<string, string[]>>({});
   const loadingDatabaseOptions = ref<Record<string, boolean>>({});
+  const catalogOptions = ref<Record<string, CatalogInfo[]>>({});
+  const loadingCatalogOptions = ref<Record<string, boolean>>({});
+  const catalogDatabaseOptions = ref<Record<string, string[]>>({});
+  const loadingCatalogDatabaseOptions = ref<Record<string, boolean>>({});
+  const catalogRequests = new Map<string, Promise<CatalogInfo[]>>();
+  const catalogDatabaseRequests = new Map<string, Promise<string[]>>();
 
   async function loadDatabaseOptions(connectionId: string) {
     const connection = connectionStore.getConfig(connectionId);
@@ -70,6 +99,56 @@ export function useDatabaseOptions() {
     }
   }
 
+  async function loadCatalogOptions(connectionId: string): Promise<CatalogInfo[]> {
+    const cached = catalogOptions.value[connectionId];
+    if (cached) return cached;
+    const pending = catalogRequests.get(connectionId);
+    if (pending) return pending;
+
+    const request = (async () => {
+      loadingCatalogOptions.value[connectionId] = true;
+      try {
+        await connectionStore.ensureConnected(connectionId);
+        const catalogs = await api.listDorisCatalogs(connectionId);
+        catalogOptions.value[connectionId] = catalogs;
+        return catalogs;
+      } finally {
+        loadingCatalogOptions.value[connectionId] = false;
+        catalogRequests.delete(connectionId);
+      }
+    })();
+    catalogRequests.set(connectionId, request);
+    return request;
+  }
+
+  async function loadCatalogDatabaseOptions(connectionId: string, catalog: string): Promise<string[]> {
+    const key = catalogDatabaseOptionsKey(connectionId, catalog);
+    const cached = catalogDatabaseOptions.value[key];
+    if (cached) return cached;
+    const pending = catalogDatabaseRequests.get(key);
+    if (pending) return pending;
+
+    const request = (async () => {
+      loadingCatalogDatabaseOptions.value[key] = true;
+      try {
+        await connectionStore.ensureConnected(connectionId);
+        const connection = connectionStore.getConfig(connectionId);
+        const databases = await api.listDorisCatalogDatabases(connectionId, catalog);
+        const names = databaseOptionsForConnection(
+          databases.map((database) => database.name),
+          connection,
+        );
+        catalogDatabaseOptions.value[key] = names;
+        return names;
+      } finally {
+        loadingCatalogDatabaseOptions.value[key] = false;
+        catalogDatabaseRequests.delete(key);
+      }
+    })();
+    catalogDatabaseRequests.set(key, request);
+    return request;
+  }
+
   async function getDatabaseOptions(connectionId: string): Promise<string[]> {
     if (!databaseOptions.value[connectionId]) {
       await loadDatabaseOptions(connectionId);
@@ -77,5 +156,16 @@ export function useDatabaseOptions() {
     return databaseOptions.value[connectionId] ?? [];
   }
 
-  return { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, getDatabaseOptions };
+  return {
+    databaseOptions,
+    loadingDatabaseOptions,
+    loadDatabaseOptions,
+    getDatabaseOptions,
+    catalogOptions,
+    loadingCatalogOptions,
+    loadCatalogOptions,
+    catalogDatabaseOptions,
+    loadingCatalogDatabaseOptions,
+    loadCatalogDatabaseOptions,
+  };
 }

@@ -134,6 +134,16 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, command);
         Err("MongoDB shell commands are not supported by this backend.".to_string())
     }
+    /// Release the connection pool pinned by an MCP session (`client_session_id`).
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let _ = (connection_id, database, client_session_id);
+        Err("Session cleanup is not supported by this backend.".to_string())
+    }
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
@@ -156,6 +166,7 @@ pub struct WebBackend {
     password: String,
     client: reqwest::Client,
     auth: Mutex<WebAuthState>,
+    connected: Mutex<HashMap<String, ConnectionConfig>>,
 }
 
 impl WebBackend {
@@ -168,7 +179,13 @@ impl WebBackend {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
-        Ok(Self { base_url, password, client, auth: Mutex::new(WebAuthState::default()) })
+        Ok(Self {
+            base_url,
+            password,
+            client,
+            auth: Mutex::new(WebAuthState::default()),
+            connected: Mutex::new(HashMap::new()),
+        })
     }
 
     async fn ensure_auth(&self) -> Result<(), String> {
@@ -260,7 +277,12 @@ impl WebBackend {
     }
 
     async fn ensure_connected(&self, connection: &ConnectionConfig) -> Result<(), String> {
+        let mut connected = self.connected.lock().await;
+        if connected.get(&connection.id) == Some(connection) {
+            return Ok(());
+        }
         self.request(reqwest::Method::POST, "/api/connection/connect", Some(json!({ "config": connection }))).await?;
+        connected.insert(connection.id.clone(), connection.clone());
         Ok(())
     }
 }
@@ -598,6 +620,16 @@ impl DbxBackend for LocalBackend {
         }
     }
 
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let database = if database.trim().is_empty() { None } else { Some(database) };
+        self.state.close_client_session_pool(connection_id, database, client_session_id).await
+    }
+
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
             .await
@@ -678,13 +710,12 @@ impl DbxBackend for WebBackend {
             }
 
             let max_rows = arguments.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let response = self
-                .request(
-                    reqwest::Method::POST,
-                    "/api/query/execute",
-                    Some(json!({ "connectionId": connection.id, "database": database, "sql": sql })),
-                )
-                .await?;
+            let mut body = json!({ "connectionId": connection.id, "database": database, "sql": sql });
+            // Stateful MCP sessions pin every query to the same backend pool.
+            if let Some(client_session_id) = arguments.get("client_session_id").and_then(Value::as_str) {
+                body["clientSessionId"] = json!(client_session_id);
+            }
+            let response = self.request(reqwest::Method::POST, "/api/query/execute", Some(body)).await?;
             let query_result: dbx_core::db::QueryResult =
                 response.json().await.map_err(|error| format!("Invalid query response: {error}"))?;
             Ok(format_query_result(&query_result, max_rows))
@@ -722,6 +753,27 @@ impl DbxBackend for WebBackend {
         .map_err(|error| format!("Invalid query response: {error}"))
     }
 
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/query/close-client-session",
+            Some(json!({
+                "connectionId": connection_id,
+                "database": database,
+                "clientSessionId": client_session_id,
+            })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid close session response: {error}"))
+    }
+
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         self.request(reqwest::Method::POST, "/api/connection/mcp/add", Some(json!({ "config": config })))
             .await?
@@ -731,15 +783,20 @@ impl DbxBackend for WebBackend {
     }
 
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
-        self.request(
-            reqwest::Method::POST,
-            "/api/connection/mcp/remove",
-            Some(json!({ "connectionId": connection_id })),
-        )
-        .await?
-        .json()
-        .await
-        .map_err(|error| format!("Invalid MCP connection response: {error}"))
+        let removed = self
+            .request(
+                reqwest::Method::POST,
+                "/api/connection/mcp/remove",
+                Some(json!({ "connectionId": connection_id })),
+            )
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid MCP connection response: {error}"))?;
+        if removed {
+            self.connected.lock().await.remove(connection_id);
+        }
+        Ok(removed)
     }
 
     async fn list_tables(

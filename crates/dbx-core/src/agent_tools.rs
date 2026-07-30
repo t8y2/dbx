@@ -204,6 +204,10 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Max rows to return (default 50, max 100)"
+                },
+                "client_session_id": {
+                    "type": "string",
+                    "description": "Opaque DBX session handle that pins this query to the same backend connection as earlier queries in the session (preserves USE/SET/session state). Managed by DBX; agents should not invent values."
                 }
             },
             "required": ["sql"]
@@ -572,8 +576,18 @@ async fn execute_execute_query(
         ));
     }
 
+    // Stateful callers (e.g. MCP sessions) pin the query to their dedicated
+    // connection pool so USE/SET and other session state is preserved.
+    let client_session_id =
+        tool_call.arguments.get("client_session_id").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
+
     // Execute query using existing infrastructure
-    let options = QueryExecutionOptions { max_rows: Some(limit), timeout_secs: Some(30), ..Default::default() };
+    let options = QueryExecutionOptions {
+        max_rows: Some(limit),
+        timeout_secs: Some(30),
+        client_session_id: client_session_id.map(str::to_string),
+        ..Default::default()
+    };
     let result =
         crate::query::execute_sql_statement_with_options(state, connection_id, database, sql, None, None, options)
             .await?;

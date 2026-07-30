@@ -153,7 +153,7 @@ make
 
 `make` 会使用锁文件安装依赖，然后启动 Tauri 桌面开发环境。第一次编译 Rust 依赖需要较长时间，后续启动会明显更快。
 
-如果你修改的功能与 DuckDB 无关，推荐跳过 DuckDB 源码编译：
+如需轻量桌面开发构建，可以保留 DuckDB sidecar 支持，同时跳过其他默认 Rust feature：
 
 ```bash
 make dev-fast
@@ -172,10 +172,10 @@ pnpm install --frozen-lockfile
 pnpm dev:tauri
 ```
 
-不需要 DuckDB 时使用：
+使用相同的轻量构建：
 
 ```powershell
-pnpm tauri dev -- --no-default-features
+pnpm tauri dev -- --no-default-features --features duckdb-sidecar
 ```
 
 ### 判断是否启动成功
@@ -451,7 +451,7 @@ git push --force-with-lease
 
 ### 第一次 Rust 编译很慢
 
-这是正常现象。与 DuckDB 无关的开发优先使用 `make dev-fast`、`make cargo-check-fast` 和 `make cargo-test-fast`。
+这是正常现象。轻量桌面开发可以使用仍支持 DuckDB 的 `make dev-fast`。`make cargo-check-fast` 和 `make cargo-test-fast` 会跳过全部可选默认 feature，因此不会验证 DuckDB 专用路径。
 
 ### pnpm 提示版本不正确
 

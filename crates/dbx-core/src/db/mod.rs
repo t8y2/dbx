@@ -5,14 +5,11 @@ pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
 pub mod document_result;
 pub mod doris;
-pub mod duckdb_driver;
 pub mod duckdb_sql;
-#[cfg(feature = "duckdb-bundled")]
+#[cfg(feature = "duckdb-sidecar")]
 pub mod duckdb_worker_process;
-#[cfg(feature = "duckdb-bundled")]
+#[cfg(feature = "duckdb-sidecar")]
 pub mod duckdb_worker_protocol;
-#[cfg(feature = "duckdb-bundled")]
-pub mod duckdb_worker_runtime;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
 pub mod file_validator;

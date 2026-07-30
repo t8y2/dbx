@@ -20,6 +20,18 @@ test("Cloudflare D1 使用 SQLite main 命名空间而不是连接凭据中的 D
   assert.equal(isDefaultDatabase({ db_type: "cloudflare-d1", database: "d1-database-uuid" }, "d1-database-uuid"), false);
 });
 
+test("SQLite 文件路径不会被当作逻辑数据库名", () => {
+  assert.equal(resolveDefaultDatabase({ db_type: "sqlite", database: "/tmp/stale.sqlite" }, []), "main");
+  assert.equal(resolveDefaultDatabase({ db_type: "sqlite", database: "C:\\data\\stale.db" }, []), "main");
+  assert.equal(resolveDefaultDatabase({ db_type: "sqlite", database: "file:/tmp/stale.sqlite" }, []), "main");
+  assert.equal(isDefaultDatabase({ db_type: "sqlite", database: "/tmp/stale.sqlite" }, "main"), true);
+});
+
+test("SQLite 附加数据库别名保持不变", () => {
+  assert.equal(resolveDefaultDatabase({ db_type: "sqlite", database: "analytics" }, ["main"]), "analytics");
+  assert.equal(isDefaultDatabase({ db_type: "sqlite", database: "analytics" }, "analytics"), true);
+});
+
 test("判断当前数据库是否为默认数据库", () => {
   assert.equal(isDefaultDatabase({ database: "analytics" }, "analytics"), true);
   assert.equal(isDefaultDatabase({ database: "analytics" }, "app"), false);

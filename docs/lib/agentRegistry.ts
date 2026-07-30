@@ -21,6 +21,7 @@ export interface GitHubReleaseAsset {
 interface AgentRegistryArtifact {
   url: string;
   size: number;
+  format?: "tar_zstd";
 }
 
 interface AgentRegistryDriver {
@@ -88,7 +89,7 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX = "https://github.com/t8y2/dbx/releases/dow
 const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const MIN_APP_VERSION = "0.6.0";
 const driverVersionMap = driverVersions as Record<string, string>;
-const nativeDriverKeys = new Set(["oracle", "kingbase", "xugu"]);
+const nativeDriverKeys = new Set(["duckdb", "oracle", "kingbase", "xugu"]);
 
 const platformLabels: Record<string, string> = {
   "macos-aarch64": "macOS (Apple Silicon)",
@@ -107,6 +108,7 @@ const driverLabels: Record<string, string> = {
   databend: "Databend",
   databricks: "Databricks",
   db2: "DB2",
+  duckdb: "DuckDB",
   etcd: "etcd",
   exasol: "Exasol",
   firebird: "Firebird",
@@ -182,31 +184,14 @@ function registryReleaseAssets(registry: AgentRegistry): GitHubReleaseAsset[] {
 
   for (const [jreKey, jre] of Object.entries(registry.jres ?? {})) {
     for (const [platformKey, artifact] of Object.entries(jre.platforms ?? {})) {
-      addArtifact(artifact, `dbx-jre-${jreKey}-${platformKey}.tar.gz`);
+      addArtifact(artifact, `dbx-jre-${jreKey}-${platformKey}.tar.zst`);
     }
   }
 
   for (const [driverKey, driver] of Object.entries(registry.drivers ?? {})) {
-    addArtifact(driver.jar, `dbx-agent-${driverKey}.jar`);
-    if (driver.version && driver.jar?.url && driver.jar.size > 0) {
-      const packageName = `dbx-agent-${driverKey}-${driver.version}.zip`;
-      assets.set(packageName, {
-        name: packageName,
-        size: 0,
-        browser_download_url: siblingReleaseAssetUrl(driver.jar.url, packageName),
-      });
-    }
+    addArtifact(driver.jar, `dbx-agent-${driverKey}-${driver.version ?? "latest"}.tar.zst`);
     for (const [platformKey, artifact] of Object.entries(driver.native ?? {})) {
-      addArtifact(artifact, `dbx-agent-${driverKey}-${platformKey}`);
-      const filename = releaseAssetName(artifact.url, "");
-      if (driver.version && filename.includes(`-${driver.version}-${platformKey}`)) {
-        const packageName = `${filename.replace(/\.exe$/, "")}.zip`;
-        assets.set(packageName, {
-          name: packageName,
-          size: 0,
-          browser_download_url: siblingReleaseAssetUrl(artifact.url, packageName),
-        });
-      }
+      addArtifact(artifact, `dbx-agent-${driverKey}-${driver.version ?? "latest"}-${platformKey}.tar.zst`);
     }
   }
 
@@ -263,7 +248,7 @@ export function buildJdbcPluginDownloadEntry(): JdbcPluginDownloadEntry {
 export function buildJreEntries(assets: GitHubReleaseAsset[]): JreDisplayEntry[] {
   return assets
     .map((asset) => {
-      const match = /^dbx-jre-(\d+)-(.+)\.tar\.gz$/.exec(asset.name);
+      const match = /^dbx-jre-(\d+)-(.+)\.tar\.(?:zst|gz)$/.exec(asset.name);
       if (!match) return null;
 
       const [, jreKey, platformKey] = match;
@@ -287,7 +272,7 @@ export function buildDriverEntries(assets: GitHubReleaseAsset[]): DriverDisplayE
   return currentJavaDriverKeys
     .map((key) => {
       const version = driverVersionMap[key] ?? "";
-      const asset = byName.get(`dbx-agent-${key}-${version}.zip`) ?? byName.get(`dbx-agent-${key}-${version}.jar`) ?? byName.get(`dbx-agent-${key}.jar`);
+      const asset = byName.get(`dbx-agent-${key}-${version}.tar.zst`) ?? byName.get(`dbx-agent-${key}-${version}.zip`) ?? byName.get(`dbx-agent-${key}-${version}.jar`) ?? byName.get(`dbx-agent-${key}.jar`);
       if (!asset) return null;
 
       return {
@@ -307,9 +292,9 @@ export function buildNativeAgentEntries(assets: GitHubReleaseAsset[]): NativeAge
   const platforms = "macos-aarch64|macos-x64|linux-aarch64|linux-x64|windows-aarch64|windows-x64";
 
   for (const asset of assets) {
-    const packageMatch = new RegExp(`^dbx-agent-(oracle|kingbase|xugu)-(.+)-(${platforms})\\.zip$`).exec(asset.name);
-    const versionedMatch = new RegExp(`^dbx-agent-(oracle|kingbase|xugu)-(.+)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
-    const legacyMatch = new RegExp(`^dbx-agent-(oracle|kingbase|xugu)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
+    const packageMatch = new RegExp(`^dbx-agent-(duckdb|oracle|kingbase|xugu)-(.+)-(${platforms})\\.(?:tar\\.zst|zip)$`).exec(asset.name);
+    const versionedMatch = new RegExp(`^dbx-agent-(duckdb|oracle|kingbase|xugu)-(.+)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
+    const legacyMatch = new RegExp(`^dbx-agent-(duckdb|oracle|kingbase|xugu)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
     const match = packageMatch ?? versionedMatch ?? legacyMatch;
     if (!match) continue;
 

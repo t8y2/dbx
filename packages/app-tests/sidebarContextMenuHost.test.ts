@@ -60,16 +60,71 @@ test("tree host owns sidebar data-open generations", () => {
   assert.match(connectionTree, /createSidebarActionTarget\(node\)/);
 });
 
+test("query-tab object source opens clean isolated tabs and honors backend editability", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const openObjectSourceBody = functionBody(runtimeHost, "openObjectSourceDialog");
+
+  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, result\.source, node\.catalog, \{ forceNew: true \}\)/);
+  assert.match(openObjectSourceBody, /result\.editable !== false/);
+  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"\]\.includes\(objectType\)/);
+  assert.match(openObjectSourceBody, /signature: node\.signature/);
+  assert.doesNotMatch(openObjectSourceBody, /queryStore\.updateSql/);
+});
+
 test("table copy menu uses the shared single and multi-selection clipboard path", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const copyNameBody = functionBody(runtimeHost, "copyName");
   const copySelectedNamesBody = functionBody(runtimeHost, "copySelectedNames");
+  const clipboardMenuBody = functionBody(runtimeHost, "treeTableClipboardMenuItems");
 
-  assert.match(runtimeHost, /label: t\("contextMenu\.copyTable"\), action: copySelectedNames, icon: Copy/);
+  assert.match(clipboardMenuBody, /tableClipboardMenuState\(\s*normalizedTreeClipboardTableEntries\(\)/);
+  assert.match(clipboardMenuBody, /state === "paste" \? \[pasteItem\] : \[copyItem, pasteItem\]/);
+  assert.match(runtimeHost, /items\.push\(\.\.\.treeTableClipboardMenuItems\(node\)\)/);
   assert.doesNotMatch(runtimeHost, /function copyTableToClipboard\(/);
+  assert.doesNotMatch(copyNameBody, /updateTreeClipboardForNodes/);
   assert.match(copySelectedNamesBody, /const selectedNodes = selectedTreeNodesInVisibleOrder\(\)/);
   assert.match(copySelectedNamesBody, /selectedNodes\.length > 1 && selectedNodes\.some\(\(node\) => node\.id === activeNode\.value\.id\) \? selectedNodes : \[activeNode\.value\]/);
   assert.match(copySelectedNamesBody, /updateTreeClipboardForNodes\(nodes\)/);
   assert.match(copySelectedNamesBody, /copyToClipboard\(nodes\.map\(copyNameForTreeNode\)\.join\("\\n"\)\)/);
+});
+
+test("successful tree table paste consumes only the clipboard used to start it", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
+
+  assert.match(confirmPasteTableBody, /const clipboardAtPasteStart = connectionStore\.treeClipboard/);
+  assert.match(confirmPasteTableBody, /if \(pasteFailCount === 0\)/);
+  assert.match(confirmPasteTableBody, /connectionStore\.treeClipboard === clipboardAtPasteStart/);
+  assert.match(confirmPasteTableBody, /connectionStore\.treeClipboard = null/);
+});
+
+test("tree table paste keeps the clipboard when production confirmation is cancelled", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
+
+  assert.match(confirmPasteTableBody, /const structureExecuted = await executeTreeNodeSqlWithProductionGuard[\s\S]*?if \(!structureExecuted\) \{[\s\S]*?pasteCancelled = true;[\s\S]*?break;/);
+  assert.match(confirmPasteTableBody, /const dataExecuted = await executeTreeNodeSqlWithProductionGuard[\s\S]*?if \(!dataExecuted\) \{[\s\S]*?pasteCancelled = true;[\s\S]*?break;/);
+  assert.match(confirmPasteTableBody, /queueRefreshTarget\(entry\)/);
+  assert.match(confirmPasteTableBody, /if \(pasteCancelled\) \{[\s\S]*?if \(hasMutatedTable && refreshFailCount === 0\)[\s\S]*?pasteTableCancelledAfterPartial[\s\S]*?return;/);
+});
+
+test("tree table paste consumes the clipboard even if only the object-list refresh fails", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
+
+  assert.match(confirmPasteTableBody, /let pasteFailCount = 0/);
+  assert.match(confirmPasteTableBody, /let refreshFailCount = 0/);
+  assert.match(confirmPasteTableBody, /pasteFailCount\+\+/);
+  assert.match(confirmPasteTableBody, /refreshFailCount\+\+/);
+  assert.match(confirmPasteTableBody, /if \(pasteFailCount === 0\)[\s\S]*?connectionStore\.treeClipboard = null/);
+  assert.match(confirmPasteTableBody, /if \(refreshFailCount > 0\)[\s\S]*?pasteTableRefreshFailed/);
+});
+
+test("sidebar keyboard table copy uses the same normalized schema as the context menu", () => {
+  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
+  const copySelectedSidebarNamesBody = functionBody(connectionTree, "copySelectedSidebarNames");
+
+  assert.match(copySelectedSidebarNamesBody, /schema: connectionObjectTreeNodeSchema\(store\.getConfig\(node\.connectionId!\), node\.database!, node\.schema\)/);
 });
 
 test("batch table paste refreshes each object list after all tables are processed", () => {

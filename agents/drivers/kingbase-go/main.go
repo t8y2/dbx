@@ -120,6 +120,7 @@ type queryPageResult struct {
 
 type querySession struct {
 	rows        *sql.Rows
+	conn        *sql.Conn
 	columns     []string
 	columnTypes []string
 	pending     []any
@@ -572,17 +573,15 @@ func (s *server) cancelActiveQuery() {
 
 func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	start := time.Now()
-	if err := s.setSchema(opts.Schema); err != nil {
-		return queryResult{}, err
-	}
 	sqlText := trimStatementSQL(opts.SQL)
 	if isQuerySQL(sqlText) {
-		rows, cancel, err := s.queryRows(sqlText, opts.TimeoutSecs)
+		rows, conn, cancel, err := s.queryRows(sqlText, opts.Schema, opts.TimeoutSecs)
 		if err != nil {
 			return queryResult{}, err
 		}
 		defer func() {
 			_ = rows.Close()
+			_ = conn.Close()
 			s.endOperation(cancel)
 		}()
 		maxRows := opts.MaxRows
@@ -593,13 +592,15 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
-	db, err := s.requireDB()
+	conn, ctx, cancel, err := s.operationConn(opts.Schema, opts.TimeoutSecs)
 	if err != nil {
 		return queryResult{}, err
 	}
-	ctx, cancel := s.beginOperation(opts.TimeoutSecs)
-	defer s.endOperation(cancel)
-	execResult, err := db.ExecContext(ctx, sqlText)
+	defer func() {
+		_ = conn.Close()
+		s.endOperation(cancel)
+	}()
+	execResult, err := conn.ExecContext(ctx, sqlText)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -607,37 +608,35 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) queryRows(sqlText string, timeoutSecs int) (*sql.Rows, context.CancelFunc, error) {
-	db, err := s.requireDB()
+func (s *server) queryRows(sqlText string, schema string, timeoutSecs int) (*sql.Rows, *sql.Conn, context.CancelFunc, error) {
+	conn, ctx, cancel, err := s.operationConn(schema, timeoutSecs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	ctx, cancel := s.beginOperation(timeoutSecs)
-	rows, err := db.QueryContext(ctx, sqlText)
+	rows, err := conn.QueryContext(ctx, sqlText)
 	if err != nil {
+		_ = conn.Close()
 		s.endOperation(cancel)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return rows, cancel, nil
+	return rows, conn, cancel, nil
 }
 
 func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageResult, error) {
 	start := time.Now()
-	if err := s.setSchema(opts.Schema); err != nil {
-		return queryPageResult{}, err
-	}
 	sqlText := trimStatementSQL(opts.SQL)
 	if !isQuerySQL(sqlText) {
 		result, err := s.executeQuery(opts)
 		return queryPageResult{Columns: result.Columns, ColumnTypes: result.ColumnTypes, Rows: result.Rows, AffectedRows: result.AffectedRows, ExecutionTimeMS: result.ExecutionTimeMS, Truncated: result.Truncated}, err
 	}
-	rows, cancel, err := s.queryRows(sqlText, opts.TimeoutSecs)
+	rows, conn, cancel, err := s.queryRows(sqlText, opts.Schema, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
 	columns, err := rows.Columns()
 	if err != nil {
 		_ = rows.Close()
+		_ = conn.Close()
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
@@ -645,11 +644,12 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
 	}
-	session := &querySession{rows: rows, columns: columns, columnTypes: columnTypeNames(rows), remaining: maxRows, cancel: cancel}
+	session := &querySession{rows: rows, conn: conn, columns: columns, columnTypes: columnTypeNames(rows), remaining: maxRows, cancel: cancel}
 	result, err := readQuerySessionPage(session, pageSize)
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
 		_ = rows.Close()
+		_ = conn.Close()
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
@@ -660,6 +660,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		result.SessionID = &id
 	} else {
 		_ = rows.Close()
+		_ = conn.Close()
 		s.endOperation(cancel)
 	}
 	return result, nil
@@ -689,6 +690,9 @@ func (s *server) closeQuerySession(id string) bool {
 		return false
 	}
 	_ = session.rows.Close()
+	if session.conn != nil {
+		_ = session.conn.Close()
+	}
 	if session.cancel != nil {
 		s.endOperation(session.cancel)
 	}
@@ -789,22 +793,23 @@ func columnTypeNames(rows *sql.Rows) []string {
 }
 
 func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {
-	db, err := s.requireDB()
+	statements := stringSliceParam(params, "statements")
+	conn, ctx, cancel, err := s.operationConn(stringParam(params, "schema"), intParam(params, "timeoutSecs"))
 	if err != nil {
 		return queryResult{}, err
 	}
-	statements := stringSliceParam(params, "statements")
-	if err := s.setSchema(stringParam(params, "schema")); err != nil {
-		return queryResult{}, err
-	}
+	defer func() {
+		_ = conn.Close()
+		s.endOperation(cancel)
+	}()
 	start := time.Now()
-	tx, err := db.Begin()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return queryResult{}, err
 	}
 	var affected int64
 	for _, statement := range statements {
-		result, execErr := tx.Exec(trimStatementSQL(statement))
+		result, execErr := tx.ExecContext(ctx, trimStatementSQL(statement))
 		if execErr != nil {
 			_ = tx.Rollback()
 			return queryResult{}, execErr
@@ -831,25 +836,41 @@ func (s *server) executeBatch(params map[string]json.RawMessage) (queryResult, e
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) setSchema(schema string) error {
-	schema = strings.TrimSpace(schema)
-	if schema == "" && !s.schemaSet {
-		return nil
+func (s *server) operationConn(schema string, timeoutSecs int) (*sql.Conn, context.Context, context.CancelFunc, error) {
+	ctx, cancel := s.beginOperation(timeoutSecs)
+	conn, err := s.schemaConn(ctx, schema)
+	if err != nil {
+		s.endOperation(cancel)
+		return nil, nil, nil, err
 	}
-	if schema != "" && s.schemaSet && schema == s.currentSchema {
-		return nil
-	}
+	return conn, ctx, cancel, nil
+}
+
+func (s *server) schemaConn(ctx context.Context, schema string) (*sql.Conn, error) {
 	db, err := s.requireDB()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.setSchema(ctx, conn, schema); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) error {
+	schema = strings.TrimSpace(schema)
 	statement := "RESET search_path"
 	if schema != "" {
 		// Kingbase implicitly prioritizes its system catalog when it is not
 		// listed explicitly, matching the JDBC agent and DBeaver behavior.
 		statement = "SET search_path TO " + quoteIdentifier(schema)
 	}
-	if _, err = db.Exec(statement); err != nil {
+	if _, err := conn.ExecContext(ctx, statement); err != nil {
 		return err
 	}
 	s.currentSchema = schema

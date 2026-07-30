@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -15,6 +16,7 @@
       self,
       nixpkgs,
       flake-utils,
+      crane,
       rust-overlay,
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -33,6 +35,14 @@
             "rustfmt"
           ];
         };
+        baseCraneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+        craneLib = baseCraneLib.appendCrateRegistries [
+          (baseCraneLib.registryFromDownloadUrl {
+            indexUrl = "https://github.com/rust-lang/crates.io-index";
+            dl = "https://static.crates.io/crates";
+            fetchurlExtraArgs.curlOpts = "--retry 20 --retry-all-errors --retry-delay 1";
+          })
+        ];
 
         # ------------------------------------------------------------------ #
         # Linux-only system libraries required by Tauri / WebKit2GTK          #
@@ -154,13 +164,17 @@
         # without compiling the frontend and Rust desktop application.
         packages.dbx-pnpm-deps = self.packages.${system}.dbx-desktop.pnpmDeps;
 
+        # Fast dependency target used by CI to validate Cargo vendoring without
+        # compiling the frontend and Rust desktop application.
+        packages.dbx-cargo-deps = self.packages.${system}.dbx-desktop.cargoVendorDir;
+
         # ------------------------------------------------------------------ #
         # packages.dbx-desktop — Tauri desktop application                    #
         # Build with: nix build .#dbx-desktop                                 #
         #                                                                      #
         # Two-phase build strategy:                                            #
         #   1. pnpm.fetchDeps  → vendor all npm/pnpm deps offline             #
-        #   2. importCargoLock → vendor all Cargo deps offline                 #
+        #   2. Crane vendoring → vendor all Cargo deps offline                #
         #   3. pnpm build      → compile Vue/TypeScript frontend               #
         #   4. cargo build -p dbx → compile Tauri Rust backend                 #
         #                                                                      #
@@ -170,7 +184,7 @@
         # ------------------------------------------------------------------ #
         packages.dbx-desktop = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "dbx-desktop";
-          version = "0.5.69";
+          version = "0.5.70";
 
           src = pkgs.lib.cleanSource ./.;
 
@@ -187,12 +201,18 @@
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #
-          cargoDeps = pkgs.rustPlatform.importCargoLock {
-            lockFile = ./Cargo.lock;
+          cargoVendorDir = craneLib.vendorCargoDeps {
+            cargoLock = ./Cargo.lock;
+            # Pin Git checkouts by their complete Cargo source identity. Unlike
+            # package-name/version keys, these remain stable when a package
+            # version inside the same checkout changes.
             outputHashes = {
-                "tokio-postgres-0.7.18" = "sha256-jsPQ1+kfUaUAn7r4ZCYlu1zc3sNOMOyh2SFroRNp+PE=";
-                "mysql-common-derive-0.32.2" = "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
-                "mysql_async-0.37.0" = "sha256-tMFvmypIBh1GHg3cLFWmLf6N1wrwKPlzx2G/MHwtlFM=";
+              "git+https://github.com/t8y2/rust_mysql_common.git?rev=77085e91e5081309d585153e3b656ce33bc1fe74#77085e91e5081309d585153e3b656ce33bc1fe74" =
+                "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
+              "git+https://github.com/t8y2/mysql_async.git?rev=2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec#2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec" =
+                "sha256-tMFvmypIBh1GHg3cLFWmLf6N1wrwKPlzx2G/MHwtlFM=";
+              "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6" =
+                "sha256-HRbYVSD7iIwG3m1tOGoIZy0xAZwALWIpTtakVSYPIYI=";
             };
           };
 
@@ -207,7 +227,8 @@
               pkgs.jq                         # used by preConfigure to strip packageManager
               pkgs.cargo-tauri               # tauri CLI — needed to properly embed frontend assets
               # Hooks that wire up the vendored deps automatically:
-              pkgs.rustPlatform.cargoSetupHook # sets CARGO_HOME to cargoDeps
+              craneLib.configureCargoCommonVarsHook
+              craneLib.configureCargoVendoredDepsHook
               pkgs.pnpmConfigHook             # sets up pnpm offline store
               pkgs.desktop-file-utils         # for `desktop-file-validate`
               pkgs.copyDesktopItems           # installs desktopItem into share/applications

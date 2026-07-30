@@ -400,7 +400,8 @@ jobs:
           # Sync metadata only so promoting a release never re-uploads large CNB assets.
           node .github/scripts/sync-cnb-release.mjs \
             --github-release "$RUNNER_TEMP/github-release/release.json" \
-            --metadata-only
+            --metadata-only \
+            --make-latest
 
   notify-qq:
     name: QQ Notify

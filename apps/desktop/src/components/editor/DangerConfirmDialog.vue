@@ -18,7 +18,7 @@ const { highlight } = useSqlHighlighter();
 
 const open = defineModel<boolean>("open", { default: false });
 const suppressFuturePrompts = defineModel<boolean>("suppressFuturePrompts", { default: false });
-const wrap = ref(false);
+const wrap = ref(true);
 const copied = ref(false);
 
 const props = withDefaults(
@@ -94,8 +94,8 @@ async function copyFullCode() {
         <p class="text-sm text-muted-foreground mb-3">{{ message || t("dangerDialog.message") }}</p>
         <p v-if="detailsText" class="text-xs text-muted-foreground mb-3 whitespace-pre-line">{{ detailsText }}</p>
         <slot name="options" />
-        <div v-if="code" class="relative">
-          <div class="absolute top-1 right-1 z-10 flex items-center gap-0.5">
+        <div v-if="code" data-testid="danger-code-container" class="min-w-0">
+          <div data-testid="danger-code-actions" class="mb-1 flex items-center justify-end gap-0.5">
             <Button variant="ghost" size="icon-xs" class="h-6 w-6 text-muted-foreground" :title="t('dangerDialog.copyFullText')" @click="copyFullCode">
               <Check v-if="copied" class="h-3.5 w-3.5 text-emerald-600" />
               <Copy v-else class="h-3.5 w-3.5" />
@@ -104,12 +104,12 @@ async function copyFullCode() {
               <TextWrap class="h-3.5 w-3.5" />
             </Button>
           </div>
-          <div data-native-clipboard data-testid="danger-code-preview" class="text-xs bg-muted px-3 pt-3 pb-3 pr-14 rounded overflow-auto max-h-40 min-w-0 font-mono" :class="wrap ? 'whitespace-pre-wrap' : 'whitespace-pre'">
-            <pre class="font-inherit whitespace-inherit" v-html="highlightedHead" />
+          <div data-native-clipboard data-testid="danger-code-preview" class="max-h-40 min-w-0 overflow-auto rounded bg-muted px-3 py-3 text-xs font-mono">
+            <pre class="font-inherit" :class="wrap ? 'w-full whitespace-pre-wrap break-all' : 'w-max min-w-full whitespace-pre'" v-html="highlightedHead" />
             <div v-if="preview.truncated" data-testid="danger-preview-truncated" class="my-2 rounded border border-border/70 bg-background/70 px-2 py-1.5 text-center text-[11px] leading-4 text-muted-foreground whitespace-normal">
               {{ t("dangerDialog.previewTruncated", { lines: preview.omittedLines.toLocaleString(), characters: preview.omittedCharacters.toLocaleString() }) }}
             </div>
-            <pre v-if="preview.tail" class="font-inherit whitespace-inherit" v-html="highlightedTail" />
+            <pre v-if="preview.tail" class="font-inherit" :class="wrap ? 'w-full whitespace-pre-wrap break-all' : 'w-max min-w-full whitespace-pre'" v-html="highlightedTail" />
           </div>
         </div>
         <div v-if="showSuppressToggle" class="mt-3 flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

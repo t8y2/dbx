@@ -18,7 +18,7 @@ import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
+import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan } from "@/lib/schema/schemaDiffMetadataLoad";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry } from "@/types/schemaDiff";
 import type { ObjectSourceKind, TableInfo } from "@/types/database";
@@ -43,7 +43,7 @@ import {
   type PermissionDiff,
   type DependencyGraph,
 } from "@/lib/schema/schemaDiff";
-import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
+import { compileSchemaDiffTableFilter, filterSchemaDiffTables, isSchemaDiffView } from "@/lib/schema/schemaDiffTableFilter";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 
@@ -350,23 +350,19 @@ interface SchemaDetailLoadContext {
   options: SchemaDiffCompareOptions;
 }
 
-function shouldLoadIndexes(options: SchemaDiffCompareOptions): boolean {
-  return options.indexes || options.primaryKeys || options.uniqueKeys;
-}
-
 async function loadSchemaDetails(tables: TableInfo[], context: SchemaDetailLoadContext): Promise<TableSchemaDetail[]> {
   const concurrency = schemaDiffMetadataConcurrency(context.dbType, tables.length);
   const runMetadataQuery = createConcurrencyLimiter(concurrency);
 
   return mapWithConcurrency(tables, concurrency, async (table) => {
     const objectType = isViewOrMaterializedView(table.table_type);
-    const shouldFetchDdl = shouldFetchSchemaDiffDdl(Boolean(objectType), context.options);
-    const ddlPromise = shouldFetchDdl ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
+    const loadPlan = schemaDiffMetadataLoadPlan(isSchemaDiffView(table), context.options);
+    const ddlPromise = loadPlan.ddl ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
     const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
-      runMetadataQuery(() => api.getColumns(context.connectionId, context.database, context.schema, table.name)),
-      shouldLoadIndexes(context.options) ? runMetadataQuery(() => api.listIndexes(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
-      context.options.foreignKeys ? runMetadataQuery(() => api.listForeignKeys(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
-      context.options.triggers ? runMetadataQuery(() => api.listTriggers(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      loadPlan.columns ? runMetadataQuery(() => api.getColumns(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      loadPlan.indexes ? runMetadataQuery(() => api.listIndexes(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      loadPlan.foreignKeys ? runMetadataQuery(() => api.listForeignKeys(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      loadPlan.triggers ? runMetadataQuery(() => api.listTriggers(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
       ddlPromise,
     ]);
 
@@ -399,7 +395,7 @@ async function handleCompare() {
     await store.ensureConnected(targetConnectionId.value);
 
     const [srcTables, tgtTables] = await Promise.all([api.listTables(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value), api.listTables(targetConnectionId.value, targetDatabase.value, targetSchema.value)]);
-    const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter);
+    const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter, opts);
 
     const sourceDetails = await loadSchemaDetails(sourceTables, {
       connectionId: sourceConnectionId.value,

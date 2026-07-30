@@ -13,7 +13,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: dbx-release-main
+  group: node-packages-release
   cancel-in-progress: false
 
 jobs:
@@ -165,50 +165,116 @@ jobs:
       - name: Build and pack packages
         run: pnpm publish:dry-run
 
-      - name: Configure git author
+      - name: Create package release patch
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --binary -- \
+            Cargo.lock \
+            pnpm-lock.yaml \
+            crates/dbx-mcp/Cargo.toml \
+            crates/dbx-cli/Cargo.toml \
+            packages/cli/package.json \
+            packages/cli-*/package.json \
+            packages/mcp-server/package.json \
+            packages/mcp-server/server.json \
+            packages/mcp-*/package.json \
+            > package-release.patch
 
-      - name: Commit package release version
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          git add Cargo.lock pnpm-lock.yaml crates/dbx-mcp/Cargo.toml crates/dbx-cli/Cargo.toml packages/cli/package.json packages/cli-*/package.json packages/mcp-server/package.json packages/mcp-server/server.json packages/mcp-*/package.json
-          if git diff --cached --quiet; then
-            echo "Package versions already committed for ${VERSION}."
-          else
-            git commit -m "chore(packages): release ${VERSION} [skip node-packages-release]"
-          fi
+      - name: Upload package release patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-release-patch
+          path: package-release.patch
+          retention-days: 1
 
-      - name: Rebase package release commit and push
+  commit-release:
+    name: Commit package release
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download package release patch
+        uses: actions/download-artifact@v4
+        with:
+          name: package-release-patch
+
+      - name: Apply package release patch and push
         env:
           RELEASE_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           if [ -n "${RELEASE_TOKEN}" ]; then
             git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin main --no-tags
-          git rebase origin/main
-          REMOTE_TAG_SHA="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk '{print $1}')"
-          HEAD_SHA="$(git rev-parse HEAD)"
-          if [ -n "${REMOTE_TAG_SHA}" ]; then
-            if [ "${REMOTE_TAG_SHA}" != "${HEAD_SHA}" ]; then
-              echo "::error::Remote tag ${TAG} already exists at ${REMOTE_TAG_SHA}, expected ${HEAD_SHA}."
+          git switch --detach origin/main
+
+          if [ -s package-release.patch ]; then
+            if git apply --check package-release.patch; then
+              git apply --index package-release.patch
+            elif git apply --reverse --check package-release.patch; then
+              echo "Package release ${VERSION} is already present on main."
+            else
+              echo "::error::Package release patch no longer applies cleanly to main."
               exit 1
             fi
-            echo "Remote tag ${TAG} already points at ${HEAD_SHA}."
           else
-            git tag -f "${TAG}" "${HEAD_SHA}"
+            echo "Package versions are already ${VERSION}."
           fi
-          git push origin HEAD:main
-          if [ -z "${REMOTE_TAG_SHA}" ]; then
-            git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
+
+          CREATED_RELEASE_COMMIT=false
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(packages): release ${VERSION} [skip node-packages-release]"
+            CREATED_RELEASE_COMMIT=true
+            RELEASE_COMMIT_SHA="$(git rev-parse HEAD)"
+          else
+            RELEASE_COMMIT_SHA="$(git log origin/main -1 --format=%H --fixed-strings --grep="chore(packages): release ${VERSION} [skip node-packages-release]")"
+            if [ -z "${RELEASE_COMMIT_SHA}" ]; then
+              echo "::error::Package versions are already ${VERSION}, but the matching release commit was not found on main."
+              exit 1
+            fi
+            echo "Package release commit already exists at ${RELEASE_COMMIT_SHA}."
           fi
+
+          REMOTE_TAG_SHA="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk '{print $1}')"
+          if [ -n "${REMOTE_TAG_SHA}" ]; then
+            if [ "${REMOTE_TAG_SHA}" != "${RELEASE_COMMIT_SHA}" ]; then
+              echo "::error::Remote tag ${TAG} already exists at ${REMOTE_TAG_SHA}, expected ${RELEASE_COMMIT_SHA}."
+              exit 1
+            fi
+            echo "Remote tag ${TAG} already points at ${RELEASE_COMMIT_SHA}."
+            exit 0
+          fi
+
+          if [ "${CREATED_RELEASE_COMMIT}" = true ]; then
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::Unable to push package release after ${attempt} attempts."
+                exit 1
+              fi
+              git fetch origin main --no-tags
+              git rebase origin/main
+            done
+            RELEASE_COMMIT_SHA="$(git rev-parse HEAD)"
+          fi
+
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "${RELEASE_COMMIT_SHA}" origin/main
+          git tag "${TAG}" "${RELEASE_COMMIT_SHA}"
+          git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
 
   publish-cli-platforms:
     name: Publish ${{ matrix.package-name }}
-    needs: prepare
+    needs: [prepare, commit-release]
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_INCREMENTAL: "0"
@@ -383,7 +449,7 @@ jobs:
 
   publish-mcp-platforms:
     name: Publish ${{ matrix.package-name }}
-    needs: prepare
+    needs: [prepare, commit-release]
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_INCREMENTAL: "0"

@@ -6,20 +6,39 @@ use super::connection::AppState;
 pub use dbx_core::ai::*;
 
 #[tauri::command]
-pub async fn ai_test_connection(config: AiConfig) -> Result<AiTestConnectionResult, String> {
-    let config = resolve_cli_provider_config(config);
+pub async fn ai_test_connection(
+    state: State<'_, Arc<AppState>>,
+    config: AiConfig,
+) -> Result<AiTestConnectionResult, String> {
+    let mut config = resolve_cli_provider_config(config);
+    merge_global_max_retries(
+        &mut config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
     dbx_core::ai::test_connection_core(&config).await
 }
 
 #[tauri::command]
-pub async fn ai_list_models(config: AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    let config = resolve_cli_provider_config(config);
+pub async fn ai_list_models(state: State<'_, Arc<AppState>>, config: AiConfig) -> Result<Vec<AiModelInfo>, String> {
+    let mut config = resolve_cli_provider_config(config);
+    merge_global_max_retries(
+        &mut config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
     dbx_core::ai::list_models_core(&config).await
 }
 
 #[tauri::command]
-pub async fn ai_resolve_model_effort(config: AiConfig, model_id: String) -> Result<AiEffortCapability, String> {
-    let config = resolve_cli_provider_config(config);
+pub async fn ai_resolve_model_effort(
+    state: State<'_, Arc<AppState>>,
+    config: AiConfig,
+    model_id: String,
+) -> Result<AiEffortCapability, String> {
+    let mut config = resolve_cli_provider_config(config);
+    merge_global_max_retries(
+        &mut config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
     dbx_core::ai::resolve_model_effort_core(&config, &model_id).await
 }
 
@@ -67,12 +86,27 @@ pub async fn load_ai_chat_selection(state: State<'_, Arc<AppState>>) -> Result<O
 }
 
 #[tauri::command]
-pub async fn ai_complete(request: AiCompletionRequest) -> Result<String, String> {
+pub async fn ai_complete(state: State<'_, Arc<AppState>>, request: AiCompletionRequest) -> Result<String, String> {
+    let mut request = request;
+    merge_global_max_retries(
+        &mut request.config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
     dbx_core::ai::complete(&request).await
 }
 
 #[tauri::command]
-pub async fn ai_stream(app: AppHandle, session_id: String, request: AiCompletionRequest) -> Result<(), String> {
+pub async fn ai_stream(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    request: AiCompletionRequest,
+) -> Result<(), String> {
+    let mut request = request;
+    merge_global_max_retries(
+        &mut request.config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
 
     let result = dbx_core::ai::stream(&session_id, &request, &cancelled, |chunk| {
@@ -110,7 +144,11 @@ pub async fn ai_agent_stream(
     confirmed_connection_id: Option<String>,
     confirmed_database: Option<String>,
 ) -> Result<String, String> {
-    let request = resolve_cli_provider_request(request);
+    let mut request = resolve_cli_provider_request(request);
+    merge_global_max_retries(
+        &mut request.config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
 
     let parsed_db_type: DatabaseType =
         serde_json::from_str(&format!("\"{}\"", db_type)).map_err(|_| format!("Unknown database type: {db_type}"))?;
@@ -209,10 +247,6 @@ fn resolve_cli_provider_config(mut config: AiConfig) -> AiConfig {
     config
 }
 
-fn is_cli_provider(provider: &AiProvider) -> bool {
-    matches!(provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli)
-}
-
 fn is_explicit_cli_path(command: &str) -> bool {
     let path = Path::new(command);
     path.is_absolute() || command.contains('/') || command.contains('\\')
@@ -235,6 +269,58 @@ pub async fn delete_ai_conversation(state: State<'_, Arc<AppState>>, id: String)
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use tauri::Manager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::super::connection::AppState;
+    use dbx_core::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
+
+    /// Spawn a TCP server that returns 429 and counts connections.
+    async fn counting_429_server() -> (String, Arc<AtomicU32>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
+        let count = Arc::new(AtomicU32::new(0));
+        let count2 = count.clone();
+        let srv = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                count2.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let resp = b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(resp).await;
+            }
+        });
+        (url, count, srv)
+    }
+
+    fn test_ai_config(endpoint: &str, model: &str) -> AiConfig {
+        AiConfig {
+            provider: AiProvider::Claude,
+            api_key: "sk-test".to_string(),
+            auth_method: AiAuthMethod::ApiKey,
+            endpoint: endpoint.to_string(),
+            model: model.to_string(),
+            models: vec![],
+            api_style: AiApiStyle::AnthropicMessages,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
+            context_window: None,
+            max_retries: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
+        }
+    }
 
     #[test]
     fn verify_confirmed_target_allows_matching_connection_and_database() {
@@ -309,5 +395,31 @@ mod tests {
         );
         assert_eq!(allow, Some(false));
         assert_eq!(confirmed, None);
+    }
+
+    #[tokio::test]
+    async fn tauri_entry_respects_global_max_retries_zero() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-mr-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let storage = dbx_core::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        storage.save_max_retries(0).await.unwrap();
+        assert_eq!(storage.load_max_retries().await.unwrap(), 0);
+
+        let (url, count, srv) = counting_429_server().await;
+
+        let app_state = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+
+        let state: tauri::State<'_, Arc<AppState>> = app.state();
+        let config = test_ai_config(&url, "claude-sonnet-4");
+        let result = super::ai_test_connection(state, config).await;
+
+        assert!(result.is_err(), "429 with max_retries=0 must fail, got: {result:?}");
+        srv.abort();
+        assert_eq!(count.load(Ordering::SeqCst), 1, "max_retries=0 must mean exactly 1 request");
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

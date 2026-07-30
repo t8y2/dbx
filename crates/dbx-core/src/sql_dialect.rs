@@ -39,7 +39,9 @@ pub use identifiers::{
 };
 pub(crate) use identifiers::{parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_transfer_identifier};
 pub use table_select::{build_count_table_sql, build_table_data_select_sql, build_table_select_sql};
-pub(crate) use table_select::{quote_table_data_identifier, table_data_qualified_table_name};
+pub(crate) use table_select::{
+    quote_table_data_identifier, table_data_qualified_table_name, uses_connection_identifier_quote,
+};
 pub use type_rewrite::{
     apply_auto_inc_to_column_def, column_is_auto_increment, rewrite_column_type, split_type_base_params,
     type_looks_integer, AutoIncColumnBuild,

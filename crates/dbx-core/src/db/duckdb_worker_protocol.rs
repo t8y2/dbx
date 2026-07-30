@@ -1,4 +1,4 @@
-#![cfg(feature = "duckdb-bundled")]
+#![cfg(feature = "duckdb-sidecar")]
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -35,6 +35,8 @@ pub enum DuckDbWorkerMethod {
     ListSchemas,
     ListTables,
     ListColumns,
+    GetTableDdl,
+    CompletionAssistant,
     GetObjectSource,
     AttachDatabase,
     Cancel,

@@ -30,6 +30,25 @@ use crate::types::{
     OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
+const GAUSSDB_COMPATIBILITY_SQL: &str =
+    "SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()";
+
+pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
+    let timeout = super::connection_timeout();
+    let client = checkout_postgres_client(pool, None, timeout).await.ok()?;
+    let row = tokio::time::timeout(timeout, client.query_opt(GAUSSDB_COMPATIBILITY_SQL, &[])).await.ok()?.ok()??;
+    let compatibility_mode = row.try_get::<_, String>(0).ok()?;
+    gaussdb_identifier_quote_for_compatibility_mode(&compatibility_mode).map(str::to_string)
+}
+
+fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
+    match compatibility_mode.trim().to_ascii_uppercase().as_str() {
+        "M" | "B" | "MYSQL" => Some("`"),
+        "A" | "PG" | "ORA" | "POSTGRESQL" => Some("\""),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresTablePrivilegeInfo {
     pub grantor: String,
@@ -4044,6 +4063,18 @@ mod tests {
     use std::process::Command;
     use std::time::Instant;
     use tokio_postgres::types::FromSql;
+
+    #[test]
+    fn gaussdb_compatibility_mode_selects_identifier_quote() {
+        for mode in ["M", "B", "mysql", " MYSQL "] {
+            assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(mode), Some("`"));
+        }
+        for mode in ["A", "PG", "ora", " PostgreSQL "] {
+            assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(mode), Some("\""));
+        }
+        assert_eq!(gaussdb_identifier_quote_for_compatibility_mode("C"), None);
+        assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(""), None);
+    }
 
     fn pg_interval_bytes(microseconds: i64, days: i32, months: i32) -> [u8; 16] {
         let mut raw = [0_u8; 16];

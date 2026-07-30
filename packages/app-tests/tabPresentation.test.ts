@@ -339,6 +339,36 @@ test("execution summary items include table and non-table statement results", ()
   );
 });
 
+test("execution summary items preserve live statuses and unexecuted statements", () => {
+  const sql = "INSERT 1;\nINSERT 2;\nINSERT 3";
+  const items = executionSummaryItems({
+    batchSqlExecution: {
+      executionId: "run-1",
+      submittedSql: sql,
+      editorFingerprint: "fingerprint",
+      sourceOffset: 0,
+      completed: 2,
+      total: 3,
+      startedAt: 1,
+      finishedAt: 2,
+      items: [
+        { statementIndex: 0, sql: "INSERT 1", from: 0, to: 8, status: "success", affectedRows: 1, executionTimeMs: 3 },
+        { statementIndex: 1, sql: "INSERT 2", from: 10, to: 18, status: "error", error: "duplicate", executionTimeMs: 2 },
+        { statementIndex: 2, sql: "INSERT 3", from: 20, to: 28, status: "skipped" },
+      ],
+    },
+  });
+
+  assert.deepEqual(
+    items.map(({ statementIndex, status, affectedRows, error }) => ({ statementIndex, status, affectedRows, error })),
+    [
+      { statementIndex: 0, status: "success", affectedRows: 1, error: undefined },
+      { statementIndex: 1, status: "error", affectedRows: 0, error: "duplicate" },
+      { statementIndex: 2, status: "skipped", affectedRows: 0, error: undefined },
+    ],
+  );
+});
+
 test("execution summary button toggles back to result only when result view is available", () => {
   assert.equal(nextExecutionSummaryView("result", true), "summary");
   assert.equal(nextExecutionSummaryView("chart", true), "summary");

@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/pulsar:4.2.3
     container_name: dbx-pulsar-4.2
+    restart: always
     command: ["bin/pulsar", "standalone", "--advertised-address", "localhost"]
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-6651}:6650"

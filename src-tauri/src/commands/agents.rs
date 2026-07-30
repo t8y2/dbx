@@ -5,7 +5,7 @@ use tauri::{Emitter, State};
 use dbx_core::agent_manager::{AgentDriverInfo, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use dbx_core::agent_service::{
     build_agent_list, clear_agent_download_cache, fetch_registry_from, import_agent_driver,
-    import_agents_from_zip as import_agents_from_zip_core, inspect_offline_zip, install_agent_driver_from,
+    import_agents_from_package as import_agents_from_package_core, inspect_offline_package, install_agent_driver_from,
     invalidate_registry_cache, reinstall_agent_jre_from, uninstall_agent_driver, uninstall_agent_jre,
     upgrade_all_agent_drivers_from, AgentProgressEvent, OfflineImportPlan, UpgradeAllAgentDriversResult,
 };
@@ -111,6 +111,7 @@ pub async fn check_agent_update_blockers(
 
 #[tauri::command]
 pub async fn uninstall_agent(state: State<'_, Arc<AppState>>, db_type: String) -> Result<(), String> {
+    ensure_no_agent_update_blockers(state.inner().as_ref(), std::slice::from_ref(&db_type)).await?;
     uninstall_agent_driver(&state.agent_manager, &db_type).await
 }
 
@@ -166,14 +167,15 @@ pub async fn import_agents_from_zip(
     operation_id: Option<String>,
 ) -> Result<u32, String> {
     let am = &state.agent_manager;
-    let zip_path = std::path::PathBuf::from(&path);
-    let plan = inspect_offline_zip(&zip_path)?;
+    let package_path = std::path::PathBuf::from(&path);
+    let plan = inspect_offline_package(&package_path)?;
     ensure_no_offline_import_blockers(state.inner().as_ref(), &plan).await?;
     let app_handle = app.clone();
     let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let result =
-        import_agents_from_zip_core(am, &zip_path, |event| emit_agent_progress(&app_handle, &operation_id, event))
-            .await?;
+    let result = import_agents_from_package_core(am, &package_path, |event| {
+        emit_agent_progress(&app_handle, &operation_id, event)
+    })
+    .await?;
     let count = result.drivers_installed.len() as u32;
     emit_agent_progress(&app, &operation_id, AgentProgressEvent::step("done"));
     Ok(count)

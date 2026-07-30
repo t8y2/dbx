@@ -70,6 +70,16 @@ pub async fn save_max_agent_turns(state: State<'_, Arc<AppState>>, max_agent_tur
 }
 
 #[tauri::command]
+pub async fn load_max_retries(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+    state.storage.load_max_retries().await
+}
+
+#[tauri::command]
+pub async fn save_max_retries(state: State<'_, Arc<AppState>>, max_retries: u32) -> Result<(), String> {
+    state.storage.save_max_retries(max_retries).await
+}
+
+#[tauri::command]
 pub async fn complete_app_close(app: AppHandle, window: Window, action: String) -> Result<(), String> {
     match action.as_str() {
         "quit" => {

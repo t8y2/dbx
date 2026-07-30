@@ -6,6 +6,11 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("dameng")).toContain("MATERIALIZED_VIEW");
   });
 
+  it("exposes synonyms for Xugu only", () => {
+    expect(sidebarObjectKindsForDatabase("xugu")).toContain("SYNONYM");
+    expect(sidebarObjectKindsForDatabase("postgres")).not.toContain("SYNONYM");
+  });
+
   it("exposes only tables for HBase namespaces", () => {
     expect(sidebarObjectKindsForDatabase("hbase")).toEqual(["TABLE"]);
   });

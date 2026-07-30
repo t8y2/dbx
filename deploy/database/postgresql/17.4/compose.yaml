@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/postgres:17.4
     container_name: dbx-postgresql-17.4
+    restart: always
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-5433}:5432"
     environment:

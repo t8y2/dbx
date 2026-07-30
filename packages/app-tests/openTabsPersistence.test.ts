@@ -342,6 +342,49 @@ test("restores data and structure tabs with table state", () => {
   assert.equal(restored.tabs[1]?.structureTableName, "users");
 });
 
+test("drops restored non-query tabs for missing connections but keeps query drafts", () => {
+  const raw = serializeOpenTabs([
+    queryTab({
+      id: "query",
+      title: "Draft",
+      connectionId: "missing-conn",
+      database: "app",
+      sql: "select * from users",
+    }),
+    queryTab({
+      id: "data",
+      title: "users",
+      connectionId: "missing-conn",
+      database: "app",
+      mode: "data",
+      sql: "",
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        columns: [],
+        primaryKeys: [],
+      },
+    }),
+    queryTab({
+      id: "structure",
+      title: "Edit users",
+      connectionId: "missing-conn",
+      database: "app",
+      mode: "structure",
+      sql: "",
+      structureTableName: "users",
+    }),
+  ]);
+
+  const restored = restoreOpenTabsState(JSON.stringify(raw), "data", { validConnectionIds: ["live-conn"] });
+
+  assert.deepEqual(
+    restored.tabs.map((tab) => ({ id: tab.id, mode: tab.mode })),
+    [{ id: "query", mode: "query" }],
+  );
+  assert.equal(restored.activeTabId, "query");
+});
+
 test("restores MQ tabs with selected tenant context", () => {
   const raw = JSON.stringify([
     queryTab({

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions } from "../../apps/desktop/src/lib/table/tableClipboard.ts";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesSingleSource, tableClipboardMatchesTarget, tableClipboardMenuState, tableDataCopyColumnOptions } from "../../apps/desktop/src/lib/table/tableClipboard.ts";
 
 test("table clipboard entries must match the paste target context", () => {
   const target = { connectionId: "c1", database: "app", schema: "public" };
@@ -12,6 +12,25 @@ test("table clipboard entries must match the paste target context", () => {
   assert.equal(tableClipboardMatchesTarget([{ connectionId: "c1", database: "app", schema: "audit" }], target), false);
   assert.equal(tableClipboardMatchesTarget([], target), false);
   assert.equal(tableClipboardMatchesTarget([{ connectionId: "c1", database: "app" }], null), false);
+});
+
+test("table clipboard identifies only its exact single source table", () => {
+  const users = { connectionId: "c1", database: "app", schema: "public", tableName: "users" };
+
+  assert.equal(tableClipboardMatchesSingleSource([users], users), true);
+  assert.equal(tableClipboardMatchesSingleSource([users], { ...users, tableName: "orders" }), false);
+  assert.equal(tableClipboardMatchesSingleSource([{ ...users, schema: "audit" }], users), false);
+  assert.equal(tableClipboardMatchesSingleSource([users, { ...users, tableName: "orders" }], users), false);
+});
+
+test("table clipboard menu state supports paste and replacing the copied source", () => {
+  const users = { connectionId: "c1", database: "app", schema: "public", tableName: "users" };
+
+  assert.equal(tableClipboardMenuState([], users), "copy");
+  assert.equal(tableClipboardMenuState([users], users), "paste");
+  assert.equal(tableClipboardMenuState([users], { ...users, tableName: "orders" }), "copy-and-paste");
+  assert.equal(tableClipboardMenuState([{ ...users, schema: "audit" }], users), "copy");
+  assert.equal(tableClipboardMenuState([{ ...users, schema: "audit" }], users, true), "copy-and-paste");
 });
 
 test("whole-row table data copy is enabled for known database types", () => {

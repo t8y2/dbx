@@ -345,6 +345,14 @@ pub struct DriverInfo {
 pub struct ArtifactInfo {
     pub url: String,
     pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ArtifactFormat>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactFormat {
+    TarZstd,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

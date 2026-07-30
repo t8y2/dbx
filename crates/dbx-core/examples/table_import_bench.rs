@@ -99,6 +99,7 @@ fn write_xlsx(path: &Path, row_count: usize, column_count: usize) -> Result<(), 
         sheet_name: Some("Benchmark".to_string()),
         columns: columns(column_count),
         column_types: vec![],
+        column_comments: vec![],
         rows: (0..row_count).map(|row_index| row(row_index, column_count)).collect(),
         numeric_column_right_align: false,
     })?;

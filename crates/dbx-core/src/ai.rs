@@ -10,6 +10,17 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::{Notify, RwLock};
 use uuid::Uuid;
 
+/// Default number of automatic retries on transient API errors
+/// (rate limits, timeouts, network blips). Users can adjust the limit in
+/// Settings → AI. Set to 0 to disable automatic retries entirely.
+pub const DEFAULT_MAX_RETRIES: u32 = 2;
+pub const MAX_MAX_RETRIES: u32 = 10;
+
+/// Clamp a user-provided max-retries value into the supported range.
+pub fn clamp_max_retries(value: u32) -> u32 {
+    value.clamp(0, MAX_MAX_RETRIES)
+}
+
 // ---------------------------------------------------------------------------
 // Stream cancel registry
 // ---------------------------------------------------------------------------
@@ -52,6 +63,8 @@ pub const AGENT_CANCELLED_ERROR: &str = "Agent loop cancelled";
 pub enum AiProvider {
     #[serde(alias = "anthropic")]
     Claude,
+    #[serde(rename = "anthropic-compatible")]
+    AnthropicCompatible,
     Openai,
     Gemini,
     Deepseek,
@@ -72,6 +85,7 @@ impl AiProvider {
     pub fn as_str(&self) -> &'static str {
         match self {
             AiProvider::Claude => "claude",
+            AiProvider::AnthropicCompatible => "anthropic-compatible",
             AiProvider::Openai => "openai",
             AiProvider::Gemini => "gemini",
             AiProvider::Deepseek => "deepseek",
@@ -340,6 +354,11 @@ pub struct AiConfig {
     pub runtime_effort: Option<AiEffortSelection>,
     #[serde(default)]
     pub context_window: Option<u32>,
+    /// Maximum number of automatic retries on transient API errors
+    /// (rate limits, timeouts, network blips). `None` uses the default (2).
+    /// Set to `Some(0)` to disable automatic retries entirely.
+    #[serde(default)]
+    pub max_retries: Option<u32>,
     #[serde(default)]
     pub codex_cli_path: Option<String>,
     #[serde(default)]
@@ -356,6 +375,30 @@ pub struct AiConfig {
 
 fn default_enable_thinking() -> bool {
     true
+}
+
+/// Whether the provider is a CLI-based provider that goes through its own
+/// executable (claude-code, codex, pi) rather than through `with_retry` /
+/// `with_stream_retry`.
+pub fn is_cli_provider(provider: &AiProvider) -> bool {
+    matches!(provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli)
+}
+
+/// Merge the global `max_retries` setting into an `AiConfig`.
+///
+/// Applied by all API-backed entry points at request time.  CLI providers are
+/// skipped because they use their own retry logic and never reach the
+/// `with_retry` / `with_stream_retry` paths.
+///
+/// Some API-backed entry points (model listing, effort resolution) do not
+/// currently call `with_retry` and so the merged value is a no-op for them.
+/// The merge is still applied uniformly so that every API-backed command
+/// follows the same entry-point pattern — if retry logic is added to those
+/// functions later, the global setting takes effect automatically.
+pub fn merge_global_max_retries(config: &mut AiConfig, max_retries: u32) {
+    if !is_cli_provider(&config.provider) {
+        config.max_retries = Some(max_retries);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -562,6 +605,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
             }
         }
         AiProvider::Claude
+        | AiProvider::AnthropicCompatible
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli
@@ -570,7 +614,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
 }
 
 pub fn uses_anthropic_messages_api(config: &AiConfig) -> bool {
-    matches!(config.provider, AiProvider::Claude)
+    matches!(config.provider, AiProvider::Claude | AiProvider::AnthropicCompatible)
         || matches!(config.provider, AiProvider::Custom) && config.api_style == AiApiStyle::AnthropicMessages
 }
 
@@ -630,6 +674,29 @@ pub fn stream_data_payload(line: &str) -> Option<&str> {
         return Some(line);
     }
     None
+}
+
+fn stream_event_name(line: &str) -> Option<&str> {
+    line.trim().strip_prefix("event:").map(str::trim).filter(|event| !event.is_empty())
+}
+
+fn anthropic_stream_error(event_name: Option<&str>, event: &serde_json::Value) -> Option<String> {
+    if event_name != Some("error") && event["type"].as_str() != Some("error") {
+        return None;
+    }
+
+    let error = event.get("error").unwrap_or(event);
+    let error_type = error["type"].as_str().filter(|value| !value.trim().is_empty());
+    let message =
+        error["message"].as_str().or_else(|| event["message"].as_str()).filter(|value| !value.trim().is_empty());
+    let detail = match (error_type, message) {
+        (Some(error_type), Some(message)) => format!("{error_type}: {message}"),
+        (Some(error_type), None) => error_type.to_string(),
+        (None, Some(message)) => message.to_string(),
+        (None, None) => truncate_diagnostic(&event.to_string(), 500),
+    };
+    let category = classify_error(&detail);
+    Some(format!("[{category}] Anthropic stream error ({detail})"))
 }
 
 fn drain_next_stream_line(buffer: &mut Vec<u8>) -> Result<Option<String>, String> {
@@ -1155,7 +1222,7 @@ fn parse_dynamic_effort_capability(
 
 fn decorate_model_capabilities(config: &AiConfig, models: &mut [AiModelInfo]) {
     for model in models {
-        if model.effort_capability.is_none() {
+        if matches!(config.provider, AiProvider::AnthropicCompatible) || model.effort_capability.is_none() {
             model.effort_capability = crate::ai_effort::static_effort_capability(config, &model.id);
         }
     }
@@ -1183,20 +1250,54 @@ fn parse_gemini_model_list_response(data: &serde_json::Value) -> Result<Vec<AiMo
 }
 
 async fn list_claude_models(client: &reqwest::Client, config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    let res = client
-        .get(resolve_model_list_endpoint(config)?)
-        .headers(claude_headers(config)?)
-        .send()
-        .await
-        .map_err(|e| format!("Claude model list request failed: {e}"))?;
+    let endpoint = resolve_model_list_endpoint(config)?;
+    let headers = claude_headers(config)?;
+    let mut after_id: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut seen_models = HashSet::new();
+    let mut models = Vec::new();
 
-    let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("Claude model list API error: {status}")));
+    loop {
+        let mut request = client.get(&endpoint).headers(headers.clone());
+        if let Some(after_id) = after_id.as_deref() {
+            request = request.query(&[("after_id", after_id)]);
+        }
+        let res = request.send().await.map_err(|e| format!("Claude model list request failed: {e}"))?;
+
+        let status = res.status();
+        if !status.is_success() {
+            if matches!(config.provider, AiProvider::AnthropicCompatible | AiProvider::Custom)
+                && matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED)
+            {
+                return Err(format!(
+                    "[modelDiscoveryUnsupported] The provider does not expose a model list at {endpoint}. Save the provider and enter a model ID manually."
+                ));
+            }
+            return Err(categorized_http_error(res, "Claude model list", &config.api_key).await);
+        }
+
+        let data: serde_json::Value =
+            res.json().await.map_err(|e| format!("Claude model list returned invalid JSON (HTTP {status}): {e}"))?;
+        for model in parse_model_list_response(&data)? {
+            if seen_models.insert(model.id.clone()) {
+                models.push(model);
+            }
+        }
+
+        if data["has_more"].as_bool() != Some(true) {
+            break;
+        }
+        let next_cursor = data["last_id"]
+            .as_str()
+            .filter(|cursor| !cursor.trim().is_empty())
+            .ok_or_else(|| "Claude model list response has_more=true but last_id is missing".to_string())?;
+        if !seen_cursors.insert(next_cursor.to_string()) {
+            return Err(format!("Claude model list returned repeated last_id cursor: {next_cursor}"));
+        }
+        after_id = Some(next_cursor.to_string());
     }
 
-    parse_model_list_response(&data)
+    Ok(models)
 }
 
 async fn list_gemini_models(client: &reqwest::Client, config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
@@ -1352,7 +1453,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
             validate_model_list_config(config)?;
             let client = build_ai_http_client(config, 30)?;
             match config.provider {
-                AiProvider::Claude => list_claude_models(&client, config).await?,
+                AiProvider::Claude | AiProvider::AnthropicCompatible => list_claude_models(&client, config).await?,
                 AiProvider::Gemini => list_gemini_models(&client, config).await?,
                 AiProvider::Ollama => {
                     let models = list_openai_compatible_models(&client, config).await?;
@@ -1734,6 +1835,7 @@ fn collect_gemini_safety_ratings(ratings: Option<&[serde_json::Value]>, output: 
 
 fn probe_stream_payload(
     data: &str,
+    event_name: Option<&str>,
     is_claude: bool,
     is_gemini: bool,
     diagnostics: &mut StreamProbeDiagnostics,
@@ -1746,6 +1848,11 @@ fn probe_stream_payload(
     let parsed: serde_json::Value = serde_json::from_str(data)
         .map_err(|e| format!("AI stream JSON parse error: {e}; payload={}", truncate_diagnostic(data, 240)))?;
     diagnostics.json_events += 1;
+    if is_claude {
+        if let Some(error) = anthropic_stream_error(event_name, &parsed) {
+            return Err(error);
+        }
+    }
     if is_gemini {
         diagnostics.observe_gemini(&parsed);
     }
@@ -1778,6 +1885,7 @@ fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
 
 async fn categorized_http_error(response: reqwest::Response, provider: &str, api_key: &str) -> String {
     let status = response.status();
+    let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
     let detail = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
@@ -1793,12 +1901,38 @@ async fn categorized_http_error(response: reqwest::Response, provider: &str, api
     let detail = if api_key.is_empty() { detail } else { detail.replace(api_key, "***") };
     let detail = truncate_diagnostic(&detail, 500);
     let diagnostic = format!("HTTP {}: {detail}", status.as_u16());
-    format!("[{}] {provider} API error ({diagnostic})", classify_error(&diagnostic))
+    maybe_tag_retry_after(&headers, format!("[{}] {provider} API error ({diagnostic})", classify_error(&diagnostic)))
 }
 
 fn format_transport_error(provider: &str, error: reqwest::Error) -> String {
     // Request URLs may contain credentials in query parameters, notably Gemini API keys.
     format!("{provider} request failed: {}", error.without_url())
+}
+
+/// Extract an error string from a non-2xx streaming response, preserving any
+/// `Retry-After` header so the retry helpers can honour server-requested delays.
+///
+/// Mirrors [`categorized_http_error`]: always embeds `HTTP <status>` in the
+/// diagnostic so that [`classify_error`] works correctly on empty-body or
+/// non-JSON responses (e.g. a bare 429 from a proxy).
+async fn stream_error(response: reqwest::Response, fallback: &str) -> String {
+    let status = response.status();
+    let headers = response.headers().clone();
+    // Read the body as text first so we still have it when JSON parsing fails.
+    let body_text = response.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|data| extract_error(&data))
+        .unwrap_or_else(|| {
+            let trimmed = body_text.trim();
+            if trimmed.is_empty() {
+                "empty response body".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        });
+    let diagnostic = format!("HTTP {}: {detail}", status.as_u16());
+    maybe_tag_retry_after(&headers, format!("[{}] {fallback} API error ({diagnostic})", classify_error(&diagnostic)))
 }
 
 async fn measure_first_stream_chunk(
@@ -1809,18 +1943,29 @@ async fn measure_first_stream_chunk(
 ) -> Result<(u64, String), String> {
     let mut buf = Vec::new();
     let mut diagnostics = StreamProbeDiagnostics::default();
+    let mut event_name: Option<String> = None;
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream read error: {}", e.without_url()))?;
         diagnostics.bytes_received += chunk.len();
         buf.extend_from_slice(&chunk);
 
         while let Some(line) = drain_next_stream_line(&mut buf)? {
+            if line.trim().is_empty() {
+                event_name = None;
+                continue;
+            }
+            if let Some(name) = stream_event_name(&line) {
+                event_name = Some(name.to_string());
+                continue;
+            }
             let Some(data) = stream_data_payload(&line) else { continue };
             if data == "[DONE]" {
                 diagnostics.data_events += 1;
                 return Err(diagnostics.empty_stream_error(is_gemini));
             }
-            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+            if let Some(text) =
+                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
+            {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -1830,7 +1975,9 @@ async fn measure_first_stream_chunk(
     if !buf.is_empty() {
         let line = String::from_utf8(buf).map_err(|e| format!("AI stream returned invalid UTF-8: {e}"))?;
         if let Some(data) = stream_data_payload(&line) {
-            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+            if let Some(text) =
+                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
+            {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -1869,127 +2016,143 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     if matches!(config.provider, AiProvider::PiAgentCli) {
         return crate::ai_pi_agent_cli::test_pi_agent_connection(config).await;
     }
+    let mut resolved_config = config.clone();
+    if resolved_config.model.trim().is_empty() {
+        let model = list_models_core(&resolved_config)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                "[modelDiscoveryUnsupported] Model discovery returned no models. Save the provider and enter a model ID manually."
+                    .to_string()
+            })?;
+        resolved_config.model = model.id;
+    }
+    let config = &resolved_config;
     validate_config(config)?;
 
     let client = build_ai_http_client(config, 15)?;
-    let start = std::time::Instant::now();
-
+    let model = config.model.clone();
+    let provider = config.provider.clone();
     let is_claude = uses_anthropic_messages_api(config);
     let is_gemini = matches!(config.provider, AiProvider::Gemini);
-    let model = config.model.clone();
+    let api_key = normalized_api_key(config).to_string();
+    let endpoint = resolve_endpoint(config);
+    let gemini_ep = resolve_gemini_stream_endpoint(config);
+    let api_style = config.api_style.clone();
+    let config_ref = config.clone();
+    let config_inner = config.clone();
 
-    // Build the streaming request and get the byte stream
-    let byte_stream = match config.provider {
-        AiProvider::Claude => {
-            let body = json!({
-                "model": claude_http_model(&model),
-                "max_tokens": 16,
-                "system": CLAUDE_DEFAULT_SYSTEM,
-                "messages": [{ "role": "user", "content": TEST_PROMPT }],
-                "stream": true,
-            });
-            let res = client
-                .post(resolve_endpoint(config))
-                .headers(claude_headers(config)?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("Claude request failed: {e}"))?;
-            if !res.status().is_success() {
-                return Err(categorized_http_error(res, "Claude", &config.api_key).await);
-            }
-            res.bytes_stream()
-        }
-        AiProvider::Gemini => {
-            // Gemini only returns SSE from streamGenerateContent; generateContent
-            // returns one JSON document even when alt=sse is supplied.
-            let ep = resolve_gemini_stream_endpoint(config);
-            let res = client
-                .post(&ep)
-                .header(CONTENT_TYPE, "application/json")
-                .query(&[("key", normalized_api_key(config)), ("alt", "sse")])
-                .json(&json!({
-                    "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
-                    "generationConfig": { "maxOutputTokens": 256 },
-                }))
-                .send()
-                .await
-                .map_err(|e| format_transport_error("Gemini", e))?;
-            if !res.status().is_success() {
-                return Err(categorized_http_error(res, "Gemini", &config.api_key).await);
-            }
-            res.bytes_stream()
-        }
-        AiProvider::Custom if uses_anthropic_messages_api(config) => {
-            let body = json!({
-                "model": claude_http_model(&model),
-                "max_tokens": 16,
-                "system": CLAUDE_DEFAULT_SYSTEM,
-                "messages": [{ "role": "user", "content": TEST_PROMPT }],
-                "stream": true,
-            });
-            let res = client
-                .post(resolve_endpoint(config))
-                .headers(claude_headers(config)?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("Claude request failed: {e}"))?;
-            if !res.status().is_success() {
-                return Err(categorized_http_error(res, "Claude", &config.api_key).await);
-            }
-            res.bytes_stream()
-        }
-        _ => {
-            // OpenAI-compatible providers
-            let mut body_obj = if config.api_style == AiApiStyle::Responses {
-                json!({
-                    "model": &model,
-                    "input": [{ "role": "user", "content": TEST_PROMPT }],
-                    "max_output_tokens": 16,
-                    "stream": true,
-                })
-            } else {
-                let messages = vec![json!({ "role": "user", "content": TEST_PROMPT })];
-                let mut body = json!({
-                    "model": &model,
-                    "messages": messages,
+    with_retry(&config_ref, || {
+        let client = client.clone();
+        let model = model.clone();
+        let provider = provider.clone();
+        let api_key = api_key.clone();
+        let endpoint = endpoint.clone();
+        let gemini_ep = gemini_ep.clone();
+        let api_style = api_style.clone();
+        let config_inner = config_inner.clone();
+        async move {
+            let start = std::time::Instant::now();
+
+            let byte_stream = if is_claude {
+                let body = json!({
+                    "model": claude_http_model(&model),
+                    "max_tokens": 16,
+                    "system": CLAUDE_DEFAULT_SYSTEM,
+                    "messages": [{ "role": "user", "content": TEST_PROMPT }],
                     "stream": true,
                 });
-                set_chat_completion_token_limit(&mut body, config, 16);
-                body
+                let headers = claude_headers(&config_inner)?;
+                let res = client
+                    .post(&endpoint)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Claude request failed: {e}"))?;
+                if !res.status().is_success() {
+                    return Err(categorized_http_error(res, "Claude", &api_key).await);
+                }
+                res.bytes_stream()
+            } else {
+                match provider {
+                    AiProvider::Gemini => {
+                        let res = client
+                            .post(&gemini_ep)
+                            .header(CONTENT_TYPE, "application/json")
+                            .query(&[("key", api_key.as_str()), ("alt", "sse")])
+                            .json(&json!({
+                                "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
+                                "generationConfig": { "maxOutputTokens": 256 },
+                            }))
+                            .send()
+                            .await
+                            .map_err(|e| format_transport_error("Gemini", e))?;
+                        if !res.status().is_success() {
+                            return Err(categorized_http_error(res, "Gemini", &api_key).await);
+                        }
+                        res.bytes_stream()
+                    }
+                    AiProvider::Claude | AiProvider::AnthropicCompatible => unreachable!(),
+                    _ => {
+                        let mut body_obj = if api_style == AiApiStyle::Responses {
+                            json!({
+                                "model": &model,
+                                "input": [{ "role": "user", "content": TEST_PROMPT }],
+                                "max_output_tokens": 16,
+                                "stream": true,
+                            })
+                        } else {
+                            let messages = vec![json!({ "role": "user", "content": TEST_PROMPT })];
+                            let mut body = json!({
+                                "model": &model,
+                                "messages": messages,
+                                "stream": true,
+                            });
+                            set_chat_completion_token_limit(&mut body, &config_inner, 16);
+                            body
+                        };
+                        if api_style != AiApiStyle::Responses {
+                            apply_chat_completion_thinking_toggle(&mut body_obj, &config_inner);
+                        }
+                        let headers = maybe_bearer_headers(&config_inner)?;
+                        let res = client
+                            .post(&endpoint)
+                            .headers(headers)
+                            .json(&body_obj)
+                            .send()
+                            .await
+                            .map_err(|e| format!("AI request failed: {e}"))?;
+                        if !res.status().is_success() {
+                            return Err(categorized_http_error(res, "AI", &api_key).await);
+                        }
+                        res.bytes_stream()
+                    }
+                }
             };
-            if config.api_style != AiApiStyle::Responses {
-                apply_chat_completion_thinking_toggle(&mut body_obj, config);
-            }
-            let ep = resolve_endpoint(config);
-            let res = client
-                .post(&ep)
-                .headers(maybe_bearer_headers(config)?)
-                .json(&body_obj)
-                .send()
-                .await
-                .map_err(|e| format!("AI request failed: {e}"))?;
-            if !res.status().is_success() {
-                return Err(categorized_http_error(res, "AI", &config.api_key).await);
-            }
-            res.bytes_stream()
-        }
-    };
 
-    match measure_first_stream_chunk(byte_stream, start, is_claude, is_gemini).await {
-        Ok((latency, _delta)) => Ok(AiTestConnectionResult {
-            success: true,
-            message: format!("OK — {}ms", latency),
-            latency_ms: Some(latency),
-            model_used: model,
-            error_category: None,
-        }),
-        Err(e) => {
-            let category = classify_error(&e);
-            Err(format!("[{category}] {e}"))
+            match measure_first_stream_chunk(byte_stream, start, is_claude, is_gemini).await {
+                Ok((latency, _delta)) => Ok(AiTestConnectionResult {
+                    success: true,
+                    message: format!("OK — {}ms", latency),
+                    latency_ms: Some(latency),
+                    model_used: model,
+                    error_category: None,
+                }),
+                Err(e) => {
+                    let category = classify_error(&e);
+                    let category_prefix = format!("[{category}]");
+                    if e.starts_with(&category_prefix) {
+                        Err(e)
+                    } else {
+                        Err(format!("{category_prefix} {e}"))
+                    }
+                }
+            }
         }
-    }
+    })
+    .await
 }
 
 fn classify_error(msg: &str) -> &'static str {
@@ -2004,6 +2167,8 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("incorrect api key")
         || lower.contains("api key not valid")
         || lower.contains("api_key_invalid")
+        || lower.contains("authentication_error")
+        || lower.contains("permission_error")
     {
         "auth"
     } else if lower.contains("404")
@@ -2011,6 +2176,7 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("model not found")
         || lower.contains("model does not exist")
         || lower.contains("not supported for generatecontent")
+        || lower.contains("not_found_error")
     {
         "modelNotFound"
     } else if lower.contains("429")
@@ -2018,11 +2184,15 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("too many requests")
         || lower.contains("resource_exhausted")
         || lower.contains("quota exceeded")
+        || lower.contains("rate_limit_error")
     {
         "rateLimit"
     } else if lower.contains("timeout") || lower.contains("timed out") || lower.contains("504") {
         "timeout"
-    } else if lower.contains("finishreason=max_tokens") || lower.contains("thinking tokens") {
+    } else if lower.contains("finishreason=max_tokens")
+        || lower.contains("thinking tokens")
+        || lower.contains("request_too_large")
+    {
         "tokenLimit"
     } else if lower.contains("safety filter") || lower.contains("prompt was blocked") {
         "safety"
@@ -2037,11 +2207,165 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("resolve")
         || lower.contains("502")
         || lower.contains("503")
+        || lower.contains("api_error")
+        || lower.contains("overloaded_error")
     {
         "network"
     } else {
         "unknown"
     }
+}
+
+/// Whether an error is transient and worth retrying.
+/// Rate limits, timeouts, network blips, and empty responses are retryable;
+/// authentication failures, missing models, safety blocks, and token limits are not.
+fn is_retryable_error(error: &str) -> bool {
+    matches!(classify_error(error), "rateLimit" | "timeout" | "network" | "emptyResponse")
+}
+
+/// Extract Retry-After seconds from HTTP response headers.
+///
+/// Supports both integer seconds and HTTP-date (RFC 9110 §10.2.3) formats.
+/// Returns `None` for missing or unparseable values, and 0 for dates in the past.
+fn parse_retry_after_secs(value: &str, now: std::time::SystemTime) -> Option<u64> {
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(secs);
+    }
+
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    match retry_at.duration_since(now) {
+        Ok(delay) => Some(delay.as_secs().saturating_add(u64::from(delay.subsec_nanos() > 0))),
+        Err(_) => Some(0),
+    }
+}
+
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after_secs(value, std::time::SystemTime::now())
+}
+
+/// Parse a Retry-After duration from an error string.
+///
+/// Recognises the `[retry-after:N]` prefix (N in whole seconds) optionally
+/// embedded by [`categorized_http_error`] or stream error sites.
+fn parse_retry_after(error: &str) -> Option<std::time::Duration> {
+    let rest = error.strip_prefix("[retry-after:")?;
+    let end = rest.find(']')?;
+    let secs: u64 = rest[..end].parse().ok()?;
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// Prepend a `[retry-after:N]` tag to an error string if the headers include
+/// a Retry-After value.
+fn maybe_tag_retry_after(headers: &reqwest::header::HeaderMap, mut error: String) -> String {
+    if let Some(secs) = retry_after_secs(headers) {
+        error = format!("[retry-after:{secs}]{error}");
+    }
+    error
+}
+
+/// Execute an async operation with automatic retry on transient errors.
+///
+/// Uses the `max_retries` field from `config` (defaults to
+/// [`DEFAULT_MAX_RETRIES`] when `None`, capped at [`MAX_MAX_RETRIES`]).
+/// Exponential back-off starts at 500 ms and doubles each
+/// attempt, with a small jitter to spread retries across concurrent tasks.
+async fn with_retry<F, Fut, T>(config: &AiConfig, mut op: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let max = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES).min(MAX_MAX_RETRIES);
+    let mut last_err: Option<String> = None;
+
+    for attempt in 0..=max {
+        if attempt > 0 {
+            // Exponential back-off: 500ms, 1s, 2s, 4s … with ±25 % jitter.
+            let base_ms = 2u64.pow(attempt.saturating_sub(1)) * 500;
+            // Honour Retry-After from the previous error response.
+            let server_delay_ms =
+                last_err.as_ref().and_then(|e| parse_retry_after(e)).map(|d| d.as_millis() as u64).unwrap_or(0);
+            let base_ms = base_ms.max(server_delay_ms);
+            let jitter = (base_ms as f64 * 0.25) as u64;
+            // We can't use thread_rng here (wasm compat), so rely on the OS
+            // scheduler to naturally jitter concurrent tasks.  A tiny fixed
+            // offset per attempt avoids thundering-herd for a single caller.
+            let delay_ms = base_ms + (attempt as u64 * 37) % jitter.max(1);
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            log::debug!("[ai][retry] attempt {attempt}/{} ({}ms back-off)", max, delay_ms);
+        }
+
+        match op().await {
+            Ok(result) => return Ok(result),
+            Err(err) if attempt < max && is_retryable_error(&err) => {
+                log::warn!("[ai][retry] transient error, will retry: {err}");
+                last_err = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "retry exhausted with no recorded error".to_string()))
+}
+
+/// Variant of [`with_retry`] for streaming operations.
+///
+/// Streaming requests are retried only when the `emitted` flag is still `false`
+/// — that is, no text, reasoning, or tool-call event has reached the frontend.
+/// Once content has been emitted, retrying would cause duplicate output, so the
+/// error is propagated immediately regardless of whether it is transient.
+///
+/// The closure rebuilds the full `send` + stream-consume each attempt.
+/// When `cancelled` is provided, back-off sleep yields to cancellation
+/// so the user's Stop button takes effect quickly.
+async fn with_stream_retry<F, Fut, T>(
+    config: &AiConfig,
+    emitted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancelled: Option<&Notify>,
+    mut op: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let max = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES).min(MAX_MAX_RETRIES);
+    let mut last_err: Option<String> = None;
+
+    for attempt in 0..=max {
+        if attempt > 0 {
+            let base_ms = 2u64.pow(attempt.saturating_sub(1)) * 500;
+            // Honour Retry-After from the previous error response.
+            let server_delay_ms =
+                last_err.as_ref().and_then(|e| parse_retry_after(e)).map(|d| d.as_millis() as u64).unwrap_or(0);
+            let base_ms = base_ms.max(server_delay_ms);
+            let jitter = (base_ms as f64 * 0.25) as u64;
+            let delay_ms = base_ms + (attempt as u64 * 37) % jitter.max(1);
+            let delay = std::time::Duration::from_millis(delay_ms);
+            log::debug!("[ai][stream_retry] attempt {attempt}/{} ({}ms back-off)", max, delay_ms);
+            // Yield to cancellation during back-off so Stop is responsive.
+            if let Some(cancelled) = cancelled {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {},
+                    _ = cancelled.notified() => return Err(AGENT_CANCELLED_ERROR.to_string()),
+                }
+            } else {
+                tokio::time::sleep(delay).await;
+            }
+        }
+
+        match op().await {
+            Ok(result) => return Ok(result),
+            Err(err)
+                if attempt < max && is_retryable_error(&err) && !emitted.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                log::warn!("[ai][stream_retry] transient error before content, will retry: {err}");
+                last_err = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "stream retry exhausted with no recorded error".to_string()))
 }
 
 pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
@@ -2051,33 +2375,43 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
         return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
-    let client = build_ai_http_client(&request.config, 60)?;
+    let config = request.config.clone();
+    let client = build_ai_http_client(&config, 60)?;
 
-    match request.config.provider {
-        AiProvider::Claude => call_claude(&client, request.clone()).await,
-        AiProvider::Gemini => call_gemini(&client, request.clone()).await,
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
-        AiProvider::Openai
-        | AiProvider::Deepseek
-        | AiProvider::Qwen
-        | AiProvider::Ollama
-        | AiProvider::OpenaiCompatible => {
-            if request.config.api_style == AiApiStyle::Responses {
-                call_responses_api(&client, request.clone()).await
-            } else {
-                call_openai_compatible(&client, request.clone()).await
-            }
-        }
-        AiProvider::Custom => {
+    with_retry(&config, || {
+        let client = client.clone();
+        let request = request.clone();
+        async move {
             if uses_anthropic_messages_api(&request.config) {
-                call_claude(&client, request.clone()).await
-            } else if request.config.api_style == AiApiStyle::Responses {
-                call_responses_api(&client, request.clone()).await
-            } else {
-                call_openai_compatible(&client, request.clone()).await
+                return call_claude(&client, request).await;
+            }
+
+            match request.config.provider {
+                AiProvider::Gemini => call_gemini(&client, request).await,
+                AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
+                AiProvider::Openai
+                | AiProvider::Deepseek
+                | AiProvider::Qwen
+                | AiProvider::Ollama
+                | AiProvider::OpenaiCompatible => {
+                    if request.config.api_style == AiApiStyle::Responses {
+                        call_responses_api(&client, request).await
+                    } else {
+                        call_openai_compatible(&client, request).await
+                    }
+                }
+                AiProvider::Custom => {
+                    if request.config.api_style == AiApiStyle::Responses {
+                        call_responses_api(&client, request).await
+                    } else {
+                        call_openai_compatible(&client, request).await
+                    }
+                }
+                AiProvider::Claude | AiProvider::AnthropicCompatible => unreachable!(),
             }
         }
-    }
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -2099,8 +2433,11 @@ pub async fn stream(
     let stream_timeout = if runtime_thinking_enabled(&request.config) { 600 } else { 120 };
     let client = build_ai_http_client(&request.config, stream_timeout)?;
 
+    if uses_anthropic_messages_api(&request.config) {
+        return stream_claude(&client, session_id, request, cancelled, &on_chunk).await;
+    }
+
     match request.config.provider {
-        AiProvider::Claude => stream_claude(&client, session_id, request, cancelled, &on_chunk).await,
         AiProvider::Gemini => stream_gemini(&client, session_id, request, cancelled, &on_chunk).await,
         AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
         AiProvider::Openai
@@ -2115,14 +2452,13 @@ pub async fn stream(
             }
         }
         AiProvider::Custom => {
-            if uses_anthropic_messages_api(&request.config) {
-                stream_claude(&client, session_id, request, cancelled, &on_chunk).await
-            } else if request.config.api_style == AiApiStyle::Responses {
+            if request.config.api_style == AiApiStyle::Responses {
                 stream_responses_api(&client, session_id, request, cancelled, &on_chunk).await
             } else {
                 stream_openai(&client, session_id, request, cancelled, &on_chunk).await
             }
         }
+        AiProvider::Claude | AiProvider::AnthropicCompatible => unreachable!(),
     }
 }
 
@@ -2142,63 +2478,89 @@ async fn stream_claude(
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(claude_headers(&request.config)?)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Claude request failed: {e}"))?;
+    let headers = claude_headers(&request.config)?;
+    let endpoint = resolve_endpoint(&request.config);
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        return Err(extract_error(&data).unwrap_or_else(|| "Claude API error".to_string()));
-    }
-
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
-
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.extend_from_slice(&chunk);
-
-                let mut finished = false;
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if data == "[DONE]" {
-                        finished = true;
-                        break;
-                    }
-
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(text) = claude_stream_text(&event) {
-                            on_chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: text.to_string(),
-                                reasoning_delta: None,
-                                done: false,
-                            });
-                        }
-                    }
-                }
-
-                if finished { break; }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body = body.clone();
+        let headers = headers.clone();
+        let endpoint = endpoint.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Claude request failed: {e}"))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "Claude API error").await);
             }
-            _ = cancelled.notified() => { break; }
+
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
+            let mut event_name: Option<String> = None;
+
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        buf.extend_from_slice(&chunk);
+
+                        let mut finished = false;
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            if line.trim().is_empty() {
+                                event_name = None;
+                                continue;
+                            }
+                            if let Some(name) = stream_event_name(&line) {
+                                event_name = Some(name.to_string());
+                                continue;
+                            }
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if data == "[DONE]" {
+                                finished = true;
+                                break;
+                            }
+
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                    return Err(error);
+                                }
+                                if let Some(text) = claude_stream_text(&event) {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: text.to_string(),
+                                        reasoning_delta: None,
+                                        done: false,
+                                    });
+                                }
+                            }
+                        }
+
+                        if finished { break; }
+                    }
+                    _ = cancelled.notified() => { break; }
+                }
+            }
+
+            on_chunk(AiStreamChunk {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                reasoning_delta: None,
+                done: true,
+            });
+
+            Ok(())
         }
-    }
-
-    on_chunk(AiStreamChunk {
-        session_id: session_id.to_string(),
-        delta: String::new(),
-        reasoning_delta: None,
-        done: true,
-    });
-
-    Ok(())
+    })
+    .await
 }
 
 async fn stream_openai(
@@ -2222,82 +2584,96 @@ async fn stream_openai(
     apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
     crate::ai_effort::apply_runtime_effort(&mut body_obj, &request.config);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body_obj)
-        .send()
-        .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+    let endpoint = resolve_endpoint(&request.config);
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        return Err(extract_error(&data).unwrap_or_else(|| "API error".to_string()));
-    }
-
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
-    let mut finish_reason_deadline = None;
-
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.extend_from_slice(&chunk);
-
-                let mut finished = false;
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if data == "[DONE]" {
-                        finished = true;
-                        break;
-                    }
-
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(reasoning) = openai_stream_reasoning(&event) {
-                            on_chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: String::new(),
-                                reasoning_delta: Some(reasoning.to_string()),
-                                done: false,
-                            });
-                        }
-                        if let Some(text) = openai_stream_text(&event) {
-                            on_chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: text,
-                                reasoning_delta: None,
-                                done: false,
-                            });
-                        }
-                        if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
-                            finish_reason_deadline =
-                                Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
-                        }
-                    }
-                }
-
-                if finished { break; }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body_obj = body_obj.clone();
+        let headers = headers.clone();
+        let endpoint = endpoint.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&body_obj)
+                .send()
+                .await
+                .map_err(|e| format!("AI request failed: {e}"))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "API error").await);
             }
-            _ = cancelled.notified() => { break; }
-            _ = async {
-                match finish_reason_deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending().await,
+
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
+            let mut finish_reason_deadline = None;
+
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        buf.extend_from_slice(&chunk);
+
+                        let mut finished = false;
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if data == "[DONE]" {
+                                finished = true;
+                                break;
+                            }
+
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(reasoning) = openai_stream_reasoning(&event) {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: String::new(),
+                                        reasoning_delta: Some(reasoning.to_string()),
+                                        done: false,
+                                    });
+                                }
+                                if let Some(text) = openai_stream_text(&event) {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: text,
+                                        reasoning_delta: None,
+                                        done: false,
+                                    });
+                                }
+                                if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    finish_reason_deadline =
+                                        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
+                                }
+                            }
+                        }
+
+                        if finished { break; }
+                    }
+                    _ = cancelled.notified() => { break; }
+                    _ = async {
+                        match finish_reason_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => { break; }
                 }
-            } => { break; }
+            }
+
+            on_chunk(AiStreamChunk {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                reasoning_delta: None,
+                done: true,
+            });
+
+            Ok(())
         }
-    }
-
-    on_chunk(AiStreamChunk {
-        session_id: session_id.to_string(),
-        delta: String::new(),
-        reasoning_delta: None,
-        done: true,
-    });
-
-    Ok(())
+    })
+    .await
 }
 
 async fn stream_responses_api(
@@ -2317,63 +2693,76 @@ async fn stream_responses_api(
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+    let endpoint = resolve_endpoint(&request.config);
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        return Err(extract_error(&data).unwrap_or_else(|| "API error".to_string()));
-    }
-
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
-
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.extend_from_slice(&chunk);
-
-                let mut finished = false;
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if data == "[DONE]" {
-                        finished = true;
-                        break;
-                    }
-
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(text) = responses_stream_text(&event) {
-                            on_chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: text.to_string(),
-                                reasoning_delta: None,
-                                done: false,
-                            });
-                        }
-                    }
-                }
-
-                if finished { break; }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body = body.clone();
+        let headers = headers.clone();
+        let endpoint = endpoint.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("AI request failed: {e}"))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "API error").await);
             }
-            _ = cancelled.notified() => { break; }
+
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
+
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        buf.extend_from_slice(&chunk);
+
+                        let mut finished = false;
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if data == "[DONE]" {
+                                finished = true;
+                                break;
+                            }
+
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(text) = responses_stream_text(&event) {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: text.to_string(),
+                                        reasoning_delta: None,
+                                        done: false,
+                                    });
+                                }
+                            }
+                        }
+
+                        if finished { break; }
+                    }
+                    _ = cancelled.notified() => { break; }
+                }
+            }
+
+            on_chunk(AiStreamChunk {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                reasoning_delta: None,
+                done: true,
+            });
+
+            Ok(())
         }
-    }
-
-    on_chunk(AiStreamChunk {
-        session_id: session_id.to_string(),
-        delta: String::new(),
-        reasoning_delta: None,
-        done: true,
-    });
-
-    Ok(())
+    })
+    .await
 }
 
 async fn stream_gemini(
@@ -2403,57 +2792,71 @@ async fn stream_gemini(
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
-    let res = client
-        .post(resolve_gemini_stream_endpoint(&request.config))
-        .query(&[("key", normalized_api_key(&request.config)), ("alt", "sse")])
-        .header(CONTENT_TYPE, "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format_transport_error("Gemini", e))?;
+    let endpoint = resolve_gemini_stream_endpoint(&request.config);
+    let api_key = normalized_api_key(&request.config).to_string();
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
-        return Err(extract_error(&data).unwrap_or_else(|| "Gemini API error".to_string()));
-    }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body = body.clone();
+        let endpoint = endpoint.clone();
+        let api_key = api_key.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .query(&[("key", api_key.as_str()), ("alt", "sse")])
+                .header(CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format_transport_error("Gemini", e))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "Gemini API error").await);
+            }
 
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
 
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.without_url().to_string())?;
-                buf.extend_from_slice(&chunk);
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.without_url().to_string())?;
+                        buf.extend_from_slice(&chunk);
 
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        let text = gemini_text(&event);
-                        if !text.is_empty() {
-                            on_chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: text,
-                                reasoning_delta: None,
-                                done: false,
-                            });
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                let text = gemini_text(&event);
+                                if !text.is_empty() {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: text,
+                                        reasoning_delta: None,
+                                        done: false,
+                                    });
+                                }
+                            }
                         }
                     }
+                    _ = cancelled.notified() => { break; }
                 }
             }
-            _ = cancelled.notified() => { break; }
+
+            on_chunk(AiStreamChunk {
+                session_id: session_id.clone(),
+                delta: String::new(),
+                reasoning_delta: None,
+                done: true,
+            });
+
+            Ok(())
         }
-    }
-
-    on_chunk(AiStreamChunk {
-        session_id: session_id.to_string(),
-        delta: String::new(),
-        reasoning_delta: None,
-        done: true,
-    });
-
-    Ok(())
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -2624,129 +3027,158 @@ async fn stream_claude_with_tools(
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(claude_headers(&request.config)?)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Claude request failed: {e}"))?;
+    let headers = claude_headers(&request.config)?;
+    let endpoint = resolve_endpoint(&request.config);
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        return Err(extract_error(&data).unwrap_or_else(|| "Claude API error".to_string()));
-    }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body = body.clone();
+        let headers = headers.clone();
+        let endpoint = endpoint.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Claude request failed: {e}"))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "Claude API error").await);
+            }
 
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
-    // Track the current content block index and type for tool_use blocks
-    let mut current_block_index: Option<u32> = None;
-    let mut current_block_type: Option<String> = None;
-    let mut token_usage: Option<TokenUsage> = None;
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
+            let mut event_name: Option<String> = None;
+            // Track the current content block index and type for tool_use blocks
+            let mut current_block_index: Option<u32> = None;
+            let mut current_block_type: Option<String> = None;
+            let mut token_usage: Option<TokenUsage> = None;
 
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.extend_from_slice(&chunk);
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        buf.extend_from_slice(&chunk);
 
-                let mut finished = false;
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if data == "[DONE]" {
-                        finished = true;
-                        break;
-                    }
-
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        let event_type = event["type"].as_str().unwrap_or("");
-
-                        match event_type {
-                            // message_start carries input_tokens (prompt cost)
-                            "message_start" => {
-                                if let Some(i) = event["message"]["usage"]["input_tokens"].as_u64() {
-                                    let existing_output = token_usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
-                                    token_usage = Some(TokenUsage { input_tokens: i as u32, output_tokens: existing_output });
-                                }
+                        let mut finished = false;
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            if line.trim().is_empty() {
+                                event_name = None;
+                                continue;
                             }
-                            // message_delta carries output_tokens (generation cost)
-                            "message_delta" => {
-                                if let Some(o) = event["usage"]["output_tokens"].as_u64() {
-                                    let existing_input = token_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
-                                    token_usage = Some(TokenUsage { input_tokens: existing_input, output_tokens: o as u32 });
-                                }
+                            if let Some(name) = stream_event_name(&line) {
+                                event_name = Some(name.to_string());
+                                continue;
                             }
-                            "content_block_start" => {
-                                let idx = event["index"].as_u64().unwrap_or(0) as u32;
-                                let block_type = event["content_block"]["type"].as_str().unwrap_or("");
-                                current_block_index = Some(idx);
-                                current_block_type = Some(block_type.to_string());
-
-                                if block_type == "tool_use" {
-                                    let id = event["content_block"]["id"].as_str().unwrap_or_default().to_string();
-                                    let name = event["content_block"]["name"].as_str().unwrap_or_default().to_string();
-                                    on_event(StreamToolEvent::ToolCallStart { index: idx, id, name });
-                                }
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if data == "[DONE]" {
+                                finished = true;
+                                break;
                             }
-                            "content_block_delta" => {
-                                let idx = event["index"].as_u64().unwrap_or(0) as u32;
-                                let delta_type = event["delta"]["type"].as_str().unwrap_or("");
 
-                                match delta_type {
-                                    "text_delta" => {
-                                        if let Some(text) = event["delta"]["text"].as_str() {
-                                            on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                                session_id: session_id.to_string(),
-                                                delta: text.to_string(),
-                                                reasoning_delta: None,
-                                                done: false,
-                                            }));
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                    return Err(error);
+                                }
+                                let event_type = event["type"].as_str().unwrap_or("");
+
+                                match event_type {
+                                    // message_start carries input_tokens (prompt cost)
+                                    "message_start" => {
+                                        if let Some(i) = event["message"]["usage"]["input_tokens"].as_u64() {
+                                            let existing_output = token_usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
+                                            token_usage = Some(TokenUsage { input_tokens: i as u32, output_tokens: existing_output });
                                         }
                                     }
-                                    "thinking_delta" => {
-                                        if let Some(thinking) = event["delta"]["thinking"].as_str() {
-                                            on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                                session_id: session_id.to_string(),
-                                                delta: String::new(),
-                                                reasoning_delta: Some(thinking.to_string()),
-                                                done: false,
-                                            }));
+                                    // message_delta carries output_tokens (generation cost)
+                                    "message_delta" => {
+                                        if let Some(o) = event["usage"]["output_tokens"].as_u64() {
+                                            let existing_input = token_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
+                                            token_usage = Some(TokenUsage { input_tokens: existing_input, output_tokens: o as u32 });
                                         }
                                     }
-                                    "input_json_delta" => {
-                                        if let Some(fragment) = event["delta"]["partial_json"].as_str() {
-                                            on_event(StreamToolEvent::ToolCallDelta {
-                                                index: idx,
-                                                fragment: fragment.to_string(),
-                                            });
+                                    "content_block_start" => {
+                                        let idx = event["index"].as_u64().unwrap_or(0) as u32;
+                                        let block_type = event["content_block"]["type"].as_str().unwrap_or("");
+                                        current_block_index = Some(idx);
+                                        current_block_type = Some(block_type.to_string());
+
+                                        if block_type == "tool_use" {
+                                            let id = event["content_block"]["id"].as_str().unwrap_or_default().to_string();
+                                            let name = event["content_block"]["name"].as_str().unwrap_or_default().to_string();
+                                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            on_event(StreamToolEvent::ToolCallStart { index: idx, id, name });
                                         }
+                                    }
+                                    "content_block_delta" => {
+                                        let idx = event["index"].as_u64().unwrap_or(0) as u32;
+                                        let delta_type = event["delta"]["type"].as_str().unwrap_or("");
+
+                                        match delta_type {
+                                            "text_delta" => {
+                                                if let Some(text) = event["delta"]["text"].as_str() {
+                                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                    on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                                        session_id: session_id.clone(),
+                                                        delta: text.to_string(),
+                                                        reasoning_delta: None,
+                                                        done: false,
+                                                    }));
+                                                }
+                                            }
+                                            "thinking_delta" => {
+                                                if let Some(thinking) = event["delta"]["thinking"].as_str() {
+                                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                    on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                                        session_id: session_id.clone(),
+                                                        delta: String::new(),
+                                                        reasoning_delta: Some(thinking.to_string()),
+                                                        done: false,
+                                                    }));
+                                                }
+                                            }
+                                            "input_json_delta" => {
+                                                if let Some(fragment) = event["delta"]["partial_json"].as_str() {
+                                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                    on_event(StreamToolEvent::ToolCallDelta {
+                                                        index: idx,
+                                                        fragment: fragment.to_string(),
+                                                    });
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    "content_block_stop" => {
+                                        if let Some(idx) = current_block_index.take() {
+                                            if current_block_type.as_deref() == Some("tool_use") {
+                                                on_event(StreamToolEvent::ToolCallComplete { index: idx });
+                                            }
+                                        }
+                                        current_block_type = None;
                                     }
                                     _ => {}
                                 }
                             }
-                            "content_block_stop" => {
-                                if let Some(idx) = current_block_index.take() {
-                                    if current_block_type.as_deref() == Some("tool_use") {
-                                        on_event(StreamToolEvent::ToolCallComplete { index: idx });
-                                    }
-                                }
-                                current_block_type = None;
-                            }
-                            _ => {}
                         }
+
+                        if finished { break; }
+                    }
+                    _ = cancelled.notified() => {
+                        return Err(AGENT_CANCELLED_ERROR.to_string());
                     }
                 }
+            }
 
-                if finished { break; }
-            }
-            _ = cancelled.notified() => {
-                return Err(AGENT_CANCELLED_ERROR.to_string());
-            }
+            Ok(token_usage)
         }
-    }
-
-    Ok(token_usage)
+    })
+    .await
 }
 
 /// Streaming OpenAI-compatible call with tool support.
@@ -2809,107 +3241,123 @@ async fn stream_openai_with_tools(
     }
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+    let endpoint = resolve_endpoint(&request.config);
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        return Err(extract_error(&data).unwrap_or_else(|| "API error".to_string()));
-    }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body = body.clone();
+        let headers = headers.clone();
+        let endpoint = endpoint.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("AI request failed: {e}"))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "API error").await);
+            }
 
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
-    let mut token_usage: Option<TokenUsage> = None;
-    let mut finish_reason_deadline = None;
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
+            let mut token_usage: Option<TokenUsage> = None;
+            let mut finish_reason_deadline = None;
 
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.extend_from_slice(&chunk);
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        buf.extend_from_slice(&chunk);
 
-                let mut finished = false;
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if data == "[DONE]" {
-                        finished = true;
-                        break;
-                    }
+                        let mut finished = false;
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if data == "[DONE]" {
+                                finished = true;
+                                break;
+                            }
 
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        // Token usage (final chunk from OpenAI with include_usage)
-                        if let Some(usage) = event.get("usage") {
-                            if let (Some(p), Some(c)) = (
-                                usage.get("prompt_tokens").and_then(|v| v.as_u64()),
-                                usage.get("completion_tokens").and_then(|v| v.as_u64()),
-                            ) {
-                                token_usage = Some(TokenUsage { input_tokens: p as u32, output_tokens: c as u32 });
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                // Token usage (final chunk from OpenAI with include_usage)
+                                if let Some(usage) = event.get("usage") {
+                                    if let (Some(p), Some(c)) = (
+                                        usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+                                        usage.get("completion_tokens").and_then(|v| v.as_u64()),
+                                    ) {
+                                        token_usage = Some(TokenUsage { input_tokens: p as u32, output_tokens: c as u32 });
+                                    }
+                                }
+                                // Reasoning
+                                if let Some(reasoning) = openai_stream_reasoning(&event) {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: String::new(),
+                                        reasoning_delta: Some(reasoning.to_string()),
+                                        done: false,
+                                    }));
+                                }
+                                // Text
+                                if let Some(text) = openai_stream_text(&event) {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: text,
+                                        reasoning_delta: None,
+                                        done: false,
+                                    }));
+                                }
+                                // Tool calls
+                                if let Some(tool_calls) = event["choices"].get(0).and_then(|c| c["delta"]["tool_calls"].as_array()) {
+                                    for tc in tool_calls {
+                                        let idx = tc["index"].as_u64().unwrap_or(0) as u32;
+                                        // The first delta carries the tool call id and
+                                        // function name. Some OpenAI-compatible providers
+                                        // (e.g. GLM) send id="" on subsequent deltas, so
+                                        // only a non-empty id marks a genuine start.
+                                        if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
+                                            let name = tc["function"]["name"].as_str().unwrap_or_default().to_string();
+                                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            on_event(StreamToolEvent::ToolCallStart { index: idx, id: id.to_string(), name });
+                                        }
+                                        // Argument fragments
+                                        if let Some(fragment) = tc["function"]["arguments"].as_str() {
+                                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            on_event(StreamToolEvent::ToolCallDelta { index: idx, fragment: fragment.to_string() });
+                                        }
+                                    }
+                                }
+                                if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    finish_reason_deadline =
+                                        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
+                                }
                             }
                         }
-                        // Reasoning
-                        if let Some(reasoning) = openai_stream_reasoning(&event) {
-                            on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: String::new(),
-                                reasoning_delta: Some(reasoning.to_string()),
-                                done: false,
-                            }));
-                        }
-                        // Text
-                        if let Some(text) = openai_stream_text(&event) {
-                            on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: text,
-                                reasoning_delta: None,
-                                done: false,
-                            }));
-                        }
-                        // Tool calls
-                        if let Some(tool_calls) = event["choices"].get(0).and_then(|c| c["delta"]["tool_calls"].as_array()) {
-                            for tc in tool_calls {
-                                let idx = tc["index"].as_u64().unwrap_or(0) as u32;
-                                // The first delta carries the tool call id and
-                                // function name. Some OpenAI-compatible providers
-                                // (e.g. GLM) send id="" on subsequent deltas, so
-                                // only a non-empty id marks a genuine start.
-                                if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
-                                    let name = tc["function"]["name"].as_str().unwrap_or_default().to_string();
-                                    on_event(StreamToolEvent::ToolCallStart { index: idx, id: id.to_string(), name });
-                                }
-                                // Argument fragments
-                                if let Some(fragment) = tc["function"]["arguments"].as_str() {
-                                    on_event(StreamToolEvent::ToolCallDelta { index: idx, fragment: fragment.to_string() });
-                                }
-                            }
-                        }
-                        if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
-                            finish_reason_deadline =
-                                Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
-                        }
-                    }
-                }
 
-                if finished { break; }
-            }
-            _ = cancelled.notified() => {
-                return Err(AGENT_CANCELLED_ERROR.to_string());
-            }
-            _ = async {
-                match finish_reason_deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending().await,
+                        if finished { break; }
+                    }
+                    _ = cancelled.notified() => {
+                        return Err(AGENT_CANCELLED_ERROR.to_string());
+                    }
+                    _ = async {
+                        match finish_reason_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => { break; }
                 }
-            } => { break; }
+            }
+
+            Ok(token_usage)
         }
-    }
-
-    Ok(token_usage)
+    })
+    .await
 }
 
 async fn stream_responses_with_tools(
@@ -2933,112 +3381,128 @@ async fn stream_responses_with_tools(
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+    let endpoint = resolve_endpoint(&request.config);
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        return Err(extract_error(&data).unwrap_or_else(|| "API error".to_string()));
-    }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body = body.clone();
+        let headers = headers.clone();
+        let endpoint = endpoint.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("AI request failed: {e}"))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "API error").await);
+            }
 
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
-    let mut item_indices: HashMap<String, u32> = HashMap::new();
-    let mut started_indices: HashSet<u32> = HashSet::new();
-    let mut argument_indices: HashSet<u32> = HashSet::new();
-    let mut next_index: u32 = 0;
-    let mut token_usage: Option<TokenUsage> = None;
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
+            let mut item_indices: HashMap<String, u32> = HashMap::new();
+            let mut started_indices: HashSet<u32> = HashSet::new();
+            let mut argument_indices: HashSet<u32> = HashSet::new();
+            let mut next_index: u32 = 0;
+            let mut token_usage: Option<TokenUsage> = None;
 
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.extend_from_slice(&chunk);
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        buf.extend_from_slice(&chunk);
 
-                let mut finished = false;
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if data == "[DONE]" {
-                        finished = true;
-                        break;
+                        let mut finished = false;
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if data == "[DONE]" {
+                                finished = true;
+                                break;
+                            }
+
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(usage) = responses_token_usage(&event) {
+                                    token_usage = Some(usage);
+                                }
+
+                                if let Some(text) = responses_stream_text(&event) {
+                                    emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                        session_id: session_id.clone(),
+                                        delta: text.to_string(),
+                                        reasoning_delta: None,
+                                        done: false,
+                                    }));
+                                }
+
+                                match event["type"].as_str().unwrap_or_default() {
+                                    "response.output_item.added" => {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        emit_responses_function_call_item(
+                                            &event,
+                                            &mut item_indices,
+                                            &mut started_indices,
+                                            &mut argument_indices,
+                                            &mut next_index,
+                                            on_event,
+                                        );
+                                    }
+                                    "response.output_item.done" => {
+                                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        if let Some(index) = emit_responses_function_call_item(
+                                            &event,
+                                            &mut item_indices,
+                                            &mut started_indices,
+                                            &mut argument_indices,
+                                            &mut next_index,
+                                            on_event,
+                                        ) {
+                                            on_event(StreamToolEvent::ToolCallComplete { index });
+                                        }
+                                    }
+                                    "response.function_call_arguments.delta" => {
+                                        let index = event["item_id"]
+                                            .as_str()
+                                            .and_then(|id| item_indices.get(id).copied())
+                                            .or_else(|| event["output_index"].as_u64().map(|i| i as u32))
+                                            .unwrap_or(0);
+                                        if let Some(fragment) = event["delta"].as_str() {
+                                            argument_indices.insert(index);
+                                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            on_event(StreamToolEvent::ToolCallDelta { index, fragment: fragment.to_string() });
+                                        }
+                                    }
+                                    "response.function_call_arguments.done" => {
+                                        let index = event["item_id"]
+                                            .as_str()
+                                            .and_then(|id| item_indices.get(id).copied())
+                                            .or_else(|| event["output_index"].as_u64().map(|i| i as u32))
+                                            .unwrap_or(0);
+                                        on_event(StreamToolEvent::ToolCallComplete { index });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        if finished { break; }
                     }
-
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(usage) = responses_token_usage(&event) {
-                            token_usage = Some(usage);
-                        }
-
-                        if let Some(text) = responses_stream_text(&event) {
-                            on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                session_id: session_id.to_string(),
-                                delta: text.to_string(),
-                                reasoning_delta: None,
-                                done: false,
-                            }));
-                        }
-
-                        match event["type"].as_str().unwrap_or_default() {
-                            "response.output_item.added" => {
-                                emit_responses_function_call_item(
-                                    &event,
-                                    &mut item_indices,
-                                    &mut started_indices,
-                                    &mut argument_indices,
-                                    &mut next_index,
-                                    on_event,
-                                );
-                            }
-                            "response.output_item.done" => {
-                                if let Some(index) = emit_responses_function_call_item(
-                                    &event,
-                                    &mut item_indices,
-                                    &mut started_indices,
-                                    &mut argument_indices,
-                                    &mut next_index,
-                                    on_event,
-                                ) {
-                                    on_event(StreamToolEvent::ToolCallComplete { index });
-                                }
-                            }
-                            "response.function_call_arguments.delta" => {
-                                let index = event["item_id"]
-                                    .as_str()
-                                    .and_then(|id| item_indices.get(id).copied())
-                                    .or_else(|| event["output_index"].as_u64().map(|i| i as u32))
-                                    .unwrap_or(0);
-                                if let Some(fragment) = event["delta"].as_str() {
-                                    argument_indices.insert(index);
-                                    on_event(StreamToolEvent::ToolCallDelta { index, fragment: fragment.to_string() });
-                                }
-                            }
-                            "response.function_call_arguments.done" => {
-                                let index = event["item_id"]
-                                    .as_str()
-                                    .and_then(|id| item_indices.get(id).copied())
-                                    .or_else(|| event["output_index"].as_u64().map(|i| i as u32))
-                                    .unwrap_or(0);
-                                on_event(StreamToolEvent::ToolCallComplete { index });
-                            }
-                            _ => {}
-                        }
+                    _ = cancelled.notified() => {
+                        return Err(AGENT_CANCELLED_ERROR.to_string());
                     }
                 }
+            }
 
-                if finished { break; }
-            }
-            _ = cancelled.notified() => {
-                return Err(AGENT_CANCELLED_ERROR.to_string());
-            }
+            Ok(token_usage)
         }
-    }
-
-    Ok(token_usage)
+    })
+    .await
 }
 
 fn build_gemini_contents(messages: &[AiMessage]) -> Vec<serde_json::Value> {
@@ -3135,71 +3599,86 @@ async fn stream_gemini_with_tools(
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
-    let res = client
-        .post(resolve_gemini_stream_endpoint(&request.config))
-        .query(&[("key", normalized_api_key(&request.config)), ("alt", "sse")])
-        .header(CONTENT_TYPE, "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format_transport_error("Gemini", e))?;
+    let endpoint = resolve_gemini_stream_endpoint(&request.config);
+    let api_key = normalized_api_key(&request.config).to_string();
+    let config = request.config.clone();
+    let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
-        return Err(extract_error(&data).unwrap_or_else(|| "Gemini API error".to_string()));
-    }
+    with_stream_retry(&config, &emitted, Some(cancelled), || {
+        let body = body.clone();
+        let endpoint = endpoint.clone();
+        let api_key = api_key.clone();
+        let session_id = session_id.to_string();
+        let emitted = emitted.clone();
+        async move {
+            let res = client
+                .post(&endpoint)
+                .query(&[("key", api_key.as_str()), ("alt", "sse")])
+                .header(CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format_transport_error("Gemini", e))?;
+            if !res.status().is_success() {
+                return Err(stream_error(res, "Gemini API error").await);
+            }
 
-    let mut byte_stream = res.bytes_stream();
-    let mut buf = Vec::new();
-    let mut tool_call_idx: u32 = 0;
-    let mut token_usage: Option<TokenUsage> = None;
+            let mut byte_stream = res.bytes_stream();
+            let mut buf = Vec::new();
+            let mut tool_call_idx: u32 = 0;
+            let mut token_usage: Option<TokenUsage> = None;
 
-    loop {
-        tokio::select! {
-            chunk = byte_stream.next() => {
-                let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.without_url().to_string())?;
-                buf.extend_from_slice(&chunk);
+            loop {
+                tokio::select! {
+                    chunk = byte_stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|e| e.without_url().to_string())?;
+                        buf.extend_from_slice(&chunk);
 
-                while let Some(line) = drain_next_stream_line(&mut buf)? {
-                    let Some(data) = stream_data_payload(&line) else { continue };
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        // Token usage (overwrite each chunk, keep last value)
-                        if let (Some(p), Some(c)) = (
-                            event["usageMetadata"]["promptTokenCount"].as_u64(),
-                            event["usageMetadata"]["candidatesTokenCount"].as_u64(),
-                        ) {
-                            token_usage = Some(TokenUsage { input_tokens: p as u32, output_tokens: c as u32 });
-                        }
-                        if let Some(candidates) = event["candidates"].as_array() {
-                            if let Some(parts) = candidates[0]["content"]["parts"].as_array() {
-                                for part in parts {
-                                    // Text
-                                    if let Some(text) = part["text"].as_str() {
-                                        on_event(StreamToolEvent::Chunk(AiStreamChunk {
-                                            session_id: session_id.to_string(),
-                                            delta: text.to_string(),
-                                            reasoning_delta: None,
-                                            done: false,
-                                        }));
-                                    }
-                                    // Function call (Gemini sends complete objects, not deltas)
-                                    if emit_gemini_tool_call_part(part, tool_call_idx, on_event) {
-                                        tool_call_idx += 1;
+                        while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            let Some(data) = stream_data_payload(&line) else { continue };
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                // Token usage (overwrite each chunk, keep last value)
+                                if let (Some(p), Some(c)) = (
+                                    event["usageMetadata"]["promptTokenCount"].as_u64(),
+                                    event["usageMetadata"]["candidatesTokenCount"].as_u64(),
+                                ) {
+                                    token_usage = Some(TokenUsage { input_tokens: p as u32, output_tokens: c as u32 });
+                                }
+                                if let Some(candidates) = event["candidates"].as_array() {
+                                    if let Some(parts) = candidates[0]["content"]["parts"].as_array() {
+                                        for part in parts {
+                                            // Text
+                                            if let Some(text) = part["text"].as_str() {
+                                                emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                                    session_id: session_id.clone(),
+                                                    delta: text.to_string(),
+                                                    reasoning_delta: None,
+                                                    done: false,
+                                                }));
+                                            }
+                                            // Function call (Gemini sends complete objects, not deltas)
+                                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            if emit_gemini_tool_call_part(part, tool_call_idx, on_event) {
+                                                tool_call_idx += 1;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    _ = cancelled.notified() => {
+                        return Err(AGENT_CANCELLED_ERROR.to_string());
+                    }
                 }
             }
-            _ = cancelled.notified() => {
-                return Err(AGENT_CANCELLED_ERROR.to_string());
-            }
-        }
-    }
 
-    Ok(token_usage)
+            Ok(token_usage)
+        }
+    })
+    .await
 }
 
 /// Public entry point: stream an LLM call with tool support, accumulating tool calls.
@@ -3222,36 +3701,31 @@ pub async fn stream_with_tools(
 
     let accumulator = Arc::new(std::sync::Mutex::new(StreamingToolCallAccumulator::new()));
 
-    let token_usage = match config.provider {
-        AiProvider::Claude => {
-            stream_claude_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        AiProvider::Gemini => {
-            stream_gemini_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        AiProvider::Custom if uses_anthropic_messages_api(config) => {
-            stream_claude_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        _ if config.api_style == AiApiStyle::Responses => {
-            stream_responses_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        _ => {
-            stream_openai_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
+    let token_usage = if uses_anthropic_messages_api(config) {
+        stream_claude_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+            accumulator.lock().unwrap().process(event, &on_chunk);
+        })
+        .await?
+    } else {
+        match config.provider {
+            AiProvider::Gemini => {
+                stream_gemini_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                    accumulator.lock().unwrap().process(event, &on_chunk);
+                })
+                .await?
+            }
+            _ if config.api_style == AiApiStyle::Responses => {
+                stream_responses_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                    accumulator.lock().unwrap().process(event, &on_chunk);
+                })
+                .await?
+            }
+            _ => {
+                stream_openai_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                    accumulator.lock().unwrap().process(event, &on_chunk);
+                })
+                .await?
+            }
         }
     };
 
@@ -3324,16 +3798,18 @@ mod tests {
 
     use super::{
         apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
-        build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt,
+        build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt, complete,
         drain_next_stream_line, emit_gemini_tool_call_part, emit_responses_function_call_item, format_transport_error,
-        gemini_text, is_kimi_model, maybe_bearer_headers, measure_first_stream_chunk,
-        ollama_selected_model_tool_support, openai_response_text, openai_stream_reasoning, openai_stream_text,
-        parse_dynamic_effort_capability, parse_gemini_model_list_response, parse_model_list_response, resolve_endpoint,
+        gemini_text, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after,
+        measure_first_stream_chunk, merge_global_max_retries, ollama_selected_model_tool_support, openai_response_text,
+        openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
+        parse_model_list_response, parse_retry_after, parse_retry_after_secs, resolve_endpoint,
         resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
         resolve_ollama_show_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
-        responses_text, responses_token_usage, retain_ollama_completion_models, set_chat_completion_token_limit,
-        stream_claude, stream_claude_with_tools, stream_data_payload, stream_openai_with_tools,
-        uses_anthropic_messages_api, validate_config, validate_model_list_config, AiApiStyle, AiAuthMethod,
+        responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
+        set_chat_completion_token_limit, stream, stream_claude, stream_claude_with_tools, stream_data_payload,
+        stream_error, stream_openai_with_tools, stream_with_tools, test_connection_core, uses_anthropic_messages_api,
+        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAuthMethod,
         AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection,
         AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
         ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
@@ -3389,6 +3865,162 @@ mod tests {
         (format!("http://{address}/v1/messages"), server)
     }
 
+    async fn spawn_error_server_with_body(
+        status: u16,
+        reason: &'static str,
+        body: &'static str,
+        retry_after_secs: Option<u64>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(n > 0, "server received no request");
+
+            let mut resp = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                body.len()
+            );
+            if let Some(secs) = retry_after_secs {
+                resp.push_str(&format!("Retry-After: {secs}\r\n"));
+            }
+            resp.push_str("Connection: close\r\n\r\n");
+            resp.push_str(body);
+            socket.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        (format!("http://{address}/test"), server)
+    }
+
+    async fn spawn_get_response_server(
+        status: &'static str,
+        response_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        (format!("http://{address}"), server)
+    }
+
+    async fn spawn_paginated_model_server() -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let responses = [
+                r#"{"data":[{"id":"vendor/first"},{"id":"vendor/shared"}],"has_more":true,"last_id":"cursor-1"}"#,
+                r#"{"data":[{"id":"vendor/shared"},{"id":"vendor/second"}],"has_more":false,"last_id":"vendor/second"}"#,
+            ];
+            let mut requests = Vec::new();
+
+            for response_body in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let bytes_read = socket.read(&mut chunk).await.unwrap();
+                    assert!(bytes_read > 0, "request ended before headers were complete");
+                    request.extend_from_slice(&chunk[..bytes_read]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+
+            requests
+        });
+
+        (format!("http://{address}"), server)
+    }
+
+    async fn spawn_model_discovery_and_stream_server() -> (String, tokio::task::JoinHandle<CapturedJsonRequest>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or_default();
+            while request.len() < header_end + content_length {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before body was complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            (headers, request[header_end..header_end + content_length].to_vec())
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut model_socket, _) = listener.accept().await.unwrap();
+            let (model_headers, _) = read_request(&mut model_socket).await;
+            assert!(model_headers.starts_with("GET /v1/models "));
+            let model_body = r#"{"data":[{"id":"discovered-model"}]}"#;
+            let model_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{model_body}",
+                model_body.len()
+            );
+            model_socket.write_all(model_response.as_bytes()).await.unwrap();
+
+            let (mut stream_socket, _) = listener.accept().await.unwrap();
+            let (stream_headers, stream_body) = read_request(&mut stream_socket).await;
+            assert!(stream_headers.starts_with("POST /v1/messages "));
+            let stream_response_body =
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n";
+            let stream_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream_response_body}",
+                stream_response_body.len()
+            );
+            stream_socket.write_all(stream_response.as_bytes()).await.unwrap();
+
+            CapturedJsonRequest { headers: stream_headers, body: serde_json::from_slice(&stream_body).unwrap() }
+        });
+
+        (format!("http://{address}"), server)
+    }
+
     fn claude_http_test_request(endpoint: String) -> AiCompletionRequest {
         AiCompletionRequest {
             config: AiConfig {
@@ -3405,6 +4037,7 @@ mod tests {
                 reasoning_level: AiReasoningLevel::Default,
                 runtime_effort: None,
                 context_window: Some(1_000_000),
+                max_retries: None,
                 codex_cli_path: None,
                 codex_cli_env: Default::default(),
                 claude_code_cli_path: None,
@@ -3424,6 +4057,15 @@ mod tests {
         }
     }
 
+    fn anthropic_compatible_test_request(endpoint: String) -> AiCompletionRequest {
+        let mut request = claude_http_test_request(endpoint);
+        request.config.provider = AiProvider::AnthropicCompatible;
+        request.config.auth_method = AiAuthMethod::Bearer;
+        request.config.api_style = AiApiStyle::AnthropicMessages;
+        request.config.model = "gateway-model".to_string();
+        request
+    }
+
     fn assert_claude_http_request(captured: CapturedJsonRequest) {
         assert_eq!(captured.body["model"], "claude-sonnet-4-6");
         assert!(!captured.headers.to_ascii_lowercase().contains("anthropic-beta:"));
@@ -3438,6 +4080,170 @@ mod tests {
 
         assert_eq!(call_claude(&client, request).await.unwrap(), "ok");
         assert_claude_http_request(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_completion_uses_messages_runtime_and_bearer_auth() {
+        let (endpoint, server) =
+            spawn_json_capture_server("application/json", r#"{"content":[{"type":"text","text":"compatible"}]}"#).await;
+        let request = anthropic_compatible_test_request(endpoint);
+
+        assert_eq!(complete(&request).await.unwrap(), "compatible");
+
+        let captured = server.await.unwrap();
+        let headers = captured.headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer secret"));
+        assert!(headers.contains("anthropic-version: 2023-06-01"));
+        assert!(!headers.contains("x-api-key:"));
+        assert_eq!(captured.body["model"], "gateway-model");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_connection_test_uses_anthropic_sse_and_api_key_auth() {
+        let response = concat!(
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut config = anthropic_compatible_test_request(endpoint).config;
+        config.auth_method = AiAuthMethod::ApiKey;
+
+        let result = test_connection_core(&config).await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.model_used, "gateway-model");
+        let captured = server.await.unwrap();
+        let headers = captured.headers.to_ascii_lowercase();
+        assert!(headers.contains("x-api-key: secret"));
+        assert!(!headers.contains("authorization: bearer"));
+        assert_eq!(captured.body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_connection_test_surfaces_stream_error_once() {
+        let response = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut config = anthropic_compatible_test_request(endpoint).config;
+        config.max_retries = Some(0);
+
+        let error = test_connection_core(&config).await.unwrap_err();
+
+        assert!(error.starts_with("[network] Anthropic stream error"));
+        assert_eq!(error.matches("[network]").count(), 1);
+        assert!(error.contains("overloaded_error: Overloaded"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_connection_test_discovers_a_model_before_messages() {
+        let (endpoint, server) = spawn_model_discovery_and_stream_server().await;
+        let mut config = anthropic_compatible_test_request(endpoint).config;
+        config.model.clear();
+
+        let result = test_connection_core(&config).await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.model_used, "discovered-model");
+        let captured = server.await.unwrap();
+        assert_eq!(captured.body["model"], "discovered-model");
+        assert_eq!(captured.body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_stream_reuses_anthropic_event_parsing() {
+        let response = concat!(
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"compatible stream\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let request = anthropic_compatible_test_request(endpoint);
+        let chunks = RefCell::new(Vec::new());
+
+        stream("compatible-session", &request, &Notify::new(), |chunk| chunks.borrow_mut().push(chunk)).await.unwrap();
+
+        let chunks = chunks.into_inner();
+        assert_eq!(chunks[0].delta, "compatible stream");
+        assert!(!chunks[0].done);
+        assert!(chunks.last().unwrap().done);
+        let captured = server.await.unwrap();
+        assert_eq!(captured.body["model"], "gateway-model");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_stream_surfaces_sse_error_event() {
+        let response = concat!(
+            "event: error\n",
+            "data: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Too many requests\"}}\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut request = anthropic_compatible_test_request(endpoint);
+        request.config.max_retries = Some(0);
+        let chunks = RefCell::new(Vec::new());
+
+        let error = stream("compatible-session", &request, &Notify::new(), |chunk| chunks.borrow_mut().push(chunk))
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("[rateLimit]"));
+        assert!(error.contains("rate_limit_error: Too many requests"));
+        assert!(chunks.into_inner().is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_tool_stream_reuses_anthropic_tool_events() {
+        let response = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"get_tables\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"schema\\\":\\\"public\\\"}\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":6}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let request = anthropic_compatible_test_request(endpoint);
+        let tools = [crate::agent_events::ToolDefinition {
+            name: "get_tables",
+            description: "List tables",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "schema": { "type": "string" } }
+            }),
+            read_only: true,
+            parallel_ok: true,
+        }];
+
+        let (calls, usage) =
+            stream_with_tools(&request.config, &request, "compatible-session", &tools, &Notify::new(), |_| {})
+                .await
+                .unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "tool-1");
+        assert_eq!(calls[0].name, "get_tables");
+        assert_eq!(calls[0].arguments["schema"], "public");
+        assert_eq!(usage.unwrap().input_tokens, 4);
+        assert_eq!(server.await.unwrap().body["tools"][0]["name"], "get_tables");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_tool_stream_surfaces_json_error_event() {
+        let response =
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}\n\n";
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut request = anthropic_compatible_test_request(endpoint);
+        request.config.max_retries = Some(0);
+
+        let error = stream_with_tools(&request.config, &request, "compatible-session", &[], &Notify::new(), |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("[auth]"));
+        assert!(error.contains("authentication_error: invalid x-api-key"));
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -3723,6 +4529,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3752,6 +4559,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3779,6 +4587,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3806,6 +4615,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3837,6 +4647,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3865,6 +4676,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3873,7 +4685,9 @@ mod tests {
             pi_agent_cli_env: Default::default(),
         };
 
-        for provider in [AiProvider::Ollama, AiProvider::OpenaiCompatible, AiProvider::Custom] {
+        for provider in
+            [AiProvider::Ollama, AiProvider::AnthropicCompatible, AiProvider::OpenaiCompatible, AiProvider::Custom]
+        {
             let config = AiConfig { provider, ..base.clone() };
             assert!(validate_config(&config).is_ok());
             assert!(validate_model_list_config(&config).is_ok());
@@ -3905,6 +4719,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3928,6 +4743,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3954,6 +4770,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -3988,6 +4805,35 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_compatible_provider_uses_fixed_messages_endpoints_and_round_trips() {
+        let config = anthropic_compatible_test_request("https://gateway.example.com".to_string()).config;
+
+        assert!(uses_anthropic_messages_api(&config));
+        assert_eq!(resolve_endpoint(&config), "https://gateway.example.com/v1/messages");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://gateway.example.com/v1/models");
+
+        let v1 = AiConfig { endpoint: "https://gateway.example.com/v1".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&v1), "https://gateway.example.com/v1/messages");
+
+        let nested =
+            AiConfig { endpoint: "https://gateway.example.com/anthropic/v1/messages".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&nested), "https://gateway.example.com/anthropic/v1/messages");
+        assert_eq!(resolve_model_list_endpoint(&nested).unwrap(), "https://gateway.example.com/anthropic/v1/models");
+
+        let dashscope =
+            AiConfig { endpoint: "https://dashscope-intl.aliyuncs.com/apps/anthropic".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&dashscope), "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages");
+        assert_eq!(
+            resolve_model_list_endpoint(&dashscope).unwrap(),
+            "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/models"
+        );
+
+        let provider_json = serde_json::to_string(&AiProvider::AnthropicCompatible).unwrap();
+        assert_eq!(provider_json, r#""anthropic-compatible""#);
+        assert!(matches!(serde_json::from_str::<AiProvider>(&provider_json).unwrap(), AiProvider::AnthropicCompatible));
+    }
+
+    #[test]
     fn auto_adds_v1_to_openai_compatible_endpoints() {
         // Endpoint without /v1 — auto add
         let config = AiConfig {
@@ -4004,6 +4850,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4066,6 +4913,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4100,6 +4948,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4214,6 +5063,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4245,6 +5095,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4325,6 +5176,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4585,6 +5437,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4701,6 +5554,84 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn anthropic_compatible_lists_unknown_models_without_filtering() {
+        let response_body = r#"{"data":[{"id":"vendor/future-model","display_name":"Future Model","capabilities":{"effort":{"low":{"supported":true},"high":{"supported":true}}}}]}"#;
+        let (origin, server) = spawn_get_response_server("200 OK", response_body).await;
+        let config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+
+        let models = list_models_core(&config).await.unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "vendor/future-model");
+        assert_eq!(models[0].display_name.as_deref(), Some("Future Model"));
+        assert!(matches!(
+            models[0].effort_capability,
+            Some(AiEffortCapability::FreeText { source: AiCapabilitySource::Custom, .. })
+        ));
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("get /v1/models "));
+        assert!(request.contains("authorization: bearer secret"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_model_list_paginates_and_deduplicates() {
+        let (origin, server) = spawn_paginated_model_server().await;
+        let config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+
+        let models = list_models_core(&config).await.unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["vendor/first", "vendor/shared", "vendor/second",]
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /v1/models "));
+        assert!(requests[1].starts_with("GET /v1/models?after_id=cursor-1 "));
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_model_list_uses_free_text_effort() {
+        let response_body = r#"{"data":[{"id":"vendor/future-model","display_name":"Future Model"}]}"#;
+        let (origin, server) = spawn_get_response_server("200 OK", response_body).await;
+        let config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+
+        let models = list_models_core(&config).await.unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "vendor/future-model");
+        assert!(matches!(
+            models[0].effort_capability,
+            Some(AiEffortCapability::FreeText { source: AiCapabilitySource::Custom, .. })
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_reports_optional_model_discovery_as_unsupported() {
+        let (origin, server) = spawn_get_response_server("404 Not Found", "<html>not found</html>").await;
+        let mut config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+        config.model.clear();
+
+        let error = test_connection_core(&config).await.unwrap_err();
+
+        assert!(error.starts_with("[modelDiscoveryUnsupported]"));
+        assert!(error.contains("/v1/models"));
+        assert!(error.contains("enter a model ID manually"));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /v1/models "));
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_effort_is_free_text_without_model_detail_request() {
+        let config = anthropic_compatible_test_request("http://127.0.0.1:1/v1/messages".to_string()).config;
+
+        let capability = resolve_model_effort_core(&config, "vendor/model").await.unwrap();
+
+        assert!(matches!(capability, AiEffortCapability::FreeText { source: AiCapabilitySource::Custom, .. }));
+    }
+
     #[test]
     fn omits_extra_body_for_kimi_test_connection_body() {
         let config = AiConfig {
@@ -4717,6 +5648,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4753,6 +5685,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4795,6 +5728,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4831,6 +5765,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::High,
             runtime_effort: Some(AiEffortSelection::ProviderDefault),
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4894,6 +5829,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -4951,6 +5887,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
@@ -5076,5 +6013,470 @@ mod tests {
         assert!(value.get("specialValues").is_some());
         assert!(value.get("special_values").is_none());
         assert_eq!(serde_json::from_value::<AiEffortCapability>(value).unwrap(), capability);
+    }
+
+    // ------------------------------------------------------------------
+    // with_retry / with_stream_retry unit tests
+    // ------------------------------------------------------------------
+
+    fn retry_config(max_retries: Option<u32>) -> AiConfig {
+        serde_json::from_value(serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4",
+            "maxRetries": max_retries,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retry_succeeds_on_first_attempt() {
+        let cfg = retry_config(Some(2));
+        let result = with_retry(&cfg, || async { Ok::<&str, String>("ok") }).await;
+        assert_eq!(result, Ok("ok"));
+    }
+
+    #[tokio::test]
+    async fn retry_succeeds_after_transient_error() {
+        let cfg = retry_config(Some(2));
+        let mut calls = 0;
+        let result = with_retry(&cfg, || {
+            calls += 1;
+            async move {
+                if calls == 1 {
+                    Err("rate limit exceeded (429)".to_string())
+                } else {
+                    Ok::<&str, String>("recovered")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok("recovered"));
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn retry_exhausts_and_returns_last_error() {
+        let cfg = retry_config(Some(1)); // max 1 → 2 attempts total
+        let result = with_retry(&cfg, || async { Err::<(), _>("gateway timeout (504)".to_string()) }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("504"));
+    }
+
+    #[tokio::test]
+    async fn retry_zero_means_no_retry() {
+        let cfg = retry_config(Some(0));
+        let mut calls = 0;
+        let result = with_retry(&cfg, || {
+            calls += 1;
+            async move { Err::<(), _>("rate limit exceeded (429)".to_string()) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "maxRetries=0 should not retry");
+    }
+
+    #[tokio::test]
+    async fn retry_stops_on_non_retryable_error() {
+        let cfg = retry_config(Some(3));
+        let mut calls = 0;
+        let result = with_retry(&cfg, || {
+            calls += 1;
+            async move { Err::<(), _>("unauthorized (401)".to_string()) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "auth errors are not retryable");
+    }
+
+    #[tokio::test]
+    async fn retry_honours_retry_after_from_error() {
+        // Verify that a [retry-after:N] tag in the error forces the delay
+        // to be at least N seconds.  We use a tight timing assertion: the
+        // sleep call inside with_retry must take ≥ 1 second when the error
+        // carries [retry-after:1].
+        let cfg = retry_config(Some(2));
+        let start = std::time::Instant::now();
+        let mut calls = 0;
+        let result = with_retry(&cfg, || {
+            calls += 1;
+            async move {
+                if calls == 1 {
+                    Err("[retry-after:1]rate limit exceeded (429)".to_string())
+                } else {
+                    Ok::<&str, String>("ok")
+                }
+            }
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert_eq!(result, Ok("ok"));
+        assert_eq!(calls, 2);
+        assert!(elapsed.as_millis() >= 800, "expected ≥1s Retry-After delay, got {}ms", elapsed.as_millis());
+    }
+
+    #[tokio::test]
+    async fn stream_retry_succeeds_on_first_attempt() {
+        let cfg = retry_config(Some(2));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = with_stream_retry(&cfg, &emitted, None, || async { Ok::<&str, String>("ok") }).await;
+        assert_eq!(result, Ok("ok"));
+    }
+
+    #[tokio::test]
+    async fn stream_retry_does_not_retry_after_content_emitted() {
+        let cfg = retry_config(Some(3));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)); // content already out
+        let mut calls = 0;
+        let result = with_stream_retry(&cfg, &emitted, None, || {
+            calls += 1;
+            async move { Err::<(), _>("rate limit exceeded (429)".to_string()) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "should not retry once content has been emitted");
+    }
+
+    #[tokio::test]
+    async fn stream_retry_retries_before_content_emitted() {
+        let cfg = retry_config(Some(2));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut calls = 0;
+        let result = with_stream_retry(&cfg, &emitted, None, || {
+            calls += 1;
+            async move {
+                if calls == 1 {
+                    Err("gateway timeout (504)".to_string())
+                } else {
+                    Ok::<&str, String>("recovered")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok("recovered"));
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn stream_retry_cancels_during_backoff() {
+        let cfg = retry_config(Some(2));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = tokio::sync::Notify::new();
+
+        // Cancel immediately — the retry loop should notice during its first
+        // back-off sleep and return the cancellation error.
+        cancel.notify_one();
+
+        let mut calls = 0;
+        let result = with_stream_retry(&cfg, &emitted, Some(&cancel), || {
+            calls += 1;
+            async move {
+                if calls == 1 {
+                    Err("rate limit exceeded (429)".to_string())
+                } else {
+                    Ok::<&str, String>("never")
+                }
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert_eq!(calls, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Retry-After / classify_error helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_retry_after_from_error() {
+        assert_eq!(parse_retry_after("[retry-after:5]rate limit exceeded"), Some(std::time::Duration::from_secs(5)));
+        assert_eq!(parse_retry_after("[retry-after:120]gateway timeout"), Some(std::time::Duration::from_secs(120)));
+        assert_eq!(parse_retry_after("rate limit exceeded"), None);
+        assert_eq!(parse_retry_after("[retry-after:abc]error"), None);
+        assert_eq!(parse_retry_after(""), None);
+    }
+
+    #[test]
+    fn test_retry_after_secs_from_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after_secs(&headers), None);
+
+        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_static("42"));
+        assert_eq!(retry_after_secs(&headers), Some(42));
+
+        let now = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_700_000_000)
+            + std::time::Duration::from_millis(250);
+        let future = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_001);
+        assert_eq!(parse_retry_after_secs(&httpdate::fmt_http_date(future), now), Some(1));
+
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_699_999_999);
+        assert_eq!(parse_retry_after_secs(&httpdate::fmt_http_date(past), now), Some(0));
+        assert_eq!(parse_retry_after_secs("not-a-number", now), None);
+    }
+
+    #[test]
+    fn test_maybe_tag_retry_after() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(maybe_tag_retry_after(&headers, "err".to_string()), "err");
+
+        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_static("30"));
+        assert_eq!(maybe_tag_retry_after(&headers, "err".to_string()), "[retry-after:30]err");
+    }
+
+    #[test]
+    fn test_is_retryable_error_covers_all_categories() {
+        assert!(is_retryable_error("rate limit exceeded (429)"));
+        assert!(is_retryable_error("gateway timeout (504)"));
+        assert!(is_retryable_error("connection refused"));
+        assert!(is_retryable_error("response body was empty"));
+        assert!(!is_retryable_error("unauthorized (401)"));
+        assert!(!is_retryable_error("model not found (404)"));
+        assert!(!is_retryable_error("safety filter blocked"));
+        assert!(!is_retryable_error("finishReason=MAX_TOKENS"));
+    }
+
+    /// `stream_error` embeds `HTTP <status>` in the diagnostic; verify that
+    /// classification works on the patterns it produces, including the
+    /// empty-body / non-JSON case that was previously classified as `unknown`.
+    #[test]
+    fn test_classify_error_from_stream_error_diagnostic() {
+        // JSON parse succeeded, server error text included.
+        assert_eq!(classify_error("HTTP 429: rate limit exceeded"), "rateLimit");
+        assert_eq!(classify_error("HTTP 504: gateway timeout"), "timeout");
+        assert_eq!(classify_error("HTTP 503: service unavailable"), "network");
+        assert_eq!(classify_error("HTTP 502: bad gateway"), "network");
+        // Empty body — the regression case: a bare 429 with no JSON payload.
+        assert_eq!(classify_error("HTTP 429: empty response body"), "rateLimit");
+        // Non-JSON body that still contains a rate-limit keyword.
+        assert_eq!(classify_error("HTTP 429: <html>Too Many Requests</html>"), "rateLimit");
+        // Auth failures must NOT be retryable.
+        assert_eq!(classify_error("HTTP 401: unauthorized"), "auth");
+        assert_eq!(classify_error("HTTP 403: forbidden"), "auth");
+        assert!(!is_retryable_error("[auth] Claude API error (HTTP 401: unauthorized)"));
+        assert!(!is_retryable_error("[auth] Claude API error (HTTP 403: forbidden)"));
+    }
+
+    // ------------------------------------------------------------------
+    // stream_error integration tests (real reqwest::Response)
+    // ------------------------------------------------------------------
+
+    /// Send a real HTTP request against a local server returning a specific
+    /// error status, then run the response through `stream_error` and verify
+    /// the output format, classification, and Retry-After encoding.
+    async fn call_stream_error(
+        status: u16,
+        reason: &'static str,
+        body: &'static str,
+        retry_after_secs: Option<u64>,
+    ) -> String {
+        let (url, _server) = spawn_error_server_with_body(status, reason, body, retry_after_secs).await;
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&serde_json::json!({"model": "test"}))
+            .send()
+            .await
+            .expect("request to test server failed");
+        stream_error(resp, "TestProvider").await
+    }
+
+    #[tokio::test]
+    async fn stream_error_empty_body_429_is_retryable() {
+        let err = call_stream_error(429, "Too Many Requests", "", None).await;
+        // Expected format: [{classify}] {fallback} API error (HTTP {status}: {detail})
+        assert!(err.contains("[rateLimit]"), "429 with empty body should classify as rateLimit, got: {err}");
+        assert!(err.contains("HTTP 429: empty response body"), "got: {err}");
+        assert!(is_retryable_error(&err), "stream_error 429 must be retryable, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn stream_error_empty_body_429_triggers_retry() {
+        let (url, _server) = spawn_error_server_with_body(429, "Too Many Requests", "", None).await;
+
+        let cfg = retry_config(Some(2));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut calls = 0;
+
+        let result = with_stream_retry(&cfg, &emitted, None, || {
+            calls += 1;
+            let url = url.clone();
+            async move {
+                if calls == 1 {
+                    let resp = reqwest::Client::new()
+                        .post(&url)
+                        .json(&serde_json::json!({"model": "test"}))
+                        .send()
+                        .await
+                        .expect("request failed");
+                    Err(stream_error(resp, "TestProvider").await)
+                } else {
+                    Ok::<(), String>(())
+                }
+            }
+        })
+        .await;
+        assert!(result.is_ok(), "should retry after stream_error 429, got: {result:?}");
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn stream_error_preserves_retry_after_from_headers() {
+        let err = call_stream_error(429, "Too Many Requests", r#"{"error":{"message":"rate limit"}}"#, Some(5)).await;
+        // The Retry-After: 5 header should be encoded as [retry-after:5] prefix.
+        assert!(err.starts_with("[retry-after:5]"), "Retry-After should be prepended, got: {err}");
+        assert!(err.contains("[rateLimit]"), "got: {err}");
+        assert!(err.contains("rate limit"), "should include original error detail, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn stream_error_retry_after_extends_backoff() {
+        // If the response says Retry-After: 1, the first retry must wait ≥ 800ms
+        // (after jitter) rather than the default 500ms.
+        let (url, _server) =
+            spawn_error_server_with_body(429, "Too Many Requests", r#"{"error":{"message":"rate limit"}}"#, Some(1))
+                .await;
+
+        let cfg = retry_config(Some(2));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start = std::time::Instant::now();
+        let mut calls = 0;
+
+        let result = with_stream_retry(&cfg, &emitted, None, || {
+            calls += 1;
+            let url = url.clone();
+            async move {
+                if calls == 1 {
+                    let resp = reqwest::Client::new()
+                        .post(&url)
+                        .json(&serde_json::json!({"model": "test"}))
+                        .send()
+                        .await
+                        .expect("request failed");
+                    Err(stream_error(resp, "TestProvider").await)
+                } else {
+                    Ok::<(), String>(())
+                }
+            }
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+        assert!(elapsed.as_millis() >= 800, "Retry-After: 1 should force ≥1s delay, got {}ms", elapsed.as_millis());
+    }
+
+    #[tokio::test]
+    async fn stream_error_non_json_429_body_is_retryable() {
+        // Some proxies return HTML or plain text for 429.
+        let err = call_stream_error(429, "Too Many Requests", "<html>Too Many Requests</html>", None).await;
+        assert!(
+            err.contains("[rateLimit]"),
+            "non-JSON body containing 'rate' keyword should classify as rateLimit, got: {err}"
+        );
+        assert!(err.contains("<html>"), "raw body should be preserved in detail, got: {err}");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[tokio::test]
+    async fn stream_error_401_is_not_retryable() {
+        let err = call_stream_error(401, "Unauthorized", r#"{"error":{"message":"invalid api key"}}"#, None).await;
+        assert!(err.contains("[auth]"), "got: {err}");
+        assert!(err.contains("HTTP 401"), "got: {err}");
+        assert!(!is_retryable_error(&err), "401 must not be retryable");
+    }
+
+    // ------------------------------------------------------------------
+    // merge_global_max_retries unit tests
+    // ------------------------------------------------------------------
+
+    fn test_config(provider: AiProvider) -> AiConfig {
+        serde_json::from_value(serde_json::json!({
+            "provider": serde_json::to_string(&provider).unwrap().trim_matches('"'),
+            "model": "test-model",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_global_max_retries_sets_for_api_providers() {
+        for provider in &[
+            AiProvider::Claude,
+            AiProvider::AnthropicCompatible,
+            AiProvider::Openai,
+            AiProvider::OpenaiCompatible,
+            AiProvider::Custom,
+            AiProvider::Gemini,
+            AiProvider::Deepseek,
+            AiProvider::Qwen,
+            AiProvider::Ollama,
+        ] {
+            let mut config = test_config(provider.clone());
+            config.max_retries = None;
+            merge_global_max_retries(&mut config, 3);
+            assert_eq!(config.max_retries, Some(3), "merge should set max_retries for {provider:?}");
+        }
+    }
+
+    #[test]
+    fn merge_global_max_retries_skips_cli_providers() {
+        for provider in [AiProvider::CodexCli, AiProvider::ClaudeCodeCli, AiProvider::PiAgentCli] {
+            let mut config = test_config(provider.clone());
+            config.max_retries = None;
+            merge_global_max_retries(&mut config, 0);
+            assert_eq!(config.max_retries, None, "merge must not touch CLI provider {provider:?}");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // End-to-end: max_retries=0 prevents retry even against a real server
+    // ------------------------------------------------------------------
+
+    /// Spawn a TCP server that returns 429 for every connection and counts them.
+    /// Returns (url, count, handle).  Abort the handle after the test.
+    async fn spawn_counting_429_server(
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/messages");
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count2 = count.clone();
+
+        let handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                count2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let resp = b"HTTP/1.1 429 Too Many Requests\r\n\
+                    Content-Type: application/json\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\r\n";
+                let _ = socket.write_all(resp).await;
+            }
+        });
+
+        (url, count, handle)
+    }
+
+    #[tokio::test]
+    async fn test_connection_core_no_retry_when_max_retries_zero() {
+        let (url, count, server) = spawn_counting_429_server().await;
+
+        let mut config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "claude",
+            "apiKey": "sk-test",
+            "model": "claude-sonnet-4",
+            "endpoint": url,
+        }))
+        .unwrap();
+        config.max_retries = Some(0);
+
+        let result = test_connection_core(&config).await;
+        assert!(result.is_err(), "429 should fail, got: {result:?}");
+
+        server.abort();
+        let requests = count.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(requests, 1, "max_retries=0 should mean exactly 1 request, got {requests}");
     }
 }

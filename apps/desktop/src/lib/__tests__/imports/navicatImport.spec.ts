@@ -76,14 +76,14 @@ if (!globalThis.DOMParser) {
 }
 
 describe("parseNavicatConnections", () => {
-  it("imports SQLite DatabaseFile as both host and database", async () => {
+  it("imports SQLite DatabaseFile as the host without treating it as a schema", async () => {
     const [connection] = await parseNavicatConnections(`<Connections>
   <Connection ConnType="SQLite" Name="local-sqlite" DatabaseFile="C:\\Users\\Yang\\demo.db" />
 </Connections>`);
 
     expect(connection?.db_type).toBe("sqlite");
     expect(connection?.host).toBe("C:\\Users\\Yang\\demo.db");
-    expect(connection?.database).toBe("C:\\Users\\Yang\\demo.db");
+    expect(connection?.database).toBeUndefined();
     expect(connection?.port).toBe(0);
   });
 
@@ -94,6 +94,7 @@ describe("parseNavicatConnections", () => {
 
     expect(connection?.db_type).toBe("sqlite");
     expect(connection?.host).toBe("/home/yang/demo.sqlite");
+    expect(connection?.database).toBeUndefined();
   });
 
   it("uses SQLite Database field as the file path", async () => {
@@ -103,7 +104,7 @@ describe("parseNavicatConnections", () => {
 
     expect(connection?.db_type).toBe("sqlite");
     expect(connection?.host).toBe("/tmp/app.data");
-    expect(connection?.database).toBe("/tmp/app.data");
+    expect(connection?.database).toBeUndefined();
   });
 
   it("keeps non-SQLite host and database mapping unchanged", async () => {

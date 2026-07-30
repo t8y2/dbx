@@ -1,4 +1,5 @@
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
 import type { ConnectionConfig, DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
@@ -13,10 +14,10 @@ export interface NewQueryTarget {
 export type NewQueryContextSource = "tab" | "sidebar";
 
 interface ResolveNewQueryTargetInput {
-  activeTab?: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog">;
+  activeTab?: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta">;
   selectedTreeNode?: Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | null;
   activeConnectionId?: string | null;
-  connections: Pick<ConnectionConfig, "id" | "database">[];
+  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "db_type">[];
   preferredSource?: NewQueryContextSource;
 }
 
@@ -49,16 +50,22 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
     : null;
 }
 
-function targetFromContext(context: Pick<QueryTab | TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined, connections: Pick<ConnectionConfig, "id" | "database">[]): NewQueryTarget | null {
+function targetFromContext(
+  context: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta"> | Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined,
+  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "db_type">[],
+): NewQueryTarget | null {
   if (!context?.connectionId) return null;
   const connection = connections.find((item) => item.id === context.connectionId);
   if (!connection) return null;
-  const database = context.database || resolveDefaultDatabase(connection, []);
+  const contextDatabase = context.database || resolveDefaultDatabase(connection, []);
+  const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(contextDatabase, connection) : contextDatabase;
+  const objectBrowser = "objectBrowser" in context ? context.objectBrowser : undefined;
+  const tableMeta = "tableMeta" in context ? context.tableMeta : undefined;
   return {
     connectionId: context.connectionId,
     database,
-    schema: "schema" in context ? (context as { schema?: string }).schema : undefined,
-    catalog: "catalog" in context ? (context as { catalog?: string }).catalog : undefined,
+    schema: context.schema ?? objectBrowser?.schema ?? tableMeta?.schema,
+    catalog: context.catalog ?? objectBrowser?.catalog ?? tableMeta?.catalog,
     shouldRefreshDefaultDatabase: !context.database,
   };
 }
@@ -72,7 +79,7 @@ export interface NewQueryTable {
 }
 
 export interface ResolveNewQueryTableInput {
-  activeTab?: Pick<QueryTab, "mode" | "connectionId" | "database" | "schema" | "tableMeta" | "structureTableName" | "title"> | null;
+  activeTab?: Pick<QueryTab, "mode" | "connectionId" | "database" | "schema" | "catalog" | "tableMeta" | "structureTableName" | "title"> | null;
   selectedTreeNode?: Pick<TreeNode, "type" | "connectionId" | "database" | "schema" | "catalog" | "tableName" | "label"> | null;
   preferredSource?: NewQueryContextSource;
 }
@@ -106,7 +113,7 @@ function tableFromTab(tab: ResolveNewQueryTableInput["activeTab"]): NewQueryTabl
   if (tab.mode === "structure") {
     const tableName = (tab.structureTableName || "").trim();
     if (!tableName) return null;
-    return { connectionId: tab.connectionId, database: tab.database, schema: tab.schema, tableName };
+    return { connectionId: tab.connectionId, database: tab.database, schema: tab.schema, catalog: tab.catalog, tableName };
   }
   return null;
 }
@@ -137,8 +144,8 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  * the same per-dialect identifier quoting and schema/catalog qualification used
  * by the table-data view.
  */
-export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName">): string {
-  const ref = qualifiedTableName({ databaseType, schema: table.schema, catalog: table.catalog, tableName: table.tableName });
+export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>): string {
+  const ref = qualifiedTableName({ databaseType, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName });
   return `SELECT * FROM ${ref}`;
 }
 

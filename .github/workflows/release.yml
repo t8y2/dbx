@@ -41,6 +41,7 @@ jobs:
 
   nix-packaging:
     runs-on: ubuntu-22.04
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
@@ -101,7 +102,17 @@ jobs:
             exit 0
           fi
           git commit -m "chore(jdbc): bump plugin version [skip ci]"
-          git push origin HEAD:main
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Unable to push JDBC plugin version bump after ${attempt} attempts."
+              exit 1
+            fi
+            git fetch origin main --no-tags
+            git rebase origin/main
+          done
 
   build:
     needs: release-ready
@@ -450,7 +461,7 @@ jobs:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
     # dependency, so the tarball runs on any Linux distribution (verified in
     # the oldest pullable Ubuntu container for each arch).
-    needs: build
+    needs: release-ready
     strategy:
       fail-fast: false
       matrix:
@@ -503,7 +514,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo zigbuild --release -p dbx-web --target ${{ matrix.target }} \
-            --no-default-features --features "duckdb-bundled,mq-admin"
+            --no-default-features --features "duckdb-sidecar,mq-admin"
 
       - name: Package static browser runtime
         env:
@@ -636,8 +647,9 @@ jobs:
             --clobber
 
   publish:
-    # Keep the release as a draft until every platform and the Nix package pass.
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, nix-packaging, static-browser]
+    # Keep the release as a draft until every release-blocking platform job passes.
+    # Nix packaging is advisory and runs independently from publication.
+    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, static-browser]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release
@@ -678,6 +690,18 @@ jobs:
           node .github/scripts/sync-cnb-release.mjs \
             --github-release "$RUNNER_TEMP/github-release/release.json" \
             --assets-dir "$RUNNER_TEMP/release-assets"
+
+      - name: Keep latest five app releases in CNB
+        continue-on-error: true
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CURRENT_TAG: ${{ github.ref_name }}
+        run: |
+          node .github/scripts/cleanup-cnb-releases.mjs \
+            --current-tag "$CURRENT_TAG" \
+            --tag-pattern '^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$' \
+            --retain 5 \
+            --apply
 
   docker:
     runs-on: ubuntu-latest

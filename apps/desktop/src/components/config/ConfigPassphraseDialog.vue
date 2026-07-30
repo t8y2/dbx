@@ -76,12 +76,12 @@ const displayError = computed(() => error.value || props.externalError || "");
 
         <div class="grid gap-2">
           <Label>{{ t("configExport.passphrase") }}</Label>
-          <PasswordInput v-model="passphrase" :placeholder="t('configExport.passphrasePlaceholder')" @keydown.enter="mode === 'import' ? confirm() : undefined" />
+          <PasswordInput v-model="passphrase" :placeholder="t('configExport.passphrasePlaceholder')" :toggle-tab-index="-1" @keydown.enter="mode === 'import' ? confirm() : undefined" />
         </div>
 
         <div v-if="mode === 'export'" class="grid gap-2">
           <Label>{{ t("configExport.passphraseConfirm") }}</Label>
-          <PasswordInput v-model="passphraseConfirm" :placeholder="t('configExport.passphraseConfirmPlaceholder')" @keydown.enter="confirm" />
+          <PasswordInput v-model="passphraseConfirm" :placeholder="t('configExport.passphraseConfirmPlaceholder')" :toggle-tab-index="-1" @keydown.enter="confirm" />
         </div>
 
         <p v-if="displayError" class="text-sm text-destructive">{{ displayError }}</p>

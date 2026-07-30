@@ -3002,15 +3002,18 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
 }
 
 fn columns_sql(database: &str, table: &str) -> String {
+    // Query only information_schema.COLUMNS and fetch TABLE_COLLATION separately via
+    // `table_collation_sql`. A LEFT JOIN onto information_schema.TABLES triggers a
+    // catastrophic plan on MySQL 5.7 (observed ~8s vs ~1ms without the join), because 5.7's
+    // TABLES metadata is materialized per-query with poor predicate pushdown. The separate
+    // lookup matches the `get_columns_show` fallback path and keeps results identical.
     format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
-         c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
-         c.CHARACTER_SET_NAME, c.COLLATION_NAME, t.TABLE_COLLATION \
-         FROM information_schema.COLUMNS c \
-         LEFT JOIN information_schema.TABLES t \
-           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
-         WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
-         ORDER BY c.ORDINAL_POSITION",
+        "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, \
+         COLUMN_COMMENT, COLUMN_KEY, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH, \
+         CHARACTER_SET_NAME, COLLATION_NAME \
+         FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         ORDER BY ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
     )
@@ -3175,8 +3178,14 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    let table_collation =
-        rows.iter().find_map(|row| get_opt_str(row, "TABLE_COLLATION").filter(|value| !value.trim().is_empty()));
+    // When database is empty the COLUMNS query returns no rows, so the
+    // function falls through to get_columns_show and this code path is
+    // never reached.  Skip the collation lookup to avoid a pointless query.
+    let table_collation = if database.trim().is_empty() {
+        None
+    } else {
+        query_first_nonblank_string(&mut conn, &table_collation_sql(database, table)).await
+    };
     let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
@@ -4914,13 +4923,15 @@ mod tests {
         let sql = columns_sql("app", "users");
 
         assert!(sql.contains("information_schema.COLUMNS"));
-        assert!(sql.contains("information_schema.TABLES"));
-        assert!(sql.contains("t.TABLE_COLLATION"));
+        // TABLE_COLLATION is fetched separately via `table_collation_sql`; the LEFT JOIN onto
+        // information_schema.TABLES is intentionally avoided to keep MySQL 5.7 fast.
+        assert!(!sql.contains("information_schema.TABLES"));
+        assert!(!sql.contains("TABLE_COLLATION"));
         assert!(!sql.contains("KEY_COLUMN_USAGE"));
         assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
-        assert!(sql.contains("c.COLUMN_KEY"));
-        assert!(sql.contains("c.DATA_TYPE"));
-        assert!(sql.contains("c.COLUMN_TYPE"));
+        assert!(sql.contains("COLUMN_KEY"));
+        assert!(sql.contains("DATA_TYPE"));
+        assert!(sql.contains("COLUMN_TYPE"));
         assert!(!sql.contains("COLLATE"));
         assert!(!sql.contains("AS ENUM_VALUES"));
     }

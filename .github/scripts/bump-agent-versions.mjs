@@ -46,6 +46,7 @@ const nativeDriverDirectories = {
   duckdb: "duckdb",
   oracle: "oracle-go",
   kingbase: "kingbase-go",
+  rabbitmq: "rabbitmq",
 };
 
 function resolveAgentModule(moduleName, { legacyStandaloneModules, moduleExists, readModuleFile }) {

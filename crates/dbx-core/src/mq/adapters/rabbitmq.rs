@@ -1,9 +1,9 @@
-//! RabbitMQ admin adapter. Communicates with a Java agent process
-//! (`RabbitMqAgent.java`) via JSON-RPC over stdin/stdout. The Java agent uses
-//! the `amqp-client` library for admin and message operations.
+//! RabbitMQ admin adapter. Communicates with the native Go agent via JSON-RPC
+//! over stdin/stdout. The agent uses `amqp091-go` for AMQP operations and the
+//! RabbitMQ management HTTP API for administrative operations.
 //!
 //! This adapter follows the same pattern as the Kafka agent:
-//! 1. Spawn a Java agent process via `AgentDriverClient`
+//! 1. Spawn the native agent process via `AgentDriverClient`
 //! 2. Perform JSON-RPC handshake + connect
 //! 3. Delegate all `MessageQueueAdmin` trait methods to JSON-RPC calls
 
@@ -59,7 +59,7 @@ pub struct RabbitMqAdmin {
 }
 
 impl RabbitMqAdmin {
-    /// Spawn the RabbitMQ Java agent, perform handshake, and connect.
+    /// Spawn the RabbitMQ native agent, perform handshake, and connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
         let mut client = AgentDriverClient::spawn(launch).await?;
 

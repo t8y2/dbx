@@ -217,6 +217,45 @@ jobs:
           name: xugu-native
           path: "release-native/dbx-agent-xugu-*"
 
+  build-rabbitmq-native:
+    needs: [bump-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test RabbitMQ native agent
+        working-directory: agents/drivers/rabbitmq
+        run: go test ./...
+      - name: Cross-compile RabbitMQ native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/rabbitmq
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-rabbitmq-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rabbitmq-native
+          path: "release-native/dbx-agent-rabbitmq-*"
+
   build-kingbase-native:
     needs: [bump-versions]
     runs-on: ubuntu-latest
@@ -436,7 +475,7 @@ jobs:
           path: "dbx-jre-*.tar.zst"
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-kingbase-native, build-duckdb-native, build-jre]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-kingbase-native, build-duckdb-native, build-jre]
     runs-on: ubuntu-latest
     steps:
       - name: Create DBX bot release token
@@ -466,6 +505,7 @@ jobs:
           find artifacts/agent-jars -name '*.jar' -exec cp {} release/ \;
           find artifacts/oracle-native -type f -name 'dbx-agent-oracle-*' -exec cp {} release/ \;
           find artifacts/xugu-native -type f -name 'dbx-agent-xugu-*' -exec cp {} release/ \;
+          find artifacts/rabbitmq-native -type f -name 'dbx-agent-rabbitmq-*' -exec cp {} release/ \;
           find artifacts/kingbase-native -type f -name 'dbx-agent-kingbase-*' -exec cp {} release/ \;
           find artifacts/duckdb-native-* -type f -name 'dbx-agent-duckdb-*' -exec cp {} release/ \;
           find artifacts -name 'dbx-jre-*.tar.zst' -exec cp {} release/ \;
@@ -540,6 +580,7 @@ jobs:
               kingbase) echo "人大金仓 KingbaseES" ;;
               duckdb) echo "DuckDB" ;;
               xugu) echo "虚谷 XuguDB" ;;
+              rabbitmq) echo "RabbitMQ" ;;
               *) echo "$name" ;;
             esac
           }
@@ -603,7 +644,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase duckdb; do
+          for name in oracle xugu kingbase duckdb rabbitmq; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -673,6 +714,7 @@ jobs:
               duckdb) echo "DuckDB" ;;
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
+              rabbitmq) echo "RabbitMQ" ;;
               *) echo "$name" ;;
             esac
           }

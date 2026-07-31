@@ -14,7 +14,7 @@ mq/
 ├── service.rs          - 服务层函数
 └── adapters/
     ├── pulsar.rs       - Pulsar 实现
-    ├── rabbitmq.rs     - RabbitMQ 实现 (Java agent)
+    ├── rabbitmq.rs     - RabbitMQ 实现 (Go native agent)
     └── pulsar_version.rs - 版本探测
 ```
 

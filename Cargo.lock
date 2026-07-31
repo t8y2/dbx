@@ -1763,6 +1763,7 @@ version = "0.4.48"
 dependencies = [
  "async-trait",
  "dbx-core",
+ "dirs",
  "reqwest 0.12.28",
  "rmcp",
  "schemars 1.2.1",

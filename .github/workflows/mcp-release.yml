@@ -363,9 +363,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
+      - name: Setup Python for cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install zig and cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: pip install ziglang==0.14.0 cargo-zigbuild==0.23.0
+
       - name: Build Rust CLI binary
         shell: bash
-        run: cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.2.31"
+          else
+            cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+          fi
 
       - name: Stage platform package
         shell: bash
@@ -538,9 +553,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
+      - name: Setup Python for cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install zig and cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: pip install ziglang==0.14.0 cargo-zigbuild==0.23.0
+
       - name: Build Rust MCP binary
         shell: bash
-        run: cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.2.31"
+          else
+            cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+          fi
 
       - name: Stage platform package
         shell: bash

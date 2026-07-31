@@ -34,7 +34,8 @@ function isSameDatabase(tab: DataTabLike, target: Pick<DataTabTarget, "connectio
 }
 
 function isSameTable(tab: DataTabLike, target: DataTabTarget): boolean {
-  return isSameDatabase(tab, target) && (tab.tableMeta?.catalog || "") === (target.catalog || "") && (tab.schema || tab.tableMeta?.schema || "") === (target.schema || "") && (tab.tableMeta?.tableName || tab.title) === target.tableName;
+  const tabSchema = tab.schema || (target.schema ? tab.tableMeta?.schema : undefined) || "";
+  return isSameDatabase(tab, target) && (tab.tableMeta?.catalog || "") === (target.catalog || "") && tabSchema === (target.schema || "") && (tab.tableMeta?.tableName || tab.title) === target.tableName;
 }
 
 export function canApplyDataTabMetadata(tab: DataTabLike | undefined, target: DataTabTarget, signal?: AbortSignal): boolean {

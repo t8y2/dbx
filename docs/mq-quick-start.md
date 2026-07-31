@@ -444,8 +444,9 @@ Agent 构建与安装：
 
 ```bash
 cd agents
-./gradlew :rabbitmq:shadowJar
-# 将 shadow JAR 安装到 DBX 数据目录 agents/drivers/rabbitmq/agent.jar
+cd drivers/rabbitmq
+go build -o agent .
+# 将原生 agent 安装到 DBX 数据目录 agents/drivers/rabbitmq/agent
 ```
 
 Docker 快速启动（AMQP 5672 + Management 15672，仅用于本地验证）：
@@ -506,4 +507,3 @@ const response = await mqRawRequest(connectionId, {
 })
 console.log(response.body)
 ```
-

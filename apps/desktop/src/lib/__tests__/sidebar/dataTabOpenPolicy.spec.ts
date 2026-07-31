@@ -82,6 +82,16 @@ describe("dataTabOpenPolicy", () => {
     expect(findExistingDataTabCandidate([tab], usersTarget, { openMode: "default", reuseDataTab: false })).toEqual({ tab, match: "same-table" });
   });
 
+  it("ignores metadata query schemas for database-scoped tables", () => {
+    const tab = dataTab("users", "users");
+    tab.schema = undefined;
+    tab.tableMeta = { schema: "app", tableName: "users", columns: [], primaryKeys: [] };
+    const mysqlTarget = { connectionId: "conn", database: "app", tableName: "users" };
+
+    expect(canApplyDataTabMetadata(tab, mysqlTarget, new AbortController().signal)).toBe(true);
+    expect(findExistingDataTabCandidate([tab], mysqlTarget, { openMode: "default", reuseDataTab: false })).toEqual({ tab, match: "same-table" });
+  });
+
   it("rejects metadata after its request is cancelled", () => {
     const tab = dataTab("users", "users");
     tab.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };

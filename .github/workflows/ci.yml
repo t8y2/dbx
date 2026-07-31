@@ -513,6 +513,10 @@ jobs:
         run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver go test ./...
         working-directory: agents/drivers/xugu
 
+      - name: RabbitMQ native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/rabbitmq
+
       - name: Oracle native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-oracle-linux-x64 .
         working-directory: agents/drivers/oracle-go
@@ -520,6 +524,46 @@ jobs:
       - name: Xugu native agent build
         run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-xugu-linux-x64 .
         working-directory: agents/drivers/xugu
+
+      - name: RabbitMQ native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rabbitmq-linux-x64 .
+        working-directory: agents/drivers/rabbitmq
+
+      - name: RabbitMQ native agent integration tests
+        shell: bash
+        working-directory: agents/drivers/rabbitmq
+        run: |
+          set -euo pipefail
+          for version in 3.13 4.3; do
+            name="dbx-rabbitmq-${version//./-}"
+            docker run -d --name "$name" \
+              -e RABBITMQ_DEFAULT_USER=dbx \
+              -e RABBITMQ_DEFAULT_PASS=dbx-password \
+              -p 5672:5672 -p 15672:15672 \
+              "rabbitmq:${version}-management"
+            cleanup() {
+              docker rm -f "$name" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            ready=false
+            for _ in $(seq 1 60); do
+              if docker exec "$name" rabbitmq-diagnostics -q ping >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != "true" ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            RABBITMQ_INTEGRATION=1 \
+              RABBITMQ_USERNAME=dbx \
+              RABBITMQ_PASSWORD=dbx-password \
+              go test -run '^TestRabbitMQIntegration$' -count=1 ./...
+            cleanup
+            trap - EXIT
+          done
 
       - name: Java agent tests and packages
         run: ./gradlew test shadowJar --continue

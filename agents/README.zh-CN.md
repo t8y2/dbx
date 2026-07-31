@@ -44,12 +44,12 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 | iotdb | Apache IoTDB | IoTDB JDBC |
 | etcd | etcd | jetcd |
 | zookeeper | Apache ZooKeeper | Apache Curator |
-| rabbitmq | RabbitMQ | RabbitMQ AMQP Java client |
+| rabbitmq | RabbitMQ | amqp091-go 原生 agent |
 
 
 ## 多 JRE 支持
 
-多数 Java agent 以 JRE 21 为目标。原生 agent（如 `oracle`、`kingbase` 和 `xugu`）不需要 JRE。对 Java agent，DBX 会自动下载并管理 JRE 21 安装。
+多数 Java agent 以 JRE 21 为目标。原生 agent（如 `oracle`、`kingbase`、`xugu` 和 `rabbitmq`）不需要 JRE。对 Java agent，DBX 会自动下载并管理 JRE 21 安装。
 
 ## JDBC 连接池
 
@@ -75,7 +75,7 @@ HikariCP 会直接打进启用连接池的 Agent JAR。已经使用 DBX 托管 J
 
 对于新 agent，只要存在成熟、许可证兼容的原生驱动，优先选择**原生（Go 或 Rust）驱动**而非 Java/JDBC agent。原生 agent 以单一自包含可执行文件发布，无需 JRE，可显著降低内存占用和启动时间 —— 完全避开 Java agent 即便空闲也要付出的 JVM 基线开销。
 
-- **原生（Go/Rust）** —— 存在可用原生驱动时首选。参考 `drivers/oracle-go`（go-ora）、`drivers/kingbase-go`（gokb）和 `drivers/xugu`。无需 JRE 下载与管理。
+- **原生（Go/Rust）** —— 存在可用原生驱动时首选。参考 `drivers/oracle-go`（go-ora）、`drivers/kingbase-go`（gokb）、`drivers/xugu` 和 `drivers/rabbitmq`（amqp091-go）。无需 JRE 下载与管理。
 - **Java/JDBC** —— 当某数据库只有 JDBC 驱动，或原生驱动不成熟、缺乏维护时的默认兜底方案。多数 agent 仍属此类。
 
 原生 agent 实现与 Java agent 相同的 JSON-RPC 契约和 `versions.json` 登记；它发布的是 `agent` 可执行文件而非 `agent.jar`。若同一数据库同时保留原生和 Java 源码实现，默认只发布原生产物；只有 Java 变体以独立兼容配置登记时才同时发布，例如 `oracle-legacy` / `oracle-10g`。
@@ -89,9 +89,10 @@ HikariCP 会直接打进启用连接池的 Agent JAR。已经使用 DBX 托管 J
 (cd drivers/oracle-go && go build -o agent .)
 (cd drivers/kingbase-go && go build -o agent .)
 (cd drivers/xugu && go build -o agent .)
+(cd drivers/rabbitmq && go build -o agent .)
 ```
 
-产物 JAR 在 `drivers/{module}/build/libs/`。原生 agent 从 `drivers/oracle-go`、`drivers/kingbase-go` 和 `drivers/xugu` 构建。
+产物 JAR 在 `drivers/{module}/build/libs/`。原生 agent 从 `drivers/oracle-go`、`drivers/kingbase-go`、`drivers/xugu` 和 `drivers/rabbitmq` 构建。
 
 ### 本地 DBX 运行时测试
 
@@ -105,7 +106,7 @@ cp agents/drivers/<db_type>/build/libs/*-all.jar ~/.dbx/agents/drivers/<db_type>
 
 重启 DBX 或断开重连数据库，使新 agent 进程加载替换后的 JAR。
 
-`oracle`、`kingbase` 和 `xugu` 等原生 agent 使用驱动目录下的 `agent` 可执行文件而非 `agent.jar`。
+`oracle`、`kingbase`、`xugu` 和 `rabbitmq` 等原生 agent 使用驱动目录下的 `agent` 可执行文件而非 `agent.jar`。
 
 ## 版本管理
 

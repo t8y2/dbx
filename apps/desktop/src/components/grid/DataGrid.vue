@@ -207,7 +207,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
-import { isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
+import { DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH, isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
@@ -464,7 +464,7 @@ const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.show
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
-const compactDataGridToolbar = computed(() => isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value));
+const compactDataGridToolbar = computed(() => isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const infiniteScrollMaxRows = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
 const expandedCellEditor = ref<{ rowId: number; col: number } | null>(null);

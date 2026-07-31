@@ -102,7 +102,7 @@ test("standalone result views use the same compact toolbar breakpoint", () => {
   assert.match(contentArea, /ref="standaloneResultToolbarRef"/);
   assert.match(contentArea, /isDataGridToolbarCompact\(standaloneResultToolbarWidth\.value, standaloneResultToolbarViewportWidth\.value\)/);
   assert.equal((contentArea.match(/:compact="standaloneResultToolbarCompact"/g) ?? []).length, 2);
-  assert.match(dataGrid, /isDataGridToolbarCompact\(dataGridTopbarWidth\.value, dataGridViewportWidth\.value\)/);
+  assert.match(dataGrid, /isDataGridToolbarCompact\(dataGridTopbarWidth\.value, dataGridViewportWidth\.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH\)/);
 });
 
 test("embedded and standalone result toolbars share the same fixed height", () => {

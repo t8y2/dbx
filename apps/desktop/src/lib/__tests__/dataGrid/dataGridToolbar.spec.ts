@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
   dataGridToolbarCompactBreakpoint,
   dataGridToolbarIntervalOptions,
   isDataGridToolbarCompact,
@@ -41,6 +42,12 @@ describe("data grid toolbar capabilities", () => {
     expect(isDataGridToolbarCompact(1040, 1280)).toBe(false);
     expect(isDataGridToolbarCompact(900, 1280)).toBe(true);
     expect(isDataGridToolbarCompact(0, 1280)).toBe(false);
+  });
+
+  it("preserves condition input space in embedded data grids", () => {
+    expect(dataGridToolbarCompactBreakpoint(1100, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(1050);
+    expect(isDataGridToolbarCompact(1000, 1100, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(true);
+    expect(isDataGridToolbarCompact(1000, 1100)).toBe(false);
   });
 
   it("does not invoke hidden or disabled actions", async () => {

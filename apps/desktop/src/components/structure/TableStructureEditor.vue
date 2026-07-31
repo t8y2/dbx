@@ -26,6 +26,9 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { invalidateObjectDdl, loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
@@ -138,6 +141,7 @@ const foreignKeysLoading = ref(false);
 const triggersLoading = ref(false);
 const ddlContent = ref("");
 const ddlLoading = ref(false);
+const structureMetadataLoaded = ref(false);
 const ddlPreRef = ref<HTMLPreElement | null>(null);
 function onDdlKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key === "a") {
@@ -153,11 +157,21 @@ function onDdlKeydown(e: KeyboardEvent) {
 }
 const ddlFetched = ref(false);
 
-async function fetchDdl() {
-  if (!props.connectionId || !props.database || !props.tableName || ddlFetched.value || !tableMetadataCapabilities.value.ddl) return;
+function ddlRequest() {
+  return {
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: metadataSchema.value,
+    tableName: props.tableName,
+    catalog: props.catalog,
+  };
+}
+
+async function fetchDdl(force = false) {
+  if (!props.connectionId || !props.database || !props.tableName || (!force && ddlFetched.value) || !tableMetadataCapabilities.value.ddl) return;
   ddlLoading.value = true;
   try {
-    const ddl = await api.getTableDisplayDdl(props.connectionId, props.database, metadataSchema.value, props.tableName, undefined, props.catalog);
+    const { ddl } = await loadObjectDdl(ddlRequest(), { force });
     ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
     ddlFetched.value = true;
   } catch (e: any) {
@@ -959,10 +973,10 @@ async function hydrateRestoredDraftFromDatabase() {
   let shouldRefreshPreview = false;
   try {
     await store.ensureConnected(connectionId);
-    let nextColumns = await api.getColumns(connectionId, database, schema, tableName, catalog);
+    let { value: nextColumns } = await loadObjectMetadataFacet({ connectionId, database, schema, tableName, catalog }, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog));
     if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
       try {
-        const ddl = await api.getTableDisplayDdl(connectionId, database, schema, tableName, undefined, catalog);
+        const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog });
         ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -1190,6 +1204,7 @@ function resetState() {
   selectedColumnId.value = null;
   ddlContent.value = "";
   ddlFetched.value = false;
+  structureMetadataLoaded.value = false;
   newTableName.value = "";
   tableComment.value = "";
   originalTableComment.value = "";
@@ -1209,7 +1224,17 @@ async function reloadStructureFromDatabase() {
     triggers.value = [];
     triggersLoaded.value = false;
   }
-  await loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true });
+  const refreshDdl = activeTab.value === "ddl";
+  const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
+  invalidateTableMetadataCache(metadataMatch);
+  await invalidateObjectDdl(ddlRequest());
+  structureMetadataLoaded.value = false;
+  if (refreshDdl) {
+    ddlFetched.value = false;
+    await fetchDdl(true);
+  } else {
+    await loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true, forceDdl: true, forceMetadata: true });
+  }
 }
 
 function setSecondaryMetadataLoading(scope: TableStructureRefreshScope, value: boolean) {
@@ -1232,7 +1257,16 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-async function loadStructure(silent = false, scope: TableStructureRefreshScope = visibleTableStructureRefreshScope(activeTab.value), showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; damengLengthUnitsAfterSave?: ReadonlyMap<string, string> } = {}) {
+function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "disk" | "remote" }> {
+  return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
+}
+
+async function loadStructure(
+  silent = false,
+  scope: TableStructureRefreshScope = visibleTableStructureRefreshScope(activeTab.value),
+  showErrors = true,
+  options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; damengLengthUnitsAfterSave?: ReadonlyMap<string, string>; forceDdl?: boolean; forceMetadata?: boolean } = {},
+) {
   const connectionId = props.connectionId;
   const database = props.database;
   const catalog = props.catalog;
@@ -1248,17 +1282,31 @@ async function loadStructure(silent = false, scope: TableStructureRefreshScope =
   try {
     await store.ensureConnected(connectionId);
 
-    const columnsPromise = scope.columns ? api.getColumns(connectionId, database, schema, tableName, catalog) : Promise.resolve(undefined);
-    const indexesPromise = scope.indexes ? (tableMetadataCapabilities.value.indexes ? api.listIndexes(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const foreignKeysPromise = scope.foreignKeys ? (tableMetadataCapabilities.value.foreignKeys ? api.listForeignKeys(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const triggersPromise = scope.triggers ? (tableMetadataCapabilities.value.triggers ? api.listTriggers(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? fetchTableCommentValue(connectionId, database, schema, tableName, catalog) : Promise.resolve(undefined);
+    const metadataRequest = ddlRequest();
+    const forceMetadata = options.forceMetadata === true;
+    const columnsPromise = scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value) : Promise.resolve(undefined);
+    const indexesPromise = scope.indexes
+      ? tableMetadataCapabilities.value.indexes
+        ? loadObjectMetadataFacet(metadataRequest, "indexes", () => api.listIndexes(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        : Promise.resolve([])
+      : Promise.resolve(undefined);
+    const foreignKeysPromise = scope.foreignKeys
+      ? tableMetadataCapabilities.value.foreignKeys
+        ? loadObjectMetadataFacet(metadataRequest, "foreign-keys", () => api.listForeignKeys(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        : Promise.resolve([])
+      : Promise.resolve(undefined);
+    const triggersPromise = scope.triggers
+      ? tableMetadataCapabilities.value.triggers
+        ? loadObjectMetadataFacet(metadataRequest, "triggers", () => api.listTriggers(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        : Promise.resolve([])
+      : Promise.resolve(undefined);
+    const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? loadCachedTableComment(metadataRequest, forceMetadata).then((result) => result.value) : Promise.resolve(undefined);
 
     let nextColumns = await columnsPromise;
     if (nextColumns) {
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
-          const ddl = await api.getTableDisplayDdl(connectionId, database, schema, tableName, undefined, catalog);
+          const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog }, { force: options.forceDdl });
           ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -1303,6 +1351,7 @@ async function loadStructure(silent = false, scope: TableStructureRefreshScope =
       await secondaryMetadataPromise;
     }
     loadedSuccessfully = true;
+    structureMetadataLoaded.value = true;
   } catch (e: any) {
     if (showErrors) {
       errorMessage.value = e?.message || String(e);
@@ -1327,7 +1376,7 @@ async function refreshStructureAfterSave(scope: TableStructureRefreshScope, dame
     console.warn("[DBX][structure-editor:post-save-refresh-failed]", e);
   } finally {
     postSaveRefreshing.value = false;
-    if (activeTab.value === "ddl") void fetchDdl();
+    if (activeTab.value === "ddl") void fetchDdl(true);
   }
 }
 
@@ -2249,6 +2298,10 @@ async function applyChanges() {
       ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
       : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection));
     await recordStructureHistory(sql, startedAt, true, result);
+    if (!isCreateMode.value && props.tableName) {
+      invalidateTableMetadataCache({ connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName });
+      await invalidateObjectDdl(ddlRequest());
+    }
     toast(t("structureEditor.saved"), 2500);
     pendingStatements.value = [];
     warnings.value = [];
@@ -2348,7 +2401,7 @@ onMounted(() => {
     void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
-  } else {
+  } else if (activeTab.value !== "ddl") {
     void loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
   }
 });
@@ -2523,6 +2576,8 @@ watch(
   (tab) => {
     if (tab === "ddl") {
       void fetchDdl();
+    } else if (!isCreateMode.value && !structureMetadataLoaded.value && !loading.value) {
+      void loadStructure(false, visibleTableStructureRefreshScope(tab), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
     }
   },
   { immediate: true },
@@ -2543,7 +2598,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
       <Badge variant="outline">{{ connection?.driver_label || databaseType }}</Badge>
-      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving" @click="reloadStructureFromDatabase">
+      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving || ddlLoading" @click="reloadStructureFromDatabase">
         <RefreshCw :class="structureIconClass" />
         {{ t("structureEditor.refresh") }}
       </Button>

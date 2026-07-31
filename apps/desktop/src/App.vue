@@ -1510,6 +1510,7 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
 function onQueryEditorObjectSourceSaved() {
   const target = queryEditorObjectSourceTarget.value;
   if (!target) return;
+  connectionStore.invalidateMetadataCache(target.connectionId, target.database, target.schema, target.name);
   connectionStore.invalidateCompletionCache(target.connectionId, target.database);
   contentAreaRef.value?.refreshQueryEditorCompletionCache();
 }

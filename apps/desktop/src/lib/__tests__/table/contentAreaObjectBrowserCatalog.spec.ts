@@ -25,8 +25,8 @@ describe("ContentArea external catalog wiring", () => {
     expect(openingTag(connectionTreeSource, "SidebarDdlViewDialog")).toContain(':catalog="sidebarDdlTarget.catalog"');
   });
 
-  it("forwards the DDL dialog catalog to the metadata API", () => {
-    expect(ddlViewDialogSource).toMatch(/api\.getTableDisplayDdl\([\s\S]*?props\.objectType, props\.catalog\)/);
+  it("forwards the DDL dialog catalog to the persistent DDL loader", () => {
+    expect(ddlViewDialogSource).toMatch(/loadObjectDdl\([\s\S]*?objectType: props\.objectType,[\s\S]*?catalog: props\.catalog/);
   });
 });
 

@@ -5129,7 +5129,6 @@ function drawCanvasGrid() {
     cellIsSelected,
     cellCanHover: canEditCellItem,
     infiniteScrollEnabled: infiniteScrollEnabled.value,
-    pageSize: pageSize.value,
     pageOffset: rowNumberPageOffset(),
     frozenColumnCount: frozenColumnCount.value,
     columnAligns: columnAligns.value,

@@ -70,7 +70,6 @@ export interface DrawCanvasDataGridOptions {
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
   infiniteScrollEnabled: boolean;
-  pageSize: number;
   pageOffset: number;
   frozenColumnCount?: number;
   columnAligns?: readonly ("left" | "right")[];
@@ -267,7 +266,6 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     cellIsSelected,
     cellCanHover,
     infiniteScrollEnabled,
-    pageSize,
     pageOffset,
     frozenColumnCount = 0,
     columnAligns,

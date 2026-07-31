@@ -2,6 +2,7 @@ import { ref, shallowRef, computed, nextTick, watch, getCurrentInstance, onActiv
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { nextBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
@@ -45,7 +46,7 @@ type CommitEditResult =
 
 interface CommitEditOptions {
   promoteDraft?: boolean;
-  explicitValue?: string | null;
+  explicitValue?: CellValue;
 }
 
 type GridScrollerRef =
@@ -761,6 +762,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (dataGridQuickEntryEnabled.value && options.promoteDraft !== false && result.changed) {
       await saveChanges({ autoSave: true });
     }
+  }
+
+  async function cycleBooleanCellValue(rowId: number, col: number, nullable: boolean) {
+    if (!editable.value || !canEditColumn(col)) return;
+    const item = getRowItem(rowId);
+    if (!item || item.isDeleted) return;
+    if (!item.isNew && !item.isDraft && !canEditExistingRows.value) return;
+    if (isSavingNewRow(item)) return;
+    const newVal = nextBooleanCellValue(item.data[col], nullable);
+    isCancelling = false;
+    suppressNextBlurCommit = false;
+    editingCell.value = { rowId, col };
+    await commitEditAndMaybeAutoSave({ explicitValue: newVal });
   }
 
   async function commitEditFromBlur(options: CommitEditOptions = {}) {
@@ -1623,6 +1637,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     startEdit,
     commitEdit,
     commitEditAndMaybeAutoSave,
+    cycleBooleanCellValue,
     commitEditFromBlur,
     applyCellValue,
     restoreCellValue,

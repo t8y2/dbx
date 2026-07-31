@@ -2137,6 +2137,7 @@ export default withEnglishFallback({
     truncateTableSuccess: '테이블 "{name}" TRUNCATE됨',
     duplicateStructureSuccess: '테이블이 "{name}"(으)로 복제됨',
     tableOperationFailed: "작업 실패: {message}",
+    objectDropRefreshFailed: "개체는 삭제되었지만 사이드바 새로 고침에 실패했습니다: {message}",
     duplicateNameTitle: "새 테이블로 복제",
     duplicateNamePlaceholder: "새 테이블 이름",
     copyTable: "테이블 복사",

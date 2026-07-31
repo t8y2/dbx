@@ -2100,6 +2100,7 @@ export default withEnglishFallback({
     truncateTableSuccess: "資料表「{name}」已截斷",
     duplicateStructureSuccess: "已克隆為新資料表「{name}」",
     tableOperationFailed: "操作失敗：{message}",
+    objectDropRefreshFailed: "物件已刪除，但側邊欄重新整理失敗：{message}",
     duplicateNameTitle: "克隆為新資料表",
     duplicateNamePlaceholder: "新資料表名稱",
     copyTable: "複製資料表",

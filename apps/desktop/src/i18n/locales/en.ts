@@ -2166,6 +2166,7 @@ export default {
     truncateTableSuccess: 'Table "{name}" truncated',
     duplicateStructureSuccess: 'Table cloned as "{name}"',
     tableOperationFailed: "Operation failed: {message}",
+    objectDropRefreshFailed: "Objects were deleted, but refreshing the sidebar failed: {message}",
     duplicateNameTitle: "Clone as New Table",
     duplicateNamePlaceholder: "New table name",
     copyTable: "Copy Table",

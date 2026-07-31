@@ -2030,9 +2030,10 @@ async function confirmDropObject() {
     connectionStore.removePinnedTreeNodes([node]);
     try {
       await refreshTableList(node);
-    } catch {
+    } catch (error: any) {
       // DROP already succeeded; keep the sidebar consistent if metadata refresh fails.
       connectionStore.removeTreeNode(node.id);
+      toast(t("contextMenu.objectDropRefreshFailed", { message: error?.message || String(error) }), 5000);
     }
     releaseActiveNodeReference([node.id]);
   } catch (e: any) {
@@ -2143,11 +2144,13 @@ async function confirmBatchDrop() {
       releaseActiveNodeReference([target.id]);
       refreshScopes.set(`${target.connectionId}:${target.database}:${target.schema ?? ""}`, target);
     }
-    for (const target of refreshScopes.values()) {
-      await refreshTableList(target);
-    }
     toast(t("contextMenu.batchDropSuccess", { count: targets.length }), 3000);
     showBatchDropConfirm.value = false;
+    const refreshResults = await Promise.allSettled([...refreshScopes.values()].map((target) => refreshTableList(target)));
+    const refreshFailure = refreshResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (refreshFailure) {
+      toast(t("contextMenu.objectDropRefreshFailed", { message: refreshFailure.reason?.message || String(refreshFailure.reason) }), 5000);
+    }
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }

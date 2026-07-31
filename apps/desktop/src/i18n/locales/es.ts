@@ -2101,6 +2101,7 @@ export default withEnglishFallback({
     truncateTableSuccess: 'Tabla "{name}" truncada',
     duplicateStructureSuccess: 'Tabla clonada como "{name}"',
     tableOperationFailed: "Error en la operación: {message}",
+    objectDropRefreshFailed: "Los objetos se eliminaron, pero no se pudo actualizar la barra lateral: {message}",
     duplicateNameTitle: "Clonar como tabla nueva",
     duplicateNamePlaceholder: "Nombre de la nueva tabla",
     copyTable: "Copiar tabla",

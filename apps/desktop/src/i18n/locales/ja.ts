@@ -2096,6 +2096,7 @@ export default withEnglishFallback({
     truncateTableSuccess: "テーブル「{name}」をトランケートしました",
     duplicateStructureSuccess: "テーブルを「{name}」として複製しました",
     tableOperationFailed: "操作に失敗しました: {message}",
+    objectDropRefreshFailed: "オブジェクトは削除されましたが、サイドバーの更新に失敗しました: {message}",
     duplicateNameTitle: "新しいテーブルとして複製",
     duplicateNamePlaceholder: "新しいテーブル名",
     copyTable: "テーブルをコピー",

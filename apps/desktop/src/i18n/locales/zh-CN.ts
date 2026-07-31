@@ -2167,6 +2167,7 @@ export default withEnglishFallback({
     truncateTableSuccess: "表「{name}」已截断",
     duplicateStructureSuccess: "已克隆为新表「{name}」",
     tableOperationFailed: "操作失败：{message}",
+    objectDropRefreshFailed: "对象已删除，但侧边栏刷新失败：{message}",
     duplicateNameTitle: "克隆为新表",
     duplicateNamePlaceholder: "新表名",
     copyTable: "复制表",

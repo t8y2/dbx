@@ -8,6 +8,7 @@ import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
+import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -253,6 +254,33 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
 export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value: boolean }; showDatabaseSearchDialog: { value: boolean }; showDiagramDialog: { value: boolean } }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
+  const settingsStore = useSettingsStore();
+  const { openData } = useSidebarDataOpenRuntime();
+
+  async function openObjectBrowserTableTarget(target: NavigationTarget) {
+    if (!settingsStore.editorSettings.reuseDataTab) {
+      await openTableTarget(target);
+      return;
+    }
+    connectionStore.activeConnectionId = target.connectionId;
+    const normalizedTableType = target.tableType?.trim().toUpperCase().replaceAll(" ", "_");
+    const nodeType = normalizedTableType === "VIEW" ? "view" : normalizedTableType === "MATERIALIZED_VIEW" ? "materialized_view" : "table";
+    await openData(
+      {
+        id: uuid(),
+        label: target.tableName,
+        type: nodeType,
+        connectionId: target.connectionId,
+        database: target.database,
+        schema: target.schema,
+        catalog: target.catalog,
+        tableType: target.tableType,
+      },
+      undefined,
+      "default",
+      { reuseScope: "same-table" },
+    );
+  }
 
   async function openLineageTarget(target: NavigationTarget) {
     dialogs.showFieldLineageDialog.value = false;
@@ -332,5 +360,5 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     }
   }
 
-  return { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, onStructureEditorSaved, openTableTarget };
+  return { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, openObjectBrowserTableTarget, onStructureEditorSaved, openTableTarget };
 }

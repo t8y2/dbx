@@ -98,6 +98,7 @@ describe("useNavigationTargets with the real query store", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     mocks.connectionStore.activeConnectionId = "";
+    mocks.settingsStore.editorSettings.reuseDataTab = true;
     mocks.ensureConnected?.mockResolvedValue?.(undefined);
     mocks.connectionStore.ensureConnected.mockResolvedValue(undefined);
     mocks.loadOpenTabsState.mockResolvedValue(null);
@@ -129,6 +130,45 @@ describe("useNavigationTargets with the real query store", () => {
 
     expect(queryStore.tabs).toHaveLength(2);
     expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(['SELECT * FROM users WHERE "id" = 1', 'SELECT * FROM users WHERE "id" = 2']);
+  });
+
+  it("reuses the same object-browser table without reusing tabs across different tables", async () => {
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
+
+    await navigation.openObjectBrowserTableTarget(target);
+    await navigation.openObjectBrowserTableTarget(target);
+    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+
+    expect(queryStore.tabs).toHaveLength(2);
+    expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual(["users", "orders"]);
+    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(["SELECT * FROM users", "SELECT * FROM orders"]);
+    expect(mocks.connectionStore.activeConnectionId).toBe("connection-1");
+  });
+
+  it("keeps object-browser tabs independent when data-tab reuse is disabled", async () => {
+    mocks.settingsStore.editorSettings.reuseDataTab = false;
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
+
+    await navigation.openObjectBrowserTableTarget(target);
+    await navigation.openObjectBrowserTableTarget(target);
+
+    expect(queryStore.tabs).toHaveLength(2);
+  });
+
+  it("keeps repeated sidebar opens independent when data-tab reuse is disabled", async () => {
+    mocks.settingsStore.editorSettings.reuseDataTab = false;
+    const { queryStore } = await setupNavigation();
+    const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
+    const runtime = useSidebarDataOpenRuntime();
+    const node = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", schema: "public", tableType: "TABLE" };
+
+    await runtime.openData(node);
+    await runtime.openData(node);
+
+    expect(queryStore.tabs).toHaveLength(2);
+    expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
   });
 
   it("creates a new target tab even when the same table was restored", async () => {

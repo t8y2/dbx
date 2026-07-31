@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   callOrder: [] as string[],
   tabs: [] as QueryTab[],
   cachedMetadata: undefined as unknown,
+  reuseDataTab: false,
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   loadTableMetadata: vi.fn(),
@@ -25,14 +26,19 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({
     tabs: mocks.tabs,
-    createTab: (connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string) => {
+    createTab: (connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string, _initialSql?: string, catalog?: string, options: { forceNew?: boolean } = {}) => {
+      if (!options.forceNew) {
+        const existing = mocks.tabs.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
+        if (existing) return existing.id;
+      }
       const tab = {
-        id: "tab-1",
+        id: `tab-${mocks.tabs.length + 1}`,
         connectionId,
         database,
         title,
         mode,
         schema,
+        catalog,
         sql: "",
         isDirty: false,
         isExecuting: false,
@@ -69,7 +75,7 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { reuseDataTab: false, pageSize: 100 } }),
+  useSettingsStore: () => ({ editorSettings: { reuseDataTab: mocks.reuseDataTab, pageSize: 100 } }),
 }));
 
 vi.mock("@/lib/database/jdbcDialect", () => ({
@@ -89,8 +95,7 @@ vi.mock("@/lib/metadata/tableMetadataCache", async (importOriginal) => {
 
 vi.mock("@/lib/common/utils", () => ({ uuid: () => "open-data-id" }));
 vi.mock("@/lib/backend/debugLog", () => ({ appendDebugLog: vi.fn(), isDebugLoggingEnabled: () => false }));
-// dataTabOpenPolicy 使用真实实现：beforeEach 清空 tabs 时无候选可复用，
-// 取消窗口测试则依赖真实 findExistingDataTabCandidate 选中同表 tab
+// dataTabOpenPolicy 使用真实实现，覆盖设置开关对应的复用范围
 vi.mock("@/lib/sidebar/treeNodeContext", () => ({ hasTreeNodeDatabaseContext: () => true }));
 vi.mock("@/lib/table/tableSelectSql", () => ({ buildTableSelectSql: async () => "SELECT * FROM users" }));
 vi.mock("@/lib/table/tableEditing", () => ({ usesSyntheticRowIdKey: () => false }));
@@ -114,6 +119,7 @@ describe("useSidebarDataOpenRuntime", () => {
     mocks.callOrder.length = 0;
     mocks.tabs.length = 0;
     mocks.cachedMetadata = undefined;
+    mocks.reuseDataTab = false;
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.executeTabSql.mockImplementation(async () => {
       mocks.callOrder.push("query");
@@ -135,6 +141,31 @@ describe("useSidebarDataOpenRuntime", () => {
         ageMs: 0,
       };
     });
+  });
+
+  it("creates a new sidebar tab for the same table when reuse is disabled", async () => {
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs).toHaveLength(2);
+  });
+
+  it("reuses a sidebar tab for the same table when reuse is enabled", async () => {
+    mocks.reuseDataTab = true;
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs).toHaveLength(1);
+  });
+
+  it("creates a new HBase tab for the same table when reuse is disabled", async () => {
+    mocks.databaseType = "hbase";
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs).toHaveLength(2);
   });
 
   it("starts cold-cache OceanBase metadata before the table query", async () => {
@@ -242,6 +273,7 @@ describe("useSidebarDataOpenRuntime", () => {
   });
 
   it("aborts when a newer navigation takes over the tab during the cancel wait", async () => {
+    mocks.reuseDataTab = true;
     const { beginDataTabNavigation } = await import("@/lib/tabs/dataTabNavigationGeneration");
     // 已存在同表 data tab 且有在途执行：真实 findExistingDataTabCandidate 会
     // 选中它（same-table 复用分支），openData 需先等待取消

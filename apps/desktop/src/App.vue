@@ -343,7 +343,7 @@ function requestActiveEditorExecuteInNewResultTab() {
 
 const dialogs = useDialogSources();
 const { getDatabaseOptions } = useDatabaseOptions();
-const { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
+const { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, openObjectBrowserTableTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
 const { onExecuteSql, onReloadData, onPaginate, onSort } = useDataGridActions(activeTab);
 const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openTableTarget,
@@ -2371,7 +2371,7 @@ onUnmounted(() => {
                     @open-object-table="
                       (target) =>
                         activeTab &&
-                        openTableTarget({
+                        openObjectBrowserTableTarget({
                           connectionId: activeTab.connectionId,
                           database: activeTab.database,
                           schema: target.schema,

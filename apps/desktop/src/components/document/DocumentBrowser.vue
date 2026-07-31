@@ -910,7 +910,11 @@ async function load() {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
     } else {
       cancelElasticsearchCount();
-      const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false);
+      const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false, {
+        page: page.value,
+        pageSize: pageSize.value,
+        rowCount: nextDocuments.length,
+      });
       total.value = totals.total;
       totalIsExact.value = totals.totalIsExact;
       paginationTotal.value = totals.paginationTotal;
@@ -926,6 +930,31 @@ async function load() {
       stopDocumentLoadingTimer();
     }
   }
+}
+
+async function countExactDocumentTotal(): Promise<number> {
+  const filter = currentDocumentFilter();
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    const exactCount = await api.elasticsearchCountDocuments(props.connectionId, props.collection, filter);
+    if (!Number.isFinite(exactCount) || exactCount < 0) {
+      throw new Error("invalid count");
+    }
+    elasticsearchExactTotal = exactCount;
+    const totals = resolveElasticsearchDocumentTotals(elasticsearchPaginationLowerBound ?? exactCount, false, exactCount);
+    total.value = totals.total;
+    totalIsExact.value = totals.totalIsExact;
+    paginationTotal.value = totals.paginationTotal;
+    return exactCount;
+  }
+  const exactCount = await api.mongoCountDocuments(props.connectionId, props.database, props.collection, filter, "accurate");
+  if (!Number.isFinite(exactCount) || exactCount < 0) {
+    throw new Error("invalid count");
+  }
+  const totals = resolveDocumentQueryTotals(exactCount, true);
+  total.value = totals.total;
+  totalIsExact.value = totals.totalIsExact;
+  paginationTotal.value = totals.paginationTotal;
+  return exactCount;
 }
 
 async function refreshDocuments() {
@@ -1617,6 +1646,7 @@ defineExpose({ focusSearch });
       :total-row-count="total"
       :total-row-count-is-exact="totalIsExact"
       :pagination-total-row-count="pageTotal"
+      :count-total-rows="totalIsExact ? undefined : countExactDocumentTotal"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"

@@ -1018,7 +1018,7 @@ export default withEnglishFallback({
     totalRows: "共 {count} 行",
     loadedRows: "已加载 {count} 行",
     totalRowCount: "（总计 {count} 行）",
-    totalRowCountAtLeast: "（至少 {count} 行）",
+    totalRowCountAtLeast: "（约 {count}）",
     totalRowCountLoading: "（统计中...）",
     loadingMore: "加载更多数据...",
     allLoaded: "已全部加载",

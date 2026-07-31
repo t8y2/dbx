@@ -965,7 +965,7 @@ export default withEnglishFallback({
     totalRows: "Total de {count} linhas",
     loadedRows: "{count} linhas carregadas",
     totalRowCount: "({count} no total)",
-    totalRowCountAtLeast: "(pelo menos {count} no total)",
+    totalRowCountAtLeast: "(aprox. {count})",
     totalRowCountLoading: "(contando...)",
     loadingMore: "Carregando mais dados...",
     allLoaded: "tudo carregado",

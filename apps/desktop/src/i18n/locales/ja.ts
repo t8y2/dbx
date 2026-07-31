@@ -964,7 +964,7 @@ export default withEnglishFallback({
     totalRows: "{count}件表示",
     loadedRows: "{count}件読み込み済み",
     totalRowCount: "（全{count}件）",
-    totalRowCountAtLeast: "（少なくとも{count}件）",
+    totalRowCountAtLeast: "（約 {count}）",
     totalRowCountLoading: "（カウント中...）",
     calculateTotalRows: "総行数をカウント",
     calculateTotalRowsInline: "（総行数をカウント）",

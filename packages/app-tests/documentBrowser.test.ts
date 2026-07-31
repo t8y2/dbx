@@ -63,6 +63,14 @@ test("document save uses shared identity plan and write helpers", () => {
   assert.doesNotMatch(source, /async function replaceDocumentStoreDocument/);
 });
 
+test("document table wires on-demand exact total counting for estimated mongo totals", () => {
+  const source = documentBrowserSource();
+  assert.match(source, /:count-total-rows="totalIsExact \? undefined : countExactDocumentTotal"/);
+  assert.match(source, /async function countExactDocumentTotal/);
+  assert.match(source, /api\.mongoCountDocuments\(/);
+  assert.match(source, /"accurate"/);
+});
+
 test("document query inputs apply on Enter and reserve Shift+Enter for newlines", () => {
   const source = documentBrowserSource();
   assert.equal(source.match(/@keydown\.enter\.exact\.prevent="applyFilter"/g)?.length, 2);

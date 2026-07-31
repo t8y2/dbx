@@ -303,6 +303,8 @@ interface DataGridProps {
   paginationTotalRowCount?: number;
   paginationEnabled?: boolean;
   totalRowCountLoading?: boolean;
+  /** Document stores (e.g. MongoDB) count exactly on demand without SQL tableMeta/countSql. */
+  countTotalRows?: () => Promise<number>;
   loading?: boolean;
   cacheKey?: string;
   exportSql?: string;
@@ -2504,9 +2506,10 @@ const canFetchNextInfiniteScrollSegment = computed(() =>
     allRowsLoaded: allRowsLoaded.value,
   }),
 );
-const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
+const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql || !!props.countTotalRows));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
-const canCalculateTotalRowCount = computed(() => !!props.connectionId && (!!props.tableMeta || !!props.countSql));
+const canCalculateTotalRowCount = computed(() => !!props.countTotalRows || (!!props.connectionId && (!!props.tableMeta || !!props.countSql)));
+const showExactTotalCountAction = computed(() => canCalculateTotalRowCount.value && (totalRowCountIsExact.value === false || typeof displayedTotalRowCount.value !== "number"));
 // When a refresh/rollback completes and the current page exceeds the last
 // available page (e.g. data was deleted while viewing), auto-navigate to the
 // last available page instead of showing an empty page.
@@ -2682,42 +2685,60 @@ function applyCustomPageSize() {
   changePageSize(normalizeResultPageSize(customPageSizeInput.value, pageSize.value));
 }
 
+function jumpToCountedLastPage(total: number) {
+  if (total <= 0) return;
+  const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
+  if (lastPageNum <= currentPage.value) return;
+  currentPage.value = lastPageNum;
+  resetGridVerticalScroll(true);
+  emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+}
+
 async function lastPage() {
   if (infiniteScrollEnabled.value) return;
   if (hasKnownPaginationTotalRowCount.value) {
-    const total = paginationTotalRowCount.value ?? 0;
-    if (total <= 0) return;
-    const lastPageNum = Math.ceil(total / pageSize.value);
-    if (lastPageNum <= currentPage.value) return;
-    currentPage.value = lastPageNum;
-    resetGridVerticalScroll(true);
-    emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+    jumpToCountedLastPage(paginationTotalRowCount.value ?? 0);
     return;
   }
   if (allRowsLoaded.value) {
     const total = props.result.rows.length;
     if (total <= 0) return;
-    const lastPageNum = Math.ceil(total / pageSize.value);
+    const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
     if (lastPageNum <= currentPage.value) return;
     currentPage.value = lastPageNum;
     resetGridVerticalScroll(true);
+    return;
+  }
+  if (props.countTotalRows) {
+    if (manualTotalRowCountLoading.value) return;
+    manualTotalRowCountLoading.value = true;
+    try {
+      const total = await props.countTotalRows();
+      if (!Number.isFinite(total) || total < 0) return;
+      manualTotalRowCount.value = total;
+      jumpToCountedLastPage(total);
+    } catch (e: any) {
+      toast(t("grid.calculateTotalRowsFailed", { message: e?.message || String(e) }), 5000);
+    } finally {
+      manualTotalRowCountLoading.value = false;
+    }
     return;
   }
   if (!props.connectionId) return;
   const countTarget = await buildCurrentCountTarget();
   const sql = countTarget?.sql;
   if (!sql) return;
+  manualTotalRowCountLoading.value = true;
   try {
     const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
-    if (total <= 0) return;
-    const lastPageNum = Math.ceil(total / pageSize.value);
-    if (lastPageNum <= currentPage.value) return;
-    currentPage.value = lastPageNum;
-    resetGridVerticalScroll(true);
-    emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+    if (!Number.isFinite(total) || total < 0) return;
+    manualTotalRowCount.value = total;
+    jumpToCountedLastPage(total);
   } catch {
     // COUNT query failed — ignore silently
+  } finally {
+    manualTotalRowCountLoading.value = false;
   }
 }
 
@@ -2739,9 +2760,17 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
 }
 
 async function calculateTotalRowCount() {
-  if (!props.connectionId || manualTotalRowCountLoading.value) return;
+  if (manualTotalRowCountLoading.value) return;
   manualTotalRowCountLoading.value = true;
   try {
+    if (props.countTotalRows) {
+      const total = await props.countTotalRows();
+      if (Number.isFinite(total) && total >= 0) {
+        manualTotalRowCount.value = total;
+      }
+      return;
+    }
+    if (!props.connectionId) return;
     const countTarget = await buildCurrentCountTarget();
     if (!countTarget?.sql) return;
     const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
@@ -9295,10 +9324,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         <span v-if="hasData" class="shrink-0">
           {{ t(showTruncationWarning ? "grid.loadedRows" : "grid.totalRows", { count: result.rows.length }) }}
           <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountIsExact === false ? "grid.totalRowCountAtLeast" : "grid.totalRowCount", { count: displayedTotalRowCount }) }}</span>
-          <span v-else-if="totalRowCountBusy" class="text-muted-foreground/70">
+          <span v-if="totalRowCountBusy" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}
           </span>
-          <button v-else-if="canCalculateTotalRowCount" type="button" class="text-muted-foreground/70 hover:text-foreground hover:underline underline-offset-2 disabled:pointer-events-none" :disabled="manualTotalRowCountLoading" @click="calculateTotalRowCount">
+          <button v-else-if="showExactTotalCountAction" type="button" class="text-muted-foreground/70 hover:text-foreground hover:underline underline-offset-2 disabled:pointer-events-none" :disabled="manualTotalRowCountLoading" @click="calculateTotalRowCount">
             {{ t("grid.calculateTotalRowsInline") }}
           </button>
         </span>
@@ -9330,7 +9359,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         :pagination-enabled="paginationEnabled"
         :selection-summary="selectionSummary"
         :selection-summary-sum-text="selectionSummarySumText"
-        :loading="loading"
+        :loading="loading || totalRowCountBusy"
         :infinite-scroll-enabled="infiniteScrollEnabled"
         :infinite-scroll-all-loaded="infiniteScrollAllLoaded"
         :page-size="pageSize"

@@ -661,7 +661,10 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
         return false;
     }
-    if database_type == DatabaseType::Sqlite {
+    if matches!(
+        database_type,
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+    ) {
         return object_type == DatabaseObjectType::Table;
     }
     if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
@@ -702,7 +705,10 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
         ));
     }
 
-    if database_type == Some(DatabaseType::Sqlite) {
+    if matches!(
+        database_type,
+        Some(DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+    ) {
         return Ok(format!(
             "ALTER TABLE {} RENAME TO {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),
@@ -1613,6 +1619,32 @@ mod tests {
             .unwrap(),
             "RENAME TABLE `active_users` TO `enabled_users`;"
         );
+    }
+
+    #[test]
+    fn builds_sqlite_protocol_table_rename_sql() {
+        for database_type in
+            [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1]
+        {
+            let expected = if database_type == DatabaseType::Sqlite {
+                "ALTER TABLE \"main\".\"users\" RENAME TO \"app users\";"
+            } else {
+                "ALTER TABLE \"users\" RENAME TO \"app users\";"
+            };
+            assert!(supports_object_rename(Some(database_type), DatabaseObjectType::Table));
+            assert!(!supports_object_rename(Some(database_type), DatabaseObjectType::View));
+            assert_eq!(
+                build_rename_object_sql(RenameObjectSqlOptions {
+                    database_type: Some(database_type),
+                    object_type: DatabaseObjectType::Table,
+                    schema: Some("main".to_string()),
+                    old_name: "users".to_string(),
+                    new_name: "app users".to_string(),
+                })
+                .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

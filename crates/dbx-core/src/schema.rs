@@ -560,6 +560,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
+        PoolKind::Turso(client) => db::turso_driver::list_databases(client).await,
         PoolKind::HBase(client) => db::hbase_driver::list_namespaces(client).await,
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
@@ -2052,6 +2053,9 @@ async fn list_tables_once(
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema)
             .await
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::Turso(client) => db::turso_driver::list_tables(client, schema)
+            .await
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::MongoDb(client) => db::mongo_driver::list_collections(client, database)
             .await
             .map(|names| collection_names_to_tables(names, "COLLECTION"))
@@ -2478,8 +2482,84 @@ mod tests {
         uses_mongodb_agent_collection_listing, visible_schema_filter, TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT,
         TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
+    use super::{list_databases_core, list_tables_core};
+    use crate::connection::{AppState, PoolKind};
     use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::storage::Storage;
     use std::collections::HashMap;
+    use std::time::Duration;
+
+    async fn spawn_turso_table_server() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut saw_table_query = false;
+            while !saw_table_query {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let header_end = loop {
+                    if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "request ended before headers were complete");
+                    request.extend_from_slice(&chunk[..read]);
+                };
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + content_length {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "request ended before body was complete");
+                    request.extend_from_slice(&chunk[..read]);
+                }
+
+                assert!(headers.starts_with("POST /v2/pipeline HTTP/1.1"));
+                assert!(headers.to_ascii_lowercase().contains("authorization: bearer test-token"));
+                let request_body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+                let sql = request_body["requests"][0]["stmt"]["sql"].as_str().unwrap();
+                let is_table_query = sql.contains("sqlite_master");
+                saw_table_query |= is_table_query;
+
+                let body = if is_table_query {
+                    r#"{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[{"name":"name","decltype":"TEXT"},{"name":"type","decltype":"TEXT"}],"rows":[[{"type":"text","value":"dbx_test_records"},{"type":"text","value":"table"}]],"rows_read":1,"rows_written":0}}}]}"#
+                } else {
+                    r#"{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[{"name":"1","decltype":"INTEGER"}],"rows":[[{"type":"integer","value":"1"}]],"rows_read":1,"rows_written":0}}}]}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        (format!("http://{address}"), server)
+    }
+
+    async fn turso_test_state(base_url: &str) -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dbx-turso-schema-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Turso);
+        config.database = Some("main".to_string());
+        config.host = base_url.to_string();
+        state.configs.write().await.insert(config.id.clone(), config);
+        let client = db::turso_driver::TursoClient::new(base_url, "test-token", false, Duration::from_secs(2)).unwrap();
+        state.connections.write().await.insert("test".to_string(), PoolKind::Turso(client));
+        (state, dir)
+    }
 
     fn test_column(name: &str, comment: Option<&str>, is_primary_key: bool) -> super::db::ColumnInfo {
         super::db::ColumnInfo {
@@ -2553,6 +2633,24 @@ mod tests {
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[tokio::test]
+    async fn turso_schema_dispatch_lists_databases_and_tables() {
+        let (base_url, server) = spawn_turso_table_server().await;
+        let (state, dir) = turso_test_state(&base_url).await;
+
+        let databases = list_databases_core(&state, "test").await.unwrap();
+        assert_eq!(databases.into_iter().map(|database| database.name).collect::<Vec<_>>(), ["main"]);
+
+        let tables = list_tables_core(&state, "test", "main", "main", None, None, None, None, None).await.unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "dbx_test_records");
+        assert_eq!(tables[0].table_type, "BASE TABLE");
+
+        server.await.unwrap();
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4880,6 +4978,9 @@ async fn get_columns_core_for_session_inner(
             PoolKind::Rqlite(client) => {
                 db::rqlite_driver::get_columns(client, schema, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::Turso(client) => {
+                db::turso_driver::get_columns(client, schema, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::get_columns(client, schema, table)
                 .await
                 .map(deduplicate_column_infos),
@@ -5027,6 +5128,7 @@ async fn list_indexes_core_for_session(
             PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_indexes(p, schema, table).await,
             PoolKind::Rqlite(client) => db::rqlite_driver::list_indexes(client, schema, table).await,
+            PoolKind::Turso(client) => db::turso_driver::list_indexes(client, schema, table).await,
             PoolKind::MongoDb(client) => db::mongo_driver::list_indexes(client, database, table).await,
             PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_indexes(client, schema, table).await,
             _ => Ok(vec![]),
@@ -5098,6 +5200,7 @@ async fn list_foreign_keys_core_for_session(
             PoolKind::Postgres(p) => db::postgres::list_foreign_keys(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_foreign_keys(p, schema, table).await,
             PoolKind::Rqlite(client) => db::rqlite_driver::list_foreign_keys(client, schema, table).await,
+            PoolKind::Turso(client) => db::turso_driver::list_foreign_keys(client, schema, table).await,
             PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_foreign_keys(client, schema, table).await,
             _ => Ok(vec![]),
         }
@@ -5143,6 +5246,7 @@ pub async fn list_triggers_core(
             PoolKind::Postgres(p) => db::postgres::list_triggers(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_triggers(p, schema, table).await,
             PoolKind::Rqlite(client) => db::rqlite_driver::list_triggers(client, schema, table).await,
+            PoolKind::Turso(client) => db::turso_driver::list_triggers(client, schema, table).await,
             PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_triggers(client, schema, table).await,
             _ => Ok(vec![]),
         }
@@ -5554,6 +5658,7 @@ async fn get_table_ddl_core_with_options(
         PoolKind::Postgres(p) => pg_ddl(p, schema, table).await,
         PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
+        PoolKind::Turso(client) => db::turso_driver::table_ddl(client, table).await,
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::table_ddl(client, table).await,
         _ => Err("DDL not supported for this database type".to_string()),
     }
@@ -6282,6 +6387,9 @@ async fn get_object_source_once(
                 }
                 PoolKind::Rqlite(client) => {
                     return db::rqlite_driver::object_source(client, name, &object_type).await;
+                }
+                PoolKind::Turso(client) => {
+                    return db::turso_driver::object_source(client, name, &object_type).await;
                 }
                 PoolKind::ClickHouse(client) if matches!(object_type, db::ObjectSourceKind::View) => {
                     let result = db::clickhouse_driver::execute_query(

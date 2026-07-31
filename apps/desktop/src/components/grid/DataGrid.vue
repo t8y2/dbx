@@ -135,7 +135,7 @@ import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOpti
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "@/lib/dataGrid/dataGridPagination";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
@@ -301,11 +301,12 @@ interface DataGridProps {
   countSql?: string;
   totalRowCount?: number;
   totalRowCountIsExact?: boolean;
+  inexactTotalRowCountMode?: DataGridInexactTotalRowCountMode;
   paginationTotalRowCount?: number;
   paginationEnabled?: boolean;
   totalRowCountLoading?: boolean;
   /** Document stores (e.g. MongoDB) count exactly on demand without SQL tableMeta/countSql. */
-  countTotalRows?: () => Promise<number>;
+  countTotalRows?: () => Promise<number | undefined>;
   loading?: boolean;
   cacheKey?: string;
   exportSql?: string;
@@ -325,6 +326,7 @@ const props = withDefaults(defineProps<DataGridProps>(), {
   // Vue casts absent Boolean props to false unless a default is explicit.
   // Regular grids have exact totals; document stores opt into lower-bound totals.
   totalRowCountIsExact: true,
+  inexactTotalRowCountMode: "at-least",
   paginationEnabled: true,
   // Omitted row-action limits must keep normal table-data editing.
   allowInsertRows: undefined,
@@ -2458,6 +2460,7 @@ const inferredBackendTotalRowCount = computed(() => {
 const serverKnownTotalRowCount = computed(() => (typeof manualTotalRowCount.value === "number" ? manualTotalRowCount.value : props.totalRowCount));
 const displayedTotalRowCount = computed(() => serverKnownTotalRowCount.value ?? inferredBackendTotalRowCount.value);
 const totalRowCountIsExact = computed(() => typeof manualTotalRowCount.value === "number" || props.totalRowCountIsExact !== false);
+const totalRowCountLabelKey = computed(() => dataGridTotalRowCountLabelKey(totalRowCountIsExact.value, props.inexactTotalRowCountMode));
 // A backend can expose an exact display total while deliberately restricting
 // offset pagination to a smaller safe range.
 const paginationTotalRowCount = computed(() =>
@@ -2740,7 +2743,7 @@ async function lastPage() {
     if (!(await beginManualTotalRowCount())) return;
     try {
       const total = await props.countTotalRows();
-      if (!Number.isFinite(total) || total < 0) return;
+      if (typeof total !== "number" || !Number.isFinite(total) || total < 0) return;
       manualTotalRowCount.value = total;
       jumpToCountedLastPage(total);
     } catch (e: any) {
@@ -2795,7 +2798,7 @@ async function calculateTotalRowCount() {
   try {
     if (props.countTotalRows) {
       const total = await props.countTotalRows();
-      if (Number.isFinite(total) && total >= 0) {
+      if (typeof total === "number" && Number.isFinite(total) && total >= 0) {
         manualTotalRowCount.value = total;
       }
       return;
@@ -9348,7 +9351,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       <div class="flex min-w-0 items-center gap-2 overflow-hidden">
         <span v-if="hasData" class="shrink-0">
           {{ t(showTruncationWarning ? "grid.loadedRows" : "grid.totalRows", { count: result.rows.length }) }}
-          <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountIsExact === false ? "grid.totalRowCountAtLeast" : "grid.totalRowCount", { count: displayedTotalRowCount }) }}</span>
+          <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}</span>
           <span v-if="totalRowCountBusy" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}
           </span>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canGoNextDocumentPage, exactTotalFromIncompleteDocumentPage, resolveDocumentQueryTotals } from "@/lib/document/documentQueryTotals";
+import { canGoNextDocumentPage, exactTotalFromIncompleteDocumentPage, isSameDocumentQueryTotalCountRequest, resolveDocumentQueryTotals, type DocumentQueryTotalCountRequest } from "@/lib/document/documentQueryTotals";
 
 describe("document query totals", () => {
   it("uses exact totals as the pagination bound", () => {
@@ -23,6 +23,7 @@ describe("document query totals", () => {
   });
 
   it("treats a short page as an exact total even when the backend estimate is inexact", () => {
+    expect(exactTotalFromIncompleteDocumentPage({ page: 0, pageSize: 500, rowCount: 0 })).toBe(0);
     expect(exactTotalFromIncompleteDocumentPage({ page: 0, pageSize: 500, rowCount: 1 })).toBe(1);
     expect(resolveDocumentQueryTotals(1, false, { page: 0, pageSize: 500, rowCount: 1 })).toEqual({
       total: 1,
@@ -39,5 +40,30 @@ describe("document query totals", () => {
       totalIsExact: false,
       paginationTotal: undefined,
     });
+  });
+
+  it("does not infer an exact total from an empty page after the first page", () => {
+    expect(exactTotalFromIncompleteDocumentPage({ page: 1, pageSize: 500, rowCount: 0 })).toBeUndefined();
+    expect(resolveDocumentQueryTotals(658_320, false, { page: 1, pageSize: 500, rowCount: 0 })).toEqual({
+      total: 658_320,
+      totalIsExact: false,
+      paginationTotal: undefined,
+    });
+  });
+
+  it("matches exact-count requests across identity, filter, and generation", () => {
+    const request: DocumentQueryTotalCountRequest = {
+      connectionId: "connection-a",
+      database: "database-a",
+      collection: "collection-a",
+      filter: '{"active":true}',
+      generation: 3,
+    };
+    expect(isSameDocumentQueryTotalCountRequest(request, { ...request })).toBe(true);
+    expect(isSameDocumentQueryTotalCountRequest(request, { ...request, connectionId: "connection-b" })).toBe(false);
+    expect(isSameDocumentQueryTotalCountRequest(request, { ...request, database: "database-b" })).toBe(false);
+    expect(isSameDocumentQueryTotalCountRequest(request, { ...request, collection: "collection-b" })).toBe(false);
+    expect(isSameDocumentQueryTotalCountRequest(request, { ...request, filter: undefined })).toBe(false);
+    expect(isSameDocumentQueryTotalCountRequest(request, { ...request, generation: 4 })).toBe(false);
   });
 });

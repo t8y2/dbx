@@ -29,6 +29,13 @@ export interface CanFetchNextDataGridSegmentOptions {
   allRowsLoaded?: boolean;
 }
 
+export type DataGridInexactTotalRowCountMode = "at-least" | "estimated";
+
+export function dataGridTotalRowCountLabelKey(totalRowCountIsExact: boolean, inexactMode: DataGridInexactTotalRowCountMode): "grid.totalRowCount" | "grid.totalRowCountAtLeast" | "grid.totalRowCountEstimated" {
+  if (totalRowCountIsExact) return "grid.totalRowCount";
+  return inexactMode === "estimated" ? "grid.totalRowCountEstimated" : "grid.totalRowCountAtLeast";
+}
+
 export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean }): number | undefined {
   if (options.paginationTotalRowCount !== undefined) return options.paginationTotalRowCount;
   return options.totalRowCountIsExact ? options.serverKnownTotalRowCount : undefined;

@@ -404,20 +404,23 @@ async function fetchScanPage(requestId = searchRequestId): Promise<RedisScanResu
   }
 
   // Keep each backend call small so a changed search can cancel between calls.
-  // The total COUNT budget bounds Redis work while giving sparse MATCH patterns
-  // substantially more coverage than a fixed number of SCAN calls.
+  // Unfiltered browsing keeps a bounded COUNT budget, while an active key
+  // pattern must continue across empty SCAN batches until it finds the next
+  // matches or exhausts the cursor. Otherwise sparse matches can appear only
+  // after "Fetch all", even though the requested key exists.
   const scanCountBudget = 50_000;
   const iterationsPerCall = 8;
   const maxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
+  const scanUntilMatch = effectivePattern.value !== "*";
   let completedIterations = 0;
   let cursor = scanCursor.value;
   let totalKeys = 0;
 
-  while (completedIterations < maxIterations) {
+  while (scanUntilMatch || completedIterations < maxIterations) {
     if (requestId !== searchRequestId) {
       return { cursor, keys: [], total_keys: totalKeys };
     }
-    const iterations = Math.min(iterationsPerCall, maxIterations - completedIterations);
+    const iterations = scanUntilMatch ? iterationsPerCall : Math.min(iterationsPerCall, maxIterations - completedIterations);
     const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
     if (totalKeys === 0) totalKeys = result.total_keys;
     if (result.keys.length > 0 || result.cursor === 0) {

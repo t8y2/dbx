@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
   toast: vi.fn(),
   updateRedisDbKeyStats: vi.fn(),
+  redisScanPageSize: 100,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -52,7 +53,7 @@ vi.mock("@/lib/redis/redisKeyTree", async (importOriginal) => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
-    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: 100 }),
+    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
     invalidateCompletionCache: vi.fn(),
     refreshRedisDbKeyCounts: vi.fn(),
@@ -342,6 +343,7 @@ function deferred<T>() {
 
 function resetApiMocks() {
   vi.clearAllMocks();
+  mocks.redisScanPageSize = 100;
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
   mocks.redisGetValue.mockImplementation((_connectionId: string, _db: number, keyRaw: string) => Promise.resolve(redisValue(keyRaw)));
   mocks.redisSetString.mockResolvedValue(undefined);
@@ -681,6 +683,66 @@ describe("RedisKeyBrowser expiry creation", () => {
 });
 
 describe("RedisKeyBrowser fuzzy key hierarchy", () => {
+  it("continues beyond the bounded browse budget until a sparse fuzzy match is found", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const target = { key_display: "issue5012:target", key_raw: "aXNzdWU1MDEyOnRhcmdldA==", key_type: "string", ttl: -1 };
+    let batch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation(() => {
+      batch += 1;
+      if (batch === 8) return Promise.resolve({ cursor: 801, keys: [target], total_keys: 0 });
+      return Promise.resolve({ cursor: batch * 100, keys: [], total_keys: batch === 1 ? 200_000 : 0 });
+    });
+
+    await submitKeySearch("issue5012:target");
+    await vi.waitFor(() => {
+      const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+      expect(labels).toContain("target");
+    });
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8);
+    expect(mocks.redisScanKeysBatch.mock.calls.every((call) => call[3] === "*issue5012:target*")).toBe(true);
+  });
+
+  it("continues beyond the bounded browse budget when loading the next sparse fuzzy match", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const first = { key_display: "issue5012:first", key_raw: "aXNzdWU1MDEyOmZpcnN0", key_type: "string", ttl: -1 };
+    const next = { key_display: "issue5012:next", key_raw: "aXNzdWU1MDEyOm5leHQ=", key_type: "string", ttl: -1 };
+    let continuationBatch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 1, keys: [first], total_keys: 200_000 });
+      continuationBatch += 1;
+      if (continuationBatch === 8) return Promise.resolve({ cursor: 0, keys: [next], total_keys: 0 });
+      return Promise.resolve({ cursor: continuationBatch + 1, keys: [], total_keys: 0 });
+    });
+
+    await submitKeySearch("issue5012");
+    await vi.waitFor(() => {
+      const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+      expect(labels).toContain("first");
+    });
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => {
+      const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+      expect(labels).toContain("next");
+    });
+
+    expect(continuationBatch).toBe(8);
+    const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+    expect(labels).toContain("first");
+  });
+
   it("keeps NUL-containing fuzzy groups isolated when selecting keys to delete", async () => {
     const firstKeyRaw = "cmF3LWZpcnN0";
     const secondKeyRaw = "cmF3LXNlY29uZA==";

@@ -1277,6 +1277,7 @@ export default withEnglishFallback({
     tableInfoColumns: "列",
     tableInfoIndexes: "インデックス",
     tableInfoForeignKeys: "外部キー",
+    foreignKeyNavigate: "{table} へ移動",
     tableInfoTriggers: "トリガー",
     tableInfoNullable: "NULL許容",
     tableInfoEmpty: "メタデータなし",

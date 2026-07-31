@@ -1377,6 +1377,7 @@ export default withEnglishFallback({
     tableInfoColumns: "컬럼",
     tableInfoIndexes: "인덱스",
     tableInfoForeignKeys: "외래 키",
+    foreignKeyNavigate: "{table}(으)로 이동",
     tableInfoTriggers: "트리거",
     tableInfoNullable: "NULL 허용",
     tableInfoEmpty: "메타데이터 없음",

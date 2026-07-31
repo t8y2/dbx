@@ -1281,6 +1281,7 @@ export default withEnglishFallback({
     tableInfoColumns: "欄位",
     tableInfoIndexes: "索引",
     tableInfoForeignKeys: "外鍵",
+    foreignKeyNavigate: "跳轉到 {table}",
     tableInfoTriggers: "觸發器",
     tableInfoNullable: "可為空",
     tableInfoEmpty: "無",

@@ -1399,6 +1399,7 @@ export default withEnglishFallback({
     tableInfoColumns: "字段",
     tableInfoIndexes: "索引",
     tableInfoForeignKeys: "外键",
+    foreignKeyNavigate: "跳转到 {table}",
     tableInfoTriggers: "触发器",
     tableInfoNullable: "可空",
     tableInfoEmpty: "暂无元数据",

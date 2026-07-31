@@ -1282,6 +1282,7 @@ export default withEnglishFallback({
     tableInfoColumns: "Colunas",
     tableInfoIndexes: "Índices",
     tableInfoForeignKeys: "Chaves Estrangeiras",
+    foreignKeyNavigate: "Ir para {table}",
     tableInfoTriggers: "Gatilhos",
     tableInfoNullable: "Permite Nulo",
     tableInfoEmpty: "Sem metadados",

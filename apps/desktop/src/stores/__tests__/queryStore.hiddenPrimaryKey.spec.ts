@@ -687,6 +687,76 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("keeps SQL Server updates unqualified when the SELECT source is unqualified", async () => {
+    getConnectionConfig.mockReturnValue({ id: "sqlserver-1", name: "SQL Server 2008", db_type: "sqlserver", database: "cdc", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "a4", data_type: "nvarchar(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "yb_ty_qtxx",
+        selectStar: true,
+        columns: [{ sourceName: undefined, star: true, resultName: "*", expression: "*" }],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "a4"],
+        rows: [[1, "德谷胰岛素利拉鲁肽"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sqlserver-1", "cdc", "Query", "query", "cdc");
+
+    await store.executeTabSql(tabId, "select * from yb_ty_qtxx where a4 like N'%德谷胰岛素利拉鲁%'");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toBeDefined());
+    expect(getColumns).toHaveBeenCalledWith("sqlserver-1", "cdc", "", "yb_ty_qtxx", undefined);
+    expect(tab.tableMeta?.database).toBe("cdc");
+    expect(tab.tableMeta?.schema).toBeUndefined();
+  });
+
+  it("preserves an explicitly qualified SQL Server update source", async () => {
+    getConnectionConfig.mockReturnValue({ id: "sqlserver-1", name: "SQL Server 2008", db_type: "sqlserver", database: "cdc", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "sales",
+        tableName: "yb_ty_qtxx",
+        selectStar: true,
+        columns: [{ sourceName: undefined, star: true, resultName: "*", expression: "*" }],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "a4"],
+        rows: [[1, "德谷胰岛素利拉鲁肽"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sqlserver-1", "cdc", "Query", "query", "cdc");
+
+    await store.executeTabSql(tabId, "select * from sales.yb_ty_qtxx");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toBeDefined());
+    expect(getColumns).toHaveBeenCalledWith("sqlserver-1", "cdc", "sales", "yb_ty_qtxx", undefined);
+    expect(tab.tableMeta?.database).toBe("cdc");
+    expect(tab.tableMeta?.schema).toBe("sales");
+  });
+
   it("appends only the missing part of a composite primary key", async () => {
     getColumns.mockResolvedValue([
       { name: "tenant_id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null },

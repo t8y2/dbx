@@ -2118,7 +2118,7 @@ test("keeps joined query read-only when multiple source tables are writable cand
   }
 });
 
-test("uses dbo as SQL Server metadata schema and keeps sorted query results editable", async () => {
+test("resolves unqualified SQL Server metadata through the default schema and keeps sorted query results editable", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -2217,8 +2217,8 @@ test("uses dbo as SQL Server metadata schema and keeps sorted query results edit
     const tab = store.tabs.find((item) => item.id === tabId);
     await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "users");
     assert.deepEqual(analyzedSql, [baseSql]);
-    assert.deepEqual(columnRequests, [{ schema: "dbo", table: "users" }]);
-    assert.equal(tab?.tableMeta?.schema, "dbo");
+    assert.deepEqual(columnRequests, [{ schema: "", table: "users" }]);
+    assert.equal(tab?.tableMeta?.schema, undefined);
     assert.equal(tab?.tableMeta?.columns[0]?.comment, "编号");
     assert.equal(tab?.tableMeta?.columns[1]?.comment, "姓名");
 

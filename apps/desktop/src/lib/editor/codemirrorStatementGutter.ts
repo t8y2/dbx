@@ -8,8 +8,8 @@ export interface StatementGutterMarkerDomOptions {
   statusLabel?: string;
 }
 
-export function shouldShowStatementGutter(showRunButtons: boolean, markerCount: number): boolean {
-  return showRunButtons || markerCount > 0;
+export function shouldShowStatementGutter(showRunButtons: boolean): boolean {
+  return showRunButtons;
 }
 
 function createStatusIconDom(status: StatementExecutionMarkerStatus, includeCircle: boolean) {

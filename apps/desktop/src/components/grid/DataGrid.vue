@@ -2706,10 +2706,6 @@ async function beginManualTotalRowCount(): Promise<boolean> {
 
 async function lastPage() {
   if (infiniteScrollEnabled.value) return;
-  if (hasKnownPaginationTotalRowCount.value) {
-    jumpToCountedLastPage(paginationTotalRowCount.value ?? 0);
-    return;
-  }
   if (allRowsLoaded.value) {
     const total = props.result.rows.length;
     if (total <= 0) return;
@@ -2719,6 +2715,7 @@ async function lastPage() {
     resetGridVerticalScroll(true);
     return;
   }
+  // Navicat-style: always re-COUNT when jumping to the last page.
   if (props.countTotalRows) {
     if (!(await beginManualTotalRowCount())) return;
     try {
@@ -2733,21 +2730,26 @@ async function lastPage() {
     }
     return;
   }
-  if (!props.connectionId) return;
-  if (!(await beginManualTotalRowCount())) return;
-  try {
-    const countTarget = await buildCurrentCountTarget();
-    const sql = countTarget?.sql;
-    if (!sql) return;
-    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
-    const total = Number(result.rows?.[0]?.[0] ?? 0);
-    if (!Number.isFinite(total) || total < 0) return;
-    manualTotalRowCount.value = total;
-    jumpToCountedLastPage(total);
-  } catch {
-    // COUNT query failed — ignore silently
-  } finally {
-    manualTotalRowCountLoading.value = false;
+  if (props.connectionId && (props.countSql || props.tableMeta)) {
+    if (!(await beginManualTotalRowCount())) return;
+    try {
+      const countTarget = await buildCurrentCountTarget();
+      const sql = countTarget?.sql;
+      if (!sql) return;
+      const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
+      const total = Number(result.rows?.[0]?.[0] ?? 0);
+      if (!Number.isFinite(total) || total < 0) return;
+      manualTotalRowCount.value = total;
+      jumpToCountedLastPage(total);
+    } catch {
+      // COUNT query failed — ignore silently
+    } finally {
+      manualTotalRowCountLoading.value = false;
+    }
+    return;
+  }
+  if (hasKnownPaginationTotalRowCount.value) {
+    jumpToCountedLastPage(paginationTotalRowCount.value ?? 0);
   }
 }
 

@@ -176,11 +176,12 @@ test("last-page COUNT shows grid busy overlay before executeQuery", () => {
   assert.ok(lastPageFn.indexOf("beginManualTotalRowCount") < lastPageFn.indexOf("buildCurrentCountTarget"), "busy UI must start before COUNT SQL is built");
 });
 
-test("manual total row count survives pagination result updates", () => {
+test("last page always re-counts when a count path is available", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const clearWatch = source.match(/watch\(\s*\(\) => \[props\.countSql[\s\S]*?manualTotalRowCount\.value = undefined;[\s\S]*?\},\s*\);/)?.[0] ?? "";
-  assert.match(clearWatch, /props\.countSql/);
-  assert.match(clearWatch, /currentWhereInput/);
-  assert.doesNotMatch(clearWatch, /props\.result/);
-  assert.match(source, /typeof manualTotalRowCount\.value === "number" \? manualTotalRowCount\.value : props\.totalRowCount/);
+  const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  const knownTotalIdx = lastPageFn.indexOf("hasKnownPaginationTotalRowCount");
+  const countCallbackIdx = lastPageFn.indexOf("props.countTotalRows");
+  const countSqlIdx = lastPageFn.indexOf("buildCurrentCountTarget");
+  assert.ok(countCallbackIdx >= 0 && countSqlIdx >= 0, "last page must keep count paths");
+  assert.ok(knownTotalIdx < 0 || knownTotalIdx > countSqlIdx, "known totals are only a fallback after re-COUNT");
 });

@@ -910,18 +910,11 @@ async function load() {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
     } else {
       cancelElasticsearchCount();
-      const totals = resolveDocumentQueryTotals(
-        result.total,
-        result.total_is_exact !== false,
-        {
-          page: page.value,
-          pageSize: pageSize.value,
-          rowCount: nextDocuments.length,
-        },
-        {
-          retainExactTotal: totalIsExact.value ? paginationTotal.value : undefined,
-        },
-      );
+      const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false, {
+        page: page.value,
+        pageSize: pageSize.value,
+        rowCount: nextDocuments.length,
+      });
       total.value = totals.total;
       totalIsExact.value = totals.totalIsExact;
       paginationTotal.value = totals.paginationTotal;
@@ -987,12 +980,7 @@ async function cancelDocumentLoad() {
 
 function applyFilter() {
   page.value = 0;
-  if (documentStoreProvider.value.kind === "elasticsearch") {
-    resetElasticsearchTotals();
-  } else {
-    paginationTotal.value = undefined;
-    totalIsExact.value = false;
-  }
+  if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals();
   void load();
 }
 
@@ -1658,7 +1646,7 @@ defineExpose({ focusSearch });
       :total-row-count="total"
       :total-row-count-is-exact="totalIsExact"
       :pagination-total-row-count="pageTotal"
-      :count-total-rows="totalIsExact ? undefined : countExactDocumentTotal"
+      :count-total-rows="countExactDocumentTotal"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"

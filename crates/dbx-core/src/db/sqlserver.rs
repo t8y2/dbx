@@ -2854,7 +2854,7 @@ mod tests {
 
         assert!(!sql.contains("STRING_AGG"));
         assert!(sql.contains("FOR XML PATH"));
-        assert!(sql.contains("OBJECT_ID('dbo.DF_Rule')"));
+        assert!(sql.contains("OBJECT_ID(QUOTENAME(N'dbo') + N'.' + QUOTENAME(N'DF_Rule'))"));
     }
 
     #[test]

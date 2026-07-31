@@ -178,7 +178,7 @@ import {
   dataGridSelectedSortMenuValue,
   type DataGridColumnSortState,
 } from "@/lib/dataGrid/dataGridContextMenu";
-import { buildColumnForeignKeyMap, foreignKeyCellNavigable, foreignKeyNavigationTarget } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyMetadataRequestCurrent, foreignKeyNavigationTarget, foreignKeySourceColumnName, foreignKeyTableIdentity, type ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
 
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
@@ -7080,6 +7080,16 @@ const foreignKeys = ref<ForeignKeyInfo[]>([]);
 const foreignKeysLoaded = ref(false);
 const foreignKeysLoading = ref(false);
 const foreignKeysError = ref("");
+const currentForeignKeyTableIdentity = computed(() =>
+  foreignKeyTableIdentity({
+    connectionId: props.connectionId,
+    database: props.database,
+    catalog: props.tableMeta?.catalog,
+    schema: props.tableMeta?.schema,
+    tableName: props.tableMeta?.tableName,
+  }),
+);
+let foreignKeysRequestGeneration = 0;
 const triggers = ref<TriggerInfo[]>([]);
 const triggersLoaded = ref(false);
 const triggersLoading = ref(false);
@@ -7272,16 +7282,26 @@ async function reloadIndexes() {
 }
 
 async function fetchForeignKeys() {
-  if (!props.connectionId || !props.tableMeta || foreignKeysLoaded.value || foreignKeysLoading.value) return;
+  const requestIdentity = currentForeignKeyTableIdentity.value;
+  if (!props.connectionId || !props.tableMeta || !requestIdentity || foreignKeysLoaded.value || foreignKeysLoading.value) return;
+  const connectionId = props.connectionId;
+  const database = props.database || "";
+  const schema = props.tableMeta.schema || props.database || "";
+  const tableName = props.tableMeta.tableName;
+  const catalog = props.tableMeta.catalog;
+  const requestGeneration = ++foreignKeysRequestGeneration;
   foreignKeysLoading.value = true;
   foreignKeysError.value = "";
   try {
-    foreignKeys.value = await api.listForeignKeys(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, props.tableMeta.catalog);
+    const nextForeignKeys = await api.listForeignKeys(connectionId, database, schema, tableName, catalog);
+    if (!foreignKeyMetadataRequestCurrent({ requestGeneration, currentGeneration: foreignKeysRequestGeneration, requestIdentity, currentIdentity: currentForeignKeyTableIdentity.value })) return;
+    foreignKeys.value = nextForeignKeys;
     foreignKeysLoaded.value = true;
   } catch (e: any) {
+    if (!foreignKeyMetadataRequestCurrent({ requestGeneration, currentGeneration: foreignKeysRequestGeneration, requestIdentity, currentIdentity: currentForeignKeyTableIdentity.value })) return;
     foreignKeysError.value = String(e?.message || e);
   } finally {
-    foreignKeysLoading.value = false;
+    if (foreignKeyMetadataRequestCurrent({ requestGeneration, currentGeneration: foreignKeysRequestGeneration, requestIdentity, currentIdentity: currentForeignKeyTableIdentity.value })) foreignKeysLoading.value = false;
   }
 }
 
@@ -7308,7 +7328,9 @@ watch(
     indexesError.value = "";
     foreignKeys.value = [];
     foreignKeysLoaded.value = false;
+    foreignKeysLoading.value = false;
     foreignKeysError.value = "";
+    foreignKeysRequestGeneration += 1;
     triggers.value = [];
     triggersLoaded.value = false;
     triggersError.value = "";
@@ -7320,19 +7342,31 @@ watch(
 const columnForeignKeyMap = computed(() => buildColumnForeignKeyMap(foreignKeys.value));
 const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && !!props.tableMeta?.tableName && tableMetadataCapabilities.value.foreignKeys);
 
-function cellForeignKey(actualColIdx: number): ForeignKeyInfo | null {
+function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation | null {
   if (!foreignKeyNavigationEnabled.value) return null;
-  const columnName = props.result.columns[actualColIdx];
+  const columnName = foreignKeySourceColumnName({
+    context: props.context,
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    columnIndex: actualColIdx,
+  });
   if (!columnName) return null;
   return columnForeignKeyMap.value.get(columnName.toLowerCase()) ?? null;
 }
 
 function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
-  const fk = cellForeignKey(actualColIdx);
-  if (!fk) return null;
+  const association = cellForeignKeyAssociation(actualColIdx);
+  if (!association) return null;
   const item = displayItems.value[rowIndex];
   if (!item) return null;
-  return foreignKeyCellNavigable(item.data[actualColIdx]) ? fk : null;
+  const cells = foreignKeyAssociationCells({
+    association,
+    context: props.context,
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    row: item.data,
+  });
+  return cells ? association.foreignKey : null;
 }
 
 // 外键跳转按钮需要 FK 元数据：表身份就绪即后台加载（fetchForeignKeys 自带去重，
@@ -7346,28 +7380,37 @@ watch(
 );
 
 async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
-  const fk = cellForeignKey(actualColIdx);
+  const association = cellForeignKeyAssociation(actualColIdx);
   const item = displayItems.value[rowIndex];
-  if (!fk || !item || !props.connectionId) return;
-  const value = item.data[actualColIdx];
-  if (!foreignKeyCellNavigable(value)) return;
+  if (!association || !item || !props.connectionId) return;
+  const cells = foreignKeyAssociationCells({
+    association,
+    context: props.context,
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    row: item.data,
+  });
+  if (!cells) return;
   try {
-    const columnName = props.result.columns[actualColIdx];
-    const columnInfo = props.tableMeta?.columns.find((column) => column.name === columnName);
-    // 被引用列与本列类型一致：用本列元数据决定数值/字符串引用方式
-    const condition = await buildColumnValueFilterCondition({
-      databaseType: resolvedDatabaseType.value,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-      columnName: fk.ref_column,
-      columnInfo,
-      rawValue: String(value),
-    });
+    const conditions = await Promise.all(
+      cells.map(({ foreignKey, value }) =>
+        buildColumnValueFilterCondition({
+          databaseType: resolvedDatabaseType.value,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+          columnName: foreignKey.ref_column,
+          columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
+          rawValue: String(value),
+        }),
+      ),
+    );
+    const condition = combineForeignKeyConditions(conditions);
+    if (!condition) return;
     await openTableTarget(
       foreignKeyNavigationTarget({
         connectionId: props.connectionId,
         database: props.database || props.tableMeta?.database || "",
         currentSchema: props.tableMeta?.schema || props.schema,
-        fk,
+        fk: association.foreignKey,
         whereInput: condition,
       }),
     );
@@ -7379,8 +7422,21 @@ async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) 
 function contextForeignKeyMenuItem(): ContextMenuItem | null {
   const cell = contextCell.value;
   if (!cell || cell.col < 0) return null;
-  const fk = cellForeignKey(cell.col);
-  if (!fk || !foreignKeyCellNavigable(contextRowItem.value?.data[cell.col])) return null;
+  const association = cellForeignKeyAssociation(cell.col);
+  const item = contextRowItem.value;
+  if (
+    !association ||
+    !item ||
+    !foreignKeyAssociationCells({
+      association,
+      context: props.context,
+      resultColumns: props.result.columns,
+      sourceColumns: props.sourceColumns,
+      row: item.data,
+    })
+  )
+    return null;
+  const fk = association.foreignKey;
   return {
     label: t("grid.foreignKeyNavigate", { table: fk.ref_table }),
     icon: ArrowUpRight,

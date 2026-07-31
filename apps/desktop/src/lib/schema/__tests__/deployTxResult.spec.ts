@@ -68,22 +68,87 @@ describe("buildDeployTxResult", () => {
     expect(result.status).toBe("unknown");
   });
 
-  it("maps MySQL-style partial DDL failure (1 of 2 applied) for UI", () => {
+  it("maps affectedRows and executionTimeMs from metadata for committed", () => {
+    const result = buildDeployTxResult(
+      {
+        status: "committed",
+        executedCount: 2,
+        statementCount: 2,
+        metadata: { affected_rows: 10, execution_time_ms: 125 },
+      },
+      t,
+    );
+    expect(result.success).toBe(true);
+    expect(result.affectedRows).toBe(10);
+    expect(result.executionTimeMs).toBe(125);
+  });
+
+  it("maps affectedRows and executionTimeMs from metadata for mixed", () => {
     const result = buildDeployTxResult(
       {
         status: "mixed",
         executedCount: 1,
         statementCount: 2,
-        error: "Statement 2 failed: table already exists",
-        metadata: { atomicity: "partial_effects_possible", ddl_atomic: false },
+        metadata: { affected_rows: 3, execution_time_ms: 39 },
       },
       t,
     );
     expect(result.success).toBe(false);
-    expect(result.status).toBe("mixed");
-    expect(result.executedCount).toBe(1);
-    expect(result.statementCount).toBe(2);
-    expect(result.message).toContain("1/2");
-    expect(result.message).toMatch(/may already be applied|may not be transactional/i);
+    expect(result.affectedRows).toBe(3);
+    expect(result.executionTimeMs).toBe(39);
+  });
+
+  it("maps affectedRows and executionTimeMs from metadata for rolled_back", () => {
+    const result = buildDeployTxResult(
+      {
+        status: "rolled_back",
+        error: "syntax error",
+        executedCount: 0,
+        statementCount: 2,
+        metadata: { affected_rows: 0, execution_time_ms: 21 },
+      },
+      t,
+    );
+    expect(result.success).toBe(false);
+    expect(result.affectedRows).toBe(0);
+    expect(result.executionTimeMs).toBe(21);
+  });
+
+  it("maps statementResults from camelCase field", () => {
+    const result = buildDeployTxResult(
+      {
+        status: "committed",
+        executedCount: 2,
+        statementCount: 2,
+        statementResults: [
+          { index: 0, status: "success", affectedRows: 1 },
+          { index: 1, status: "success", affectedRows: 0, executionTimeMs: 5 },
+        ],
+      },
+      t,
+    );
+    expect(result.success).toBe(true);
+    expect(result.statementResults).toHaveLength(2);
+    expect(result.statementResults?.[0].status).toBe("success");
+    expect(result.statementResults?.[1].affectedRows).toBe(0);
+  });
+
+  it("maps statementResults from snake_case field", () => {
+    const result = buildDeployTxResult(
+      {
+        status: "mixed",
+        executedCount: 1,
+        statementCount: 2,
+        statement_results: [
+          { index: 0, status: "success", statement: "CREATE TABLE t1 (id INT)" },
+          { index: 1, status: "failed", error: "table already exists" },
+        ],
+      },
+      t,
+    );
+    expect(result.success).toBe(false);
+    expect(result.statementResults).toHaveLength(2);
+    expect(result.statementResults?.[0].statement).toBe("CREATE TABLE t1 (id INT)");
+    expect(result.statementResults?.[1].status).toBe("failed");
   });
 });

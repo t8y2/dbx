@@ -30,6 +30,41 @@ export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror
   });
 }
 
+/**
+ * A minimal CodeMirror theme that follows the application light/dark appearance
+ * using CSS variables. Used for embedded SQL preview/panels so they blend into
+ * the surrounding UI instead of using the user's editor theme.
+ */
+export async function createReadOnlyCodeTheme(isDark: boolean): Promise<Extension> {
+  const { EditorView } = await import("@codemirror/view");
+  return EditorView.theme(
+    {
+      "&": {
+        backgroundColor: "var(--background) !important",
+        color: "var(--foreground) !important",
+      },
+      ".cm-scroller": {
+        backgroundColor: "var(--background) !important",
+      },
+      ".cm-gutters": {
+        backgroundColor: "var(--muted) !important",
+        color: "var(--muted-foreground) !important",
+      },
+      ".cm-activeLine": {
+        backgroundColor: "var(--muted) !important",
+      },
+      ".cm-activeLineGutter": {
+        backgroundColor: "var(--muted) !important",
+        color: "var(--muted-foreground) !important",
+      },
+      "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+        backgroundColor: "var(--muted) !important",
+      },
+    },
+    { dark: isDark },
+  );
+}
+
 const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "color-mix(in oklch, black 50%, white)");
 const SUPPORTS_OKLCH = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "oklch(0.62 0.19 255)");
 

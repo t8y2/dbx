@@ -1,4 +1,5 @@
 import type { ColumnInfo, IndexInfo, ForeignKeyInfo, TriggerInfo, FunctionInfo, SequenceInfo, RuleInfo, OwnerInfo, DatabaseType, TableInfo } from "@/types/database";
+import type { DeployStatementResult } from "./deployTxResult";
 
 const DIALECT_KIND_MAP: Record<string, string> = {
   mysql: "mysql",
@@ -260,6 +261,12 @@ export interface DependencyGraph {
   nodes: DependencyNode[];
 }
 
+export interface DeployObjectRef {
+  kind: DiffObjectKind;
+  name: string;
+  arguments?: string;
+}
+
 export interface MissingRollbackObject {
   kind: string;
   name: string;
@@ -285,6 +292,7 @@ export interface SchemaDiffPreparation {
   permissionDiffs?: PermissionDiff[];
   permissionSyncSql?: string;
   dependencyGraph?: DependencyGraph;
+  deployOrder?: DeployObjectRef[];
 }
 
 const MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "sundb", "databend", "gbase"]);
@@ -527,46 +535,141 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
   return objects;
 }
 
+export function sortSchemaDiffObjects(objects: SchemaDiffObject[], deployOrder?: DeployObjectRef[]): SchemaDiffObject[] {
+  if (!deployOrder || deployOrder.length === 0) return objects;
+  const indexMap = new Map<string, number>();
+  deployOrder.forEach((node, idx) => {
+    const key = `${node.kind}:${node.name}:${node.arguments ?? ""}`;
+    if (!indexMap.has(key)) {
+      indexMap.set(key, idx);
+    }
+  });
+  return [...objects].sort((a, b) => {
+    const aKey = `${a.objectKind}:${a.name}:${a.arguments ?? ""}`;
+    const bKey = `${b.objectKind}:${b.name}:${b.arguments ?? ""}`;
+    const aIdx = indexMap.get(aKey) ?? Number.MAX_SAFE_INTEGER;
+    const bIdx = indexMap.get(bKey) ?? Number.MAX_SAFE_INTEGER;
+    return aIdx - bIdx;
+  });
+}
+
 export function buildDeploySqlForObjects(objects: SchemaDiffObject[]): string {
+  const items = buildDeploySqlObjects(objects);
+  if (items.length === 0) {
+    return "-- No objects selected";
+  }
+  return items.map((item) => item.sql).join("\n\n") + "\n";
+}
+
+export interface DeployObjectSqlItem {
+  objectId: string;
+  object: SchemaDiffObject;
+  sql: string;
+}
+
+export function buildDeploySqlObjects(objects: SchemaDiffObject[]): DeployObjectSqlItem[] {
   const selected = objects.filter((o) => {
     const isTopLevel = !o.id.startsWith("col-") && !o.id.startsWith("idx-") && !o.id.startsWith("fk-") && !o.id.startsWith("trg-");
     return o.selected && o.operationType !== "none" && isTopLevel;
   });
 
-  if (selected.length === 0) {
-    return "-- No objects selected";
-  }
-
-  const lines: string[] = [];
+  const items: DeployObjectSqlItem[] = [];
 
   for (const obj of selected) {
-    if (obj.deploySql?.trim()) {
-      lines.push(obj.deploySql.trim());
-      lines.push("");
-      continue;
-    }
+    let sql = "";
 
-    if (obj.operationType === "create") {
+    if (obj.deploySql?.trim()) {
+      sql = obj.deploySql.trim();
+    } else if (obj.operationType === "create") {
       if (obj.sourceDdl) {
-        lines.push(`-- Create ${obj.objectKind}: ${obj.name}`);
-        lines.push(obj.sourceDdl);
-        lines.push("");
+        sql = `-- Create ${obj.objectKind}: ${obj.name}\n${obj.sourceDdl}`;
       }
     } else if (obj.operationType === "delete") {
-      lines.push(`-- Drop ${obj.objectKind}: ${obj.name}`);
-      const dropSql = generateDropSql(obj);
-      lines.push(dropSql);
-      lines.push("");
+      sql = `-- Drop ${obj.objectKind}: ${obj.name}\n${generateDropSql(obj)}`;
     } else if (obj.operationType === "modify") {
       if (obj.sourceDdl) {
-        lines.push(`-- Modify ${obj.objectKind}: ${obj.name}`);
-        lines.push(obj.sourceDdl);
-        lines.push("");
+        sql = `-- Modify ${obj.objectKind}: ${obj.name}\n${obj.sourceDdl}`;
       }
+    }
+
+    if (sql) {
+      items.push({ objectId: obj.id, object: obj, sql });
     }
   }
 
-  return lines.join("\n") || "-- No DDL available for selected objects";
+  return items;
+}
+
+export interface DeployObjectResult {
+  objectId: string;
+  object: SchemaDiffObject;
+  status: "success" | "failed" | "skipped";
+  error?: string;
+  affectedRows: number;
+  executionTimeMs: number;
+  statements: DeployStatementResult[];
+}
+
+export function buildDeployObjectResults(objects: SchemaDiffObject[], statementResults: DeployStatementResult[] = []): DeployObjectResult[] {
+  const items = buildDeploySqlObjects(objects);
+
+  if (statementResults.length === 0) {
+    // No per-statement details available; mark everything as failed with no detail.
+    return items.map((item) => ({
+      objectId: item.objectId,
+      object: item.object,
+      status: "failed" as const,
+      error: undefined,
+      affectedRows: 0,
+      executionTimeMs: 0,
+      statements: [] as DeployStatementResult[],
+    }));
+  }
+
+  // Robust mapping: statements are executed in order, objects are also in order.
+  // First try to match by substring (multi-statement objects), then fall back to
+  // order-based assignment for single-statement objects where quoting/trimming may
+  // prevent exact substring matching.
+  const unassigned = [...statementResults];
+  const assignments: Map<string, DeployStatementResult[]> = new Map();
+
+  for (const item of items) {
+    const assigned: DeployStatementResult[] = [];
+    // Substring match: assign any statements whose text appears in this object's SQL.
+    for (let i = unassigned.length - 1; i >= 0; i--) {
+      const sr = unassigned[i];
+      if (sr.statement && item.sql.includes(sr.statement.trim())) {
+        assigned.unshift(sr);
+        unassigned.splice(i, 1);
+      }
+    }
+    // Order fallback: if nothing matched, take the next statement in order.
+    if (assigned.length === 0 && unassigned.length > 0) {
+      assigned.push(unassigned.shift()!);
+    }
+    assignments.set(item.objectId, assigned);
+  }
+
+  return items.map((item) => {
+    const objectStatements = assignments.get(item.objectId) ?? [];
+
+    const failed = objectStatements.find((s) => s.status === "failed" || s.status === "rolled_back");
+    const skipped = objectStatements.length > 0 && objectStatements.every((s) => s.status === "skipped");
+    const status = failed ? "failed" : skipped ? "skipped" : "success";
+    const error = failed?.error;
+    const affectedRows = objectStatements.reduce((sum, s) => sum + (s.affectedRows ?? 0), 0);
+    const executionTimeMs = objectStatements.reduce((sum, s) => sum + (s.executionTimeMs ?? 0), 0);
+
+    return {
+      objectId: item.objectId,
+      object: item.object,
+      status,
+      error,
+      affectedRows,
+      executionTimeMs,
+      statements: objectStatements,
+    };
+  });
 }
 
 function generateDropSql(obj: SchemaDiffObject): string {

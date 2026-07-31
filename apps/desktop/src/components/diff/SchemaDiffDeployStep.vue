@@ -6,7 +6,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { createReadOnlyCodeTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { Splitpanes, Pane } from "splitpanes";
 import type { SchemaDiffObject, DiffOperationType, DiffObjectKind, CompatibilityWarning, RenameCandidate, MissingRollbackObject, RollbackCompleteness } from "@/lib/schema/schemaDiff";
@@ -139,17 +139,12 @@ const operationColors: Record<DiffOperationType, string> = {
 async function initEditor() {
   if (!editorContainer.value) return;
 
-  const [{ EditorView }, { EditorState, Compartment }, langSql, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView }, { EditorState }, langSql, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
-  const themeComp = new Compartment();
-  const fontComp = new Compartment();
-
-  const editorTheme = settingsStore.editorSettings.theme;
-  const appAppearance = isDark.value ? "dark" : "light";
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
 
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance);
+  const themeExt = await createReadOnlyCodeTheme(isDark.value);
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
 
   const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres");
@@ -159,8 +154,8 @@ async function initEditor() {
     extensions: [
       basicSetup,
       langSql.sql({ dialect }),
-      themeComp.of(themeExt),
-      fontComp.of(fontExt),
+      fontExt,
+      themeExt,
       EditorView.updateListener.of((update: any) => {
         if (update.docChanged) {
           emit("update:deploySql", update.state.doc.toString());

@@ -475,6 +475,7 @@ mod tests {
             permission_diffs: Vec::new(),
             permission_sync_sql: None,
             dependency_graph: None,
+            deploy_order: Vec::new(),
         }
     }
 

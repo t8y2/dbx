@@ -2508,6 +2508,8 @@ const canFetchNextInfiniteScrollSegment = computed(() =>
 );
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql || !!props.countTotalRows));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
+/** Full-grid busy state: query loading or on-demand COUNT (e.g. jump to last page). */
+const gridSurfaceBusy = computed(() => props.loading === true || totalRowCountBusy.value);
 const canCalculateTotalRowCount = computed(() => !!props.countTotalRows || (!!props.connectionId && (!!props.tableMeta || !!props.countSql)));
 const showExactTotalCountAction = computed(() => canCalculateTotalRowCount.value && (totalRowCountIsExact.value === false || typeof displayedTotalRowCount.value !== "number"));
 // When a refresh/rollback completes and the current page exceeds the last
@@ -2694,6 +2696,14 @@ function jumpToCountedLastPage(total: number) {
   emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
 }
 
+async function beginManualTotalRowCount(): Promise<boolean> {
+  if (manualTotalRowCountLoading.value) return false;
+  manualTotalRowCountLoading.value = true;
+  // Flush busy UI (overlay / spinner) before the slow COUNT starts.
+  await nextTick();
+  return true;
+}
+
 async function lastPage() {
   if (infiniteScrollEnabled.value) return;
   if (hasKnownPaginationTotalRowCount.value) {
@@ -2710,8 +2720,7 @@ async function lastPage() {
     return;
   }
   if (props.countTotalRows) {
-    if (manualTotalRowCountLoading.value) return;
-    manualTotalRowCountLoading.value = true;
+    if (!(await beginManualTotalRowCount())) return;
     try {
       const total = await props.countTotalRows();
       if (!Number.isFinite(total) || total < 0) return;
@@ -2725,11 +2734,11 @@ async function lastPage() {
     return;
   }
   if (!props.connectionId) return;
-  const countTarget = await buildCurrentCountTarget();
-  const sql = countTarget?.sql;
-  if (!sql) return;
-  manualTotalRowCountLoading.value = true;
+  if (!(await beginManualTotalRowCount())) return;
   try {
+    const countTarget = await buildCurrentCountTarget();
+    const sql = countTarget?.sql;
+    if (!sql) return;
     const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (!Number.isFinite(total) || total < 0) return;
@@ -2760,8 +2769,7 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
 }
 
 async function calculateTotalRowCount() {
-  if (manualTotalRowCountLoading.value) return;
-  manualTotalRowCountLoading.value = true;
+  if (!(await beginManualTotalRowCount())) return;
   try {
     if (props.countTotalRows) {
       const total = await props.countTotalRows();
@@ -7444,45 +7452,40 @@ function stopLoadingElapsedTimer() {
 
 function startLoadingElapsedTimer() {
   stopLoadingElapsedTimer();
-  if (!dataGridIsActive || !props.loading) return;
+  if (!dataGridIsActive || !gridSurfaceBusy.value) return;
   _loadingStart = Date.now();
   loadingElapsed.value = 0;
   const updateOnNextFrame = () => {
-    if (!dataGridIsActive || !props.loading) return;
+    if (!dataGridIsActive || !gridSurfaceBusy.value) return;
     loadingElapsed.value = Date.now() - _loadingStart;
     _loadingFrame = window.requestAnimationFrame(updateOnNextFrame);
   };
   _loadingFrame = window.requestAnimationFrame(updateOnNextFrame);
 }
 
-watch(
-  () => props.loading,
-  (isLoading) => {
-    stopLoadingElapsedTimer();
-    if (isDebugLoggingEnabled()) {
-      logDataGridTiming(isLoading ? "[DBX][DataGrid:loading:start]" : "[DBX][DataGrid:loading:stop]", {
-        traceId: dataGridTraceId,
-        cacheKey: props.cacheKey,
-        elapsedSinceSetup: dataGridElapsed(),
-      });
-    }
-    if (isLoading) {
-      startLoadingElapsedTimer();
-    } else {
-      if (isDebugLoggingEnabled()) {
-        nextTick(() => {
-          requestAnimationFrame(() => {
-            logDataGridTiming("[DBX][DataGrid:loading:stop:first-frame]", {
-              traceId: dataGridTraceId,
-              cacheKey: props.cacheKey,
-              elapsedSinceSetup: dataGridElapsed(),
-            });
-          });
+watch(gridSurfaceBusy, (isLoading) => {
+  stopLoadingElapsedTimer();
+  if (isDebugLoggingEnabled()) {
+    logDataGridTiming(isLoading ? "[DBX][DataGrid:loading:start]" : "[DBX][DataGrid:loading:stop]", {
+      traceId: dataGridTraceId,
+      cacheKey: props.cacheKey,
+      elapsedSinceSetup: dataGridElapsed(),
+    });
+  }
+  if (isLoading) {
+    startLoadingElapsedTimer();
+  } else if (isDebugLoggingEnabled()) {
+    nextTick(() => {
+      requestAnimationFrame(() => {
+        logDataGridTiming("[DBX][DataGrid:loading:stop:first-frame]", {
+          traceId: dataGridTraceId,
+          cacheKey: props.cacheKey,
+          elapsedSinceSetup: dataGridElapsed(),
         });
-      }
-    }
-  },
-);
+      });
+    });
+  }
+});
 
 onActivated(() => {
   startLoadingElapsedTimer();
@@ -8923,7 +8926,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </template>
               </RecycleScroller>
               <!-- Infinite scroll loading indicator for RecycleScroller -->
-              <div v-if="infiniteScrollEnabled && infiniteScrollLoading && !loading" class="flex items-center justify-center py-2 text-xs text-muted-foreground">
+              <div v-if="infiniteScrollEnabled && infiniteScrollLoading && !gridSurfaceBusy" class="flex items-center justify-center py-2 text-xs text-muted-foreground">
                 <Loader2 class="w-3 h-3 animate-spin mr-1" />
                 {{ t("grid.loadingMore") }}
               </div>
@@ -8933,7 +8936,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <div v-if="hasGridVerticalOverflow" ref="gridVerticalScrollbarTrackRef" class="data-grid-vertical-scrollbar" @pointerdown="startGridVerticalScrollbarDrag">
                 <div ref="gridVerticalScrollbarThumbRef" class="data-grid-vertical-scrollbar__thumb" />
               </div>
-              <div v-if="loading" class="absolute inset-0 z-20 bg-background/50 flex items-center justify-center">
+              <div v-if="gridSurfaceBusy" class="absolute inset-0 z-20 bg-background/50 flex items-center justify-center">
                 <div class="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
                   <Loader2 class="w-3.5 h-3.5 animate-spin" />
                   <span>{{ formatElapsedSeconds(loadingElapsed) }}s</span>
@@ -9359,7 +9362,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         :pagination-enabled="paginationEnabled"
         :selection-summary="selectionSummary"
         :selection-summary-sum-text="selectionSummarySumText"
-        :loading="loading || totalRowCountBusy"
+        :loading="gridSurfaceBusy"
         :infinite-scroll-enabled="infiniteScrollEnabled"
         :infinite-scroll-all-loaded="infiniteScrollAllLoaded"
         :page-size="pageSize"

@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
@@ -161,4 +162,16 @@ test("auto-redirect: total is zero — guard prevents redirect attempt", () => {
 test("auto-redirect: total is undefined — guard prevents redirect attempt", () => {
   const total = undefined;
   assert.equal(!total || (total as any) <= 0, true, "guard should prevent redirect when total is unknown");
+});
+
+test("last-page COUNT shows grid busy overlay before executeQuery", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => props\.loading === true \|\| totalRowCountBusy\.value\)/);
+  assert.match(source, /v-if="gridSurfaceBusy"/);
+  assert.match(source, /async function beginManualTotalRowCount/);
+  assert.match(source, /await nextTick\(\);/);
+  const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(lastPageFn, /beginManualTotalRowCount\(\)/);
+  assert.match(lastPageFn, /buildCurrentCountTarget\(\)/);
+  assert.ok(lastPageFn.indexOf("beginManualTotalRowCount") < lastPageFn.indexOf("buildCurrentCountTarget"), "busy UI must start before COUNT SQL is built");
 });

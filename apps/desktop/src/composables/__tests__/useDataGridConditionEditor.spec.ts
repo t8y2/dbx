@@ -386,12 +386,26 @@ describe("useDataGridConditionEditor", () => {
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(1));
 
+    const initialEnter = keyboardEvent("Enter");
+    expect(editor.handleKeydown(initialEnter)).toBe("apply");
+    expect(initialEnter.preventDefault).toHaveBeenCalledOnce();
+    expect(value.value).toBe("na");
+
     const down = keyboardEvent("ArrowDown");
     expect(editor.handleKeydown(down)).toBe("navigate");
     expect(down.preventDefault).toHaveBeenCalledOnce();
-    const tab = keyboardEvent("Tab");
-    expect(editor.handleKeydown(tab)).toBe("accept");
+    const navigatedEnter = keyboardEvent("Enter");
+    expect(editor.handleKeydown(navigatedEnter)).toBe("accept");
     expect(value.value).toBe("name");
+
+    const tabValue = ref("");
+    const tabEditor = useDataGridConditionEditor({ kind: "orderBy", value: tabValue, columns: ["name"], historyScope: {} });
+    tabValue.value = "na";
+    await nextTick();
+    await vi.waitFor(() => expect(tabEditor.suggestions.value).toHaveLength(1));
+    const tab = keyboardEvent("Tab");
+    expect(tabEditor.handleKeydown(tab)).toBe("accept");
+    expect(tabValue.value).toBe("name");
 
     const enter = keyboardEvent("Enter");
     expect(editor.handleKeydown(enter)).toBe("apply");

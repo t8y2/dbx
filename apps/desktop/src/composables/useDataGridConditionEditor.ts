@@ -205,6 +205,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
   let suggestionRequestId = 0;
   let suggestionAbortController: AbortController | undefined;
   let suppressNextValueSuggestion = false;
+  let keyboardSelectedSuggestion = false;
 
   const dropdownOpen = computed(() => suggestions.value.length > 0 || historyOpen.value);
 
@@ -221,6 +222,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     cancelSuggestionRequest();
     suggestions.value = [];
     highlightedIndex.value = -1;
+    keyboardSelectedSuggestion = false;
     historyOpen.value = false;
     replacementRange.value = undefined;
   }
@@ -265,10 +267,12 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       suggestions.value = values ? [...new Set(values)].slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" })) : defaultSuggestions(target).slice(0, limit);
       replacementRange.value = { from: target.from, to: target.to };
       highlightedIndex.value = suggestions.value.length > 0 ? 0 : -1;
+      keyboardSelectedSuggestion = false;
     } catch (error) {
       if (!controller.signal.aborted && requestId === suggestionRequestId) {
         suggestions.value = [];
         highlightedIndex.value = -1;
+        keyboardSelectedSuggestion = false;
         console.warn("[DBX][condition-editor] Failed to load suggestions", error);
       }
     } finally {
@@ -280,6 +284,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     cancelSuggestionRequest();
     suggestions.value = [];
     highlightedIndex.value = -1;
+    keyboardSelectedSuggestion = false;
     historyOpen.value = false;
     if (!value.trim()) return;
 
@@ -304,6 +309,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     replacementRange.value = undefined;
     suggestions.value = loadDataGridConditionHistory(options.kind, toValue(options.historyScope), options.value.value).map((value) => ({ value, kind: "history" }));
     highlightedIndex.value = -1;
+    keyboardSelectedSuggestion = false;
   }
 
   function deleteHistory(value: string) {
@@ -311,6 +317,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     const query = options.value.value.trim().toLowerCase();
     suggestions.value = history.filter((item) => !query || item.toLowerCase().includes(query)).map((item) => ({ value: item, kind: "history" }));
     highlightedIndex.value = suggestions.value.length > 0 ? Math.min(Math.max(highlightedIndex.value, 0), suggestions.value.length - 1) : -1;
+    keyboardSelectedSuggestion = false;
     historyOpen.value = true;
   }
 
@@ -325,6 +332,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     } else {
       highlightedIndex.value = Math.min(Math.max(highlightedIndex.value + delta, 0), suggestions.value.length - 1);
     }
+    keyboardSelectedSuggestion = true;
     return true;
   }
 
@@ -370,7 +378,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (suggestions.value.length > 0 && highlightedIndex.value >= 0) {
+      if (keyboardSelectedSuggestion && suggestions.value.length > 0 && highlightedIndex.value >= 0) {
         if (accept()) return "accept";
       }
       return "apply";

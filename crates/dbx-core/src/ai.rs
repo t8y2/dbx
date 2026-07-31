@@ -3546,17 +3546,27 @@ fn build_gemini_contents(messages: &[AiMessage]) -> Vec<serde_json::Value> {
             }
             if m.role == "assistant" && !m.tool_calls.is_empty() {
                 let mut parts: Vec<serde_json::Value> = Vec::new();
-                if !m.content.is_empty() {
-                    parts.push(json!({ "text": m.content }));
-                }
+                let mut has_text_part = false;
                 for tc in &m.tool_calls {
-                    if let Some(payload) =
-                        tc.provider_payload.as_ref().filter(|payload| payload.get("functionCall").is_some())
-                    {
-                        parts.push(payload.clone());
+                    if let Some(payload) = &tc.provider_payload {
+                        if let Some(model_parts) = payload.get("model_parts").and_then(|p| p.as_array()) {
+                            for p in model_parts {
+                                if p.get("text").is_some() {
+                                    has_text_part = true;
+                                }
+                                parts.push(p.clone());
+                            }
+                        } else if payload.get("functionCall").is_some() || payload.get("thought_signature").is_some() || payload.get("thoughtSignature").is_some() {
+                            parts.push(payload.clone());
+                        } else {
+                            parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.arguments } }));
+                        }
                     } else {
                         parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.arguments } }));
                     }
+                }
+                if !m.content.is_empty() && !has_text_part {
+                    parts.insert(0, json!({ "text": m.content }));
                 }
                 contents.push(json!({ "role": "model", "parts": parts }));
             } else {
@@ -3576,7 +3586,7 @@ fn build_gemini_contents(messages: &[AiMessage]) -> Vec<serde_json::Value> {
     contents
 }
 
-fn emit_gemini_tool_call_part(part: &serde_json::Value, index: u32, on_event: &impl Fn(StreamToolEvent)) -> bool {
+fn emit_gemini_tool_call_part(part: &serde_json::Value, all_parts: &[serde_json::Value], index: u32, on_event: &impl Fn(StreamToolEvent)) -> bool {
     let Some(function_call) = part.get("functionCall") else {
         return false;
     };
@@ -3585,7 +3595,17 @@ fn emit_gemini_tool_call_part(part: &serde_json::Value, index: u32, on_event: &i
     let arguments = function_call["args"].clone();
     let id = format!("gemini-tc-{name}-{index}");
     on_event(StreamToolEvent::ToolCallStart { index, id, name });
-    on_event(StreamToolEvent::ToolCallProviderPayload { index, payload: part.clone() });
+
+    let payload = if all_parts.len() > 1 || part.get("thought_signature").is_some() || part.get("thoughtSignature").is_some() || all_parts.iter().any(|p| p.get("thought_signature").is_some() || p.get("thoughtSignature").is_some() || p.get("thought").as_bool() == Some(true)) {
+        json!({
+            "model_parts": all_parts,
+            "functionCall": function_call
+        })
+    } else {
+        part.clone()
+    };
+
+    on_event(StreamToolEvent::ToolCallProviderPayload { index, payload });
     on_event(StreamToolEvent::ToolCallDelta { index, fragment: arguments.to_string() });
     on_event(StreamToolEvent::ToolCallComplete { index });
     true
@@ -3674,7 +3694,7 @@ async fn stream_gemini_with_tools(
                                             }
                                             // Function call (Gemini sends complete objects, not deltas)
                                             emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                                            if emit_gemini_tool_call_part(part, tool_call_idx, on_event) {
+                                            if emit_gemini_tool_call_part(part, parts, tool_call_idx, on_event) {
                                                 tool_call_idx += 1;
                                             }
                                         }

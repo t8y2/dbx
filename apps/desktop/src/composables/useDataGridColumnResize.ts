@@ -8,23 +8,22 @@ type CellValue = string | number | boolean | null;
 /** Minimum row-number gutter; fits ~4 digits with px-2 padding. */
 export const DATA_GRID_ROW_NUM_WIDTH = 48;
 
-/** Largest absolute row number that may appear in the gutter for the current view. */
-export function resolveDataGridMaxRowNumber(options: { infiniteScroll: boolean; allRowsLoaded: boolean; currentPage: number; pageSize: number; rowCount: number; knownTotal?: number }): number {
-  const knownTotal = typeof options.knownTotal === "number" && Number.isFinite(options.knownTotal) ? Math.max(0, Math.floor(options.knownTotal)) : 0;
+/** Largest absolute row number that may appear in the gutter for the current page/window. */
+export function resolveDataGridMaxRowNumber(options: { infiniteScroll: boolean; allRowsLoaded: boolean; currentPage: number; pageSize: number; rowCount: number }): number {
   if (options.infiniteScroll || options.allRowsLoaded) {
-    return Math.max(1, options.rowCount, knownTotal);
+    return Math.max(1, options.rowCount);
   }
   const pageSize = Math.max(1, options.pageSize);
-  const pageEnd = Math.max(0, options.currentPage - 1) * pageSize + Math.max(options.rowCount, 1);
-  return Math.max(1, pageEnd, knownTotal);
+  return Math.max(1, Math.max(0, options.currentPage - 1) * pageSize + Math.max(options.rowCount, 1));
 }
 
-/** Grow the sticky # column so multi-million row indexes are not clipped. */
-export function dataGridRowNumberColumnWidth(maxRowNumber: number, fontSize = 12): number {
-  const digits = String(Math.max(1, Math.floor(Math.max(0, maxRowNumber)))).length;
-  const charWidth = Math.max(7, Math.ceil(fontSize * 0.62));
-  // px-2 (16) keeps ~4 digits in the default 48px gutter; larger indexes grow.
-  return Math.max(DATA_GRID_ROW_NUM_WIDTH, digits * charWidth + 16);
+/** Grow the sticky # column so multi-million row indexes are not clipped or spilled into data cells. */
+export function dataGridRowNumberColumnWidth(maxRowNumber: number, fontSize = 12, measureTextWidth?: (text: string) => number | undefined): number {
+  const text = String(Math.max(1, Math.floor(Math.max(0, maxRowNumber))));
+  const measured = measureTextWidth?.(text);
+  const contentWidth = typeof measured === "number" && Number.isFinite(measured) && measured > 0 ? measured : text.length * Math.max(8, Math.ceil(fontSize * 0.65));
+  // Keep ~4 digits in the default 48px gutter; measured text gets the same 16px padding as px-2.
+  return Math.max(DATA_GRID_ROW_NUM_WIDTH, Math.ceil(contentWidth) + 16);
 }
 
 export function resizeDataGridColumnWidth(startWidth: number, deltaX: number): number {

@@ -362,6 +362,10 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.font = item.status === "new" || item.status === "edited" || item.status === "draft" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
     const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+    ctx.clip();
     if (item.isDraft) {
       ctx.fillText("*", rowNumberTextX, textY);
     } else if (infiniteScrollEnabled) {
@@ -369,6 +373,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     } else {
       ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
     }
+    ctx.restore();
     ctx.font = normalFont;
 
     ctx.strokeStyle = theme.border;

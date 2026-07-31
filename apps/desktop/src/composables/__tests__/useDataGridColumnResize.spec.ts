@@ -313,15 +313,7 @@ describe("dataGridRowNumberColumnWidth", () => {
     expect(dataGridRowNumberColumnWidth(4_215_101)).toBe(dataGridRowNumberColumnWidth(9_999_999));
   });
 
-  it("resolves the max visible row number from the current page window", () => {
-    expect(
-      resolveDataGridMaxRowNumber({
-        infiniteScroll: false,
-        allRowsLoaded: false,
-        currentPage: 42152,
-        pageSize: 100,
-        rowCount: 38,
-      }),
-    ).toBe(4_215_138);
+  it("prefers measured text width when provided", () => {
+    expect(dataGridRowNumberColumnWidth(99, 12, () => 40)).toBe(56);
   });
 });

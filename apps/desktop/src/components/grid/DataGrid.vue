@@ -2526,12 +2526,18 @@ watch(
         currentPage: currentPage.value,
         pageSize: pageSize.value,
         rowCount: props.result.rows.length,
-        knownTotal: hasKnownPaginationTotalRowCount.value ? paginationTotalRowCount.value : undefined,
       }),
     tableFontSize,
+    tableFontFamily,
   ],
-  ([maxRowNumber, fontSize]) => {
-    rowNumberWidth.value = dataGridRowNumberColumnWidth(maxRowNumber, fontSize);
+  ([maxRowNumber, fontSize, fontFamily]) => {
+    rowNumberWidth.value = dataGridRowNumberColumnWidth(maxRowNumber, fontSize, (text) => {
+      if (typeof document === "undefined") return undefined;
+      if (columnHeaderMeasureContext === undefined) columnHeaderMeasureContext = document.createElement("canvas").getContext("2d");
+      if (!columnHeaderMeasureContext) return undefined;
+      columnHeaderMeasureContext.font = `400 ${fontSize}px ${fontFamily}`;
+      return Math.ceil(columnHeaderMeasureContext.measureText(text).width);
+    });
   },
   { immediate: true },
 );

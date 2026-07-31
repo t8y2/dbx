@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectDuplicateTableColumnComments, duplicateTableStructureRequiresScript } from "@/lib/database/dbAdminSql";
+import { collectDuplicateTableColumnComments, damengDropSchemaExecutionSchema, duplicateTableStructureRequiresScript } from "@/lib/database/dbAdminSql";
 
 describe("collectDuplicateTableColumnComments", () => {
   it("preserves meaningful whitespace and excludes whitespace-only comments", () => {
@@ -28,5 +28,19 @@ describe("duplicateTableStructureRequiresScript", () => {
 
   it("keeps single-statement structure copies on the query path", () => {
     expect(duplicateTableStructureRequiresScript('CREATE TABLE "copy" (LIKE "source" INCLUDING ALL);')).toBe(false);
+  });
+});
+
+describe("damengDropSchemaExecutionSchema", () => {
+  it("uses the login schema when dropping a different schema", () => {
+    expect(damengDropSchemaExecutionSchema("APP", "TARGET")).toBe("APP");
+  });
+
+  it("fails closed when dropping the login schema", () => {
+    expect(damengDropSchemaExecutionSchema("APP", "APP")).toBeNull();
+  });
+
+  it("fails closed when the username is missing", () => {
+    expect(damengDropSchemaExecutionSchema(undefined, "TARGET")).toBeNull();
   });
 });

@@ -119,6 +119,13 @@ export function buildDropSchemaSql(options: SchemaNameSqlOptions): Promise<strin
   return api.buildDropSchemaSql(options);
 }
 
+export function damengDropSchemaExecutionSchema(username: string | null | undefined, targetSchema: string): string | null {
+  const executionSchema = username?.trim();
+  const normalizedTargetSchema = targetSchema.trim().toUpperCase();
+  if (!executionSchema || !normalizedTargetSchema || executionSchema.toUpperCase() === normalizedTargetSchema) return null;
+  return executionSchema;
+}
+
 export function supportsSchemaComment(databaseType?: DatabaseType): boolean {
   return ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "yashandb"].includes(databaseType || "");
 }

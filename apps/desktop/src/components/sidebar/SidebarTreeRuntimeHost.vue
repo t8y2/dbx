@@ -105,6 +105,7 @@ import {
   buildDropDatabaseSql,
   buildDropObjectSql,
   buildDropSchemaSql,
+  damengDropSchemaExecutionSchema,
   buildGetDatabaseCommentSql,
   buildGetSchemaCommentSql,
   buildUpdateDatabasePropertiesSql,
@@ -2953,22 +2954,17 @@ async function confirmDropSchema() {
     await connectionStore.ensureConnected(node.connectionId);
     const config = connectionStore.getConfig(node.connectionId);
     const dbType = effectiveDatabaseTypeForConnection(config);
+    let dropExecutionSchema: string | undefined;
+    if (dbType === "dameng") {
+      dropExecutionSchema = damengDropSchemaExecutionSchema(config?.username, node.label) ?? undefined;
+      if (!dropExecutionSchema) throw new Error(t("contextMenu.dropDamengSchemaRequiresDifferentDba"));
+    }
     const sql =
       dropSchemaPreviewSql.value ||
       (await buildDropSchemaSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
       }));
-    // Dameng refuses to drop the schema the session is currently using (DM
-    // error "当前对象被占用"), and the JDBC agent switches the session to the
-    // target schema (node.schema) before executing any statement. Run the drop
-    // from a different schema: the connected user's own schema, or SYSDBA when
-    // the user's own schema is the one being dropped.
-    let dropExecutionSchema: string | undefined;
-    if (dbType === "dameng") {
-      const username = config?.username?.trim().toUpperCase();
-      dropExecutionSchema = username && username !== node.label.trim().toUpperCase() ? username : "SYSDBA";
-    }
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: dropExecutionSchema });
     toast(t("contextMenu.dropSchemaSuccess", { name: node.label }), 3000);
     if (config?.db_type === "sqlserver") {

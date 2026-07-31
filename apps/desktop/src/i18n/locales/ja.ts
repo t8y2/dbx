@@ -2212,6 +2212,7 @@ export default withEnglishFallback({
     confirmDropSchemaMessage: "本当にスキーマ「{name}」を削除しますか？スキーマとすべてのオブジェクトが永久に削除されます。",
     createSchemaSuccess: "スキーマ「{name}」を作成しました",
     dropSchemaSuccess: "スキーマ「{name}」を削除しました",
+    dropDamengSchemaRequiresDifferentDba: "現在の接続ではこのスキーマを安全に削除できません。別の DBA ユーザーで接続して再試行してください。",
     createSchemaNamePlaceholder: "スキーマ名",
     editSchemaComment: "コメントを編集",
     editSchemaCommentTitle: "コメントを編集: 「{name}」",

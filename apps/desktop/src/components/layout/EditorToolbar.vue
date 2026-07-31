@@ -96,7 +96,7 @@ const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 const supportsExplain = computed(() => {
   const dbType = props.activeConnection?.db_type;
-  return dbType !== "redis" && dbType !== "mongodb" && dbType !== "elasticsearch" && dbType !== "qdrant" && dbType !== "milvus" && dbType !== "weaviate" && dbType !== "chromadb" && dbType !== "etcd" && dbType !== "zookeeper" && dbType !== "mq" && dbType !== "nacos";
+  return dbType !== "redis" && dbType !== "mongodb" && dbType !== "elasticsearch" && dbType !== "easysearch" && dbType !== "qdrant" && dbType !== "milvus" && dbType !== "weaviate" && dbType !== "chromadb" && dbType !== "etcd" && dbType !== "zookeeper" && dbType !== "mq" && dbType !== "nacos";
 });
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
 const supportsExPaste = computed(() => supportsSqlInListPaste(props.activeConnection?.db_type));
@@ -433,7 +433,16 @@ async function changeCatalog(selectedCatalog: string) {
         </SearchableSelect>
       </div>
       <div
-        v-if="activeConnection?.db_type !== 'elasticsearch' && activeConnection?.db_type !== 'qdrant' && activeConnection?.db_type !== 'milvus' && activeConnection?.db_type !== 'weaviate' && activeConnection?.db_type !== 'chromadb' && activeConnection?.db_type !== 'zookeeper' && !isSingleDb"
+        v-if="
+          activeConnection?.db_type !== 'elasticsearch' &&
+          activeConnection?.db_type !== 'easysearch' &&
+          activeConnection?.db_type !== 'qdrant' &&
+          activeConnection?.db_type !== 'milvus' &&
+          activeConnection?.db_type !== 'weaviate' &&
+          activeConnection?.db_type !== 'chromadb' &&
+          activeConnection?.db_type !== 'zookeeper' &&
+          !isSingleDb
+        "
         class="flex items-center gap-1"
         :class="{ 'database-required-prompt': databaseRequiredVisible }"
       >

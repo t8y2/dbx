@@ -23,6 +23,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sqlSemanticDiagnosticsMode",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
+  "savedSqlOpenTargetMode",
   "appLayout",
   "tabLayout",
   "showColumnCommentsInHeader",
@@ -62,6 +63,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "snippets",
   "sqlVariableSyntaxOverrides",
   "continueOnErrorOnBatch",
+  "clickTableNavigationTarget",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];

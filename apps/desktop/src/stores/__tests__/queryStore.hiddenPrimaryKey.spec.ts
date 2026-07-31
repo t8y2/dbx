@@ -569,6 +569,22 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.resultSortedSql).toBe("SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC");
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
     expect(tab.queryAnalysis).toBeDefined();
+
+    await store.executeTabSql(tabId, "SELECT name FROM users", {
+      resultBaseSql: "SELECT name FROM users",
+      resultSortedSql: tab.resultSortedSql,
+      querySort: {
+        resultColumns: ["name"],
+        columnIndex: 0,
+        column: "name",
+        direction: "asc",
+      },
+      pagination: { offset: 100, limit: 100 },
+    });
+
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
   });
 
   it("clears result sorting when the editor SQL is executed again", async () => {
@@ -913,5 +929,42 @@ describe("queryStore hidden primary key editing", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.resultTotalRowCount).toBe(123));
     expect(tab.resultTotalRowCountLoading).toBe(false);
+  });
+
+  it("stops appending when a SQL Server query has no bounded next-page plan", async () => {
+    getConnectionConfig.mockReturnValue({ id: "sqlserver-1", name: "SQL Server", db_type: "sqlserver", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    const rows = Array.from({ length: 28 }, (_, index) => [index + 1]);
+    executeMulti.mockResolvedValueOnce([
+      {
+        columns: ["id"],
+        rows,
+        affected_rows: 28,
+        execution_time_ms: 1,
+        has_more: true,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sqlserver-1", "app", "Query");
+    const sql = "SELECT a.id, b.* FROM orders a JOIN order_details b ON b.order_id = a.id";
+
+    await store.executeTabSql(tabId, sql);
+    expect(executeMulti).toHaveBeenCalledTimes(1);
+
+    await store.executeTabSql(tabId, sql, {
+      resultBaseSql: sql,
+      pagination: { limit: 25, offset: 28 },
+      appendResult: { maxRows: 10_000 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+      replaceActiveResultInGroup: true,
+    });
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(executeMulti).toHaveBeenCalledTimes(1);
+    expect(tab.result?.rows).toEqual(rows);
+    expect(tab.result?.has_more).toBe(false);
   });
 });

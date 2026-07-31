@@ -1,6 +1,6 @@
 package com.dbx.agent.dameng;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -23,6 +23,7 @@ import java.io.Reader;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -40,7 +41,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public final class DamengAgent extends BaseDatabaseAgent {
+public final class DamengAgent extends AbstractJdbcAgent {
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
     private static final String DAMENG_CLASSIFIED_OBJECT_TYPE_SQL =
         "CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' OR (o.OBJECT_TYPE = 'VIEW' AND mv.MVIEW_NAME IS NOT NULL) "
@@ -72,35 +73,33 @@ public final class DamengAgent extends BaseDatabaseAgent {
               ON schema_object.OBJECT_ID = m.SCHID AND schema_object.OBJECT_TYPE = 'SCH'
         ) mv ON mv.OWNER = o.OWNER AND mv.MVIEW_NAME = o.OBJECT_NAME
         """.stripIndent().trim();
-    private Connection connection;
     private String connectedUsername;
 
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "dm.jdbc.driver.DmDriver";
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            withSuppressedStdout(() -> {
-                Class.forName("dm.jdbc.driver.DmDriver");
-                connection = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword());
-                connectedUsername = params.getUsername();
-            });
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        return buildUrl(params);
     }
 
     @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            return withSuppressedStdout(() -> {
-                Class.forName("dm.jdbc.driver.DmDriver");
-                try (Connection conn = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword())) {
-                    return conn.isValid(5);
-                }
-            });
-        });
+    protected void loadDriver(ConnectParams params) throws Exception {
+        withSuppressedStdout(() -> super.loadDriver(params));
+    }
+
+    @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        return withSuppressedStdout(
+            () -> DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword())
+        );
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        connectedUsername = params.getUsername();
     }
 
     /**
@@ -195,31 +194,121 @@ public final class DamengAgent extends BaseDatabaseAgent {
         if (!constraints.includesTableLikeTypes()) {
             return List.of();
         }
+        RuntimeException permissionError;
         try {
             return executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
-            if (needsMaterializedViewClassification(constraints)) {
-                try {
-                    return executeConstrainedTables(
-                        buildAccessibleConstrainedTablesQuery(schema, constraints),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to owner-local and raw catalog fallbacks.
-                }
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
             }
-            if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
-                try {
-                    return executeConstrainedTables(
-                        buildConstrainedTablesQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to the raw catalog path below.
-                }
-            }
-            return executeRawConstrainedTables(schema, constraints);
+            permissionError = e;
         }
+        if (needsMaterializedViewClassification(constraints)) {
+            try {
+                return executeConstrainedTables(
+                    buildAccessibleConstrainedTablesQuery(schema, constraints),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
+            try {
+                return executeConstrainedTables(
+                    buildConstrainedTablesQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        try {
+            return executeRawConstrainedTables(schema, constraints);
+        } catch (RuntimeException e) {
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
+            }
+            permissionError.addSuppressed(e);
+        }
+        try {
+            return executeJdbcMetadataTables(schema, constraints);
+        } catch (RuntimeException e) {
+            e.addSuppressed(permissionError);
+            throw e;
+        }
+    }
+
+    private List<TableInfo> executeJdbcMetadataTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            DatabaseMetaData metadata = requireConnected().getMetaData();
+            String schemaPattern = escapeJdbcMetadataPattern(metadata, schema);
+            List<String> supportedTypes = damengTableObjectTypes(constraints);
+            List<TableInfo> result = new ArrayList<>();
+            try (ResultSet rs = metadata.getTables(null, schemaPattern, "%", null)) {
+                while (rs.next()) {
+                    String name = rs.getString("TABLE_NAME");
+                    String tableType = normalizeObjectType(rs.getString("TABLE_TYPE"));
+                    if (name == null || name.isBlank() || !supportedTypes.contains(tableType)) {
+                        continue;
+                    }
+                    if ("TABLE".equals(tableType) && name.startsWith("MTAB$_")) {
+                        continue;
+                    }
+                    result.add(new TableInfo(name, tableType, rs.getString("REMARKS")));
+                }
+            }
+            result.sort((left, right) -> left.getName().compareToIgnoreCase(right.getName()));
+            return constraints.filterTables(result);
+        });
+    }
+
+    private static String escapeJdbcMetadataPattern(DatabaseMetaData metadata, String value) throws SQLException {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        String escape = metadata.getSearchStringEscape();
+        if (escape == null || escape.isEmpty()) {
+            return value;
+        }
+        return value
+            .replace(escape, escape + escape)
+            .replace("_", escape + "_")
+            .replace("%", escape + "%");
+    }
+
+    private static boolean isDamengMetadataPermissionError(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (!(current instanceof SQLException sqlError)) {
+                continue;
+            }
+            for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                String message = candidate.getMessage();
+                if (message == null) {
+                    continue;
+                }
+                String normalized = message.toLowerCase(Locale.ROOT);
+                boolean metadataObject = normalized.contains("all_objects")
+                    || normalized.contains("sysobjects")
+                    || normalized.contains("all_dependencies")
+                    || normalized.contains("all_tab_comments");
+                boolean permissionDenied = normalized.contains("权限")
+                    || normalized.contains("privilege")
+                    || normalized.contains("permission denied")
+                    || normalized.contains("access denied")
+                    || normalized.contains("not authorized");
+                if (metadataObject && permissionDenied) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private List<TableInfo> executeConstrainedTables(MetadataQuery query, MetadataListConstraints constraints) {
@@ -883,7 +972,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::stringResultValue
+            this::resultValue
         );
     }
 
@@ -979,7 +1068,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::stringResultValue
+            this::resultValue
         );
     }
 
@@ -991,7 +1080,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::stringResultValue
+            this::resultValue
         );
     }
 
@@ -1001,16 +1090,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
     }
 
     @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
-    }
-
-    private Object stringResultValue(ResultSet rs, int index, int sqlType) {
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = switch (sqlType) {
                 case Types.BIGINT -> rs.getLong(index);
@@ -1464,9 +1544,10 @@ public final class DamengAgent extends BaseDatabaseAgent {
                     }
                     try {
                         Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
-                        if (dmConnClass.isInstance(conn)) {
+                        Object dmConnection = unwrapConnection(conn, dmConnClass);
+                        if (dmConnection != null) {
                             Method m = dmConnClass.getMethod("getExplainInfo", Statement.class);
-                            planText = (String) m.invoke(dmConnClass.cast(conn), stmt);
+                            planText = (String) m.invoke(dmConnection, stmt);
                         }
                     } catch (Exception ignored) {}
                 } finally {
@@ -1479,9 +1560,10 @@ public final class DamengAgent extends BaseDatabaseAgent {
             } else {
                 try {
                     Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
-                    if (dmConnClass.isInstance(conn)) {
+                    Object dmConnection = unwrapConnection(conn, dmConnClass);
+                    if (dmConnection != null) {
                         Method m = dmConnClass.getMethod("getExplainInfo", String.class);
-                        planText = (String) m.invoke(dmConnClass.cast(conn), sql);
+                        planText = (String) m.invoke(dmConnection, sql);
                     }
                 } catch (Exception ignored) {}
             }

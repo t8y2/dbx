@@ -10,6 +10,7 @@ pub mod duckdb_sql;
 pub mod duckdb_worker_process;
 #[cfg(feature = "duckdb-sidecar")]
 pub mod duckdb_worker_protocol;
+pub mod easysearch_driver;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
 pub mod file_validator;

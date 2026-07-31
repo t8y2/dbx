@@ -144,9 +144,7 @@ public final class HiveAgent extends AbstractJdbcAgent {
     }
 
     private void useSchema(String schema) throws Exception {
-        try (java.sql.Statement stmt = requireConnected().createStatement()) {
-            stmt.execute(setSchemaSQL(schema));
-        }
+        applySchemaContext(requireConnected(), schema);
     }
 
     private List<ColumnInfo> getColumnsFromDescribe(String schema, String table) throws Exception {

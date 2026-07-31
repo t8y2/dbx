@@ -7,12 +7,14 @@ import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.client.ZKClientConfig;
 import org.apache.zookeeper.data.Stat;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
@@ -27,6 +29,8 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.security.auth.login.AppConfigurationEntry;
+import javax.security.auth.login.Configuration;
 
 public final class ZooKeeperAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
@@ -42,6 +46,11 @@ public final class ZooKeeperAgent {
     private static final int DEFAULT_STAT_LOOKUP_CONCURRENCY = 16;
     private static final int MIN_STAT_LOOKUP_CONCURRENCY = 1;
     private static final int MAX_STAT_LOOKUP_CONCURRENCY = 64;
+    private static final String DEFAULT_AUTH_SCHEME = "digest";
+    private static final String SASL_DIGEST_AUTH_SCHEME = "sasl_digest";
+    private static final String SASL_LOGIN_CONTEXT_PREFIX = "DbxZooKeeperClient";
+    private static final Object JAAS_LOCK = new Object();
+    private static final AtomicInteger SASL_CONTEXT_SEQUENCE = new AtomicInteger(1);
     private static final int STAT_LOOKUP_CONCURRENCY = configuredStatLookupConcurrency();
     private static final ExecutorService STAT_LOOKUP_EXECUTOR = Executors.newFixedThreadPool(
         STAT_LOOKUP_CONCURRENCY,
@@ -53,6 +62,8 @@ public final class ZooKeeperAgent {
         AgentProtocol.CAPABILITY_KV
     ));
     private static CuratorFramework client;
+    private static SaslLease activeSaslLease;
+    private static JaasRegistryConfiguration jaasRegistry;
 
     private ZooKeeperAgent() {
     }
@@ -63,32 +74,66 @@ public final class ZooKeeperAgent {
 
     private static Object connect(JsonObject params) throws Exception {
         JsonObject connection = connectionObject(params);
-        CuratorFramework nextClient = buildClient(connection);
+        SaslLease nextLease = SASL_DIGEST_AUTH_SCHEME.equals(authScheme(connection)) ? acquireSaslLease(connection) : null;
+        CuratorFramework nextClient = null;
         try {
+            nextClient = buildClient(connection, nextLease == null ? null : nextLease.contextName);
             startAndVerify(nextClient, connection);
             closeClient();
             client = nextClient;
+            activeSaslLease = nextLease;
+            nextLease = null;
             return Collections.singletonMap("ok", true);
         } catch (Exception e) {
-            nextClient.close();
+            if (nextClient != null) {
+                nextClient.close();
+            }
             throw e;
+        } finally {
+            if (nextLease != null) {
+                nextLease.close();
+            }
         }
     }
 
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject connection = connectionObject(params);
-        CuratorFramework probe = buildClient(connection);
+        SaslLease probeLease = SASL_DIGEST_AUTH_SCHEME.equals(authScheme(connection)) ? acquireSaslLease(connection) : null;
+        CuratorFramework probe = null;
         try {
+            probe = buildClient(connection, probeLease == null ? null : probeLease.contextName);
             startAndVerify(probe, connection);
             return Collections.singletonMap("ok", true);
         } finally {
-            probe.close();
+            try {
+                if (probe != null) {
+                    probe.close();
+                }
+            } finally {
+                if (probeLease != null) {
+                    probeLease.close();
+                }
+            }
         }
     }
 
     static CuratorFramework buildClient(JsonObject connection) {
+        return buildClient(connection, null);
+    }
+
+    private static CuratorFramework buildClient(JsonObject connection, String saslContextName) {
         if (hasTlsOptions(connection)) {
             throw new IllegalArgumentException("ZooKeeper TLS is not supported");
+        }
+
+        String scheme = authScheme(connection);
+        if (!DEFAULT_AUTH_SCHEME.equals(scheme) && !SASL_DIGEST_AUTH_SCHEME.equals(scheme)) {
+            throw new IllegalArgumentException(
+                "Unsupported auth_scheme \"" + scheme + "\"; expected \"digest\" or \"sasl_digest\""
+            );
+        }
+        if (SASL_DIGEST_AUTH_SCHEME.equals(scheme)) {
+            saslCredentials(connection);
         }
 
         int baseSleepTimeMs = intOrDefault(connection, "base_sleep_time_ms", DEFAULT_BASE_SLEEP_TIME_MS);
@@ -104,15 +149,27 @@ public final class ZooKeeperAgent {
             .connectionTimeoutMs(connectionTimeoutMs)
             .retryPolicy(new ExponentialBackoffRetry(baseSleepTimeMs, maxRetries));
 
+        if (SASL_DIGEST_AUTH_SCHEME.equals(scheme)) {
+            if (saslContextName == null) {
+                throw new IllegalStateException("SASL JAAS context was not initialized");
+            }
+            ZKClientConfig clientConfig = new ZKClientConfig();
+            clientConfig.setProperty(ZKClientConfig.ENABLE_CLIENT_SASL_KEY, "true");
+            clientConfig.setProperty(ZKClientConfig.LOGIN_CONTEXT_NAME_KEY, saslContextName);
+            builder.zkClientConfig(clientConfig);
+        }
+
         String namespace = trimSlashes(stringOrEmpty(connection, "namespace"));
         if (!namespace.isBlank()) {
             builder.namespace(namespace);
         }
 
-        String username = stringOrEmpty(connection, "username");
-        String password = stringOrEmpty(connection, "password");
-        if (!username.isBlank()) {
-            builder.authorization("digest", (username + ":" + password).getBytes(StandardCharsets.UTF_8));
+        if (DEFAULT_AUTH_SCHEME.equals(scheme)) {
+            String username = stringOrEmpty(connection, "username");
+            String password = stringOrEmpty(connection, "password");
+            if (!username.isBlank()) {
+                builder.authorization(DEFAULT_AUTH_SCHEME, (username + ":" + password).getBytes(StandardCharsets.UTF_8));
+            }
         }
 
         return builder.build();
@@ -427,9 +484,16 @@ public final class ZooKeeperAgent {
     }
 
     private static void closeClient() {
-        if (client != null) {
-            client.close();
-            client = null;
+        try {
+            if (client != null) {
+                client.close();
+                client = null;
+            }
+        } finally {
+            if (activeSaslLease != null) {
+                activeSaslLease.close();
+                activeSaslLease = null;
+            }
         }
     }
 
@@ -648,6 +712,73 @@ public final class ZooKeeperAgent {
             ) != null;
     }
 
+    static String authScheme(JsonObject connection) {
+        String configured = connectionOption(connection, "auth_scheme");
+        return configured == null ? DEFAULT_AUTH_SCHEME : configured.toLowerCase(Locale.ROOT);
+    }
+
+    private static String connectionOption(JsonObject connection, String key) {
+        String direct = stringOrNull(connection, key);
+        if (direct != null && !direct.isBlank()) {
+            return direct.trim();
+        }
+        String params = stringOrEmpty(connection, "url_params").trim();
+        if (params.startsWith("?")) {
+            params = params.substring(1);
+        }
+        for (String part : params.split("[&;]")) {
+            int separator = part.indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String candidateKey = URLDecoder.decode(part.substring(0, separator), StandardCharsets.UTF_8);
+            if (key.equalsIgnoreCase(candidateKey.trim())) {
+                String value = URLDecoder.decode(part.substring(separator + 1), StandardCharsets.UTF_8).trim();
+                return value.isEmpty() ? null : value;
+            }
+        }
+        return null;
+    }
+
+    private static SaslCredentials saslCredentials(JsonObject connection) {
+        String username = stringOrEmpty(connection, "username").trim();
+        String password = stringOrEmpty(connection, "password");
+        if (username.isEmpty()) {
+            throw new IllegalArgumentException("username is required when auth_scheme = \"sasl_digest\"");
+        }
+        if (password.isEmpty()) {
+            throw new IllegalArgumentException("password is required when auth_scheme = \"sasl_digest\"");
+        }
+        return new SaslCredentials(username, password);
+    }
+
+    private static SaslLease acquireSaslLease(JsonObject connection) {
+        SaslCredentials credentials = saslCredentials(connection);
+        synchronized (JAAS_LOCK) {
+            if (jaasRegistry == null) {
+                jaasRegistry = new JaasRegistryConfiguration(Configuration.getConfiguration());
+                Configuration.setConfiguration(jaasRegistry);
+            }
+            String contextName = SASL_LOGIN_CONTEXT_PREFIX + SASL_CONTEXT_SEQUENCE.getAndIncrement();
+            jaasRegistry.add(contextName, credentials);
+            return new SaslLease(contextName);
+        }
+    }
+
+    private static void releaseSaslLease(String contextName) {
+        synchronized (JAAS_LOCK) {
+            if (jaasRegistry == null) {
+                return;
+            }
+            jaasRegistry.remove(contextName);
+            if (jaasRegistry.isEmpty()) {
+                Configuration base = jaasRegistry.base;
+                jaasRegistry = null;
+                Configuration.setConfiguration(base);
+            }
+        }
+    }
+
     private static String trimSlashes(String value) {
         String trimmed = value.trim();
         while (trimmed.startsWith("/")) {
@@ -736,6 +867,81 @@ public final class ZooKeeperAgent {
 
             System.out.println(handleRequest(line));
             System.out.flush();
+        }
+    }
+
+    private static final class SaslCredentials {
+        private final String username;
+        private final String password;
+
+        private SaslCredentials(String username, String password) {
+            this.username = username;
+            this.password = password;
+        }
+    }
+
+    private static final class JaasRegistryConfiguration extends Configuration {
+        private final Configuration base;
+        private final Map<String, AppConfigurationEntry[]> entries = new HashMap<>();
+
+        private JaasRegistryConfiguration(Configuration base) {
+            this.base = base;
+        }
+
+        private void add(String contextName, SaslCredentials credentials) {
+            Map<String, Object> options = new HashMap<>();
+            options.put("username", credentials.username);
+            options.put("password", credentials.password);
+            entries.put(contextName, new AppConfigurationEntry[] {
+                new AppConfigurationEntry(
+                    "org.apache.zookeeper.server.auth.DigestLoginModule",
+                    AppConfigurationEntry.LoginModuleControlFlag.REQUIRED,
+                    Collections.unmodifiableMap(options)
+                )
+            });
+        }
+
+        private void remove(String contextName) {
+            entries.remove(contextName);
+        }
+
+        private boolean isEmpty() {
+            return entries.isEmpty();
+        }
+
+        @Override
+        public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
+            synchronized (JAAS_LOCK) {
+                AppConfigurationEntry[] configured = entries.get(name);
+                if (configured != null) {
+                    return configured.clone();
+                }
+            }
+            return base == null ? null : base.getAppConfigurationEntry(name);
+        }
+
+        @Override
+        public void refresh() {
+            if (base != null) {
+                base.refresh();
+            }
+        }
+    }
+
+    private static final class SaslLease implements AutoCloseable {
+        private final String contextName;
+        private boolean closed;
+
+        private SaslLease(String contextName) {
+            this.contextName = contextName;
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                releaseSaslLease(contextName);
+                closed = true;
+            }
         }
     }
 

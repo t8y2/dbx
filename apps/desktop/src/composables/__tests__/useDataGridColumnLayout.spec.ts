@@ -1,11 +1,21 @@
 // @vitest-environment happy-dom
 
 import { effectScope, nextTick, ref } from "vue";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dataGridColumnOffsets, dataGridHorizontalColumnWindow, useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
+import { loadDataGridColumnLayout, saveDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 describe("useDataGridColumnLayout", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      clear: () => values.clear(),
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
   it("builds cumulative offsets", () => {
     expect(dataGridColumnOffsets([80, 120, 60])).toEqual([0, 80, 200, 260]);
   });
@@ -91,7 +101,7 @@ describe("useDataGridColumnLayout", () => {
 
     allNullColumnIndexes.value = [2];
     await nextTick();
-    state.resetColumnVisibility();
+    state.resetColumnVisibility([]);
     expect(state.visibleColumnIndexes.value).toEqual([0, 1]);
 
     state.toggleAllNullColumns();
@@ -101,7 +111,6 @@ describe("useDataGridColumnLayout", () => {
   });
 
   it("restores manually hidden columns after the grid scope is recreated", () => {
-    const hiddenColumnKeys = ref<string[]>([]);
     const options = {
       columns: ref(["id", "name", "email"]),
       sourceColumns: ref(undefined),
@@ -111,28 +120,49 @@ describe("useDataGridColumnLayout", () => {
       columnOrderKeys: ref(["id\0\0", "name\0\0", "email\0\0"]),
       layoutScopeKey: ref("visibility-recreated-layout"),
       tableScopeKey: ref(""),
-      initialHiddenColumnKeys: hiddenColumnKeys,
-      onHiddenColumnKeysChange: (keys: string[]) => {
-        hiddenColumnKeys.value = keys;
-      },
     };
     const firstScope = effectScope();
     const firstState = firstScope.run(() => useDataGridColumnLayoutState(options))!;
 
     firstState.toggleColumnVisibility(1);
-    expect(hiddenColumnKeys.value).toEqual(["name\0\0"]);
     firstScope.stop();
 
     const recreatedScope = effectScope();
     const recreatedState = recreatedScope.run(() => useDataGridColumnLayoutState(options))!;
     expect(recreatedState.visibleColumnIndexes.value).toEqual([0, 2]);
     recreatedState.showAllColumns();
-    expect(hiddenColumnKeys.value).toEqual([]);
     recreatedScope.stop();
+
+    expect(JSON.parse(localStorage.getItem("dbx-data-grid-column-layout:visibility-recreated-layout")!)).toMatchObject({ hiddenKeys: [] });
+  });
+
+  it("show all clears hidden keys for fields missing from the current page", () => {
+    const layoutScopeKey = "visibility-missing-field-layout";
+    saveDataGridColumnLayout(layoutScopeKey, {
+      orderKeys: [],
+      hiddenKeys: ["goodsList\0\0"],
+    });
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "status"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map()),
+        displayableColumnIndexes: ref([0, 1]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["id\0\0", "status\0\0"]),
+        layoutScopeKey: ref(layoutScopeKey),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    state.showAllColumns();
+    scope.stop();
+
+    expect(loadDataGridColumnLayout(layoutScopeKey)?.hiddenKeys).toEqual([]);
   });
 
   it("persists a null column when it is manually hidden after showing all columns", () => {
-    const onHiddenColumnKeysChange = vi.fn();
     const scope = effectScope();
     const state = scope.run(() =>
       useDataGridColumnLayoutState({
@@ -145,7 +175,6 @@ describe("useDataGridColumnLayout", () => {
         layoutScopeKey: ref("visibility-null-column-layout"),
         tableScopeKey: ref(""),
         hideNullColumns: ref(true),
-        onHiddenColumnKeysChange,
       }),
     )!;
 
@@ -153,7 +182,30 @@ describe("useDataGridColumnLayout", () => {
     state.showAllColumns();
     state.toggleColumnVisibility(1);
 
-    expect(onHiddenColumnKeysChange).toHaveBeenLastCalledWith(["empty\0\0"]);
+    scope.stop();
+    expect(JSON.parse(localStorage.getItem("dbx-data-grid-column-layout:visibility-null-column-layout")!)).toMatchObject({ hiddenKeys: ["empty\0\0"] });
+  });
+
+  it("returns ordered layout options with visibility state and reorders hidden fields", () => {
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "status", "goodsList"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map([["goodsList", "Line items"]])),
+        displayableColumnIndexes: ref([0, 1, 2]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["id\0\0", "status\0\0", "goodsList\0\0"]),
+        layoutScopeKey: ref("layout-options"),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    state.toggleColumnVisibility(2);
+    state.moveDisplayableColumn(2, 1);
+
+    expect(state.filteredColumnLayoutOptions("line")).toMatchObject([{ column: "goodsList", visible: false, displayPosition: 1 }]);
+    expect(state.orderedDisplayableColumnIndexes.value).toEqual([0, 2, 1]);
     scope.stop();
   });
 

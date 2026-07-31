@@ -139,6 +139,26 @@ describe("data transfer task duration", () => {
     await Promise.resolve();
   });
 
+  it("allows the same target table in different catalogs", async () => {
+    const resolvers: Array<() => void> = [];
+    vi.mocked(api.startTransfer).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const tracker = useExportTracker();
+
+    tracker.startDataTransferTask({ ...transferRequest("hive"), targetCatalog: "hive" }, "hive");
+    const iceberg = tracker.startDataTransferTask({ ...transferRequest("iceberg"), targetCatalog: "iceberg" }, "iceberg");
+
+    expect(iceberg.status).toBe("Running");
+    expect(api.startTransfer).toHaveBeenCalledTimes(2);
+
+    for (const resolve of resolvers) resolve();
+    await Promise.resolve();
+  });
+
   it("keeps SQL-file backend elapsed time unchanged", () => {
     const tracker = useExportTracker();
     const task = tracker.addSqlFileTask("sql", "script.sql", "/tmp/script.sql");

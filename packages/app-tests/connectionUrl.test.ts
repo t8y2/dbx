@@ -458,6 +458,18 @@ test("uses selected HTTP-compatible profile for HTTP URLs", () => {
   assert.equal(parsed.ssl, true);
 });
 
+test("parses Easysearch URLs and keeps the selected HTTPS profile", () => {
+  const dedicated = parseConnectionUrl("easysearch://dbx_test:secret@search.example.com:9200");
+  const https = parseConnectionUrl("https://search.example.com:9243", "easysearch");
+
+  assert.equal(dedicated.dbType, "easysearch");
+  assert.equal(dedicated.driverProfile, "easysearch");
+  assert.equal(dedicated.username, "dbx_test");
+  assert.equal(https.dbType, "easysearch");
+  assert.equal(https.port, 9243);
+  assert.equal(https.ssl, true);
+});
+
 test("parses HTTPS ClickHouse URLs with selected profile", () => {
   const parsed = parseConnectionUrl("https://default:secret@clickhouse.example.com:8443/default?secure=true", "clickhouse");
 

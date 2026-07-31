@@ -5,6 +5,7 @@ export interface KvKeyTreeLeafNode {
   id: string;
   label: string;
   key: string;
+  leadingSlash: boolean;
   keyIdentity?: string | null;
   keyBytes?: KvValue | null;
   pathSegments: string[];
@@ -19,6 +20,7 @@ export interface KvKeyTreeGroupNode {
   kind: "group";
   id: string;
   label: string;
+  leadingSlash: boolean;
   pathSegments: string[];
   children: KvKeyTreeNode[];
   key?: string;
@@ -38,12 +40,23 @@ export interface KvKeyTreeRow {
   depth: number;
 }
 
-function keySegments(key: string): string[] {
-  return key.split("/").filter(Boolean);
+function keyPath(key: string): { segments: string[]; leadingSlash: boolean } {
+  return {
+    segments: key.split("/").filter(Boolean),
+    leadingSlash: key.startsWith("/"),
+  };
 }
 
-function groupId(pathSegments: string[]): string {
-  return `group:${pathSegments.join("\u0000")}`;
+function groupId(pathSegments: string[], leadingSlash: boolean): string {
+  return `group:${leadingSlash ? "/" : ""}${pathSegments.join("\u0000")}`;
+}
+
+function nodePathIdentity(pathSegments: string[], leadingSlash: boolean): string {
+  return `${leadingSlash ? "/" : ""}${pathSegments.join("\u0000")}`;
+}
+
+function treeLabel(segment: string, index: number, leadingSlash: boolean): string {
+  return leadingSlash && index === 0 ? `/${segment}` : segment;
 }
 
 function summaryIdentity(key: KvKeySummary): string {
@@ -68,13 +81,14 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
   const groups = new Map<string, KvKeyTreeGroupNode>();
 
   for (const key of keys) {
-    const segments = keySegments(key.key);
+    const { segments, leadingSlash } = keyPath(key.key);
     if (segments.length <= 1) {
       root.push({
         kind: "leaf",
         id: leafId(key),
-        label: segments[0] || key.key || "/",
+        label: segments[0] ? treeLabel(segments[0], 0, leadingSlash) : key.key || "/",
         key: key.key,
+        leadingSlash,
         keyIdentity: key.keyIdentity,
         keyBytes: key.keyBytes,
         pathSegments: segments,
@@ -89,17 +103,18 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
 
     let current = root;
     const groupSegments: string[] = [];
-    for (const segment of segments.slice(0, -1)) {
+    for (const [index, segment] of segments.slice(0, -1).entries()) {
       groupSegments.push(segment);
-      const id = groupId(groupSegments);
+      const id = groupId(groupSegments, leadingSlash);
       let group = groups.get(id);
       if (!group) {
-        const leafIndex = current.findIndex((candidate) => candidate.kind === "leaf" && candidate.pathSegments.join("\u0000") === groupSegments.join("\u0000"));
+        const leafIndex = current.findIndex((candidate) => candidate.kind === "leaf" && nodePathIdentity(candidate.pathSegments, candidate.leadingSlash) === nodePathIdentity(groupSegments, leadingSlash));
         const existingLeaf = leafIndex >= 0 ? (current.splice(leafIndex, 1)[0] as KvKeyTreeLeafNode) : null;
         group = {
           kind: "group",
           id,
-          label: segment,
+          label: treeLabel(segment, index, leadingSlash),
+          leadingSlash,
           pathSegments: [...groupSegments],
           children: [],
           key: existingLeaf?.key,
@@ -117,7 +132,7 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
       current = group.children;
     }
 
-    const existingGroup = groups.get(groupId(segments));
+    const existingGroup = groups.get(groupId(segments, leadingSlash));
     if (existingGroup) {
       existingGroup.key = key.key;
       existingGroup.keyIdentity = key.keyIdentity;
@@ -135,6 +150,7 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
       id: leafId(key),
       label: segments[segments.length - 1],
       key: key.key,
+      leadingSlash,
       keyIdentity: key.keyIdentity,
       keyBytes: key.keyBytes,
       pathSegments: segments,
@@ -186,17 +202,6 @@ export function kvKeyTreeNodePath(node: KvKeyTreeNode): string {
   if (node.kind === "leaf") return node.key;
   if (node.key) return node.key;
 
-  const descendantKey = firstDescendantKey(node);
   const joined = node.pathSegments.join("/");
-  return descendantKey?.startsWith("/") ? `/${joined}` : joined;
-}
-
-function firstDescendantKey(node: KvKeyTreeGroupNode): string | null {
-  for (const child of node.children) {
-    if (child.kind === "leaf") return child.key;
-    if (child.key) return child.key;
-    const nested = firstDescendantKey(child);
-    if (nested) return nested;
-  }
-  return null;
+  return node.leadingSlash ? `/${joined}` : joined;
 }

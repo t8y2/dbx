@@ -13,6 +13,7 @@ fn uses_sqlite_upsert_syntax() {
         "main",
         &DatabaseType::CloudflareD1,
         &[String::from("id")],
+        None,
     );
 
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE SET"));

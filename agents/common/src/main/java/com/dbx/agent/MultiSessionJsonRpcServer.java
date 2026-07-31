@@ -7,31 +7,71 @@ import com.google.gson.JsonParser;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.PrintStream;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
-public final class MultiSessionJsonRpcServer {
+public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private static final String LEGACY_SESSION_ID = "__legacy__";
     private static final int MAX_SESSIONS = 256;
+    private static final long MAINTENANCE_INTERVAL_MILLIS = 60_000L;
 
     private final Supplier<? extends DatabaseAgent> agentFactory;
+    private final Supplier<? extends SessionRpcHandler> sessionHandlerFactory;
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
     private final ExecutorService requests = Executors.newCachedThreadPool();
+    private final JdbcConnectionPoolRegistry poolRegistry;
     private final Gson gson = new Gson();
+    private final PrintStream protocolOutput = System.out;
     private final Object outputLock = new Object();
+    private final Object maintenanceLock = new Object();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private ScheduledExecutorService maintenance;
 
     public MultiSessionJsonRpcServer(Supplier<? extends DatabaseAgent> agentFactory) {
+        this(agentFactory, new JdbcConnectionPoolRegistry());
+    }
+
+    MultiSessionJsonRpcServer(
+        Supplier<? extends DatabaseAgent> agentFactory,
+        JdbcConnectionPoolRegistry.PoolSettings poolSettings
+    ) {
+        this(agentFactory, new JdbcConnectionPoolRegistry(poolSettings));
+    }
+
+    private MultiSessionJsonRpcServer(
+        Supplier<? extends DatabaseAgent> agentFactory,
+        JdbcConnectionPoolRegistry poolRegistry
+    ) {
         this.agentFactory = agentFactory;
+        this.sessionHandlerFactory = null;
+        this.poolRegistry = poolRegistry;
+    }
+
+    private MultiSessionJsonRpcServer(Supplier<? extends SessionRpcHandler> sessionHandlerFactory, boolean customHandler) {
+        this.agentFactory = null;
+        this.sessionHandlerFactory = sessionHandlerFactory;
+        this.poolRegistry = new JdbcConnectionPoolRegistry();
+    }
+
+    /** Creates a protocol v2 server for a non-JDBC, session-scoped agent. */
+    public static MultiSessionJsonRpcServer forSessionHandlers(Supplier<? extends SessionRpcHandler> sessionHandlerFactory) {
+        return new MultiSessionJsonRpcServer(sessionHandlerFactory, true);
     }
 
     public void run() {
         synchronized (outputLock) {
-            System.out.println("{\"ready\":true}");
-            System.out.flush();
+            protocolOutput.println("{\"ready\":true}");
+            protocolOutput.flush();
         }
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
             String line;
@@ -40,15 +80,14 @@ public final class MultiSessionJsonRpcServer {
                 String method = request.get("method").getAsString();
                 if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
                     writeResponse(handleRequest(request));
-                    closeAllSessions();
-                    requests.shutdown();
                     return;
                 }
                 requests.submit(() -> writeResponse(handleRequest(request)));
             }
         } catch (Exception e) {
-            closeAllSessions();
             throw new RuntimeException(e);
+        } finally {
+            close();
         }
     }
 
@@ -68,7 +107,7 @@ public final class MultiSessionJsonRpcServer {
         try {
             Object result;
             if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
-                result = AgentProtocol.multiSessionHandshakeResult();
+                result = sessionHandlerFactory == null ? AgentProtocol.multiSessionHandshakeResult() : customHandshake();
             } else if (AgentProtocol.METHOD_OPEN_SESSION.equals(method)) {
                 result = openSession(requiredSessionId(params), params);
             } else if (AgentProtocol.METHOD_CLOSE_SESSION.equals(method)) {
@@ -79,7 +118,9 @@ public final class MultiSessionJsonRpcServer {
                 session(requiredSessionId(params)).cancel();
                 result = Collections.singletonMap("ok", true);
             } else if (AgentProtocol.METHOD_TEST_CONNECTION.equals(method)) {
-                result = new JsonRpcServer(agentFactory.get()).dispatchForRuntime(method, params);
+                result = sessionHandlerFactory == null
+                    ? new JsonRpcServer(agentFactory.get()).dispatchForRuntime(method, params)
+                    : testSession(params);
             } else if (AgentProtocol.METHOD_CONNECT.equals(method)) {
                 closeSession(LEGACY_SESSION_ID);
                 result = openSession(LEGACY_SESSION_ID, params);
@@ -105,13 +146,23 @@ public final class MultiSessionJsonRpcServer {
         if (sessions.size() >= MAX_SESSIONS && !sessions.containsKey(sessionId)) {
             throw new IllegalStateException("Agent session limit reached: " + MAX_SESSIONS);
         }
-        Session session = new Session(new JsonRpcServer(agentFactory.get()));
+        Session session;
+        if (sessionHandlerFactory != null) {
+            session = new Session(sessionHandlerFactory.get());
+        } else {
+            DatabaseAgent agent = agentFactory.get();
+            if (poolRegistry.isEnabled() && agent instanceof AbstractJdbcAgent jdbcAgent) {
+                jdbcAgent.attachConnectionPoolRegistry(poolRegistry);
+                ensureMaintenanceStarted();
+            }
+            session = new Session(new JsonRpcServer(agent));
+        }
         Session existing = sessions.putIfAbsent(sessionId, session);
         if (existing != null) {
             throw new IllegalStateException("Agent session already exists: " + sessionId);
         }
         try {
-            return session.handle(AgentProtocol.METHOD_CONNECT, params);
+            return session.connect(params);
         } catch (Exception error) {
             sessions.remove(sessionId, session);
             session.close();
@@ -125,6 +176,24 @@ public final class MultiSessionJsonRpcServer {
             session.close();
         }
         return Collections.singletonMap("ok", true);
+    }
+
+    private Object testSession(JsonObject params) throws Exception {
+        Session session = new Session(sessionHandlerFactory.get());
+        try {
+            return session.connect(params);
+        } finally {
+            session.close();
+        }
+    }
+
+    private Object customHandshake() {
+        SessionRpcHandler handler = sessionHandlerFactory.get();
+        try {
+            return handler.handshake();
+        } finally {
+            handler.close();
+        }
     }
 
     private Session session(String sessionId) {
@@ -141,6 +210,71 @@ public final class MultiSessionJsonRpcServer {
         }
     }
 
+    void runMaintenance() {
+        for (Session session : sessions.values()) {
+            try {
+                session.expireIdleResources();
+            } catch (Exception ignored) {
+            }
+        }
+        poolRegistry.retireUnusedPools();
+    }
+
+    void runMaintenance(long nowMillis, long idleTimeoutMillis) {
+        for (Session session : sessions.values()) {
+            try {
+                session.expireIdleResources(nowMillis, idleTimeoutMillis);
+            } catch (Exception ignored) {
+            }
+        }
+        poolRegistry.retireUnusedPools();
+    }
+
+    private void ensureMaintenanceStarted() {
+        synchronized (maintenanceLock) {
+            if (maintenance != null || closed.get()) {
+                return;
+            }
+            maintenance = Executors.newSingleThreadScheduledExecutor(daemonThreadFactory("dbx-jdbc-maintenance"));
+            maintenance.scheduleWithFixedDelay(
+                this::runMaintenanceSafely,
+                MAINTENANCE_INTERVAL_MILLIS,
+                MAINTENANCE_INTERVAL_MILLIS,
+                TimeUnit.MILLISECONDS
+            );
+        }
+    }
+
+    private void runMaintenanceSafely() {
+        try {
+            runMaintenance();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        synchronized (maintenanceLock) {
+            if (maintenance != null) {
+                maintenance.shutdownNow();
+            }
+        }
+        closeAllSessions();
+        requests.shutdown();
+        poolRegistry.close();
+    }
+
+    private static ThreadFactory daemonThreadFactory(String name) {
+        return runnable -> {
+            Thread thread = new Thread(runnable, name);
+            thread.setDaemon(true);
+            return thread;
+        };
+    }
+
     private static String requiredSessionId(JsonObject params) {
         if (!params.has("agentSessionId") || params.get("agentSessionId").getAsString().trim().isEmpty()) {
             throw new IllegalArgumentException("agentSessionId is required");
@@ -150,31 +284,94 @@ public final class MultiSessionJsonRpcServer {
 
     private void writeResponse(JsonObject response) {
         synchronized (outputLock) {
-            System.out.println(gson.toJson(response));
-            System.out.flush();
+            protocolOutput.println(gson.toJson(response));
+            protocolOutput.flush();
         }
     }
 
     private static final class Session {
         private final JsonRpcServer server;
+        private final SessionRpcHandler handler;
+        private final ReentrantLock lock = new ReentrantLock();
 
         private Session(JsonRpcServer server) {
             this.server = server;
+            this.handler = null;
         }
 
-        private synchronized Object handle(String method, JsonObject params) throws Exception {
-            return server.dispatchForRuntime(method, params);
+        private Session(SessionRpcHandler handler) {
+            this.server = null;
+            this.handler = handler;
         }
 
-        private synchronized void close() {
+        private Object handle(String method, JsonObject params) throws Exception {
+            lock.lock();
             try {
-                server.dispatchForRuntime(AgentProtocol.METHOD_DISCONNECT, new JsonObject());
+                return handler == null ? server.dispatchForRuntime(method, params) : handler.handle(method, params);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private Object connect(JsonObject params) throws Exception {
+            lock.lock();
+            try {
+                return handler == null
+                    ? server.dispatchForRuntime(AgentProtocol.METHOD_CONNECT, params)
+                    : handler.connect(params);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private void close() {
+            lock.lock();
+            try {
+                if (handler != null) {
+                    handler.close();
+                } else {
+                    server.dispatchForRuntime(AgentProtocol.METHOD_DISCONNECT, new JsonObject());
+                }
             } catch (Exception ignored) {
+            } finally {
+                lock.unlock();
             }
         }
 
         private void cancel() {
-            server.cancelActiveStatements();
+            if (handler == null) {
+                server.cancelActiveStatements();
+            } else {
+                handler.cancel();
+            }
+        }
+
+        private void expireIdleResources() {
+            if (handler != null) {
+                return;
+            }
+            if (!lock.tryLock()) {
+                return;
+            }
+            try {
+                server.expireIdleResources();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private void expireIdleResources(long nowMillis, long idleTimeoutMillis) {
+            if (handler != null) {
+                return;
+            }
+            if (!lock.tryLock()) {
+                return;
+            }
+            try {
+                server.expireIdleResources(nowMillis, idleTimeoutMillis);
+            } finally {
+                lock.unlock();
+            }
         }
     }
 }

@@ -92,13 +92,19 @@ LIMIT 1;`.trim();
     return `
 SELECT
   p.name AS name,
-  TYPE_NAME(p.user_type_id) AS data_type,
+  t.name AS data_type,
   CASE WHEN p.is_output = 1 THEN 'OUT' ELSE 'IN' END AS mode,
   p.parameter_id AS ordinal,
-  p.has_default_value AS has_default
+  p.has_default_value AS has_default,
+  p.max_length AS max_length,
+  p.precision AS precision,
+  p.scale AS scale,
+  SCHEMA_NAME(t.schema_id) AS type_schema,
+  t.is_user_defined AS is_user_defined
 FROM sys.parameters p
 JOIN sys.objects o ON o.object_id = p.object_id
 JOIN sys.schemas s ON s.schema_id = o.schema_id
+JOIN sys.types t ON t.user_type_id = p.user_type_id
 WHERE o.type IN ('P', 'PC')
   AND s.name = ${schema}
   AND o.name = ${name}
@@ -123,15 +129,76 @@ ORDER BY SEQUENCE;`.trim();
 
 export function routineParametersFromResult(result: QueryResult, databaseType?: DatabaseType): RoutineParameter[] {
   if (databaseType === "databend") return databendRoutineParametersFromResult(result);
+  const sqlServerMetadata =
+    databaseType === "sqlserver"
+      ? {
+          maxLength: result.columns.findIndex((column) => column.toLowerCase() === "max_length"),
+          precision: result.columns.findIndex((column) => column.toLowerCase() === "precision"),
+          scale: result.columns.findIndex((column) => column.toLowerCase() === "scale"),
+          typeSchema: result.columns.findIndex((column) => column.toLowerCase() === "type_schema"),
+          isUserDefined: result.columns.findIndex((column) => column.toLowerCase() === "is_user_defined"),
+        }
+      : null;
   return result.rows
-    .map((row, index) => ({
-      name: String(row[0] || `arg${index + 1}`),
-      dataType: String(row[1] || ""),
-      mode: normalizeParameterMode(row[2]),
-      ordinal: Number(row[3] || index + 1),
-      hasDefault: normalizeBoolean(row[4]),
-    }))
+    .map((row, index) => {
+      const dataType = String(row[1] || "");
+      return {
+        name: String(row[0] || `arg${index + 1}`),
+        dataType: sqlServerMetadata ? sqlServerParameterDeclarationType(dataType, row, sqlServerMetadata) : dataType,
+        mode: normalizeParameterMode(row[2]),
+        ordinal: Number(row[3] || index + 1),
+        hasDefault: normalizeBoolean(row[4]),
+      };
+    })
     .filter((parameter) => parameter.mode !== "RETURN");
+}
+
+interface SqlServerParameterMetadataIndexes {
+  maxLength: number;
+  precision: number;
+  scale: number;
+  typeSchema: number;
+  isUserDefined: number;
+}
+
+function sqlServerParameterDeclarationType(baseType: string, row: unknown[], indexes: SqlServerParameterMetadataIndexes): string {
+  const typeName = baseType.trim();
+  if (!typeName) return "";
+  if (normalizeBoolean(valueAt(row, indexes.isUserDefined))) {
+    const schema = String(valueAt(row, indexes.typeSchema) || "").trim();
+    const qualifiedType = quoteSqlServerIdentifier(typeName);
+    return schema ? `${quoteSqlServerIdentifier(schema)}.${qualifiedType}` : qualifiedType;
+  }
+
+  const normalizedType = typeName.toLowerCase();
+  const maxLength = Number(valueAt(row, indexes.maxLength));
+  if (["varchar", "char", "varbinary", "binary"].includes(normalizedType) && Number.isFinite(maxLength)) {
+    return `${typeName}(${maxLength === -1 ? "max" : Math.max(1, maxLength)})`;
+  }
+  if (["nvarchar", "nchar"].includes(normalizedType) && Number.isFinite(maxLength)) {
+    return `${typeName}(${maxLength === -1 ? "max" : Math.max(1, Math.floor(maxLength / 2))})`;
+  }
+
+  const precision = Number(valueAt(row, indexes.precision));
+  const scale = Number(valueAt(row, indexes.scale));
+  if (["decimal", "numeric"].includes(normalizedType) && Number.isFinite(precision) && Number.isFinite(scale)) {
+    return `${typeName}(${precision},${scale})`;
+  }
+  if (["datetime2", "datetimeoffset", "time"].includes(normalizedType) && Number.isFinite(scale)) {
+    return `${typeName}(${scale})`;
+  }
+  if (normalizedType === "float" && Number.isFinite(precision)) {
+    return `${typeName}(${precision})`;
+  }
+  return typeName;
+}
+
+function valueAt(row: unknown[], index: number): unknown {
+  return index >= 0 ? row[index] : undefined;
+}
+
+function quoteSqlServerIdentifier(value: string): string {
+  return `[${value.replace(/]/g, "]]")}]`;
 }
 
 function databendRoutineParametersFromResult(result: QueryResult): RoutineParameter[] {

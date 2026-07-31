@@ -1150,6 +1150,7 @@ mod tests {
                 pinned_version: Some("3.1".to_string()),
                 token_signing: None,
                 connect_override: None,
+                management_connect_override: None,
                 extra: serde_json::Value::Null,
             })
             .await

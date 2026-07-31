@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.70"
+version = "0.5.71"
 dependencies = [
  "anyhow",
  "axum",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.45"
+version = "0.4.49"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1747,6 +1747,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "unicode-ident",
  "unicode-width",
  "utoipa",
  "uuid",
@@ -1758,10 +1759,11 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.45"
+version = "0.4.49"
 dependencies = [
  "async-trait",
  "dbx-core",
+ "dirs",
  "reqwest 0.12.28",
  "rmcp",
  "schemars 1.2.1",
@@ -1775,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.70"
+version = "0.5.71"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

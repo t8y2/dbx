@@ -35,7 +35,7 @@ pub(crate) fn build_import_insert_batches(
         .collect::<Vec<_>>();
 
     build_sql_batches(rows.len(), max_rows, "import row", |range| {
-        generate_insert_typed(&columns, &column_types, &rows[range], table, schema, &DatabaseType::CloudflareD1)
+        generate_insert_typed(&columns, &column_types, &rows[range], table, schema, &DatabaseType::CloudflareD1, None)
     })
     .map(|batches| {
         batches.into_iter().map(|batch| ImportSqlBatch { sql: batch.sql, row_count: batch.item_count }).collect()

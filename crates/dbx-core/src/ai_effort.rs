@@ -8,8 +8,9 @@ const GEMINI_THINKING_DOCS: &str = "https://ai.google.dev/gemini-api/docs/thinki
 const DEEPSEEK_THINKING_DOCS: &str = "https://api-docs.deepseek.com/guides/thinking_mode";
 const QWEN_THINKING_DOCS: &str = "https://help.aliyun.com/en/model-studio/deep-thinking";
 const OLLAMA_THINKING_DOCS: &str = "https://docs.ollama.com/capabilities/thinking";
+const MINIMAX_THINKING_DOCS: &str = "https://platform.minimax.io/docs/api-reference/text-chat-openai";
 
-pub const EFFORT_REGISTRY_LAST_VERIFIED: &str = "2026-07-26";
+pub const EFFORT_REGISTRY_LAST_VERIFIED: &str = "2026-07-30";
 
 fn option(id: &str, label: &str, selection: AiEffortSelection) -> AiEffortOption {
     AiEffortOption { id: id.to_string(), label: label.to_string(), description: None, selection }
@@ -76,6 +77,8 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         AiProvider::Deepseek => deepseek_capability(&model, source),
         AiProvider::Qwen => qwen_capability(&model, source),
         AiProvider::Ollama => ollama_capability(&model, source),
+        AiProvider::MiniMax if matches_family(&model, "minimax-m3") => Some(boolean_capability(source)),
+        AiProvider::MiniMax => None,
         AiProvider::AnthropicCompatible | AiProvider::OpenaiCompatible | AiProvider::Custom => {
             Some(AiEffortCapability::FreeText { placeholder: None, source: AiCapabilitySource::Custom })
         }
@@ -177,6 +180,7 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         AiProvider::Deepseek => Some(DEEPSEEK_THINKING_DOCS),
         AiProvider::Qwen => Some(QWEN_THINKING_DOCS),
         AiProvider::Ollama => Some(OLLAMA_THINKING_DOCS),
+        AiProvider::MiniMax => Some(MINIMAX_THINKING_DOCS),
         AiProvider::Claude
         | AiProvider::AnthropicCompatible
         | AiProvider::OpenaiCompatible
@@ -241,6 +245,7 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
         AiProvider::Deepseek => apply_deepseek_effort(object, selection),
         AiProvider::Qwen => apply_qwen_effort(object, selection),
         AiProvider::Ollama => apply_openai_effort(object, &config.api_style, selection),
+        AiProvider::MiniMax => apply_minimax_effort(object, selection),
         AiProvider::Openai | AiProvider::OpenaiCompatible => apply_openai_effort(object, &config.api_style, selection),
         AiProvider::Custom => {
             if config.api_style == AiApiStyle::AnthropicMessages {
@@ -267,6 +272,15 @@ fn apply_openai_effort(object: &mut Map<String, Value>, api_style: &AiApiStyle, 
             object.insert("reasoning_effort".to_string(), Value::String(value));
         }
     }
+}
+
+fn apply_minimax_effort(object: &mut Map<String, Value>, selection: &AiEffortSelection) {
+    let thinking_type = match selection {
+        AiEffortSelection::Disabled | AiEffortSelection::Boolean(false) => "disabled",
+        AiEffortSelection::Boolean(true) => "adaptive",
+        _ => return,
+    };
+    object.insert("thinking".to_string(), json!({ "type": thinking_type }));
 }
 
 fn apply_gemini_effort(object: &mut Map<String, Value>, model_id: &str, selection: &AiEffortSelection) {
@@ -361,7 +375,10 @@ fn title_case_effort(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_runtime_effort, dynamic_enum_capability, static_effort_capability, validate_runtime_effort};
+    use super::{
+        apply_runtime_effort, dynamic_enum_capability, registry_source_url, static_effort_capability,
+        validate_runtime_effort, MINIMAX_THINKING_DOCS,
+    };
     use crate::ai::{
         AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiProvider,
         AiReasoningLevel,
@@ -412,6 +429,31 @@ mod tests {
             };
             assert_eq!(placeholder, None);
         }
+    }
+
+    #[test]
+    fn minimax_m3_uses_boolean_adaptive_thinking() {
+        let mut config = config(AiProvider::MiniMax, "MiniMax-M3");
+        let capability = static_effort_capability(&config, "MiniMax-M3").unwrap();
+        let AiEffortCapability::Boolean { default, source } = capability else {
+            panic!("expected boolean capability");
+        };
+        assert_eq!(default, AiEffortSelection::ProviderDefault);
+        assert_eq!(source, AiCapabilitySource::OfficialRegistry);
+        assert_eq!(registry_source_url(&AiProvider::MiniMax), Some(MINIMAX_THINKING_DOCS));
+        assert!(static_effort_capability(&config, "MiniMax-M2.7").is_none());
+
+        config.runtime_effort = Some(AiEffortSelection::Boolean(true));
+        let mut body = json!({});
+        apply_runtime_effort(&mut body, &config);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(body.get("reasoning_effort").is_none());
+
+        config.runtime_effort = Some(AiEffortSelection::Disabled);
+        let mut body = json!({});
+        apply_runtime_effort(&mut body, &config);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]

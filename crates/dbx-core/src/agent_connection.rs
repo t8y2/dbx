@@ -9,7 +9,9 @@ const ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS: u64 = 15_000;
 
 fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
-    if config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana") {
+    if config.db_type == DatabaseType::H2
+        || (config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana"))
+    {
         ""
     } else {
         driver_class
@@ -737,6 +739,19 @@ mod tests {
     }
 
     #[test]
+    fn h2_agent_connect_params_ignore_stale_driver_class() {
+        for driver_profile in [None, Some("h2-legacy")] {
+            let mut cfg = config(DatabaseType::H2, Some("test"));
+            cfg.driver_profile = driver_profile.map(str::to_string);
+            cfg.jdbc_driver_class = Some("h2_embedded".to_string());
+
+            let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+
+            assert_eq!(params["jdbc_driver_class"], "");
+        }
+    }
+
+    #[test]
     fn vastbase_agent_url_defaults_to_postgres_database_when_empty() {
         let cfg = config(DatabaseType::Vastbase, Some(""));
 
@@ -1063,6 +1078,16 @@ mod tests {
 
         assert_eq!(params["jdbc_driver_class"], "sap_hana");
         assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/custom-driver.jar"]));
+    }
+
+    #[test]
+    fn generic_jdbc_agent_connect_params_preserve_custom_driver_class() {
+        let mut cfg = config(DatabaseType::Jdbc, Some("test"));
+        cfg.jdbc_driver_class = Some("com.example.CustomDriver".to_string());
+
+        let params = agent_connect_params(&cfg, "jdbc.example.com", 1234, "test");
+
+        assert_eq!(params["jdbc_driver_class"], "com.example.CustomDriver");
     }
 
     #[test]

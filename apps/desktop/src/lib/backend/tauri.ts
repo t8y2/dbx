@@ -1885,6 +1885,10 @@ export async function downloadUpdate(source: UpdateDownloadSource, latestVersion
   return invoke("download_update", { source, latestVersion });
 }
 
+export async function cancelUpdateDownload(): Promise<void> {
+  return invoke("cancel_update_download");
+}
+
 export async function installDownloadedUpdate(): Promise<void> {
   return invoke("install_downloaded_update");
 }
@@ -1949,6 +1953,11 @@ export interface RedisStreamEntry {
   fields: RedisStreamField[];
 }
 
+export interface RedisStreamPage {
+  entries: RedisStreamEntry[];
+  next_cursor?: string;
+}
+
 // Redis counters above Number.MAX_SAFE_INTEGER are transported as decimal strings.
 export type RedisStreamMetric = number | string;
 
@@ -2002,7 +2011,7 @@ export type RedisValueData =
       total: number;
       scan_cursor?: number;
     }
-  | { kind: "stream"; entries: RedisStreamEntry[] }
+  | { kind: "stream"; entries: RedisStreamEntry[]; total?: number; next_cursor?: string }
   | { kind: "unknown" };
 
 export interface RedisValue {
@@ -2083,6 +2092,14 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return invoke("redis_get_value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {
+  return invoke("redis_get_ttl", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
+  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
@@ -2463,6 +2480,75 @@ export interface KvStatusResponse {
   metrics?: KvPrometheusMetrics | null;
 }
 
+export interface EtcdDefragMemberResult {
+  endpoint: string;
+  status: "succeeded" | "failed" | "not_executed";
+  durationMs?: number | null;
+  error?: string | null;
+}
+export interface EtcdDefragResponse {
+  members: EtcdDefragMemberResult[];
+}
+export interface EtcdWatchStartRequest {
+  key: string;
+  keyBytes?: KvValue | null;
+  scope: "key" | "prefix";
+  startRevision?: KvInt64 | null;
+  includePrevKv: boolean;
+}
+export interface EtcdWatchStartResponse {
+  watchId: string;
+  startedRevision: KvInt64;
+}
+export interface EtcdWatchPollResponse {
+  watchId: string;
+  batches: Array<{ revision: KvInt64; events: Array<{ eventType: "put" | "delete"; revision: KvInt64; key: string; keyBytes?: KvValue | null; value?: KvValue | null; previousValue?: KvValue | null; metadata?: KvKeyMetadata | null }> }>;
+  terminal?: { reason: string; message?: string; compactedRevision?: KvInt64 | null } | null;
+}
+export interface EtcdLeaseListResponse {
+  leases: Array<{ id: KvInt64; ttl: number; grantedTtl?: number }>;
+  partial: boolean;
+  nextContinuation?: string | null;
+}
+export interface EtcdLeaseDetail {
+  id: KvInt64;
+  ttl: number;
+  grantedTtl?: number;
+  keys: KvValue[];
+  truncated: boolean;
+}
+export interface EtcdAuthUserListResponse {
+  users: string[];
+}
+export interface EtcdAuthUserDetail {
+  user: string;
+  roles: string[];
+}
+export interface EtcdAuthPermission {
+  access: "read" | "write" | "readwrite";
+  key: KvValue;
+  rangeEnd: KvValue;
+  resource: "all" | "key" | "prefix";
+}
+export interface EtcdAuthRoleListResponse {
+  roles: string[];
+}
+export interface EtcdAuthRoleDetail {
+  role: string;
+  permissions: EtcdAuthPermission[];
+}
+export interface EtcdPreflightResponse {
+  token: string;
+  action: string;
+  confirmationText: string;
+  expiresAtMs: number;
+  clusterId?: KvInt64 | null;
+}
+export interface EtcdDangerousApproval {
+  preflightToken: string;
+  confirmationText: string;
+}
+
 export async function etcdListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null): Promise<KvListPrefixResponse> {
   return invoke("etcd_list_prefix", {
     connectionId,
@@ -2538,6 +2624,33 @@ export async function etcdHistory(
 }
 export async function etcdStatus(connectionId: string): Promise<KvStatusResponse> {
   return invoke("etcd_status", { connectionId });
+}
+export async function etcdPreflight(connectionId: string, action: string, params: Record<string, unknown>): Promise<EtcdPreflightResponse> {
+  return invoke("etcd_preflight", { connectionId, request: { action, params } });
+}
+export async function etcdCompact(connectionId: string, revision: KvInt64, approval: EtcdDangerousApproval): Promise<{ revision: KvInt64 }> {
+  return invoke("etcd_compact", { connectionId, revision, ...approval });
+}
+export async function etcdDefrag(connectionId: string, endpoints: string[], approval: EtcdDangerousApproval): Promise<EtcdDefragResponse> {
+  return invoke("etcd_defrag", { connectionId, endpoints, ...approval });
+}
+export async function etcdWatchStart(connectionId: string, request: EtcdWatchStartRequest): Promise<EtcdWatchStartResponse> {
+  return invoke("etcd_watch_start", { connectionId, request });
+}
+export async function etcdWatchPoll(connectionId: string, watchId: string): Promise<EtcdWatchPollResponse> {
+  return invoke("etcd_watch_poll", { connectionId, watchId });
+}
+export async function etcdWatchStop(connectionId: string, watchId: string): Promise<{ stopped: boolean }> {
+  return invoke("etcd_watch_stop", { connectionId, watchId });
+}
+export async function etcdLeaseList(connectionId: string, limit = 100, continuation?: string | null): Promise<EtcdLeaseListResponse> {
+  return invoke("etcd_lease_list", { connectionId, limit, continuation: continuation ?? null });
+}
+export async function etcdLeaseCall<T = unknown>(connectionId: string, operation: "get" | "grant" | "keepalive" | "revoke", params: Record<string, unknown>, approval?: EtcdDangerousApproval): Promise<T> {
+  return invoke("etcd_lease_call", { connectionId, operation, params, ...approval });
+}
+export async function etcdAuthCall<T = unknown>(connectionId: string, operation: string, params: Record<string, unknown>, approval?: EtcdDangerousApproval): Promise<T> {
+  return invoke("etcd_auth_call", { connectionId, operation, params, ...approval });
 }
 
 // --- ZooKeeper ---
@@ -3129,6 +3242,8 @@ export interface SqlFileProgress {
   elapsedMs: number;
   statementSummary: string;
   error?: string | null;
+  fileIndex?: number;
+  fileName?: string;
 }
 
 export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> {
@@ -3161,9 +3276,11 @@ export interface TransferRequest {
   sourceConnectionId: string;
   sourceDatabase: string;
   sourceSchema: string;
+  sourceCatalog?: string;
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
+  targetCatalog?: string;
   tables: string[];
   createTable: boolean;
   mode: TransferMode;

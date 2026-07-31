@@ -70,6 +70,7 @@ import type {
   RedisDatabaseInfo,
   RedisStreamConsumer,
   RedisStreamGroup,
+  RedisStreamPage,
   RedisStreamPendingPage,
   RedisValue,
   RedisScanResult,
@@ -88,6 +89,11 @@ import type {
   KvDeleteResponse,
   KvHistoryResponse,
   KvStatusResponse,
+  EtcdDefragResponse,
+  EtcdWatchStartRequest,
+  EtcdWatchStartResponse,
+  EtcdWatchPollResponse,
+  EtcdLeaseListResponse,
   DocumentQueryResult,
   MongoDocumentResult,
   MongoCollectionStatsResult,
@@ -2253,6 +2259,14 @@ export async function redisGetValue(connectionId: string, db: number, keyRaw: st
   return post("/api/redis/get-value", { connectionId, db, keyRaw });
 }
 
+export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {
+  return post("/api/redis/get-ttl", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
+  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor });
+}
+
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
   return post("/api/redis/get-stream-groups", { connectionId, db, keyRaw });
 }
@@ -2515,6 +2529,33 @@ export async function etcdHistory(
 
 export async function etcdStatus(connectionId: string): Promise<KvStatusResponse> {
   return post("/api/etcd/status", { connectionId });
+}
+export async function etcdPreflight(connectionId: string, action: string, params: Record<string, unknown>): Promise<import("./tauri").EtcdPreflightResponse> {
+  return post("/api/etcd/preflight", { connectionId, request: { action, params } });
+}
+export async function etcdCompact(connectionId: string, revision: KvInt64, approval: import("./tauri").EtcdDangerousApproval): Promise<{ revision: KvInt64 }> {
+  return post("/api/etcd/compact", { connectionId, revision, ...approval });
+}
+export async function etcdDefrag(connectionId: string, endpoints: string[], approval: import("./tauri").EtcdDangerousApproval): Promise<EtcdDefragResponse> {
+  return post("/api/etcd/defrag", { connectionId, endpoints, ...approval });
+}
+export async function etcdWatchStart(connectionId: string, request: EtcdWatchStartRequest): Promise<EtcdWatchStartResponse> {
+  return post("/api/etcd/watch/start", { connectionId, request });
+}
+export async function etcdWatchPoll(connectionId: string, watchId: string): Promise<EtcdWatchPollResponse> {
+  return post("/api/etcd/watch/poll", { connectionId, watchId });
+}
+export async function etcdWatchStop(connectionId: string, watchId: string): Promise<{ stopped: boolean }> {
+  return post("/api/etcd/watch/stop", { connectionId, watchId });
+}
+export async function etcdLeaseList(connectionId: string, limit = 100, continuation?: string | null): Promise<EtcdLeaseListResponse> {
+  return post("/api/etcd/lease/list", { connectionId, limit, continuation: continuation ?? null });
+}
+export async function etcdLeaseCall<T = unknown>(connectionId: string, operation: "get" | "grant" | "keepalive" | "revoke", params: Record<string, unknown>, approval?: import("./tauri").EtcdDangerousApproval): Promise<T> {
+  return post("/api/etcd/lease/call", { connectionId, operation, params, ...approval });
+}
+export async function etcdAuthCall<T = unknown>(connectionId: string, operation: string, params: Record<string, unknown>, approval?: import("./tauri").EtcdDangerousApproval): Promise<T> {
+  return post("/api/etcd/auth/call", { connectionId, operation, params, ...approval });
 }
 
 // ---------------------------------------------------------------------------
@@ -3219,6 +3260,8 @@ export async function getSystemProxyUrl(): Promise<string | null> {
 export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion?: string): Promise<void> {
   throw new Error("In-app update downloads are only available in the desktop app.");
 }
+
+export async function cancelUpdateDownload(): Promise<void> {}
 
 export async function installDownloadedUpdate(): Promise<void> {
   throw new Error("In-app update installation is only available in the desktop app.");

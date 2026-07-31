@@ -126,6 +126,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
         DatabaseType::Redis
             | DatabaseType::MongoDb
             | DatabaseType::Elasticsearch
+            | DatabaseType::Easysearch
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -205,7 +206,85 @@ pub fn is_write_sql(sql: &str) -> bool {
 /// executable comments and file exports, plus PostgreSQL-family/SQL Server
 /// `SELECT ... INTO` table creation.
 pub fn is_write_sql_for_database(sql: &str, database_type: DatabaseType) -> bool {
+    if let Some(risk) = classify_search_engine_query_risk(sql, database_type) {
+        return risk != SearchEngineQueryRisk::ReadOnly;
+    }
     is_write_sql_with_database_type(sql, Some(database_type))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchEngineQueryRisk {
+    ReadOnly,
+    Write,
+    Dangerous,
+}
+
+pub(crate) fn classify_search_engine_query_risk(
+    source: &str,
+    database_type: DatabaseType,
+) -> Option<SearchEngineQueryRisk> {
+    if !matches!(database_type, DatabaseType::Elasticsearch | DatabaseType::Easysearch) {
+        return None;
+    }
+    let source = strip_leading_search_engine_comments(source);
+    let request_line = source.lines().next()?.trim();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_ascii_uppercase();
+    let path = parts.next()?;
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    let segments = path.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+    let has_segment = |candidate: &str| segments.iter().any(|segment| segment.eq_ignore_ascii_case(candidate));
+    let has_document_id = |candidate: &str| {
+        segments
+            .iter()
+            .position(|segment| segment.eq_ignore_ascii_case(candidate))
+            .is_some_and(|index| segments.get(index + 1).is_some_and(|value| !value.is_empty()))
+    };
+
+    match method.as_str() {
+        "GET" | "HEAD" | "OPTIONS" => Some(SearchEngineQueryRisk::ReadOnly),
+        "POST"
+            if [
+                "_search",
+                "_count",
+                "_sql",
+                "_msearch",
+                "_field_caps",
+                "_terms_enum",
+                "_validate",
+                "_explain",
+                "_rank_eval",
+                "_search_shards",
+            ]
+            .iter()
+            .any(|endpoint| has_segment(endpoint)) =>
+        {
+            Some(SearchEngineQueryRisk::ReadOnly)
+        }
+        "POST" if ["_doc", "_create", "_update", "_bulk"].iter().any(|endpoint| has_segment(endpoint)) => {
+            Some(SearchEngineQueryRisk::Write)
+        }
+        "PUT" if has_document_id("_doc") || has_document_id("_create") => Some(SearchEngineQueryRisk::Write),
+        "DELETE" if has_document_id("_doc") => Some(SearchEngineQueryRisk::Write),
+        "POST" | "PUT" | "PATCH" | "DELETE" => Some(SearchEngineQueryRisk::Dangerous),
+        _ => None,
+    }
+}
+
+fn strip_leading_search_engine_comments(input: &str) -> &str {
+    let mut rest = input;
+    loop {
+        rest = rest.trim_start();
+        if let Some(comment) = rest.strip_prefix('#').or_else(|| rest.strip_prefix("//")) {
+            rest = comment.split_once('\n').map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("/*") {
+            rest = comment.split_once("*/").map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        return rest.trim();
+    }
 }
 
 fn is_write_sql_with_database_type(sql: &str, database_type: Option<DatabaseType>) -> bool {
@@ -1257,5 +1336,18 @@ mod tests {
         // strip_sql_comments does NOT handle string delimiters, so it strips
         // comments even inside string literals
         assert_eq!(strip_sql_comments("SELECT 'hello /* not a comment */'"), "SELECT 'hello  '");
+    }
+
+    #[test]
+    fn classifies_search_engine_rest_writes() {
+        assert!(!is_write_sql_for_database("GET /_cluster/health", DatabaseType::Easysearch));
+        assert!(!is_write_sql_for_database(
+            "POST /products/_search\n{\"query\":{\"match_all\":{}}}",
+            DatabaseType::Easysearch
+        ));
+        assert!(is_write_sql_for_database(
+            "PUT /products/_doc/1?refresh=true\n{\"name\":\"Notebook\"}",
+            DatabaseType::Easysearch
+        ));
     }
 }

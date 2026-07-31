@@ -30,7 +30,7 @@ use crate::types::{
     OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
-const GAUSSDB_COMPATIBILITY_SQL: &str =
+pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
     "SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()";
 
 pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
@@ -41,7 +41,7 @@ pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
     gaussdb_identifier_quote_for_compatibility_mode(&compatibility_mode).map(str::to_string)
 }
 
-fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
+pub(crate) fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
     match compatibility_mode.trim().to_ascii_uppercase().as_str() {
         "M" | "B" | "MYSQL" => Some("`"),
         "A" | "PG" | "ORA" | "POSTGRESQL" => Some("\""),

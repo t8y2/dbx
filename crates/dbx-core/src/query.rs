@@ -625,6 +625,25 @@ fn should_continue_batch_after_error(continue_on_error: bool, action: PoolErrorA
     continue_on_error && action == PoolErrorAction::Keep
 }
 
+fn options_for_sequential_statements(
+    options: &QueryExecutionOptions,
+    statement_count: usize,
+    db_type: Option<DatabaseType>,
+) -> QueryExecutionOptions {
+    let mut statement_options = options.clone();
+    if statement_count <= 1 || db_type != Some(DatabaseType::Kingbase) || statement_options.result_session_id.is_some()
+    {
+        return statement_options;
+    }
+
+    if let Some(page_size) = statement_options.page_size.take() {
+        let page_size = page_size.max(1);
+        statement_options.max_rows =
+            Some(statement_options.max_rows.map_or(page_size, |max_rows| max_rows.min(page_size)));
+    }
+    statement_options
+}
+
 fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> bool {
     let Some(db_type) = db_type else {
         return false;
@@ -648,6 +667,7 @@ fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Turso
                 | DatabaseType::CloudflareD1
                 | DatabaseType::Elasticsearch
+                | DatabaseType::Easysearch
                 | DatabaseType::Qdrant
                 | DatabaseType::Milvus
                 | DatabaseType::Weaviate
@@ -1182,6 +1202,23 @@ pub async fn do_execute(
                 cancel_token,
                 query_timeout,
                 db::elasticsearch_driver::execute_rest_query(&client, &sql),
+            )
+            .await
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            drop(connections);
+            let result = wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::easysearch_driver::execute_rest_query(&client, &sql),
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -1753,6 +1790,11 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
         .await;
     }
 
+    // Kingbase Go keeps one physical connection per Agent session, so an open
+    // result cursor prevents the next statement from acquiring that connection.
+    // Multi-result execution therefore reads a bounded first page for each
+    // Kingbase statement without retaining cursors.
+    let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
     let mut results = Vec::with_capacity(statements.len());
     for (statement_index, stmt) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
@@ -1766,7 +1808,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
             stmt,
             schema,
             cancel_token.clone(),
-            options.clone(),
+            statement_options.clone(),
         )
         .await
         {
@@ -2077,6 +2119,16 @@ async fn execute_multi_sqlserver(
     Ok(all_results)
 }
 
+async fn execute_multi_agent(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: Option<&str>,
+    statements: &[String],
+    schema: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<db::QueryResult, String> {
+    client.execute_batch(database, statements, schema, resolve_query_timeout(timeout_secs)).await
+}
+
 pub async fn execute_statements(
     state: &AppState,
     connection_id: &str,
@@ -2120,9 +2172,7 @@ pub async fn execute_statements(
         };
         let mut client = client.lock().await;
         let database = if database.trim().is_empty() { None } else { Some(database) };
-        let timeout_duration = timeout_secs.map(Duration::from_secs);
-        let result: Result<db::QueryResult, String> =
-            client.execute_batch(database, statements, execution_schema, timeout_duration).await;
+        let result = execute_multi_agent(&mut client, database, statements, execution_schema, timeout_secs).await;
         match result {
             Ok(result) => return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result }),
             Err(err) => {
@@ -2312,6 +2362,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Redis(_)
         | PoolKind::MongoDb(_)
         | PoolKind::Elasticsearch(_)
+        | PoolKind::Easysearch(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::ExternalDriver { .. } => false,
@@ -2507,6 +2558,7 @@ pub async fn execute_statements_in_transaction_on_pool(
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
+            | PoolKind::Easysearch(_)
             | PoolKind::VectorDb(_)
             | PoolKind::InfluxDb(_)
             | PoolKind::ExternalDriver { .. } => TxPath::None,
@@ -3491,12 +3543,86 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
     #[cfg(unix)]
     use crate::plugins::{
         InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
     };
     use crate::storage::Storage;
+
+    #[cfg(unix)]
+    async fn spawn_agent_batch_timeout_test_client() -> (AgentDriverClient, tempfile::NamedTempFile) {
+        use std::io::Write;
+
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            script,
+            r#"import json
+import sys
+import time
+
+print(json.dumps({{"ready": True}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    statements = request.get("params", {{}}).get("statements", [])
+    time.sleep(1.2 if statements == ["slow"] else 0.05)
+    result = {{
+        "columns": [],
+        "column_types": [],
+        "column_sortables": [],
+        "rows": [],
+        "affected_rows": 1,
+        "execution_time_ms": 50,
+        "truncated": False,
+        "session_id": None,
+        "has_more": False
+    }}
+    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+"#
+        )
+        .unwrap();
+        script.flush().unwrap();
+
+        let client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new("python3").with_args([script.path().to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        (client, script)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_multi_agent_zero_timeout_waits_for_response() {
+        let (mut client, _script) = spawn_agent_batch_timeout_test_client().await;
+
+        let result = execute_multi_agent(&mut client, None, &["fast".to_string()], None, Some(0)).await.unwrap();
+
+        assert_eq!(result.affected_rows, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_multi_agent_positive_timeout_still_expires() {
+        let (mut client, _script) = spawn_agent_batch_timeout_test_client().await;
+
+        let error = execute_multi_agent(&mut client, None, &["slow".to_string()], None, Some(1)).await.unwrap_err();
+
+        assert_eq!(error, "Agent RPC call timed out (1s)");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_multi_agent_default_timeout_keeps_normal_execution() {
+        let (mut client, _script) = spawn_agent_batch_timeout_test_client().await;
+
+        let result = execute_multi_agent(&mut client, None, &["fast".to_string()], None, None).await.unwrap();
+
+        assert_eq!(result.affected_rows, 1);
+        assert_eq!(resolve_query_timeout(None), Some(QUERY_TIMEOUT));
+    }
 
     #[test]
     fn external_catalog_queries_do_not_bind_database_during_pool_creation() {
@@ -4778,6 +4904,63 @@ mod tests {
         let params = agent_close_query_session_params("session-1");
 
         assert_eq!(params["sessionId"], "session-1");
+    }
+
+    #[test]
+    fn multi_statement_execution_does_not_retain_query_cursors() {
+        let options = QueryExecutionOptions {
+            max_rows: Some(100_000),
+            fetch_size: Some(100),
+            page_size: Some(100),
+            timeout_secs: Some(30),
+            ..Default::default()
+        };
+
+        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Kingbase));
+
+        assert_eq!(adjusted.page_size, None);
+        assert_eq!(adjusted.max_rows, Some(100));
+        assert_eq!(adjusted.fetch_size, Some(100));
+        assert_eq!(adjusted.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn multi_statement_execution_preserves_smaller_row_limit() {
+        let options = QueryExecutionOptions { max_rows: Some(25), page_size: Some(100), ..Default::default() };
+
+        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Kingbase));
+
+        assert_eq!(adjusted.page_size, None);
+        assert_eq!(adjusted.max_rows, Some(25));
+    }
+
+    #[test]
+    fn single_statement_and_existing_cursor_execution_keep_paging_options() {
+        let first_page = QueryExecutionOptions { max_rows: Some(100_000), page_size: Some(100), ..Default::default() };
+        let next_page = QueryExecutionOptions {
+            max_rows: Some(100_000),
+            page_size: Some(100),
+            result_session_id: Some("session-1".to_string()),
+            ..Default::default()
+        };
+
+        let single = options_for_sequential_statements(&first_page, 1, Some(DatabaseType::Kingbase));
+        let existing_cursor = options_for_sequential_statements(&next_page, 2, Some(DatabaseType::Kingbase));
+
+        assert_eq!(single.page_size, Some(100));
+        assert_eq!(single.max_rows, Some(100_000));
+        assert_eq!(existing_cursor.page_size, Some(100));
+        assert_eq!(existing_cursor.result_session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn other_databases_keep_multi_statement_cursor_options() {
+        let options = QueryExecutionOptions { max_rows: Some(100_000), page_size: Some(100), ..Default::default() };
+
+        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Oracle));
+
+        assert_eq!(adjusted.page_size, Some(100));
+        assert_eq!(adjusted.max_rows, Some(100_000));
     }
 
     #[test]

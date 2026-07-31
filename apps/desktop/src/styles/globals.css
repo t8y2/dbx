@@ -270,10 +270,6 @@
   }
 }
 
-html.dbx-dialog-backdrop-active #root {
-  filter: blur(4px);
-}
-
 .dark {
   --background: rgb(19 20 22);
   --foreground: rgb(215 215 219);

@@ -1,6 +1,6 @@
 package com.dbx.agent.neo4j;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -16,7 +16,6 @@ import com.dbx.agent.TriggerInfo;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -27,12 +26,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-public class Neo4jAgent extends BaseDatabaseAgent {
-    private Connection connection;
-
+public class Neo4jAgent extends AbstractJdbcAgent {
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "org.neo4j.jdbc.Neo4jDriver";
     }
 
     @Override
@@ -41,23 +38,8 @@ public class Neo4jAgent extends BaseDatabaseAgent {
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            Class.forName("org.neo4j.jdbc.Neo4jDriver");
-            String url = buildNeo4jUrl(params);
-            connection = DriverManager.getConnection(url, params.getUsername(), params.getPassword());
-        });
-    }
-
-    @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            Class.forName("org.neo4j.jdbc.Neo4jDriver");
-            String url = buildNeo4jUrl(params);
-            try (Connection conn = DriverManager.getConnection(url, params.getUsername(), params.getPassword())) {
-                return conn.isValid(5);
-            }
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        return buildNeo4jUrl(params);
     }
 
     private static String buildNeo4jUrl(ConnectParams params) {
@@ -287,21 +269,12 @@ public class Neo4jAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::stringResultValue
+            this::resultValue
         );
     }
 
     @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
-    }
-
-    private Object stringResultValue(ResultSet rs, int index, int sqlType) {
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();

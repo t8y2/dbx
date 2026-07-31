@@ -12,7 +12,7 @@ description: 了解 DBX 可以连接哪些数据库，以及每类高级功能�
 | 分组                | 类型                                                                                                             | 说明                                                         |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | 核心 SQL 数据库     | MySQL、PostgreSQL、SQLite、DuckDB、ClickHouse、SQL Server、Oracle、Redshift、DM、GaussDB、KWDB、Teradata、Vertica、Exasol、Firebird、SAP HANA、崖山 YashanDB、GBase | 直接出现在 DBX 连接选择器中                                  |
-| 文档、键值、向量与配置服务 | Redis、MongoDB、Elasticsearch、Qdrant、Milvus、Weaviate、ChromaDB、etcd、Apache ZooKeeper、Nacos                    | 根据数据模型使用专门浏览器、管理控制台或查询流程，不完全等同于关系型表格 |
+| 文档、键值、向量与配置服务 | Redis、MongoDB、Elasticsearch、Easysearch、Qdrant、Milvus、Weaviate、ChromaDB、etcd、Apache ZooKeeper、Nacos         | 根据数据模型使用专门浏览器、管理控制台或查询流程，不完全等同于关系型表格 |
 | MySQL 兼容类型      | MariaDB、TiDB、OceanBase、Doris、SelectDB、StarRocks、Manticore Search、GoldenDB、TDSQL、PolarDB、GreatSQL、自定义 MySQL | 复用 MySQL 风格连接能力                                      |
 | PostgreSQL 兼容类型 | openGauss、KingBase、HighGo、Vastbase、CockroachDB、自定义 PostgreSQL                                             | 复用 PostgreSQL 风格连接能力                                 |
 | 文件型数据库        | SQLite、DuckDB、Microsoft Access、RQLite、Turso                                                                   | 选择本地数据库文件或 HTTP 端点，不填写主机和端口             |
@@ -31,7 +31,7 @@ description: 了解 DBX 可以连接哪些数据库，以及每类高级功能�
 | ClickHouse                                  |     8123 |
 | SQL Server                                  |     1433 |
 | Oracle                                      |     1521 |
-| Elasticsearch                               |     9200 |
+| Elasticsearch / Easysearch                  |     9200 |
 | Qdrant                                      |     6333 |
 | Milvus                                      |    19530 |
 | Weaviate                                    |     8080 |
@@ -108,7 +108,7 @@ DBX 只会在具备足够元数据和 SQL 生成能力的数据库上启用高�
 | 创建数据库          | MySQL、PostgreSQL、SQL Server、ClickHouse、Oracle、DM、GaussDB、KWDB、Doris、StarRocks、Redshift、Teradata、Vertica                                                                                                                           |
 | 字段血缘            | MySQL、PostgreSQL、SQLite、Cloudflare D1、SQL Server、Oracle、Redshift、DM、GaussDB、KWDB                                                                                                                                                     |
 | 数据传输            | MySQL、PostgreSQL、SQLite、Cloudflare D1、SQL Server、Oracle、ClickHouse、DuckDB、DM、GaussDB、KWDB                                                                                                                                           |
-| 不支持 SQL 文件执行 | Redis、MongoDB、Elasticsearch、etcd、Nacos                                                                                                                                                                                                    |
+| 不支持 SQL 文件执行 | Redis、MongoDB、Elasticsearch、Easysearch、etcd、Nacos                                                                                                                                                                                        |
 
 <Callout type="warn">如果某个数据库可以连接，但没有出现在某个功能行中，该功能可能会被隐藏或受限。这是为了避免 DBX 生成无法可靠审查的 SQL。</Callout>
 
@@ -116,7 +116,13 @@ DBX 只会在具备足够元数据和 SQL 生成能力的数据库上启用高�
 
 大多数网络数据库支持主机、端口、用户名、密码、默认数据库、URL 参数、SSL、连接颜色和隧道/代理设置。文件型数据库会改为选择本地文件。
 
-DBX 也可以解析常见连接 URL，例如 MySQL、PostgreSQL、Redis、MongoDB、ClickHouse、SQL Server、Oracle、Elasticsearch、DM、GaussDB、KWDB、openGauss、TDengine、XuguDB、Access、Teradata、Vertica、Firebird、Exasol、GBase、YashanDB、SAP HANA、InfluxDB、QuestDB、IoTDB、etcd、Nacos、RQLite 和 Databricks。
+DBX 也可以解析常见连接 URL，例如 MySQL、PostgreSQL、Redis、MongoDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、DM、GaussDB、KWDB、openGauss、TDengine、XuguDB、Access、Teradata、Vertica、Firebird、Exasol、GBase、YashanDB、SAP HANA、InfluxDB、QuestDB、IoTDB、etcd、Nacos、RQLite 和 Databricks。
+
+### Easysearch
+
+DBX 提供独立的 Easysearch 连接类型，默认端口为 `9200`，通过 Elasticsearch 兼容的 HTTP REST API 连接。它复用 DBX 已有的 Elasticsearch 文档引擎，支持索引与文档浏览、Query DSL、REST 请求、常用 SQL 查询、分页与计数、文档增删改以及批量写入流程。
+
+Easysearch 官方兼容基线面向 Elasticsearch 7.10 API 和生态，但这不表示所有 Elasticsearch 版本、X-Pack、ES|QL 或其他专有扩展都完全等价。HTTPS 实例请启用 SSL；使用自签名证书的测试环境也走同一 TLS 连接路径。
 
 ### Cloudflare D1
 

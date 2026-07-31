@@ -16,6 +16,7 @@ export type DataGridContextMenuItem = {
   separator?: boolean;
   icon?: Component;
   iconClass?: string;
+  checked?: boolean;
   shortcut?: string;
   variant?: "default" | "destructive";
   visible?: boolean;

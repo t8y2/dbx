@@ -24,6 +24,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "open-latest-release": [];
   "download-and-install": [];
+  "cancel-download": [];
   "install-downloaded": [];
   restart: [];
 }>();
@@ -32,8 +33,24 @@ const { t } = useI18n();
 const isDesktop = isTauriRuntime();
 
 const renderedNotes = ref("");
-// Keep a downloaded package retryable after install errors; only active transitions must trap the dialog.
-const isCloseBlocked = computed(() => props.isDownloadingUpdate || props.isInstallingUpdate || props.updateReady);
+// Only active file replacement (installation) must trap the dialog.
+const isCloseBlocked = computed(() => props.isInstallingUpdate);
+
+function handleCancel() {
+  handleOpenChange(false);
+}
+
+function handleOpenChange(nextOpen: boolean) {
+  if (nextOpen) {
+    open.value = true;
+    return;
+  }
+  if (isCloseBlocked.value) return;
+  if (props.isDownloadingUpdate) {
+    emit("cancel-download");
+  }
+  open.value = false;
+}
 
 function handleReleaseNotesClick(event: MouseEvent) {
   const target = event.target as HTMLElement;
@@ -65,7 +82,7 @@ watch(
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent
       class="sm:max-w-[520px]"
       :show-close-button="!isCloseBlocked"
@@ -118,7 +135,7 @@ watch(
         </div>
       </div>
       <DialogFooter>
-        <Button v-if="!isCloseBlocked" variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button v-if="!isCloseBlocked" variant="outline" @click="handleCancel">{{ t("dangerDialog.cancel") }}</Button>
         <template v-if="updateInfo?.update_available">
           <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">

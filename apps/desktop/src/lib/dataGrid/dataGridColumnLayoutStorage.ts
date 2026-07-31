@@ -1,4 +1,5 @@
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import type { DatabaseType } from "@/types/database";
 
 const STORAGE_PREFIX = "dbx-data-grid-column-layout:";
 const TABLE_STORAGE_PREFIX = "dbx-data-grid-table-column-order:";
@@ -22,10 +23,26 @@ export interface DataGridColumnLayoutScope {
   sourceColumns?: readonly (string | undefined)[];
 }
 
-interface StoredDataGridColumnLayout {
+export interface DataGridColumnLayout {
+  orderKeys: string[];
+  hiddenKeys: string[];
+}
+
+interface StoredDataGridColumnLayout extends DataGridColumnLayout {
   version: number;
-  columnSignature: string;
+}
+
+interface LegacyStoredDataGridColumnLayout {
+  version: number;
+  columnSignature?: string;
   order: string[];
+}
+
+export interface DocumentDataGridColumnLayoutScope {
+  databaseType: DatabaseType;
+  connectionId: string;
+  database: string;
+  collection: string;
 }
 
 export interface TableDataGridColumnOrderScope {
@@ -50,30 +67,61 @@ export function dataGridColumnLayoutScopeKey(scope: DataGridColumnLayoutScope): 
   return [scope.connectionId ?? "", scope.database ?? "", scope.schema ?? "", scope.context ?? "", scope.tableSchema ?? "", scope.tableName ?? "", scope.tableName ? "" : normalizeSql(scope.sql), columnSignature, sourceSignature].join("\u0001");
 }
 
-export function loadDataGridColumnOrder(scopeKey: string, columnKeys: readonly string[]): string[] {
+export function documentDataGridColumnLayoutScopeKey(scope: DocumentDataGridColumnLayoutScope): string {
+  return ["document", scope.databaseType, scope.connectionId, scope.database, scope.collection].join("\u0001");
+}
+
+function normalizedStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((key): key is string => typeof key === "string"))];
+}
+
+export function loadDataGridColumnLayout(scopeKey: string, columnKeys: readonly string[] = []): DataGridColumnLayout | null {
   const raw = safeLocalStorageGet(`${STORAGE_PREFIX}${scopeKey}`);
-  if (!raw) return [];
+  if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as Partial<StoredDataGridColumnLayout>;
-    if (parsed.version !== STORAGE_VERSION || !Array.isArray(parsed.order)) return [];
-    if (parsed.columnSignature && parsed.columnSignature !== columnKeys.join("\0")) return [];
-    return parsed.order.filter((key): key is string => typeof key === "string");
-  } catch {
-    return [];
+    const parsed = JSON.parse(raw) as Partial<StoredDataGridColumnLayout & LegacyStoredDataGridColumnLayout>;
+    if (parsed.version !== STORAGE_VERSION) return null;
+    if (Array.isArray(parsed.orderKeys) || Array.isArray(parsed.hiddenKeys)) {
+      return {
+        orderKeys: normalizedStringList(parsed.orderKeys),
+        hiddenKeys: normalizedStringList(parsed.hiddenKeys),
+      };
+    }
+    if (!Array.isArray(parsed.order)) return null;
+    if (parsed.columnSignature && parsed.columnSignature !== columnKeys.join("\0")) return null;
+    return { orderKeys: normalizedStringList(parsed.order), hiddenKeys: [] };
+  } catch (error) {
+    console.warn(`[DBX][data-grid-column-layout:parse] ${scopeKey}`, error);
+    return null;
   }
 }
 
-export function saveDataGridColumnOrder(scopeKey: string, columnKeys: readonly string[], order: readonly string[]) {
+export function saveDataGridColumnLayout(scopeKey: string, layout: DataGridColumnLayout) {
   const payload: StoredDataGridColumnLayout = {
     version: STORAGE_VERSION,
-    columnSignature: columnKeys.join("\0"),
-    order: [...order],
+    orderKeys: normalizedStringList(layout.orderKeys),
+    hiddenKeys: normalizedStringList(layout.hiddenKeys),
   };
   safeLocalStorageSet(`${STORAGE_PREFIX}${scopeKey}`, JSON.stringify(payload));
 }
 
+export function loadDataGridColumnOrder(scopeKey: string, columnKeys: readonly string[]): string[] {
+  return loadDataGridColumnLayout(scopeKey, columnKeys)?.orderKeys ?? [];
+}
+
+export function saveDataGridColumnOrder(scopeKey: string, columnKeys: readonly string[], order: readonly string[]) {
+  const hiddenKeys = loadDataGridColumnLayout(scopeKey, columnKeys)?.hiddenKeys ?? [];
+  saveDataGridColumnLayout(scopeKey, { orderKeys: [...order], hiddenKeys });
+}
+
 export function removeDataGridColumnOrder(scopeKey: string) {
-  safeLocalStorageRemove(`${STORAGE_PREFIX}${scopeKey}`);
+  const layout = loadDataGridColumnLayout(scopeKey);
+  if (!layout) {
+    safeLocalStorageRemove(`${STORAGE_PREFIX}${scopeKey}`);
+    return;
+  }
+  saveDataGridColumnLayout(scopeKey, { orderKeys: [], hiddenKeys: layout.hiddenKeys });
 }
 
 export function tableDataGridColumnOrderScopeKey(scope: TableDataGridColumnOrderScope): string {

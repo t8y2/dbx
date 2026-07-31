@@ -1724,6 +1724,20 @@ fn format_grid_copy_insert_sql_literal(
             }
         }
     }
+    // JSON columns may expose a JSON array/object value (e.g. `[1,2,3]` or `{}`)
+    // instead of its string form. Keep it as a single JSON literal rather than
+    // letting format_grid_sql_literal serialize it as a PostgreSQL-style array
+    // (`{...}`). Serialize the value back to compact JSON text, format that as a
+    // string literal, then cast it for MySQL so it inserts as JSON.
+    if column_info.is_some_and(|column| {
+        let dt = column.data_type.trim();
+        dt.eq_ignore_ascii_case("json") || dt.eq_ignore_ascii_case("jsonb")
+    }) && (value.is_array() || value.is_object())
+    {
+        let json_text = value.to_string();
+        let string_literal = format_grid_sql_literal(&Value::String(json_text), database_type, column_info);
+        return mysql_json_predicate_literal(string_literal, database_type, column_info);
+    }
     format_grid_sql_literal(value, database_type, column_info)
 }
 
@@ -1770,6 +1784,11 @@ pub fn format_grid_sql_literal(
         if let Some(literal) = format_mysql_binary_literal_text(&text) {
             // DBX result values expose binary columns as prefixed hex; keep them
             // as MySQL hex literals so copied INSERT/UPDATE SQL round-trips bytes.
+            return literal;
+        }
+    }
+    if is_oracle_raw_literal_column(database_type, column_info) {
+        if let Some(literal) = format_oracle_raw_literal_text(&text) {
             return literal;
         }
     }
@@ -2063,6 +2082,24 @@ fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
     let hex = trimmed.strip_prefix("0x")?;
     if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
         Some(if hex.is_empty() { "X''".to_string() } else { trimmed.to_string() })
+    } else {
+        None
+    }
+}
+
+fn is_oracle_raw_literal_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    is_oracle_temporal_literal_database(database_type)
+        && column_info.map(|column| is_oracle_raw_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_oracle_raw_column_type(data_type: &str) -> bool {
+    data_type.trim().split(['(', ':', ' ']).next().is_some_and(|base| base.eq_ignore_ascii_case("raw"))
+}
+
+fn format_oracle_raw_literal_text(text: &str) -> Option<String> {
+    let hex = text.strip_prefix("0x")?;
+    if hex.len() % 2 == 0 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(format!("HEXTORAW('{hex}')"))
     } else {
         None
     }
@@ -2988,6 +3025,57 @@ mod tests {
             statement.as_deref(),
             Some("INSERT INTO table_name (\"id\", \"active\", \"profile\") VALUES (7, TRUE, '{\"name\":\"Ada\",\"roles\":[\"admin\"]}');")
         );
+    }
+
+    #[test]
+    fn copy_insert_keeps_mysql_json_array_as_single_json_literal() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: None,
+            columns: vec!["data".to_string()],
+            column_types: Some(vec![Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!([1, 2, 3])]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES (CAST('[1,2,3]' AS JSON));"));
+    }
+
+    #[test]
+    fn copy_insert_keeps_mysql_json_empty_array_as_single_json_literal() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: None,
+            columns: vec!["data".to_string()],
+            column_types: Some(vec![Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!([])]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES (CAST('[]' AS JSON));"));
+    }
+
+    #[test]
+    fn copy_insert_keeps_mysql_json_object_as_single_json_literal() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: None,
+            columns: vec!["data".to_string()],
+            column_types: Some(vec![Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!({"a": 1})]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES (CAST('{\"a\":1}' AS JSON));"));
     }
 
     #[test]
@@ -4184,6 +4272,35 @@ mod tests {
     }
 
     #[test]
+    fn prepares_sqlserver_cross_database_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: Some("BarDB".to_string()),
+                database: Some("BarDB".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "TUser".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "int", false, None), column("UserId", "bigint", false, None)]),
+            },
+            columns: vec!["ID".to_string(), "UserId".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(10279)]],
+            dirty_rows: vec![(0, vec![(1, json!(10280))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE [BarDB].[dbo].[TUser] SET [UserId] = 10280 WHERE [ID] = 1;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE [BarDB].[dbo].[TUser] SET [UserId] = 10279 WHERE [ID] = 1 AND [UserId] = 10280;"]
+        );
+    }
+
+    #[test]
     fn prepares_kingbase_update_when_source_primary_key_case_differs() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Kingbase),
@@ -4653,6 +4770,51 @@ mod tests {
                 "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_AT\") VALUES (1, TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'));"
             ]
         );
+    }
+
+    #[test]
+    fn prepares_oracle_raw_update_with_hex_literals() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "RAW_VALUES".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "RAW(16)", false, None), column("PAYLOAD", "RAW(16)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "PAYLOAD".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("0x00112233445566778899aabbccddeeff"), json!("0xaabb")]],
+            dirty_rows: vec![(0, vec![(1, json!("0xccdd"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"APP\".\"RAW_VALUES\" SET \"PAYLOAD\" = HEXTORAW('ccdd') WHERE \"ID\" = HEXTORAW('00112233445566778899aabbccddeeff');"
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_raw_literals_require_valid_even_length_hex() {
+        let raw = column("ID", "RAW(16)", false, None);
+        let text = column("ID", "VARCHAR2(64)", false, None);
+        let blob = column("ID", "BLOB", false, None);
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(format_grid_sql_literal(&json!("0x00aB"), Some(database_type), Some(&raw)), "HEXTORAW('00aB')");
+            assert_eq!(format_grid_sql_literal(&json!("0xabc"), Some(database_type), Some(&raw)), "'0xabc'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00gg"), Some(database_type), Some(&raw)), "'0x00gg'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&text)), "'0x00ab'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&blob)), "'0x00ab'");
+        }
     }
 
     #[test]

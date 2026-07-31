@@ -82,9 +82,11 @@ pub struct TransferRequest {
     pub source_connection_id: String,
     pub source_database: String,
     pub source_schema: String,
+    pub source_catalog: Option<String>,
     pub target_connection_id: String,
     pub target_database: String,
     pub target_schema: String,
+    pub target_catalog: Option<String>,
     pub tables: Vec<String>,
     pub create_table: bool,
     #[serde(default)]
@@ -141,8 +143,78 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
     quote_transfer_identifier(name, db_type)
 }
 
-pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType) -> String {
-    qualified_transfer_table(table, schema, db_type)
+/// Resolve an optional catalog for external-catalog routing in the transfer
+/// pipeline.  Returns `Some(catalog)` only when:
+///   - the catalog is non-empty and not a built-in catalog name, AND
+///   - the database type is Doris/StarRocks, or MySQL (StarRocks/Doris are often
+///     saved as `db_type=mysql` with a matching `driver_profile`; the transfer UI
+///     only sends `sourceCatalog`/`targetCatalog` for catalog-capable connections).
+///
+/// Built-in catalogs: Doris `internal`, StarRocks `default_catalog`. Prefer
+/// [`resolve_external_transfer_catalog_for_config`] when a full connection
+/// config is available (also matches `driver_profile=starrocks|doris`).
+pub fn resolve_external_transfer_catalog<'a>(catalog: Option<&'a str>, db_type: &DatabaseType) -> Option<&'a str> {
+    let catalog = normalize_external_catalog_name(catalog)?;
+    match db_type {
+        DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Mysql => Some(catalog),
+        _ => None,
+    }
+}
+
+/// Like [`resolve_external_transfer_catalog`], but also treats MySQL connections
+/// with a Doris/StarRocks `driver_profile` as catalog-capable.
+pub fn resolve_external_transfer_catalog_for_config<'a>(
+    catalog: Option<&'a str>,
+    config: &crate::models::connection::ConnectionConfig,
+) -> Option<&'a str> {
+    let catalog = normalize_external_catalog_name(catalog)?;
+    if crate::schema::is_doris_family_catalog_capable_config(config) {
+        Some(catalog)
+    } else {
+        None
+    }
+}
+
+fn normalize_external_catalog_name(catalog: Option<&str>) -> Option<&str> {
+    let catalog = catalog?.trim();
+    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") || catalog.eq_ignore_ascii_case("default_catalog")
+    {
+        return None;
+    }
+    Some(catalog)
+}
+
+/// Create (or reuse) a transfer pool for the given connection/database/catalog.
+///
+/// For Doris/StarRocks external catalogs the pool is created with
+/// `catalog=<name>` in the connection URL params so mysql_async runs
+/// `SET catalog` **before** `USE <database>` during setup. The handshake does
+/// not send the external database name (mysql_async strips the path when a
+/// catalog is present), which is what previously caused `Unknown database`.
+pub async fn ensure_transfer_pool(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    catalog: Option<&str>,
+) -> Result<String, String> {
+    let config = {
+        let configs = state.configs.read().await;
+        configs.get(connection_id).cloned().ok_or_else(|| format!("Connection config not found: {connection_id}"))?
+    };
+    if let Some(catalog) = resolve_external_transfer_catalog_for_config(catalog, &config) {
+        // SET catalog first, then USE <database> so session has both catalog and
+        // database selected — StarRocks rejects unqualified analysis with
+        // "No database selected" when only SET catalog ran.
+        state.get_or_create_pool_with_catalog(connection_id, Some(database), Some(catalog)).await
+    } else {
+        state.get_or_create_pool(connection_id, Some(database)).await
+    }
+}
+
+pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
+    // Only use 3-part catalog-qualified names for Doris/StarRocks external catalogs.
+    let effective_catalog = resolve_external_transfer_catalog(catalog, db_type);
+    qualified_transfer_table(table, schema, db_type, effective_catalog)
 }
 
 pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result<(), String> {
@@ -221,6 +293,8 @@ async fn resolve_transfer_target_table_name(
     source_table: &str,
     target_pool_key: &str,
     target_db_type: &DatabaseType,
+    _source_catalog: Option<&str>,
+    target_catalog: Option<&str>,
 ) -> ResolvedTransferTargetTable {
     let requested_name = request.target_table_name(source_table);
     if is_mongodb_transfer_type(target_db_type) {
@@ -229,22 +303,45 @@ async fn resolve_transfer_target_table_name(
 
     let allow_case_insensitive_match =
         target_table_lookup_is_case_insensitive(state, target_pool_key, target_db_type).await;
-    let tables = crate::schema::list_tables_core(
-        state,
-        &request.target_connection_id,
-        &request.target_database,
-        &request.target_schema,
-        Some(&requested_name),
-        Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap_or_else(|error| {
-        log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
-        Vec::new()
-    });
+
+    // Route through the catalog-aware path when targeting an external
+    // Doris/StarRocks catalog — otherwise the lookup runs against the
+    // default / internal catalog and can miss or misidentify the table.
+    let tables = if let Some(catalog) = resolve_external_transfer_catalog(target_catalog, target_db_type) {
+        crate::schema::list_doris_catalog_tables_core(
+            state,
+            &request.target_connection_id,
+            catalog,
+            &request.target_database,
+            Some(&requested_name),
+            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!("[transfer] failed to resolve target table metadata for {requested_name} in catalog '{catalog}': {error}");
+            Vec::new()
+        })
+    } else {
+        crate::schema::list_tables_core(
+            state,
+            &request.target_connection_id,
+            &request.target_database,
+            &request.target_schema,
+            Some(&requested_name),
+            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
+            Vec::new()
+        })
+    };
 
     if let Some(existing_name) =
         existing_transfer_target_table_name(&requested_name, &tables, allow_case_insensitive_match)
@@ -398,6 +495,20 @@ pub(crate) fn is_identity_column_extra(extra: Option<&str>) -> bool {
     })
 }
 
+pub(crate) fn is_mysql_generated_column_extra(extra: Option<&str>) -> bool {
+    extra.is_some_and(|value| {
+        let mut parts = value.split_whitespace();
+        let Some(first) = parts.next() else {
+            return false;
+        };
+        if first.eq_ignore_ascii_case("generated") {
+            return true;
+        }
+        matches!(first.to_ascii_lowercase().as_str(), "virtual" | "stored" | "persistent")
+            && parts.next().is_some_and(|part| part.eq_ignore_ascii_case("generated"))
+    })
+}
+
 pub(crate) fn selected_columns_include_identity_extras(columns: &[String], column_extras: &[Option<String>]) -> bool {
     columns
         .iter()
@@ -426,6 +537,10 @@ fn is_sqlserver_non_insertable_transfer_column(
         && is_sqlserver_rowversion_type(&column.data_type)
 }
 
+fn is_mysql_non_insertable_transfer_column(column: &db::ColumnInfo, source_db_type: &DatabaseType) -> bool {
+    *source_db_type == DatabaseType::Mysql && is_mysql_generated_column_extra(column.extra.as_deref())
+}
+
 fn writable_transfer_columns(
     columns: &[db::ColumnInfo],
     source_db_type: &DatabaseType,
@@ -433,18 +548,21 @@ fn writable_transfer_columns(
 ) -> Vec<db::ColumnInfo> {
     columns
         .iter()
-        .filter(|column| !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type))
+        .filter(|column| {
+            !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type)
+                && !is_mysql_non_insertable_transfer_column(column, source_db_type)
+        })
         .cloned()
         .collect()
 }
 
 fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) -> String {
-    let full_table = qualified_table(table, schema, &DatabaseType::Dameng);
+    let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
 }
 
 pub(crate) fn wrap_dameng_identity_insert_sql(insert_sql: &str, table: &str, schema: &str) -> String {
-    let full_table = qualified_table(table, schema, &DatabaseType::Dameng);
+    let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
     wrap_dameng_identity_insert_sql_for_table(insert_sql, &full_table)
 }
 
@@ -758,7 +876,7 @@ fn postgres_index_column_sql(column: &str) -> String {
 }
 
 fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &str) -> Vec<String> {
-    let full_table = qualified_table(table, schema, &DatabaseType::Postgres);
+    let full_table = qualified_table(table, schema, &DatabaseType::Postgres, None);
     let mut statements = Vec::new();
     for index in indexes.iter().filter(|index| !index.is_primary) {
         if index.name.trim().is_empty() || index.columns.is_empty() {
@@ -822,7 +940,7 @@ fn generate_postgres_foreign_key_ddl(
     source_schema: &str,
     target_schema: &str,
 ) -> Vec<String> {
-    let full_table = qualified_table(table, target_schema, &DatabaseType::Postgres);
+    let full_table = qualified_table(table, target_schema, &DatabaseType::Postgres, None);
     let mut grouped: HashMap<&str, Vec<&db::ForeignKeyInfo>> = HashMap::new();
     let mut order = Vec::new();
 
@@ -853,7 +971,7 @@ fn generate_postgres_foreign_key_ddl(
             Some(ref_schema) => ref_schema,
             None => target_schema,
         };
-        let referenced_table = qualified_table(&group[0].ref_table, referenced_schema, &DatabaseType::Postgres);
+        let referenced_table = qualified_table(&group[0].ref_table, referenced_schema, &DatabaseType::Postgres, None);
         statements.push(format!(
             "ALTER TABLE {full_table} ADD CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({ref_columns})",
             quote_identifier(name, &DatabaseType::Postgres)
@@ -864,7 +982,7 @@ fn generate_postgres_foreign_key_ddl(
 }
 
 fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, schema: &str) -> Vec<String> {
-    let full_table = qualified_table(table, schema, &DatabaseType::Postgres);
+    let full_table = qualified_table(table, schema, &DatabaseType::Postgres, None);
     columns
         .iter()
         .filter(|column| {
@@ -1055,7 +1173,7 @@ fn generate_postgres_domain_ddl(domain: &PostgresDomainSource, target_schema: &s
 }
 
 fn generate_postgres_materialized_view_ddls(view: &PostgresMaterializedViewSource, target_schema: &str) -> Vec<String> {
-    let qualified_name = qualified_table(&view.view_name, target_schema, &DatabaseType::Postgres);
+    let qualified_name = qualified_table(&view.view_name, target_schema, &DatabaseType::Postgres, None);
     vec![
         format!("DROP MATERIALIZED VIEW IF EXISTS {qualified_name}"),
         format!("CREATE MATERIALIZED VIEW {qualified_name} AS\n{}", ensure_sql_statement_terminated(&view.source)),
@@ -1092,7 +1210,7 @@ fn rewrite_postgres_trigger_table_schema(
     table_name: &str,
     target_schema: &str,
 ) -> String {
-    let qualified_target_table = qualified_table(table_name, target_schema, &DatabaseType::Postgres);
+    let qualified_target_table = qualified_table(table_name, target_schema, &DatabaseType::Postgres, None);
     let candidate_patterns = [
         format!(
             " ON {}.{} ",
@@ -1804,8 +1922,9 @@ pub fn generate_create_table_ddl(
     target_db: &DatabaseType,
     source_db: &DatabaseType,
     table_comment: Option<&str>,
+    catalog: Option<&str>,
 ) -> String {
-    let full_table = qualified_table(table, schema, target_db);
+    let full_table = qualified_table(table, schema, target_db, catalog);
 
     let is_mysql_family = matches!(
         target_db,
@@ -1872,7 +1991,7 @@ pub fn generate_create_table_ddl(
     };
 
     let create_prefix = match target_db {
-        DatabaseType::SqlServer => "CREATE TABLE",
+        DatabaseType::SqlServer | DatabaseType::Dameng => "CREATE TABLE",
         _ => "CREATE TABLE IF NOT EXISTS",
     };
 
@@ -1917,15 +2036,17 @@ pub fn generate_comment_ddl(
     target_db: &DatabaseType,
     table_comment: Option<&str>,
 ) -> Vec<String> {
-    if !matches!(target_db, DatabaseType::Postgres | DatabaseType::Oracle | DatabaseType::ClickHouse) {
+    if !(is_postgres_transfer_dialect(target_db)
+        || matches!(target_db, DatabaseType::Oracle | DatabaseType::ClickHouse))
+    {
         return Vec::new();
     }
 
-    let full_table = qualified_table(table, schema, target_db);
+    let full_table = qualified_table(table, schema, target_db, None);
     let mut statements = Vec::new();
 
     // Table-level comment first (PostgreSQL/Oracle only; ClickHouse doesn't support COMMENT ON TABLE)
-    if matches!(target_db, DatabaseType::Postgres | DatabaseType::Oracle) {
+    if is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle) {
         if let Some(comment) = table_comment {
             let trimmed = comment.trim();
             if !trimmed.is_empty() {
@@ -1945,7 +2066,7 @@ pub fn generate_comment_ddl(
             let qcol = quote_identifier(&c.name, target_db);
 
             match target_db {
-                DatabaseType::Postgres | DatabaseType::Oracle => {
+                target_db if is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle) => {
                     statements.push(format!("COMMENT ON COLUMN {full_table}.{qcol} IS '{escaped}'"));
                 }
                 DatabaseType::ClickHouse => {
@@ -1966,7 +2087,7 @@ pub fn generate_insert(
     schema: &str,
     db_type: &DatabaseType,
 ) -> String {
-    generate_insert_typed(columns, &vec![None; columns.len()], rows, table, schema, db_type)
+    generate_insert_typed(columns, &vec![None; columns.len()], rows, table, schema, db_type, None)
 }
 
 pub fn generate_insert_typed(
@@ -1976,12 +2097,13 @@ pub fn generate_insert_typed(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
+    catalog: Option<&str>,
 ) -> String {
     if rows.is_empty() {
         return String::new();
     }
 
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type);
+    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog);
     let value_rows = value_rows_sql(rows, column_types, db_type);
     template.build(&value_rows)
 }
@@ -1993,8 +2115,8 @@ struct InsertSqlTemplate {
 }
 
 impl InsertSqlTemplate {
-    fn new(columns: &[String], table: &str, schema: &str, db_type: &DatabaseType) -> Self {
-        let full_table = qualified_table(table, schema, db_type);
+    fn new(columns: &[String], table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> Self {
+        let full_table = qualified_table(table, schema, db_type, catalog);
         let col_list = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
         Self {
             standard_prefix: format!("INSERT INTO {full_table} ({col_list}) VALUES\n"),
@@ -2072,7 +2194,7 @@ pub fn generate_upsert(
     db_type: &DatabaseType,
     pk_columns: &[String],
 ) -> String {
-    generate_upsert_typed(columns, &vec![None; columns.len()], rows, table, schema, db_type, pk_columns)
+    generate_upsert_typed(columns, &vec![None; columns.len()], rows, table, schema, db_type, pk_columns, None)
 }
 
 pub fn generate_upsert_typed(
@@ -2083,12 +2205,13 @@ pub fn generate_upsert_typed(
     schema: &str,
     db_type: &DatabaseType,
     pk_columns: &[String],
+    catalog: Option<&str>,
 ) -> String {
     if rows.is_empty() || pk_columns.is_empty() {
         return String::new();
     }
 
-    let full_table = qualified_table(table, schema, db_type);
+    let full_table = qualified_table(table, schema, db_type, catalog);
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     let value_rows = value_rows_sql(rows, column_types, db_type);
@@ -2219,7 +2342,7 @@ pub fn generate_upsert_typed(
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"));
             sql
         }
-        _ => generate_insert_typed(columns, column_types, rows, table, schema, db_type),
+        _ => generate_insert_typed(columns, column_types, rows, table, schema, db_type, catalog),
     }
 }
 
@@ -2269,10 +2392,13 @@ fn generate_transfer_write_sql(
     schema: &str,
     db_type: &DatabaseType,
     pk_columns: &[String],
+    catalog: Option<&str>,
 ) -> String {
     match mode {
-        TransferMode::Upsert => generate_upsert_typed(columns, column_types, rows, table, schema, db_type, pk_columns),
-        _ => generate_insert_typed(columns, column_types, rows, table, schema, db_type),
+        TransferMode::Upsert => {
+            generate_upsert_typed(columns, column_types, rows, table, schema, db_type, pk_columns, catalog)
+        }
+        _ => generate_insert_typed(columns, column_types, rows, table, schema, db_type, catalog),
     }
 }
 
@@ -2284,6 +2410,7 @@ pub(crate) fn generate_insert_typed_sql_batches(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
+    catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
@@ -2297,7 +2424,7 @@ pub(crate) fn generate_insert_typed_sql_batches(
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
     let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type);
+    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog);
     let value_rows = value_rows_sql(rows, column_types, db_type);
     let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
@@ -2345,6 +2472,7 @@ fn generate_transfer_write_sql_batches(
     schema: &str,
     db_type: &DatabaseType,
     pk_columns: &[String],
+    catalog: Option<&str>,
 ) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -2358,6 +2486,7 @@ fn generate_transfer_write_sql_batches(
             table,
             schema,
             db_type,
+            catalog,
             SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode)),
         )?
         .into_iter()
@@ -2384,6 +2513,7 @@ fn generate_transfer_write_sql_batches(
             schema,
             db_type,
             pk_columns,
+            catalog,
         );
 
         while end < rows.len() && end - start < max_rows {
@@ -2396,6 +2526,7 @@ fn generate_transfer_write_sql_batches(
                 schema,
                 db_type,
                 pk_columns,
+                catalog,
             );
             if candidate.len() > max_sql_bytes && !accepted.is_empty() {
                 break;
@@ -2421,7 +2552,7 @@ pub fn pagination_sql(
     offset: u64,
     limit: usize,
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type);
+    let full_table = qualified_table(table, schema, db_type, None);
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     match db_type {
@@ -2452,8 +2583,9 @@ pub fn pagination_sql_with_order(
     offset: u64,
     limit: usize,
     order_by_columns: &[String],
+    catalog: Option<&str>,
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type);
+    let full_table = qualified_table(table, schema, db_type, catalog);
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
     let order_expression = postgres_order_by_expression(order_by_columns, db_type);
 
@@ -2493,7 +2625,7 @@ pub fn pagination_sql_with_filter_order(
     order_by: Option<&str>,
     default_order_columns: &[String],
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type);
+    let full_table = qualified_table(table, schema, db_type, None);
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
     let predicate = crate::sql_dialect::normalize_where_input(where_input);
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
@@ -2527,12 +2659,18 @@ pub fn pagination_sql_with_filter_order(
     }
 }
 
-pub fn count_sql(table: &str, schema: &str, db_type: &DatabaseType) -> String {
-    count_sql_with_where(table, schema, db_type, None)
+pub fn count_sql(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
+    count_sql_with_where(table, schema, db_type, None, catalog)
 }
 
-pub fn count_sql_with_where(table: &str, schema: &str, db_type: &DatabaseType, where_input: Option<&str>) -> String {
-    let full_table = qualified_table(table, schema, db_type);
+pub fn count_sql_with_where(
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    where_input: Option<&str>,
+    catalog: Option<&str>,
+) -> String {
+    let full_table = qualified_table(table, schema, db_type, catalog);
     let predicate = crate::sql_dialect::normalize_where_input(where_input);
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     format!("SELECT COUNT(*) FROM {full_table}{where_clause}")
@@ -2547,7 +2685,7 @@ pub fn keyset_pagination_sql(
     last_pk_values: &[serde_json::Value],
     limit: usize,
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type);
+    let full_table = qualified_table(table, schema, db_type, None);
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
     let order =
         primary_keys.iter().map(|pk| format!("{} ASC", quote_identifier(pk, db_type))).collect::<Vec<_>>().join(", ");
@@ -2976,8 +3114,14 @@ async fn execute_on_pool_with_options(
                     state.remove_pool_by_key(&current_pool_key).await;
                     return result;
                 };
+                let catalog = catalog_from_pool_key(&current_pool_key).map(str::to_string);
                 current_pool_key = state
-                    .reconnect_pool_for_session(connection_id, database.as_deref(), client_session_id.as_deref())
+                    .reconnect_pool_for_session_with_catalog(
+                        connection_id,
+                        database.as_deref(),
+                        catalog.as_deref(),
+                        client_session_id.as_deref(),
+                    )
                     .await?;
             }
             PoolErrorAction::ReconnectAndRetry => {
@@ -3058,13 +3202,14 @@ async fn execute_on_pool_once(
 }
 
 fn database_from_pool_key(pool_key: &str) -> Option<&str> {
-    pool_key
-        .split_once(":session:")
-        .map(|(base, _)| base)
-        .unwrap_or(pool_key)
-        .split_once(':')
-        .map(|(_, database)| database)
-        .filter(|database| !database.is_empty())
+    let base = pool_key.split_once(":session:").map(|(base, _)| base).unwrap_or(pool_key);
+    let base = base.split_once(":catalog:").map(|(base, _)| base).unwrap_or(base);
+    base.split_once(':').map(|(_, database)| database).filter(|database| !database.is_empty())
+}
+
+fn catalog_from_pool_key(pool_key: &str) -> Option<&str> {
+    let base = pool_key.split_once(":session:").map(|(base, _)| base).unwrap_or(pool_key);
+    base.split_once(":catalog:").map(|(_, catalog)| catalog).filter(|catalog| !catalog.is_empty())
 }
 
 pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
@@ -3079,6 +3224,7 @@ pub async fn get_columns_for_transfer(
     database: &str,
     schema: &str,
     table: &str,
+    catalog: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     let connections = state.connections.read().await;
 
@@ -3129,8 +3275,14 @@ pub async fn get_columns_for_transfer(
     match pool {
         PoolKind::Mysql(p, _) => {
             let p = p.clone();
+            let catalog = normalize_external_catalog_name(catalog).map(str::to_string);
             drop(connections);
-            db::mysql::get_columns(&p, &schema, &table).await
+            if let Some(catalog) = catalog {
+                // Use 3-part qualified column lookup for Doris/StarRocks external catalogs
+                db::doris::get_catalog_columns(&p, &catalog, &schema, &table).await
+            } else {
+                db::mysql::get_columns(&p, &schema, &table).await
+            }
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
@@ -3341,7 +3493,7 @@ async fn bind_postgres_owned_sequences_for_transfer(
         let owner_sql = format!(
             "ALTER SEQUENCE {} OWNED BY {}.{}",
             postgres_sequence_qualified_name(&request.target_schema, &sequence.name),
-            qualified_table(&sequence.owner_table, &request.target_schema, &DatabaseType::Postgres),
+            qualified_table(&sequence.owner_table, &request.target_schema, &DatabaseType::Postgres, None),
             quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
         );
         execute_on_pool(state, target_pool_key, &owner_sql)
@@ -3929,7 +4081,16 @@ where
 {
     let total_tables = request.tables.len();
     let ResolvedTransferTargetTable { name: target_table, preexisting: target_table_preexisting } =
-        resolve_transfer_target_table_name(state, request, table, target_pool_key, target_db_type).await;
+        resolve_transfer_target_table_name(
+            state,
+            request,
+            table,
+            target_pool_key,
+            target_db_type,
+            request.source_catalog.as_deref(),
+            request.target_catalog.as_deref(),
+        )
+        .await;
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
@@ -3991,6 +4152,7 @@ where
                 &request.source_database,
                 &request.source_schema,
                 table,
+                request.source_catalog.as_deref(),
             )
             .await?;
             let col_names = columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
@@ -4007,6 +4169,7 @@ where
                 offset,
                 batch_size,
                 &primary_key_columns,
+                request.source_catalog.as_deref(),
             );
             let result = execute_on_pool(state, source_pool_key, &sql).await?;
             sql_rows_to_mongo_documents(&col_names, &result.rows)
@@ -4071,6 +4234,7 @@ where
                             target_db_type,
                             source_db_type,
                             None,
+                            request.target_catalog.as_deref(),
                         );
                         let target_table_created = transfer_create_table_created(
                             execute_on_pool(state, target_pool_key, &ddl).await.map(|_| ()),
@@ -4102,7 +4266,12 @@ where
                 }
 
                 if request.mode == TransferMode::Overwrite {
-                    let full_table = qualified_table(&target_table, &request.target_schema, target_db_type);
+                    let full_table = qualified_table(
+                        &target_table,
+                        &request.target_schema,
+                        target_db_type,
+                        request.target_catalog.as_deref(),
+                    );
                     let truncate_sql = match target_db_type {
                         DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb => {
                             format!("DELETE FROM {full_table}")
@@ -4131,6 +4300,7 @@ where
                 &request.target_schema,
                 target_db_type,
                 &[],
+                request.target_catalog.as_deref(),
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
@@ -4201,7 +4371,16 @@ where
     let total_tables = request.tables.len();
     let pg_compat_transfer = is_postgres_compat_transfer(source_db_type, target_db_type);
     let ResolvedTransferTargetTable { name: target_table, preexisting: mut target_table_preexisting } =
-        resolve_transfer_target_table_name(state, request, table, target_pool_key, target_db_type).await;
+        resolve_transfer_target_table_name(
+            state,
+            request,
+            table,
+            target_pool_key,
+            target_db_type,
+            request.source_catalog.as_deref(),
+            request.target_catalog.as_deref(),
+        )
+        .await;
     let preserves_target_table_name = target_table == table;
 
     // Get source columns (deduplicate by name)
@@ -4213,6 +4392,7 @@ where
             &request.source_database,
             &request.source_schema,
             table,
+            request.source_catalog.as_deref(),
         )
         .await?;
         let mut seen = std::collections::HashSet::new();
@@ -4235,22 +4415,44 @@ where
     log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
 
     // Fetch source table comment
-    let table_comment: Option<String> = crate::schema::list_tables_core(
-        state,
-        &request.source_connection_id,
-        &request.source_database,
-        &request.source_schema,
-        Some(table),
-        Some(1),
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .next()
-    .and_then(|t| t.comment);
+    // Route through the catalog-aware path for Doris/StarRocks external catalogs
+    // so the comment comes from the selected catalog, not the default one.
+    let table_comment: Option<String> =
+        if let Some(catalog) = resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type) {
+            crate::schema::list_doris_catalog_tables_core(
+                state,
+                &request.source_connection_id,
+                catalog,
+                &request.source_database,
+                Some(table),
+                Some(1),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .and_then(|t| t.comment)
+        } else {
+            crate::schema::list_tables_core(
+                state,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                Some(table),
+                Some(1),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .and_then(|t| t.comment)
+        };
 
     let source_indexes =
         if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
@@ -4267,7 +4469,7 @@ where
 
     // Count source rows
     let total_rows = {
-        let sql = count_sql(table, &request.source_schema, source_db_type);
+        let sql = count_sql(table, &request.source_schema, source_db_type, request.source_catalog.as_deref());
         match execute_on_pool(state, source_pool_key, &sql).await {
             Ok(result) => result.rows.first().and_then(|r| r.first()).and_then(|v| match v {
                 serde_json::Value::Number(n) => n.as_u64(),
@@ -4309,26 +4511,58 @@ where
             let can_reuse_source_ddl =
                 can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
             let ddl = if can_reuse_source_ddl {
-                let source_ddl = crate::schema::get_table_ddl_core(
-                    state,
-                    &request.source_connection_id,
-                    &request.source_database,
-                    &request.source_schema,
-                    table,
-                    None,
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    generate_create_table_ddl(
-                        &columns,
-                        &target_table,
+                let source_ddl = if let Some(catalog) =
+                    resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type)
+                {
+                    // Doris/StarRocks external catalog: read DDL directly via
+                    // SHOW CREATE TABLE catalog.database.table using the
+                    // existing source pool (bare MySQL — addresses any catalog).
+                    let pool = {
+                        let connections = state.connections.read().await;
+                        let pool =
+                            connections.get(source_pool_key).ok_or_else(|| "Source pool not found".to_string())?;
+                        let PoolKind::Mysql(p, _) = pool else {
+                            return Err("Source pool must be MySQL-family for catalog DDL".to_string());
+                        };
+                        p.clone()
+                    };
+                    db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await
+                        .unwrap_or_else(|err| {
+                            log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
+                            generate_create_table_ddl(
+                                &columns,
+                                &target_table,
+                                &request.source_schema,
+                                &request.target_schema,
+                                target_db_type,
+                                source_db_type,
+                                table_comment.as_deref(),
+                                request.target_catalog.as_deref(),
+                            )
+                        })
+                } else {
+                    crate::schema::get_table_ddl_core(
+                        state,
+                        &request.source_connection_id,
+                        &request.source_database,
                         &request.source_schema,
-                        &request.target_schema,
-                        target_db_type,
-                        source_db_type,
-                        table_comment.as_deref(),
+                        table,
+                        None,
                     )
-                });
+                    .await
+                    .unwrap_or_else(|_| {
+                        generate_create_table_ddl(
+                            &columns,
+                            &target_table,
+                            &request.source_schema,
+                            &request.target_schema,
+                            target_db_type,
+                            source_db_type,
+                            table_comment.as_deref(),
+                            request.target_catalog.as_deref(),
+                        )
+                    })
+                };
                 rewrite_transfer_source_table_ddl(
                     &source_ddl,
                     &request.source_schema,
@@ -4345,6 +4579,7 @@ where
                     target_db_type,
                     source_db_type,
                     table_comment.as_deref(),
+                    request.target_catalog.as_deref(),
                 )
             };
             log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
@@ -4383,7 +4618,8 @@ where
 
     // Truncate target if overwrite mode
     if request.mode == TransferMode::Overwrite {
-        let full_table = qualified_table(&target_table, &request.target_schema, target_db_type);
+        let full_table =
+            qualified_table(&target_table, &request.target_schema, target_db_type, request.target_catalog.as_deref());
         let truncate_sql = match target_db_type {
             DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb => {
                 format!("DELETE FROM {full_table}")
@@ -4406,6 +4642,7 @@ where
                 &request.target_database,
                 &request.target_schema,
                 &target_table,
+                request.target_catalog.as_deref(),
             )
             .await
             .unwrap_or_default();
@@ -4433,6 +4670,7 @@ where
             &request.target_database,
             &request.target_schema,
             &target_table,
+            request.target_catalog.as_deref(),
         )
         .await
         .unwrap_or_default();
@@ -4459,6 +4697,7 @@ where
             offset,
             batch_size,
             &primary_key_columns,
+            request.source_catalog.as_deref(),
         );
         let result = execute_on_pool(state, source_pool_key, &sql).await?;
         let row_count = result.rows.len();
@@ -4476,6 +4715,7 @@ where
             &request.target_schema,
             target_db_type,
             &pk_columns,
+            request.target_catalog.as_deref(),
         )?;
         for (statement_index, batch_sql) in write_statements.iter().enumerate() {
             execute_transfer_write_statement(
@@ -4762,9 +5002,10 @@ where
                 rewrite_postgres_routine_schema(&object.source, &request.source_schema, &request.target_schema)
                     .unwrap_or_else(|| object.source.clone())
             }
-            db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => {
-                object.source.clone()
-            }
+            db::ObjectSourceKind::Sequence
+            | db::ObjectSourceKind::Synonym
+            | db::ObjectSourceKind::Package
+            | db::ObjectSourceKind::PackageBody => object.source.clone(),
             db::ObjectSourceKind::Trigger | db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody => {
                 object.source.clone()
             }
@@ -4822,7 +5063,7 @@ where
             error: None,
             terminal: false,
         });
-        let full_table = qualified_table(&trigger.table_name, &request.target_schema, &DatabaseType::Postgres);
+        let full_table = qualified_table(&trigger.table_name, &request.target_schema, &DatabaseType::Postgres, None);
         let drop_sql = format!(
             "DROP TRIGGER IF EXISTS {} ON {full_table}",
             quote_identifier(&trigger.trigger_name, &DatabaseType::Postgres)
@@ -4996,9 +5237,11 @@ mod tests {
             source_connection_id: "source".to_string(),
             source_database: "source_db".to_string(),
             source_schema: "source_schema".to_string(),
+            source_catalog: None,
             target_connection_id: "target".to_string(),
             target_database: "target_db".to_string(),
             target_schema: "target_schema".to_string(),
+            target_catalog: None,
             tables: tables.into_iter().map(str::to_string).collect(),
             create_table: true,
             mode: TransferMode::Append,
@@ -5123,6 +5366,49 @@ mod tests {
     }
 
     #[test]
+    fn mysql_writable_transfer_columns_skip_only_generated_columns() {
+        let columns = vec![
+            test_column("id", "int"),
+            db::ColumnInfo { extra: Some("DEFAULT_GENERATED".to_string()), ..test_column("created_at", "timestamp") },
+            db::ColumnInfo { extra: Some("auto_increment".to_string()), ..test_column("sequence_id", "bigint") },
+            db::ColumnInfo {
+                extra: Some("VIRTUAL GENERATED".to_string()),
+                ..test_column("virtual_total", "decimal(10,2)")
+            },
+            db::ColumnInfo { extra: Some("stored generated".to_string()), ..test_column("stored_hash", "varchar(64)") },
+            db::ColumnInfo {
+                extra: Some("PERSISTENT GENERATED".to_string()),
+                ..test_column("persistent_total", "decimal(10,2)")
+            },
+            db::ColumnInfo { extra: Some("GENERATED ALWAYS".to_string()), ..test_column("explicit_generated", "int") },
+            db::ColumnInfo {
+                extra: Some("on update CURRENT_TIMESTAMP".to_string()),
+                ..test_column("updated_at", "timestamp")
+            },
+        ];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Mysql, &DatabaseType::Mysql);
+
+        assert_eq!(
+            writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["id", "created_at", "sequence_id", "updated_at"]
+        );
+        assert_eq!(columns.len(), 8, "DDL metadata must retain generated columns");
+    }
+
+    #[test]
+    fn non_mysql_transfer_columns_keep_generated_markers() {
+        let columns = vec![
+            test_column("id", "int"),
+            db::ColumnInfo { extra: Some("STORED GENERATED".to_string()), ..test_column("computed", "int") },
+        ];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Postgres, &DatabaseType::Postgres);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "computed"]);
+    }
+
+    #[test]
     fn non_sqlserver_target_writable_transfer_columns_keep_timestamp_type() {
         let columns = vec![test_column("id", "int"), test_column("updated_at", "timestamp")];
 
@@ -5165,13 +5451,72 @@ mod tests {
             db::ColumnInfo { comment: None, ..test_column("age", "int") },
         ];
 
-        let ddl = generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None, None);
 
         assert!(ddl.contains("COMMENT '用户ID'"));
         assert!(ddl.contains("COMMENT '用户姓名'"));
         assert!(!ddl.contains("`age` INT COMMENT")); // no comment for age
         assert!(ddl.contains("`name` VARCHAR(100) NOT NULL COMMENT '用户姓名'"));
         assert!(ddl.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn dameng_create_table_omits_if_not_exists_without_changing_other_prefixes() {
+        let cols = vec![test_column("id", "int")];
+
+        let dameng = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        let mysql = generate_create_table_ddl(
+            &cols,
+            "users",
+            "",
+            "app",
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        let postgres = generate_create_table_ddl(
+            &cols,
+            "users",
+            "",
+            "public",
+            &DatabaseType::Postgres,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        let sqlserver = generate_create_table_ddl(
+            &cols,
+            "users",
+            "",
+            "dbo",
+            &DatabaseType::SqlServer,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(dameng.starts_with("CREATE TABLE \"SYSDBA\".\"users\" ("), "ddl: {dameng}");
+        assert!(!dameng.contains("IF NOT EXISTS"), "ddl: {dameng}");
+        assert!(dameng.contains("\"id\" INTEGER"), "ddl: {dameng}");
+        assert!(mysql.starts_with("CREATE TABLE IF NOT EXISTS `users` ("), "ddl: {mysql}");
+        assert!(postgres.starts_with("CREATE TABLE IF NOT EXISTS \"public\".\"users\" ("), "ddl: {postgres}");
+        assert!(
+            sqlserver.starts_with(
+                "IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'users')\nCREATE TABLE [dbo].[users] ("
+            ),
+            "ddl: {sqlserver}"
+        );
     }
 
     #[test]
@@ -5205,6 +5550,7 @@ mod tests {
             &DatabaseType::Postgres,
             &DatabaseType::Postgres,
             None,
+            None,
         );
 
         assert!(ddl.contains("\"id\" integer GENERATED BY DEFAULT AS IDENTITY NOT NULL"));
@@ -5230,6 +5576,7 @@ mod tests {
             &DatabaseType::Postgres,
             &DatabaseType::Postgres,
             None,
+            None,
         );
 
         assert!(
@@ -5249,6 +5596,7 @@ mod tests {
             &DatabaseType::Mysql,
             &DatabaseType::Mysql,
             Some("用户表"),
+            None,
         );
 
         assert!(ddl.contains(") COMMENT='用户表'"));
@@ -5259,7 +5607,8 @@ mod tests {
         let cols =
             vec![db::ColumnInfo { data_type: "text".to_string(), is_primary_key: true, ..test_column("id", "text") }];
 
-        let ddl = generate_create_table_ddl(&cols, "logs", "", "", &DatabaseType::Mysql, &DatabaseType::Sqlite, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "logs", "", "", &DatabaseType::Mysql, &DatabaseType::Sqlite, None, None);
 
         assert!(ddl.contains("PRIMARY KEY (`id`(255))"));
         assert!(ddl.contains("`id` TEXT"));
@@ -5269,7 +5618,8 @@ mod tests {
     fn mysql_int_pk_no_prefix() {
         let cols = vec![db::ColumnInfo { is_primary_key: true, ..test_column("id", "int") }];
 
-        let ddl = generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Mysql, &DatabaseType::Sqlite, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Mysql, &DatabaseType::Sqlite, None, None);
 
         assert!(ddl.contains("PRIMARY KEY (`id`)"));
         assert!(!ddl.contains("PRIMARY KEY (`id`(255))"));
@@ -5288,6 +5638,37 @@ mod tests {
         assert!(stmts[0].contains("COMMENT ON TABLE \"public\".\"items\" IS '项目表'"));
         assert!(stmts[1].contains("COMMENT ON COLUMN \"public\".\"items\".\"id\" IS '主键'"));
         assert!(stmts[2].contains("COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'"));
+    }
+
+    #[test]
+    fn kingbase_comment_ddl_generates_and_escapes_comments() {
+        let cols = vec![
+            db::ColumnInfo { comment: Some("owner's id".to_string()), ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some("display name".to_string()), ..test_column("name", "varchar(100)") },
+        ];
+
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Kingbase, Some("team's items"));
+
+        assert_eq!(
+            stmts,
+            vec![
+                "COMMENT ON TABLE \"public\".\"items\" IS 'team''s items'".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"id\" IS 'owner''s id'".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"name\" IS 'display name'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn kingbase_comment_ddl_skips_empty_comments() {
+        let cols = vec![
+            db::ColumnInfo { comment: None, ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some("  ".to_string()), ..test_column("name", "varchar(100)") },
+        ];
+
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Kingbase, Some("  "));
+
+        assert!(stmts.is_empty());
     }
 
     #[test]
@@ -5379,7 +5760,8 @@ mod tests {
         let cols = vec![db::ColumnInfo { comment: Some("test".to_string()), ..test_column("col", "text") }];
 
         // PostgreSQL target should NOT have inline COMMENT
-        let ddl = generate_create_table_ddl(&cols, "t", "", "", &DatabaseType::Postgres, &DatabaseType::Postgres, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "t", "", "", &DatabaseType::Postgres, &DatabaseType::Postgres, None, None);
         assert!(!ddl.contains("COMMENT"));
     }
 
@@ -5397,6 +5779,7 @@ mod tests {
             "",
             &DatabaseType::ClickHouse,
             &DatabaseType::ClickHouse,
+            None,
             None,
         );
 
@@ -5418,6 +5801,7 @@ mod tests {
             &DatabaseType::ClickHouse,
             &DatabaseType::ClickHouse,
             None,
+            None,
         );
 
         assert!(ddl.contains("ENGINE = MergeTree() ORDER BY tuple()"));
@@ -5435,6 +5819,7 @@ mod tests {
             "",
             &DatabaseType::ClickHouse,
             &DatabaseType::Dameng,
+            None,
             None,
         );
 
@@ -5481,6 +5866,7 @@ mod tests {
             "warehouse",
             &DatabaseType::Hive,
             &DatabaseType::Postgres,
+            None,
             None,
         );
 
@@ -5541,6 +5927,7 @@ mod tests {
             200,
             100,
             &[String::from("id")],
+            None,
         );
 
         assert_eq!(sql, "SELECT \"id\", \"name\" FROM \"public\".\"users\" ORDER BY \"id\" LIMIT 100 OFFSET 200");
@@ -5556,6 +5943,7 @@ mod tests {
             200,
             100,
             &[String::from("id")],
+            None,
         );
 
         assert_eq!(sql, "SELECT `id`, `name` FROM `users` ORDER BY `id` LIMIT 200, 300");
@@ -5589,6 +5977,7 @@ mod tests {
             200,
             100,
             &[String::from("id")],
+            None,
         );
 
         assert_eq!(
@@ -5663,7 +6052,8 @@ mod tests {
 
     #[test]
     fn filtered_count_preserves_where() {
-        let sql = count_sql_with_where("users", "public", &DatabaseType::SapHana, Some("WHERE status = 'active'"));
+        let sql =
+            count_sql_with_where("users", "public", &DatabaseType::SapHana, Some("WHERE status = 'active'"), None);
 
         assert_eq!(sql, "SELECT COUNT(*) FROM \"public\".\"users\" WHERE (status = 'active')");
     }
@@ -5866,7 +6256,7 @@ mod tests {
         let owner_sql = format!(
             "ALTER SEQUENCE {} OWNED BY {}.{}",
             postgres_sequence_qualified_name("public", &sequence.name),
-            qualified_table(&sequence.owner_table, "public", &DatabaseType::Postgres),
+            qualified_table(&sequence.owner_table, "public", &DatabaseType::Postgres, None),
             quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
         );
 
@@ -5948,7 +6338,7 @@ mod tests {
         let owner_sql = format!(
             "ALTER SEQUENCE {} OWNED BY {}.{}",
             postgres_sequence_qualified_name("archive", &sequence.name),
-            qualified_table(&sequence.owner_table, "archive", &DatabaseType::Postgres),
+            qualified_table(&sequence.owner_table, "archive", &DatabaseType::Postgres, None),
             quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
         );
         let sequence_sync_sql = generate_postgres_sequence_sync_sql(&columns, "it_quick_entry", "archive");
@@ -6054,23 +6444,22 @@ mod tests {
             "policies",
             "",
             &DatabaseType::Mysql,
+            None,
         );
 
         assert_eq!(sql, "INSERT INTO `policies` (`insurance_start_time`) VALUES\n('2026-05-12 00:00:00')");
     }
 
     #[test]
-    fn mysql_insert_omits_database_qualified_table_name() {
-        let sql = generate_insert_typed(
-            &[String::from("id")],
-            &[Some(String::from("int"))],
-            &[vec![json!(1)]],
-            "users",
-            "app",
-            &DatabaseType::Mysql,
-        );
+    fn count_sql_uses_three_part_name_for_mysql_external_catalog() {
+        let sql = count_sql("t1", "ads", &DatabaseType::Mysql, Some("hive_catalog"));
+        assert_eq!(sql, "SELECT COUNT(*) FROM `hive_catalog`.`ads`.`t1`");
+    }
 
-        assert_eq!(sql, "INSERT INTO `users` (`id`) VALUES\n(1)");
+    #[test]
+    fn count_sql_uses_three_part_name_for_starrocks_external_catalog() {
+        let sql = count_sql("t1", "ads", &DatabaseType::StarRocks, Some("paimon"));
+        assert_eq!(sql, "SELECT COUNT(*) FROM `paimon`.`ads`.`t1`");
     }
 
     #[test]
@@ -6092,6 +6481,7 @@ mod tests {
             "policies",
             "",
             &DatabaseType::Mysql,
+            None,
         );
 
         assert_eq!(
@@ -6119,6 +6509,7 @@ mod tests {
             "events",
             "APP",
             &DatabaseType::Oracle,
+            None,
         );
 
         assert_eq!(
@@ -6169,6 +6560,7 @@ mod tests {
             "orders",
             "",
             &DatabaseType::Mysql,
+            None,
         );
 
         assert_eq!(
@@ -6187,6 +6579,7 @@ mod tests {
             "",
             &DatabaseType::Mysql,
             &[String::from("id")],
+            None,
         );
 
         assert_eq!(
@@ -6204,6 +6597,7 @@ mod tests {
             "customers",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[customers] ([name], [note]) VALUES\n(N'Tiếng Việt', N'O''Brien')");
@@ -6222,6 +6616,7 @@ mod tests {
             "notes",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(
@@ -6249,6 +6644,7 @@ mod tests {
             "test",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(
@@ -6266,6 +6662,7 @@ mod tests {
             "flags",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[flags] ([enabled], [deleted]) VALUES\n(1, 0)");
@@ -6280,6 +6677,7 @@ mod tests {
             "files",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[files] ([payload], [note]) VALUES\n(0x0001ABff, N'0x0001ABff')");
@@ -6294,6 +6692,7 @@ mod tests {
             "files",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[files] ([payload]) VALUES\n(CONVERT(varbinary(max), N'O''Brien'))");
@@ -6308,6 +6707,7 @@ mod tests {
             "flags",
             "DBX_TEST",
             &DatabaseType::Dameng,
+            None,
         );
 
         assert_eq!(
@@ -6328,6 +6728,7 @@ mod tests {
             "dbo",
             &DatabaseType::SqlServer,
             &[String::from("id")],
+            None,
         );
 
         assert!(sql.contains("USING (VALUES\n(1, 1)\n)"));
@@ -6344,6 +6745,7 @@ mod tests {
             "events",
             "public",
             &DatabaseType::Postgres,
+            None,
         );
 
         assert_eq!(
@@ -6362,6 +6764,7 @@ mod tests {
             "files",
             "public",
             &DatabaseType::Postgres,
+            None,
         );
 
         assert_eq!(
@@ -6380,6 +6783,7 @@ mod tests {
             "files",
             "public",
             &DatabaseType::Postgres,
+            None,
         );
 
         assert_eq!(
@@ -6403,6 +6807,7 @@ mod tests {
             "files",
             "",
             &DatabaseType::Mysql,
+            None,
         );
 
         assert_eq!(
@@ -6421,6 +6826,7 @@ mod tests {
             "files",
             "",
             &DatabaseType::Mysql,
+            None,
         );
 
         assert_eq!(
@@ -6439,6 +6845,7 @@ mod tests {
             "files",
             "",
             &DatabaseType::Mysql,
+            None,
         );
 
         assert_eq!(
@@ -6469,6 +6876,7 @@ mod tests {
             "notes",
             "public",
             &DatabaseType::Postgres,
+            None,
         );
 
         assert_eq!(
@@ -6487,6 +6895,7 @@ mod tests {
             "numbers",
             "public",
             &DatabaseType::Postgres,
+            None,
         );
 
         assert_eq!(
@@ -6531,6 +6940,7 @@ mod tests {
             "INSTR_CATEGORY",
             "APP",
             &DatabaseType::Oracle,
+            None,
         );
 
         assert_eq!(
@@ -6549,6 +6959,7 @@ mod tests {
             "INSTR_CATEGORY",
             "APP",
             &DatabaseType::Oracle,
+            None,
         );
 
         assert_eq!(
@@ -6572,6 +6983,7 @@ SELECT 1 FROM dual"#
             "APP",
             &DatabaseType::Oracle,
             &[],
+            None,
         )
         .unwrap();
 
@@ -6593,6 +7005,7 @@ SELECT 1 FROM dual"#
             "",
             &DatabaseType::Mysql,
             &[],
+            None,
         )
         .unwrap();
 
@@ -6612,6 +7025,7 @@ SELECT 1 FROM dual"#
             "events",
             "",
             &DatabaseType::Mysql,
+            None,
             limits,
         )
         .unwrap();
@@ -6632,6 +7046,7 @@ SELECT 1 FROM dual"#
             "events",
             "",
             &DatabaseType::Mysql,
+            None,
             limits,
         )
         .unwrap_err();
@@ -6651,6 +7066,7 @@ SELECT 1 FROM dual"#
             "events",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
             SqlBatchLimits::for_database(&DatabaseType::SqlServer, rows.len()),
         )
         .unwrap();
@@ -6669,6 +7085,7 @@ SELECT 1 FROM dual"#
             "events",
             "dbo",
             &DatabaseType::SqlServer,
+            None,
             SqlBatchLimits::for_database(&DatabaseType::SqlServer, rows.len()),
         )
         .unwrap();
@@ -6693,6 +7110,7 @@ SELECT 1 FROM dual"#
             "",
             &DatabaseType::Mysql,
             &[String::from("id")],
+            None,
         )
         .unwrap();
 
@@ -6705,6 +7123,82 @@ SELECT 1 FROM dual"#
         assert_eq!(database_from_pool_key("conn:analytics"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn:analytics:session:editor-1"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn"), None);
+        assert_eq!(database_from_pool_key("conn:analytics:catalog:hive"), Some("analytics"));
+        assert_eq!(database_from_pool_key("conn:catalog:hive"), None);
+        assert_eq!(catalog_from_pool_key("conn:catalog:hive"), Some("hive"));
+        assert_eq!(catalog_from_pool_key("conn:ads:catalog:paimon"), Some("paimon"));
+        assert_eq!(catalog_from_pool_key("conn:ads"), None);
+    }
+
+    #[test]
+    fn resolve_external_transfer_catalog_skips_builtin_catalogs() {
+        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::StarRocks), Some("hive"));
+        assert_eq!(resolve_external_transfer_catalog(Some("default_catalog"), &DatabaseType::StarRocks), None);
+        assert_eq!(resolve_external_transfer_catalog(Some("internal"), &DatabaseType::Doris), None);
+        // MySQL db_type is included so StarRocks saved as mysql+driver_profile still
+        // gets 3-part catalog qualification (UI only sends catalog for capable engines).
+        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::Mysql), Some("hive"));
+        assert_eq!(resolve_external_transfer_catalog(Some("hive"), &DatabaseType::Postgres), None);
+    }
+
+    #[test]
+    fn resolve_external_transfer_catalog_for_config_accepts_starrocks_driver_profile() {
+        let config = crate::models::connection::ConnectionConfig {
+            id: "sr".to_string(),
+            name: "sr".to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Mysql,
+            driver_profile: Some("starrocks".to_string()),
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: "127.0.0.1".to_string(),
+            port: 9030,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            visible_databases: None,
+            visible_schemas: None,
+            show_system_schemas: false,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 5,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+        };
+        assert_eq!(resolve_external_transfer_catalog_for_config(Some("paimon"), &config), Some("paimon"));
+        assert_eq!(resolve_external_transfer_catalog_for_config(Some("default_catalog"), &config), None);
     }
 
     #[test]
@@ -6809,7 +7303,8 @@ SELECT 1 FROM dual"#
             db::ColumnInfo { is_nullable: false, ..test_column("name", "varchar(64)") },
         ];
 
-        let ddl = generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None, None);
 
         assert!(ddl.contains("`id` INT NOT NULL AUTO_INCREMENT"), "ddl: {ddl}");
         assert!(ddl.contains("PRIMARY KEY (`id`)"), "ddl: {ddl}");
@@ -6823,7 +7318,8 @@ SELECT 1 FROM dual"#
             ..test_column("status", "tinyint")
         }];
 
-        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None, None);
 
         assert!(ddl.contains("DEFAULT 0"), "ddl: {ddl}");
         assert!(!ddl.contains("'0'"), "ddl should not quote numeric default: {ddl}");
@@ -6834,7 +7330,8 @@ SELECT 1 FROM dual"#
         let cols =
             vec![db::ColumnInfo { column_default: Some("o'clock".to_string()), ..test_column("label", "varchar(32)") }];
 
-        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None, None);
 
         assert!(ddl.contains("DEFAULT 'o''clock'"), "ddl: {ddl}");
     }
@@ -6848,7 +7345,8 @@ SELECT 1 FROM dual"#
             ..test_column("updated_at", "timestamp")
         }];
 
-        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None, None);
 
         assert!(ddl.contains("DEFAULT CURRENT_TIMESTAMP"), "ddl: {ddl}");
         assert!(ddl.contains("ON UPDATE CURRENT_TIMESTAMP"), "ddl: {ddl}");
@@ -6864,7 +7362,8 @@ SELECT 1 FROM dual"#
             ..test_column("created_at", "timestamp(6)")
         }];
 
-        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None, None);
 
         assert!(ddl.contains("DEFAULT CURRENT_TIMESTAMP(6)"), "ddl: {ddl}");
     }
@@ -6877,7 +7376,8 @@ SELECT 1 FROM dual"#
             ..test_column("touched_at", "timestamp(3)")
         }];
 
-        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None, None);
 
         assert!(ddl.contains("ON UPDATE CURRENT_TIMESTAMP(3)"), "ddl: {ddl}");
         assert!(!ddl.contains("DEFAULT"), "ddl should not emit DEFAULT when none was set: {ddl}");
@@ -6892,7 +7392,8 @@ SELECT 1 FROM dual"#
             ..test_column("id", "int")
         }];
 
-        let ddl = generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Sqlite, &DatabaseType::Mysql, None);
+        let ddl =
+            generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Sqlite, &DatabaseType::Mysql, None, None);
 
         assert!(!ddl.contains("AUTO_INCREMENT"), "non-mysql target should not emit AUTO_INCREMENT: {ddl}");
     }
@@ -6914,6 +7415,7 @@ SELECT 1 FROM dual"#
             "public",
             &DatabaseType::Postgres,
             &DatabaseType::Postgres,
+            None,
             None,
         );
 
@@ -6937,6 +7439,7 @@ SELECT 1 FROM dual"#
             "public",
             &DatabaseType::Postgres,
             &DatabaseType::Postgres,
+            None,
             None,
         );
 
@@ -6969,6 +7472,7 @@ SELECT 1 FROM dual"#
             &DatabaseType::Kingbase,
             &DatabaseType::Postgres,
             None,
+            None,
         );
 
         assert!(ddl.contains("GENERATED BY DEFAULT AS IDENTITY"), "ddl: {ddl}");
@@ -6984,6 +7488,7 @@ SELECT 1 FROM dual"#
             "public",
             &DatabaseType::Kingbase,
             &[String::from("id")],
+            None,
         );
 
         assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""), "sql: {sql}");

@@ -198,7 +198,17 @@ export function areSqlSemanticDiagnosticsEqual(left: readonly SqlSemanticDiagnos
 }
 
 export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
-  if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "chromadb" || options.databaseType === "redis") return false;
+  if (
+    options.databaseType === "mongodb" ||
+    options.databaseType === "elasticsearch" ||
+    options.databaseType === "easysearch" ||
+    options.databaseType === "qdrant" ||
+    options.databaseType === "milvus" ||
+    options.databaseType === "weaviate" ||
+    options.databaseType === "chromadb" ||
+    options.databaseType === "redis"
+  )
+    return false;
   const context = getSqlCompletionContext(sql, cursor, options);
   if (context.exclusiveColumnSuggestions) return false;
   if (context.qualifier) return false;
@@ -207,7 +217,17 @@ export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, opt
 }
 
 export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
-  if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "chromadb" || options.databaseType === "redis") return false;
+  if (
+    options.databaseType === "mongodb" ||
+    options.databaseType === "elasticsearch" ||
+    options.databaseType === "easysearch" ||
+    options.databaseType === "qdrant" ||
+    options.databaseType === "milvus" ||
+    options.databaseType === "weaviate" ||
+    options.databaseType === "chromadb" ||
+    options.databaseType === "redis"
+  )
+    return false;
   const context = getSqlCompletionContext(sql, cursor, options);
   return context.exclusiveColumnSuggestions || !!context.qualifier || ((context.suggestTables || context.exclusiveTableSuggestions) && isCursorAfterTableTrigger(sql, cursor));
 }

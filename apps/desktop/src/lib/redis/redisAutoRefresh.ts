@@ -5,31 +5,29 @@
  * state-machine logic without mounting a Vue component.
  */
 
-/** Action computed after evaluating one auto-refresh tick. */
-export type AutoRefreshTickAction = { type: "idle" } | { type: "decrement" } | { type: "refresh" };
+export const MIN_REDIS_AUTO_REFRESH_INTERVAL_SECONDS = 1;
+export const MAX_REDIS_AUTO_REFRESH_INTERVAL_SECONDS = 3600;
+export const DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS = 5;
 
-/**
- * Evaluate one tick of the auto-refresh interval.
- *
- * @param enabled  Whether auto-refresh is currently toggled on.
- * @param countdownTtl  Current countdown value in seconds.
- * @param isLoading  Whether a data load is already in flight.
- * @returns The action the caller should take this tick.
- */
-export function computeAutoRefreshTick(enabled: boolean, countdownTtl: number, isLoading: boolean): AutoRefreshTickAction {
-  if (!enabled) return { type: "idle" };
-  if (isLoading) return countdownTtl > 0 ? { type: "decrement" } : { type: "idle" };
-  return countdownTtl <= 1 ? { type: "refresh" } : { type: "decrement" };
+/** Action computed after evaluating one visible TTL countdown tick. */
+export type AutoRefreshTickAction = { type: "idle" } | { type: "decrement" };
+
+/** Keep a user-entered polling frequency within a safe, whole-second range. */
+export function normalizeRedisAutoRefreshInterval(value: unknown): number {
+  const seconds = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(seconds)) return DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS;
+  return Math.min(MAX_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, Math.max(MIN_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, Math.floor(seconds)));
 }
 
 /**
- * Determine whether auto-refresh should be automatically disabled
- * after a server load completes (e.g. key expired or deleted).
+ * Evaluate one one-second visible TTL countdown tick.
  *
- * @param ttl  The TTL value returned by the server (seconds, -1 = no expiry).
+ * @param enabled  Whether auto-refresh is currently toggled on.
+ * @param countdownTtl  Current countdown value in seconds.
+ * @returns The action the caller should take this tick.
  */
-export function shouldStopAutoRefresh(ttl: number): boolean {
-  return ttl <= 0;
+export function computeAutoRefreshTick(enabled: boolean, countdownTtl: number): AutoRefreshTickAction {
+  return enabled && countdownTtl > 0 ? { type: "decrement" } : { type: "idle" };
 }
 
 /**

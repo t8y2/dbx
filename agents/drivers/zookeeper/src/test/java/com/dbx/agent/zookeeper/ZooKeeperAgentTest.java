@@ -7,6 +7,7 @@ import com.google.gson.JsonParser;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.ExponentialBackoffRetry;
+import org.apache.curator.test.InstanceSpec;
 import org.apache.curator.test.TestingServer;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.ZooDefs;
@@ -20,6 +21,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -105,6 +107,134 @@ final class ZooKeeperAgentTest {
         );
 
         Assertions.assertEquals("ZooKeeper TLS is not supported", error.getMessage());
+    }
+
+    @Test
+    void buildClientRejectsUnsupportedAuthSchemeBeforeNetworkProbe() {
+        JsonObject connection = JsonParser.parseString(
+            "{\"auth_scheme\":\"world\",\"connect_string\":\"127.0.0.1:1\"}"
+        ).getAsJsonObject();
+
+        IllegalArgumentException error = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> ZooKeeperAgent.buildClient(connection)
+        );
+
+        Assertions.assertTrue(error.getMessage().contains("world"), error.getMessage());
+        Assertions.assertFalse(error.getMessage().contains("No reachable"), error.getMessage());
+    }
+
+    @Test
+    void saslDigestRequiresUsernameAndPasswordBeforeNetworkProbe() {
+        JsonObject missingUsername = JsonParser.parseString(
+            "{\"auth_scheme\":\"sasl_digest\",\"password\":\"secret\",\"connect_string\":\"127.0.0.1:1\"}"
+        ).getAsJsonObject();
+        JsonObject missingPassword = JsonParser.parseString(
+            "{\"auth_scheme\":\"sasl_digest\",\"username\":\"dbx\",\"connect_string\":\"127.0.0.1:1\"}"
+        ).getAsJsonObject();
+
+        IllegalArgumentException usernameError = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> ZooKeeperAgent.buildClient(missingUsername)
+        );
+        IllegalArgumentException passwordError = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> ZooKeeperAgent.buildClient(missingPassword)
+        );
+
+        Assertions.assertTrue(usernameError.getMessage().contains("username"), usernameError.getMessage());
+        Assertions.assertTrue(passwordError.getMessage().contains("password"), passwordError.getMessage());
+    }
+
+    @Test
+    void rejectsGenericSaslSchemeBeforeNetworkProbe() {
+        JsonObject connection = JsonParser.parseString(
+            "{\"auth_scheme\":\"sasl\",\"username\":\"dbx\",\"password\":\"secret\",\"connect_string\":\"127.0.0.1:1\"}"
+        ).getAsJsonObject();
+
+        IllegalArgumentException error = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> ZooKeeperAgent.buildClient(connection)
+        );
+
+        Assertions.assertTrue(error.getMessage().contains("sasl_digest"), error.getMessage());
+        Assertions.assertFalse(error.getMessage().contains("No reachable"), error.getMessage());
+    }
+
+    @Test
+    void connectsToServerThatRequiresSaslDigestAuthenticationAndRestoresJaasConfiguration() throws Exception {
+        javax.security.auth.login.Configuration previousConfiguration =
+            javax.security.auth.login.Configuration.getConfiguration();
+        String previousRequiredSasl = System.getProperty("zookeeper.sessionRequireClientSASLAuth");
+        String previousServerConfig = System.getProperty("zookeeper.sasl.serverconfig");
+        String previousLoginConfig = System.getProperty("java.security.auth.login.config");
+        java.nio.file.Path jaas = java.nio.file.Files.createTempFile("dbx-zookeeper-server", ".conf");
+        java.nio.file.Files.writeString(jaas, """
+            Server {
+              org.apache.zookeeper.server.auth.DigestLoginModule required
+              user_dbx="secret";
+            };
+            """);
+
+        try {
+            System.setProperty("java.security.auth.login.config", jaas.toString());
+            System.setProperty("zookeeper.sasl.serverconfig", "Server");
+            System.setProperty("zookeeper.sessionRequireClientSASLAuth", "true");
+            javax.security.auth.login.Configuration.getConfiguration().refresh();
+
+            InstanceSpec spec = new InstanceSpec(
+                null,
+                -1,
+                -1,
+                -1,
+                true,
+                -1,
+                -1,
+                -1,
+                Map.of("authProvider.1", "org.apache.zookeeper.server.auth.SASLAuthenticationProvider")
+            );
+            try (TestingServer server = new TestingServer(spec, true)) {
+                String connection = "{\"connection\":{\"url_params\":\"auth_scheme=sasl_digest\","
+                    + "\"username\":\"dbx\",\"password\":\"secret\","
+                    + "\"connect_string\":\"" + server.getConnectString() + "\"}}";
+
+                JsonObject connect = result(request(1, "connect", connection));
+                Assertions.assertNotNull(connect, "SASL connect returned an RPC error");
+                Assertions.assertTrue(connect.get("ok").getAsBoolean());
+
+                JsonObject probe = result(request(2, "test_connection", connection));
+                Assertions.assertNotNull(probe, "concurrent SASL test_connection returned an RPC error");
+                Assertions.assertTrue(probe.get("ok").getAsBoolean());
+
+                JsonObject root = result(request(3, "kv_get", "{\"key\":\"/\"}"));
+                Assertions.assertTrue(root.get("found").getAsBoolean(), "active SASL client must remain usable");
+
+                JsonObject disconnect = result(request(4, "disconnect", "{}"));
+                Assertions.assertTrue(disconnect.get("ok").getAsBoolean());
+
+                String wrongConnection = "{\"connection\":{\"url_params\":\"auth_scheme=sasl_digest\","
+                    + "\"username\":\"dbx\",\"password\":\"wrong\","
+                    + "\"connect_string\":\"" + server.getConnectString() + "\"}}";
+                JsonObject authError = error(request(5, "test_connection", wrongConnection));
+                Assertions.assertTrue(
+                    authError.get("message").getAsString().toLowerCase(java.util.Locale.ROOT).contains("auth"),
+                    authError.toString()
+                );
+            }
+
+            Assertions.assertSame(
+                previousConfiguration,
+                javax.security.auth.login.Configuration.getConfiguration(),
+                "client SASL configuration must be restored after authentication"
+            );
+        } finally {
+            javax.security.auth.login.Configuration.setConfiguration(previousConfiguration);
+            restoreSystemProperty("zookeeper.sessionRequireClientSASLAuth", previousRequiredSasl);
+            restoreSystemProperty("zookeeper.sasl.serverconfig", previousServerConfig);
+            restoreSystemProperty("java.security.auth.login.config", previousLoginConfig);
+            javax.security.auth.login.Configuration.getConfiguration().refresh();
+            java.nio.file.Files.deleteIfExists(jaas);
+        }
     }
 
     @Test
@@ -678,6 +808,14 @@ final class ZooKeeperAgentTest {
     private static String requiredString(JsonObject object, String key) {
         Assertions.assertTrue(object.has(key), "expected result to contain " + key);
         return object.get(key).getAsString();
+    }
+
+    private static void restoreSystemProperty(String key, String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
+        }
     }
 
     private static List<String> listedKeys(JsonObject listResult) {

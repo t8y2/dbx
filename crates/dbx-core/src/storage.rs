@@ -5180,6 +5180,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn minimax_ai_config_roundtrip() {
+        let db = temp_db_path("minimax-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("minimax", true);
+        cfg.config.provider = AiProvider::MiniMax;
+        cfg.config.api_key = "key".to_string();
+        cfg.config.auth_method = AiAuthMethod::Bearer;
+        cfg.config.endpoint = "https://api.minimax.io/v1".to_string();
+        cfg.config.model = "MiniMax-M3".to_string();
+        cfg.config.api_style = AiApiStyle::Completions;
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::MiniMax));
+        assert_eq!(loaded[0].config.auth_method, AiAuthMethod::Bearer);
+        assert_eq!(loaded[0].config.endpoint, "https://api.minimax.io/v1");
+        assert_eq!(loaded[0].config.model, "MiniMax-M3");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
     async fn ai_config_only_one_default() {
         let db = temp_db_path("ai-one-default");
         let storage = Storage::open(&db).await.unwrap();

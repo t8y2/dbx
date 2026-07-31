@@ -40,9 +40,11 @@ import {
   type OpenTabsRestoreMode,
   type SidebarObjectInfoMode,
   type SqlSemanticDiagnosticsMode,
+  type SavedSqlOpenTargetMode,
   type UpdateDownloadSource,
   type CustomThemeColors,
   type CustomTheme,
+  type ClickTableNavigationTarget,
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -305,6 +307,7 @@ const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSe
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
 const editContinueOnErrorOnBatch = ref(settingsStore.editorSettings.continueOnErrorOnBatch);
 const editConfirmUnsavedSqlClose = ref(settingsStore.editorSettings.confirmUnsavedSqlClose);
+const editSavedSqlOpenTargetMode = ref<SavedSqlOpenTargetMode>(settingsStore.editorSettings.savedSqlOpenTargetMode);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
@@ -382,6 +385,7 @@ const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSet
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
 const editPrefillNewQueryWithSelect = ref(settingsStore.editorSettings.prefillNewQueryWithSelect);
+const editClickTableNavigationTarget = ref<ClickTableNavigationTarget>(settingsStore.editorSettings.clickTableNavigationTarget);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
 const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
@@ -463,6 +467,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     continueOnErrorOnBatch: editContinueOnErrorOnBatch.value,
     confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
+    savedSqlOpenTargetMode: editSavedSqlOpenTargetMode.value,
     appLayout: editAppLayout.value,
     tabLayout: editTabLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
@@ -501,6 +506,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     toolbarItems: { ...editToolbarItems.value },
     snippets: editSnippets.value,
     sqlVariableSyntaxOverrides: editSqlVariableSyntaxOverrides.value,
+    clickTableNavigationTarget: editClickTableNavigationTarget.value,
   };
 }
 
@@ -727,6 +733,7 @@ function syncEditorSettingsDraftFromStore() {
   editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
   editContinueOnErrorOnBatch.value = settingsStore.editorSettings.continueOnErrorOnBatch;
   editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
+  editSavedSqlOpenTargetMode.value = settingsStore.editorSettings.savedSqlOpenTargetMode;
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
@@ -751,6 +758,7 @@ function syncEditorSettingsDraftFromStore() {
   editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
   editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
   editPrefillNewQueryWithSelect.value = settingsStore.editorSettings.prefillNewQueryWithSelect;
+  editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
   editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
   editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
@@ -766,6 +774,7 @@ function syncEditorSettingsDraftFromStore() {
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides);
+  editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
   editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
 }
 
@@ -925,6 +934,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
     editContinueOnErrorOnBatch.value = DEFAULT_EDITOR_SETTINGS.continueOnErrorOnBatch;
     editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
+    editSavedSqlOpenTargetMode.value = DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode;
+    editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
@@ -954,6 +965,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
     editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
     editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
+    editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
     editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
@@ -1011,6 +1023,7 @@ function resetAllDefaults() {
   editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
+  editSavedSqlOpenTargetMode.value = DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
@@ -3327,6 +3340,24 @@ onUnmounted(cleanupPreviewEditor);
               </div>
 
               <div class="grid gap-3 md:grid-cols-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="editor-saved-sql-open-target">{{ t("settings.savedSqlOpenTarget") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ editSavedSqlOpenTargetMode === "current" ? t("settings.savedSqlOpenTargetCurrentDescription") : t("settings.savedSqlOpenTargetSavedDescription") }}
+                    </p>
+                  </div>
+                  <Select v-model="editSavedSqlOpenTargetMode">
+                    <SelectTrigger id="editor-saved-sql-open-target" class="h-8 w-44 shrink-0 px-2 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="saved">{{ t("settings.savedSqlOpenTargetSaved") }}</SelectItem>
+                      <SelectItem value="current">{{ t("settings.savedSqlOpenTargetCurrent") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-sql-semantic-diagnostics">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
@@ -3365,6 +3396,16 @@ onUnmounted(cleanupPreviewEditor);
                     </p>
                   </div>
                   <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-click-table-navigation-ddl">{{ t("settings.clickTableNavigationTarget") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.clickTableNavigationTargetDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-click-table-navigation-ddl" :model-value="editClickTableNavigationTarget === 'ddl'" @update:model-value="editClickTableNavigationTarget = $event ? 'ddl' : 'data'" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

@@ -166,6 +166,47 @@ describe("EtcdKeyBrowser TTL capability recovery", () => {
   });
 });
 
+describe("EtcdKeyBrowser global search", () => {
+  it("clears results and counters while retaining the search form", async () => {
+    backend.etcdListPrefix.mockResolvedValue({
+      keys: [
+        {
+          key: "/test/config",
+          keyBytes: { encoding: "utf8", data: "/test/config" },
+          value: { encoding: "utf8", data: "matched value" },
+          modRevision: "8",
+        },
+      ],
+      continuation: null,
+      revision: "8",
+    });
+
+    await mountBrowser();
+    const openSearch = [...root!.querySelectorAll("button")].find((button) => button.textContent?.includes("etcd.globalSearch"));
+    openSearch?.click();
+    await flushUi();
+
+    const input = root!.querySelector<HTMLInputElement>('input[placeholder="etcd.searchPlaceholder"]')!;
+    input.value = "matched";
+    input.dispatchEvent(new Event("input"));
+    await flushUi();
+    const submit = [...root!.querySelectorAll("button")].filter((button) => button.textContent?.includes("etcd.globalSearch")).at(-1);
+    submit?.click();
+    await flushUi();
+
+    expect(root!.textContent).toContain("/test/config");
+    const clear = [...root!.querySelectorAll("button")].find((button) => button.textContent?.includes("etcd.clearSearchResults"));
+    expect(clear).toBeTruthy();
+    clear?.click();
+    await flushUi();
+
+    expect(root!.textContent).not.toContain("/test/config");
+    expect(root!.textContent).toContain("已扫描 0 个 Key");
+    expect(input.value).toBe("matched");
+    expect([...root!.querySelectorAll("button")].some((button) => button.textContent?.includes("etcd.clearSearchResults"))).toBe(false);
+  });
+});
+
 describe("EtcdKeyBrowser byte-identity routing", () => {
   it("keeps colliding display keys on distinct keyBytes routes", async () => {
     backend.etcdListPrefix.mockResolvedValue({
@@ -264,10 +305,10 @@ describe("EtcdKeyBrowser byte-identity routing", () => {
     searchSubmit?.click();
     await flushUi();
 
-    const rows = [...root.querySelectorAll("tbody tr")];
-    expect(rows).toHaveLength(2);
-    rows[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    rows[1].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const resultButtons = [...root.querySelectorAll("button")].filter((button) => button.textContent?.includes("[base64:/w==]"));
+    expect(resultButtons).toHaveLength(2);
+    resultButtons[0].click();
+    resultButtons[1].click();
     await flushUi();
 
     expect(backend.selectKeyCalls).toHaveLength(2);

@@ -1,6 +1,6 @@
 package com.dbx.agent.access;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -29,39 +29,32 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public final class AccessAgent extends BaseDatabaseAgent {
+public final class AccessAgent extends AbstractJdbcAgent {
     private static final String ENCRYPTED_ACCESS_OPENER = EncryptedAccessOpener.class.getName();
-    private Connection connection;
     private String databaseFile = "";
 
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "net.ucanaccess.jdbc.UcanaccessDriver";
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            Class.forName("net.ucanaccess.jdbc.UcanaccessDriver");
-            String file = databasePath(params);
-            String url = jdbcUrl(params, true);
-            connection = DriverManager.getConnection(url, params.getUsername(), params.getPassword());
-            databaseFile = file;
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        return jdbcUrl(params, true);
     }
 
     @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            Class.forName("net.ucanaccess.jdbc.UcanaccessDriver");
-            String file = databasePath(params);
-            if (file.isBlank() || !Files.exists(Path.of(file))) {
-                return false;
-            }
-            try (Connection conn = DriverManager.getConnection(jdbcUrl(params, false), params.getUsername(), params.getPassword())) {
-                return conn.isValid(5);
-            }
-        });
+    protected Connection openTestConnection(ConnectParams params) throws Exception {
+        String file = databasePath(params);
+        if (file.isBlank() || !Files.exists(Path.of(file))) {
+            return null;
+        }
+        return DriverManager.getConnection(jdbcUrl(params, false), params.getUsername(), params.getPassword());
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        databaseFile = databasePath(params);
     }
 
     @Override
@@ -232,16 +225,6 @@ public final class AccessAgent extends BaseDatabaseAgent {
     @Override
     public String setSchemaSQL(String schema) {
         return "";
-    }
-
-    @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
     }
 
     private Set<String> primaryKeyColumns(DatabaseMetaData meta, String table) throws Exception {

@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Pane, Splitpanes } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { ChevronDown, ChevronRight, Clock3, Copy, Download, FolderClosed, FolderOpen, KeyRound, Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from "@lucide/vue";
+import { Activity, ChevronDown, ChevronRight, Clock3, Copy, Download, FolderClosed, FolderOpen, KeyRound, Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -96,6 +96,12 @@ interface KvKeyBrowserLabels {
   summaryVersion?: string;
   summaryLease?: string;
   summarySize?: string;
+  watch?: string;
+  selectExistingLease?: string;
+  enterLeaseId?: string;
+  leasePickerHint?: string;
+  noLeasePickerHint?: string;
+  registryWarning?: string;
 }
 
 interface KvCreateModeOption {
@@ -154,6 +160,9 @@ const props = withDefaults(
     safeWrite?: boolean;
     allowBinaryEdit?: boolean;
     readOnly?: boolean;
+    onWatchKey?: (route: KvKeyRoute) => void;
+    leaseOptions?: Array<{ id: KvInt64; ttl: number; grantedTtl?: number }>;
+    onLeaseOptionsRequested?: () => void;
   }>(),
   {
     supportsCreateModes: false,
@@ -167,6 +176,7 @@ const props = withDefaults(
     safeWrite: false,
     allowBinaryEdit: false,
     readOnly: false,
+    leaseOptions: () => [],
   },
 );
 
@@ -175,6 +185,8 @@ const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const searchInputRef = ref<HTMLInputElement>();
 const prefix = ref("");
+const keySuggestionOpen = ref(false);
+const keySuggestionIndex = ref(-1);
 const keys = ref<KvKeySummary[]>([]);
 const continuation = ref<string | null>(null);
 const listRevision = ref<KvInt64 | null>(null);
@@ -232,6 +244,7 @@ let metadataRefreshInFlight = false;
 let keyListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let keyListRefreshGeneration = 0;
 let keyListRefreshDelayMs = keyListRefreshBaseIntervalMs;
+let initialLoadPromise: Promise<void> | null = null;
 type LoadKeysOptions = {
   preserveSelection?: boolean;
 };
@@ -262,6 +275,21 @@ function knownLeaseKeyRoutes(): KvKeyRoute[] {
 }
 
 const tree = computed(() => buildKvKeyTree(keys.value));
+const keySuggestions = computed(() => {
+  const query = prefix.value.trim();
+  if (!query) return [];
+
+  const seen = new Set<string>();
+  const suggestions: KvKeySummary[] = [];
+  for (const key of keys.value) {
+    if (key.key === query || !key.key.startsWith(query) || seen.has(summaryIdentity(key))) continue;
+    seen.add(summaryIdentity(key));
+    suggestions.push(key);
+    if (suggestions.length === 8) break;
+  }
+  return suggestions;
+});
+const showKeySuggestions = computed(() => keySuggestionOpen.value && keySuggestions.value.length > 0);
 const visibleRows = computed<BrowserTreeRow[]>(() => {
   if (props.lazyHierarchy) return flattenLazyKvKeyTree(lazyTreeState, expandedGroupIds.value);
   return flattenVisibleKvKeyTree(tree.value, expandedGroupIds.value).map((row) => ({ type: "node", node: row.node, depth: row.depth }));
@@ -331,6 +359,61 @@ const highRiskRegistryKey = computed(() => editKey.value === "/registry" || edit
 
 function preserveExpandedGroups(expandAll = false) {
   expandedGroupIds.value = preserveKvExpandedGroupIds(tree.value, expandedGroupIds.value, expandAll);
+}
+
+function closeKeySuggestions() {
+  keySuggestionOpen.value = false;
+  keySuggestionIndex.value = -1;
+}
+
+function onPrefixInput(event: Event) {
+  const value = (event.target as HTMLInputElement).value;
+  keySuggestionOpen.value = Boolean(value.trim());
+  keySuggestionIndex.value = -1;
+}
+
+function moveKeySuggestion(delta: number) {
+  if (!keySuggestions.value.length) return;
+  keySuggestionOpen.value = true;
+  keySuggestionIndex.value = (keySuggestionIndex.value + delta + keySuggestions.value.length) % keySuggestions.value.length;
+}
+
+function acceptKeySuggestion(index: number) {
+  const suggestion = keySuggestions.value[index];
+  if (!suggestion) return;
+  prefix.value = suggestion.key;
+  closeKeySuggestions();
+  void loadKeys(true);
+}
+
+function onPrefixKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return;
+
+  if (event.key === "Escape") {
+    closeKeySuggestions();
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    if (!keySuggestions.value.length) return;
+    event.preventDefault();
+    moveKeySuggestion(1);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    if (!keySuggestions.value.length) return;
+    event.preventDefault();
+    moveKeySuggestion(-1);
+    return;
+  }
+  if (event.key !== "Enter") return;
+
+  event.preventDefault();
+  if (showKeySuggestions.value && keySuggestionIndex.value >= 0) {
+    acceptKeySuggestion(keySuggestionIndex.value);
+    return;
+  }
+  closeKeySuggestions();
+  void loadKeys(true);
 }
 
 function handleKvBrowserSplitResized(payload: { panes?: { size: number }[] }) {
@@ -756,6 +839,11 @@ function openCreateDialog(parentPath?: string) {
   showEditDialog.value = true;
 }
 
+function selectExpiryMode(mode: KvExpiryMode) {
+  editExpiryMode.value = mode;
+  if (mode === "lease") props.onLeaseOptionsRequested?.();
+}
+
 function openEditDialog() {
   if (!selectedKey.value || !canEditSelectedValue.value) return;
   isCreating.value = false;
@@ -928,6 +1016,15 @@ function revisionString(value: string | number | null | undefined): KvInt64 | un
 async function copySelectedKey() {
   if (!selectedKey.value) return;
   await navigator.clipboard.writeText(selectedKey.value);
+}
+
+function watchSelectedKey() {
+  if (!selectedKey.value || !props.onWatchKey) return;
+  props.onWatchKey({
+    key: selectedKey.value,
+    keyIdentity: selectedKeyIdentity.value,
+    keyBytes: selectedKeyBytes.value,
+  });
 }
 
 function downloadText(filename: string, content: string, type = "application/json") {
@@ -1206,6 +1303,27 @@ function refresh(): boolean {
   return true;
 }
 
+function expandPathToKey(key: string) {
+  if (props.lazyHierarchy) return;
+  const segments = key.split("/").filter(Boolean);
+  if (segments.length < 2) return;
+  const next = new Set(expandedGroupIds.value);
+  const groupPrefix = key.startsWith("/") ? "/" : "";
+  for (let index = 1; index < segments.length; index++) {
+    next.add(`group:${groupPrefix}${segments.slice(0, index).join("\u0000")}`);
+  }
+  expandedGroupIds.value = next;
+}
+
+async function selectKeyFromNavigation(key: string | KvKeyRoute) {
+  // Search results can remount this browser. Wait for the initial list reset
+  // before applying the selection so it cannot clear the detail pane afterward.
+  await initialLoadPromise?.catch(() => undefined);
+  const route = routeFromKey(key);
+  expandPathToKey(route.key);
+  await loadSelectedKey(route);
+}
+
 watch(
   () => props.connectionId,
   async () => {
@@ -1251,13 +1369,19 @@ watch(editKey, () => {
   editErrorKind.value = "request";
 });
 
-onMounted(async () => {
-  try {
-    await connectionStore.ensureConnected(props.connectionId);
-  } catch (e) {
-    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
-  }
-  void loadKeys(true);
+onMounted(() => {
+  initialLoadPromise = (async () => {
+    try {
+      await connectionStore.ensureConnected(props.connectionId);
+    } catch (e) {
+      console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+    }
+    try {
+      await loadKeys(true);
+    } catch {
+      // The browser's normal refresh path can retry after a transient failure.
+    }
+  })();
 });
 
 onBeforeUnmount(() => {
@@ -1267,7 +1391,7 @@ onBeforeUnmount(() => {
 defineExpose({
   focusSearch,
   refresh,
-  selectKey: (key: string | KvKeyRoute) => loadSelectedKey(key),
+  selectKey: selectKeyFromNavigation,
   openCreate: (parentPath?: string) => openCreateDialog(parentPath),
   selection: () => ({ key: selectedKey.value, value: selectedValue.value }),
 });
@@ -1278,7 +1402,38 @@ defineExpose({
     <div class="flex shrink-0 items-center gap-2 border-b px-3 py-2">
       <div class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input ref="searchInputRef" v-model="prefix" class="h-8 pl-8" :placeholder="labels.prefixPlaceholder" @keyup.enter="loadKeys(true)" />
+        <Input
+          ref="searchInputRef"
+          v-model="prefix"
+          class="h-8 pl-8"
+          role="combobox"
+          aria-autocomplete="list"
+          :aria-expanded="showKeySuggestions"
+          aria-controls="kv-key-prefix-suggestions"
+          :aria-activedescendant="keySuggestionIndex >= 0 ? `kv-key-prefix-suggestion-${keySuggestionIndex}` : undefined"
+          :placeholder="labels.prefixPlaceholder"
+          @input="onPrefixInput"
+          @focus="keySuggestionOpen = Boolean(prefix.trim())"
+          @blur="closeKeySuggestions"
+          @keydown="onPrefixKeydown"
+        />
+        <div v-if="showKeySuggestions" id="kv-key-prefix-suggestions" role="listbox" class="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-lg">
+          <button
+            v-for="(suggestion, index) in keySuggestions"
+            :id="`kv-key-prefix-suggestion-${index}`"
+            :key="summaryIdentity(suggestion)"
+            type="button"
+            role="option"
+            :aria-selected="keySuggestionIndex === index"
+            class="flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-xs"
+            :class="keySuggestionIndex === index ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/70'"
+            @mouseenter="keySuggestionIndex = index"
+            @mousedown.prevent="acceptKeySuggestion(index)"
+          >
+            <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span class="truncate">{{ suggestion.key }}</span>
+          </button>
+        </div>
       </div>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="loadKeys(true, { preserveSelection: true })">
         <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
@@ -1306,8 +1461,8 @@ defineExpose({
               <CustomContextMenu v-if="row.type === 'node'" :items="nodeContextMenuItems(row.node)" v-slot="{ onContextMenu }">
                 <button
                   type="button"
-                  class="flex h-8 w-full items-center gap-1.5 px-2 text-left hover:bg-accent"
-                  :class="{ 'bg-accent/70': rowIsSelected(row.node) }"
+                  class="flex h-8 w-full items-center gap-1.5 px-2 text-left transition-colors hover:bg-accent"
+                  :class="rowIsSelected(row.node) ? 'bg-primary/10 font-medium text-foreground shadow-[inset_3px_0_0_hsl(var(--primary))]' : ''"
                   :style="{ paddingLeft: `${8 + row.depth * 18}px` }"
                   @click="onRowClick(row.node)"
                   @dblclick.stop.prevent="onRowDoubleClick(row.node)"
@@ -1369,6 +1524,10 @@ defineExpose({
                 </div>
               </div>
               <div class="flex shrink-0 gap-2">
+                <Button v-if="onWatchKey" size="sm" variant="outline" class="h-8 gap-1.5" @click="watchSelectedKey">
+                  <Activity class="h-3.5 w-3.5" />
+                  {{ labels.watch || "Watch" }}
+                </Button>
                 <Button v-if="api.history" size="sm" variant="outline" class="h-8 gap-1.5" @click="openHistory">
                   <Clock3 class="h-3.5 w-3.5" />
                   {{ labels.history || "History" }}
@@ -1427,7 +1586,9 @@ defineExpose({
             <div v-if="editError && editErrorKind === 'keyAlreadyExists'" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
               {{ editError }}
             </div>
-            <div v-if="highRiskRegistryKey" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">This key is under /registry/, a namespace commonly used by control-plane components. Verify the owner and impact before saving.</div>
+            <div v-if="highRiskRegistryKey" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+              {{ labels.registryWarning || "This key is under /registry/, a namespace commonly used by control-plane components. Verify the owner and impact before saving." }}
+            </div>
           </div>
 
           <div v-if="showCreateModeSelect" class="grid gap-2">
@@ -1454,7 +1615,7 @@ defineExpose({
                 class="flex min-h-20 items-start gap-3 rounded-md border bg-background px-3 py-3 text-left transition-colors hover:border-primary/50 disabled:cursor-not-allowed disabled:opacity-45"
                 :class="editExpiryMode === option.value ? 'border-primary bg-primary/5 ring-1 ring-primary/30' : 'border-input'"
                 :disabled="option.disabled"
-                @click="editExpiryMode = option.value"
+                @click="selectExpiryMode(option.value)"
               >
                 <span class="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="editExpiryMode === option.value ? 'border-primary' : 'border-muted-foreground/50'">
                   <span v-if="editExpiryMode === option.value" class="h-2 w-2 rounded-full bg-primary" />
@@ -1471,7 +1632,16 @@ defineExpose({
             </div>
             <div v-else-if="editExpiryMode === 'lease'" class="grid gap-2 md:grid-cols-[160px_1fr] md:items-center">
               <Label for="kv-edit-lease">{{ labels.leaseId || "Lease ID" }}</Label>
-              <Input id="kv-edit-lease" v-model="editLeaseId" class="h-10 font-mono" inputmode="numeric" :placeholder="labels.leasePlaceholder || 'Existing Lease ID'" />
+              <div class="grid gap-2">
+                <Select v-if="leaseOptions.length" :model-value="editLeaseId" @update:model-value="(value) => (editLeaseId = String(value))">
+                  <SelectTrigger class="h-10 font-mono"><SelectValue :placeholder="labels.selectExistingLease || 'Select an existing Lease'" /></SelectTrigger>
+                  <SelectContent
+                    ><SelectItem v-for="lease in leaseOptions" :key="lease.id" :value="String(lease.id)">{{ lease.id }} · TTL {{ lease.ttl }}s</SelectItem></SelectContent
+                  >
+                </Select>
+                <Input id="kv-edit-lease" v-model="editLeaseId" class="h-10 font-mono" inputmode="numeric" :placeholder="leaseOptions.length ? labels.enterLeaseId || 'Or enter a Lease ID manually' : labels.leasePlaceholder || 'Existing Lease ID'" />
+                <span class="text-xs text-muted-foreground">{{ leaseOptions.length ? labels.leasePickerHint || "Choose a Lease from this session or enter a Lease ID manually." : labels.noLeasePickerHint || "No Lease is available in this session. Enter an ID manually and save." }}</span>
+              </div>
             </div>
             <div v-if="showTtlUnavailable" class="text-xs text-amber-700 dark:text-amber-300">
               {{ labels.ttlUnavailable }}

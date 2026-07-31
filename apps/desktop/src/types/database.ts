@@ -12,6 +12,7 @@ export type DatabaseType =
   | "mongodb"
   | "oracle"
   | "elasticsearch"
+  | "easysearch"
   | "hbase"
   | "qdrant"
   | "milvus"
@@ -66,6 +67,10 @@ export type DatabaseType =
   | "jdbc"
   | "mq"
   | "nacos";
+
+export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "elasticsearch" || dbType === "easysearch";
+}
 
 export interface SqlSnippet {
   id: string;
@@ -781,6 +786,7 @@ export type TreeNodeType =
   | "nacos-namespace"
   | "etcd-root"
   | "etcd-dashboard"
+  | "etcd-access-control"
   | "zookeeper-root"
   | "mongo-db"
   | "mongo-gridfs"
@@ -972,6 +978,7 @@ export interface QueryTab {
     | "hbase"
     | "etcd"
     | "etcd-dashboard"
+    | "etcd-access-control"
     | "zookeeper"
     | "mq"
     | "nacos"
@@ -1116,6 +1123,21 @@ export interface VectorCollectionMeta {
   collectionId?: string;
 }
 
+export interface MilvusFieldInfo {
+  name: string;
+  dataType: string;
+  dimension?: number;
+  primaryKey: boolean;
+  autoId: boolean;
+  nullable: boolean;
+  hasDefaultValue: boolean;
+  isFunctionOutput: boolean;
+}
+
+export interface MilvusCollectionSchema {
+  fields: MilvusFieldInfo[];
+}
+
 /** Mongo collection node metadata (not SQL tableType). */
 export type MongoCollectionKind = "collection" | "view" | "timeseries";
 
@@ -1127,6 +1149,7 @@ export interface CollectionInfo {
   name: string;
   id: string;
   dimension?: number;
+  milvusSchema?: MilvusCollectionSchema;
   kind?: MongoCollectionKind | "bucket";
   bucketName?: string;
 }

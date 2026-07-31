@@ -1797,32 +1797,36 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     result
 }
 
+const SHOW_DATABASES_SQL: &str = "SHOW DATABASES";
+const INFORMATION_SCHEMA_DATABASES_SQL: &str =
+    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME";
+const DATABASE_LIST_QUERY_PLAN: [(&str, bool); 2] =
+    [(SHOW_DATABASES_SQL, true), (INFORMATION_SCHEMA_DATABASES_SQL, false)];
+
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = match conn.query_iter("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME").await
-    {
-        Ok(result) => result,
+    let [(primary_sql, primary_catalogless), (fallback_sql, fallback_catalogless)] = DATABASE_LIST_QUERY_PLAN;
+    match list_databases_with_query(pool, primary_sql, primary_catalogless).await {
+        Ok(databases) => Ok(databases),
         Err(err) => {
-            log::debug!("Falling back to SHOW DATABASES after information_schema.SCHEMATA failed: {err}");
-            return list_databases_show(pool).await;
+            log::debug!("Falling back to information_schema.SCHEMATA after SHOW DATABASES failed: {err}");
+            list_databases_with_query(pool, fallback_sql, fallback_catalogless).await
         }
-    };
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let databases = database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), false);
-
-    if databases.is_empty() {
-        log::debug!("Falling back to SHOW DATABASES after information_schema.SCHEMATA returned no named databases");
-        return list_databases_show(pool).await;
     }
+}
 
-    Ok(databases)
+async fn list_databases_with_query(
+    pool: &MySqlPool,
+    sql: &str,
+    include_catalogless_when_blank: bool,
+) -> Result<Vec<DatabaseInfo>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), include_catalogless_when_blank))
 }
 
 pub async fn list_databases_show(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter("SHOW DATABASES").await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), true))
+    list_databases_with_query(pool, SHOW_DATABASES_SQL, true).await
 }
 
 pub(super) fn database_infos_from_names(
@@ -3002,15 +3006,18 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
 }
 
 fn columns_sql(database: &str, table: &str) -> String {
+    // Query only information_schema.COLUMNS and fetch TABLE_COLLATION separately via
+    // `table_collation_sql`. A LEFT JOIN onto information_schema.TABLES triggers a
+    // catastrophic plan on MySQL 5.7 (observed ~8s vs ~1ms without the join), because 5.7's
+    // TABLES metadata is materialized per-query with poor predicate pushdown. The separate
+    // lookup matches the `get_columns_show` fallback path and keeps results identical.
     format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
-         c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
-         c.CHARACTER_SET_NAME, c.COLLATION_NAME, t.TABLE_COLLATION \
-         FROM information_schema.COLUMNS c \
-         LEFT JOIN information_schema.TABLES t \
-           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
-         WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
-         ORDER BY c.ORDINAL_POSITION",
+        "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, \
+         COLUMN_COMMENT, COLUMN_KEY, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH, \
+         CHARACTER_SET_NAME, COLLATION_NAME \
+         FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         ORDER BY ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
     )
@@ -3175,8 +3182,14 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    let table_collation =
-        rows.iter().find_map(|row| get_opt_str(row, "TABLE_COLLATION").filter(|value| !value.trim().is_empty()));
+    // When database is empty the COLUMNS query returns no rows, so the
+    // function falls through to get_columns_show and this code path is
+    // never reached.  Skip the collation lookup to avoid a pointless query.
+    let table_collation = if database.trim().is_empty() {
+        None
+    } else {
+        query_first_nonblank_string(&mut conn, &table_collation_sql(database, table)).await
+    };
     let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
@@ -4820,6 +4833,17 @@ mod tests {
     }
 
     #[test]
+    fn mysql_database_listing_prefers_show_databases() {
+        assert_eq!(
+            DATABASE_LIST_QUERY_PLAN,
+            [
+                ("SHOW DATABASES", true),
+                ("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME", false),
+            ]
+        );
+    }
+
+    #[test]
     fn mysql_show_metadata_sql_supports_catalogless_services() {
         assert_eq!(show_tables_filtered_sql("", true, None, &[]), "SHOW FULL TABLES");
         assert_eq!(show_tables_filtered_sql("", false, None, &[]), "SHOW TABLES");
@@ -4914,13 +4938,15 @@ mod tests {
         let sql = columns_sql("app", "users");
 
         assert!(sql.contains("information_schema.COLUMNS"));
-        assert!(sql.contains("information_schema.TABLES"));
-        assert!(sql.contains("t.TABLE_COLLATION"));
+        // TABLE_COLLATION is fetched separately via `table_collation_sql`; the LEFT JOIN onto
+        // information_schema.TABLES is intentionally avoided to keep MySQL 5.7 fast.
+        assert!(!sql.contains("information_schema.TABLES"));
+        assert!(!sql.contains("TABLE_COLLATION"));
         assert!(!sql.contains("KEY_COLUMN_USAGE"));
         assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
-        assert!(sql.contains("c.COLUMN_KEY"));
-        assert!(sql.contains("c.DATA_TYPE"));
-        assert!(sql.contains("c.COLUMN_TYPE"));
+        assert!(sql.contains("COLUMN_KEY"));
+        assert!(sql.contains("DATA_TYPE"));
+        assert!(sql.contains("COLUMN_TYPE"));
         assert!(!sql.contains("COLLATE"));
         assert!(!sql.contains("AS ENUM_VALUES"));
     }

@@ -30,6 +30,7 @@ import {
   UsersRound,
   CalendarClock,
   Gauge,
+  ShieldCheck,
   Lock,
   Archive,
   Square,
@@ -257,6 +258,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Database, colorClass: "text-sky-500" };
     case "etcd-dashboard":
       return { icon: Gauge, colorClass: "text-sky-500" };
+    case "etcd-access-control":
+      return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "mongo-db":
@@ -382,6 +385,7 @@ function connectionTooltipScheme(config: Pick<ConnectionConfig, "db_type" | "ssl
     case "sqlserver":
       return "mssql";
     case "elasticsearch":
+    case "easysearch":
     case "qdrant":
     case "milvus":
     case "weaviate":
@@ -1166,7 +1170,7 @@ function onKeydown(event: KeyboardEvent) {
               @keydown.escape.prevent="isRenamingGroup = false"
               @click.stop
             />
-            <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+            <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' }]">{{ visibleLabel(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
               type="button"

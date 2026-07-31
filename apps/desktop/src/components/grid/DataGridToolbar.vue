@@ -109,9 +109,8 @@ function actionLabelClass() {
           <template v-for="item in copyData?.items ?? []" :key="item.value">
             <DropdownMenuSeparator v-if="item.separatorBefore" />
             <DropdownMenuItem class="gap-2" :disabled="item.disabled" @select="void selectDataGridToolbarCopyItem(copyData, item.value)">
-              <Check v-if="copyData?.currentValue === item.value" class="h-3.5 w-3.5" />
-              <span v-else class="h-3.5 w-3.5" />
-              {{ item.label }}
+              <span class="flex-1">{{ item.label }}</span>
+              <Check v-if="copyData?.currentValue === item.value" class="h-3.5 w-3.5 shrink-0 text-primary" />
             </DropdownMenuItem>
           </template>
         </DropdownMenuContent>

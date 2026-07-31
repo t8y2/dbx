@@ -16,4 +16,11 @@ describe("Elasticsearch JSON response detection", () => {
       body: '[{"index":"data_pack_and_box_index_v1","docs.count":"42"}]',
     });
   });
+
+  it("routes Easysearch REST responses through the same JSON renderer", () => {
+    expect(elasticsearchJsonResponseForResult("easysearch", "GET /_cat/indices", catJsonResult)).toEqual({
+      status: 200,
+      body: '[{"index":"data_pack_and_box_index_v1","docs.count":"42"}]',
+    });
+  });
 });

@@ -81,14 +81,25 @@ impl AgentRuntimeClient {
             handshake: AgentHandshake { protocol_version: 0, agent_protocol_version: 0, capabilities: Vec::new() },
         });
         runtime.start_response_reader(stdout);
-        let handshake = runtime
+        let handshake = match runtime
             .call::<AgentHandshake>(
                 AgentMethod::Handshake.as_str(),
                 agent_handshake_params(app_version),
                 Some(Duration::from_secs(RPC_TIMEOUT_SECS)),
                 None,
             )
-            .await?;
+            .await
+        {
+            Ok(handshake) => handshake,
+            Err(error) if is_unsupported_handshake_error(&error) => {
+                runtime.kill();
+                return Err("Agent runtime does not support multi_session protocol v2".to_string());
+            }
+            Err(error) => {
+                runtime.kill();
+                return Err(error);
+            }
+        };
         if handshake.protocol_version < 2 || !handshake.supports(AgentCapability::MultiSession) {
             runtime.kill();
             return Err("Agent runtime does not support multi_session protocol v2".to_string());
@@ -387,11 +398,16 @@ pub enum AgentCapability {
     KvListValues,
     KvStatus,
     KvHistory,
+    EtcdCompaction,
+    EtcdDefrag,
+    EtcdWatch,
+    EtcdLease,
+    EtcdAuth,
     MultiSession,
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 19] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -405,6 +421,11 @@ impl AgentCapability {
         Self::KvListValues,
         Self::KvStatus,
         Self::KvHistory,
+        Self::EtcdCompaction,
+        Self::EtcdDefrag,
+        Self::EtcdWatch,
+        Self::EtcdLease,
+        Self::EtcdAuth,
         Self::MultiSession,
     ];
 
@@ -423,6 +444,11 @@ impl AgentCapability {
             Self::KvListValues => "kv_list_values",
             Self::KvStatus => "kv_status",
             Self::KvHistory => "kv_history",
+            Self::EtcdCompaction => "etcd_compaction",
+            Self::EtcdDefrag => "etcd_defrag",
+            Self::EtcdWatch => "etcd_watch",
+            Self::EtcdLease => "etcd_lease",
+            Self::EtcdAuth => "etcd_auth",
             Self::MultiSession => "multi_session",
         }
     }
@@ -655,11 +681,64 @@ pub enum AgentKvMethod {
     Rename,
     History,
     Status,
+    Compact,
+    Defrag,
+    WatchStart,
+    WatchPoll,
+    WatchStop,
+    LeaseList,
+    LeaseGet,
+    LeaseGrant,
+    LeaseKeepalive,
+    LeaseRevoke,
+    AuthUserList,
+    AuthUserGet,
+    AuthUserAdd,
+    AuthUserDelete,
+    AuthUserChangePassword,
+    AuthUserGrantRole,
+    AuthUserRevokeRole,
+    AuthRoleList,
+    AuthRoleGet,
+    AuthRoleAdd,
+    AuthRoleDelete,
+    AuthRoleGrantPermission,
+    AuthRoleRevokePermission,
 }
 
 impl AgentKvMethod {
-    pub const ALL: [Self; 7] =
-        [Self::ListPrefix, Self::Get, Self::Put, Self::Delete, Self::Rename, Self::History, Self::Status];
+    pub const ALL: [Self; 30] = [
+        Self::ListPrefix,
+        Self::Get,
+        Self::Put,
+        Self::Delete,
+        Self::Rename,
+        Self::History,
+        Self::Status,
+        Self::Compact,
+        Self::Defrag,
+        Self::WatchStart,
+        Self::WatchPoll,
+        Self::WatchStop,
+        Self::LeaseList,
+        Self::LeaseGet,
+        Self::LeaseGrant,
+        Self::LeaseKeepalive,
+        Self::LeaseRevoke,
+        Self::AuthUserList,
+        Self::AuthUserGet,
+        Self::AuthUserAdd,
+        Self::AuthUserDelete,
+        Self::AuthUserChangePassword,
+        Self::AuthUserGrantRole,
+        Self::AuthUserRevokeRole,
+        Self::AuthRoleList,
+        Self::AuthRoleGet,
+        Self::AuthRoleAdd,
+        Self::AuthRoleDelete,
+        Self::AuthRoleGrantPermission,
+        Self::AuthRoleRevokePermission,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -670,6 +749,29 @@ impl AgentKvMethod {
             Self::Rename => "kv_rename",
             Self::History => "kv_history",
             Self::Status => "kv_status",
+            Self::Compact => "etcd_compact",
+            Self::Defrag => "etcd_defrag",
+            Self::WatchStart => "etcd_watch_start",
+            Self::WatchPoll => "etcd_watch_poll",
+            Self::WatchStop => "etcd_watch_stop",
+            Self::LeaseList => "etcd_lease_list",
+            Self::LeaseGet => "etcd_lease_get",
+            Self::LeaseGrant => "etcd_lease_grant",
+            Self::LeaseKeepalive => "etcd_lease_keepalive_once",
+            Self::LeaseRevoke => "etcd_lease_revoke",
+            Self::AuthUserList => "etcd_auth_user_list",
+            Self::AuthUserGet => "etcd_auth_user_get",
+            Self::AuthUserAdd => "etcd_auth_user_add",
+            Self::AuthUserDelete => "etcd_auth_user_delete",
+            Self::AuthUserChangePassword => "etcd_auth_user_change_password",
+            Self::AuthUserGrantRole => "etcd_auth_user_grant_role",
+            Self::AuthUserRevokeRole => "etcd_auth_user_revoke_role",
+            Self::AuthRoleList => "etcd_auth_role_list",
+            Self::AuthRoleGet => "etcd_auth_role_get",
+            Self::AuthRoleAdd => "etcd_auth_role_add",
+            Self::AuthRoleDelete => "etcd_auth_role_delete",
+            Self::AuthRoleGrantPermission => "etcd_auth_role_grant_permission",
+            Self::AuthRoleRevokePermission => "etcd_auth_role_revoke_permission",
         }
     }
 }
@@ -1741,6 +1843,11 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::KvListValues
             | AgentCapability::KvStatus
             | AgentCapability::KvHistory
+            | AgentCapability::EtcdCompaction
+            | AgentCapability::EtcdDefrag
+            | AgentCapability::EtcdWatch
+            | AgentCapability::EtcdLease
+            | AgentCapability::EtcdAuth
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
@@ -2634,6 +2741,42 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn shared_runtime_routes_agents_without_handshake_to_legacy_fallback() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-runtime-no-handshake-test-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({
+        'jsonrpc': '2.0',
+        'id': req['id'],
+        'error': {'code': -1, 'message': 'Unknown method: ' + req['method']}
+    }), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let error = match AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        {
+            Ok(runtime) => {
+                runtime.kill();
+                panic!("agent without handshake unexpectedly started as a shared runtime");
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "Agent runtime does not support multi_session protocol v2");
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
     async fn canceling_one_runtime_request_keeps_other_requests_alive() {
         let script_path = std::env::temp_dir().join(format!("dbx-agent-cancel-test-{}.py", uuid::Uuid::new_v4()));
         std::fs::write(
@@ -2766,8 +2909,13 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::KvListValues.as_str(), "kv_list_values");
         assert_eq!(AgentCapability::KvStatus.as_str(), "kv_status");
         assert_eq!(AgentCapability::KvHistory.as_str(), "kv_history");
+        assert_eq!(AgentCapability::EtcdCompaction.as_str(), "etcd_compaction");
+        assert_eq!(AgentCapability::EtcdDefrag.as_str(), "etcd_defrag");
+        assert_eq!(AgentCapability::EtcdWatch.as_str(), "etcd_watch");
+        assert_eq!(AgentCapability::EtcdLease.as_str(), "etcd_lease");
+        assert_eq!(AgentCapability::EtcdAuth.as_str(), "etcd_auth");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
-        assert_eq!(AgentCapability::ALL.len(), 14);
+        assert_eq!(AgentCapability::ALL.len(), 19);
     }
 
     #[test]
@@ -2831,7 +2979,19 @@ for line in sys.stdin:
         assert_eq!(AgentKvMethod::Rename.as_str(), "kv_rename");
         assert_eq!(AgentKvMethod::History.as_str(), "kv_history");
         assert_eq!(AgentKvMethod::Status.as_str(), "kv_status");
-        assert_eq!(AgentKvMethod::ALL.len(), 7);
+        assert_eq!(AgentKvMethod::Compact.as_str(), "etcd_compact");
+        assert_eq!(AgentKvMethod::Defrag.as_str(), "etcd_defrag");
+        assert_eq!(AgentKvMethod::WatchStart.as_str(), "etcd_watch_start");
+        assert_eq!(AgentKvMethod::WatchPoll.as_str(), "etcd_watch_poll");
+        assert_eq!(AgentKvMethod::WatchStop.as_str(), "etcd_watch_stop");
+        assert_eq!(AgentKvMethod::LeaseList.as_str(), "etcd_lease_list");
+        assert_eq!(AgentKvMethod::LeaseGet.as_str(), "etcd_lease_get");
+        assert_eq!(AgentKvMethod::LeaseGrant.as_str(), "etcd_lease_grant");
+        assert_eq!(AgentKvMethod::LeaseKeepalive.as_str(), "etcd_lease_keepalive_once");
+        assert_eq!(AgentKvMethod::LeaseRevoke.as_str(), "etcd_lease_revoke");
+        assert_eq!(AgentKvMethod::AuthUserList.as_str(), "etcd_auth_user_list");
+        assert_eq!(AgentKvMethod::AuthRoleGrantPermission.as_str(), "etcd_auth_role_grant_permission");
+        assert_eq!(AgentKvMethod::ALL.len(), 30);
     }
 
     #[test]

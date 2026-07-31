@@ -116,7 +116,15 @@ pub async fn start_transfer(
             }
         };
 
-        let source_pool_key = match app.get_or_create_pool(&req.source_connection_id, Some(&req.source_database)).await
+        // External Doris/StarRocks catalogs: pool is created with `catalog=` URL
+        // setup (SET catalog) and without USE <external-db>. See ensure_transfer_pool.
+        let source_pool_key = match transfer::ensure_transfer_pool(
+            &app,
+            &req.source_connection_id,
+            &req.source_database,
+            req.source_catalog.as_deref(),
+        )
+        .await
         {
             Ok(k) => k,
             Err(e) => {
@@ -125,7 +133,13 @@ pub async fn start_transfer(
                 return;
             }
         };
-        let target_pool_key = match app.get_or_create_pool(&req.target_connection_id, Some(&req.target_database)).await
+        let target_pool_key = match transfer::ensure_transfer_pool(
+            &app,
+            &req.target_connection_id,
+            &req.target_database,
+            req.target_catalog.as_deref(),
+        )
+        .await
         {
             Ok(k) => k,
             Err(e) => {
@@ -137,19 +151,36 @@ pub async fn start_transfer(
 
         let tables = req.tables.clone();
         // Sort by FK dependency so referenced tables are transferred first.
-        let tables = transfer::sort_tables_by_fk_dependency(
-            &app,
-            &req.source_connection_id,
-            &req.source_database,
-            &req.source_schema,
-            &tables,
-            true,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
-            tables
-        });
+        // Skip for external Doris/StarRocks catalogs — the database name does
+        // not exist in the default catalog and sorting is unnecessary.
+        let tables = {
+            let skip_fk_sort = {
+                let configs = app.configs.read().await;
+                configs
+                    .get(&req.source_connection_id)
+                    .and_then(|config| {
+                        transfer::resolve_external_transfer_catalog_for_config(req.source_catalog.as_deref(), config)
+                    })
+                    .is_some()
+            };
+            if skip_fk_sort {
+                tables
+            } else {
+                transfer::sort_tables_by_fk_dependency(
+                    &app,
+                    &req.source_connection_id,
+                    &req.source_database,
+                    &req.source_schema,
+                    &tables,
+                    true,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+                    tables
+                })
+            }
+        };
         let mut failed_tables: Vec<String> = Vec::new();
 
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
@@ -375,16 +406,22 @@ pub async fn preview_transfer_ownership(
     transfer::validate_transfer_target_table_names(&req).map_err(AppError::from)?;
     let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
     let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
-    let source_pool_key = state
-        .app
-        .get_or_create_pool(&req.source_connection_id, Some(&req.source_database))
-        .await
-        .map_err(AppError::from)?;
-    let target_pool_key = state
-        .app
-        .get_or_create_pool(&req.target_connection_id, Some(&req.target_database))
-        .await
-        .map_err(AppError::from)?;
+    let source_pool_key = transfer::ensure_transfer_pool(
+        &state.app,
+        &req.source_connection_id,
+        &req.source_database,
+        req.source_catalog.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    let target_pool_key = transfer::ensure_transfer_pool(
+        &state.app,
+        &req.target_connection_id,
+        &req.target_database,
+        req.target_catalog.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
     let preview = transfer::preview_transfer_ownership(
         &state.app,
         &req,

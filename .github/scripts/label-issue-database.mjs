@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+
+import { databaseIssueDrivers } from "./database-issue-catalog.mjs";
 
 const LABEL_PREFIX = "db/";
 const USER_PRIORITY_PREFIX = "user-priority/";
 const API_VERSION = "2022-11-28";
 const dryRun = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
+const syncDatabaseLabels = process.env.SYNC_DATABASE_LABELS === "1" || process.env.SYNC_DATABASE_LABELS === "true";
 
 const USER_PRIORITY_LABELS = {
   P0: { color: "b60205", description: "User-reported priority: urgent" },
@@ -27,42 +31,6 @@ const LABEL_PALETTE = [
   "f29513",
   "c5def5",
 ];
-
-const extraAliases = {
-  mysql: ["mariadb", "percona", "tidb"],
-  postgres: ["postgresql", "postgres", "pgsql", "pg", "hologres"],
-  sqlite: ["sqlite3", "sql lite"],
-  clickhouse: ["click house", "ch"],
-  sqlserver: ["sql server", "mssql", "microsoft sql server", "sqlservice"],
-  mongodb: ["mongo", "mongodb"],
-  oracle: ["oracle database"],
-  elasticsearch: ["elastic search"],
-  chromadb: ["chroma"],
-  manticoresearch: ["manticore"],
-  dameng: ["dm8", "dameng", "达梦"],
-  kingbase: ["kingbasees", "kingbase", "人大金仓", "金仓"],
-  highgo: ["瀚高"],
-  yashandb: ["yashan", "崖山"],
-  saphana: ["hana", "sap hana"],
-  opengauss: ["open gauss"],
-  "oceanbase-oracle": ["oceanbase", "oceanbase oracle"],
-  gbase: ["gbase 8a", "gbase8a", "gbase 8s", "gbase8s"],
-  access: ["microsoft access", "ms access"],
-  vastbase: ["vastbase g", "vastbaseg"],
-  prestosql: ["presto", "presto sql"],
-  hive: ["apache hive"],
-  db2: ["ibm db2"],
-  informix: ["ibm informix"],
-  bigquery: ["google bigquery"],
-  kylin: ["apache kylin"],
-  oscar: ["shentong", "oscar", "神通"],
-  xugu: ["xugudb", "xugu", "虚谷"],
-  zookeeper: ["zoo keeper", "apache zookeeper"],
-  mq: ["message queue", "kafka", "rabbitmq", "rocketmq"],
-  iotdb: ["apache iotdb"],
-  iris: ["intersystems iris", "intersystems cache", "intersystems caché", "cache", "caché", "ensemble"],
-  spark: ["apache spark"],
-};
 
 const globallyAmbiguousAliases = new Set([
   "access",
@@ -91,13 +59,7 @@ const genericDatabaseValues = [
   "不适用",
 ];
 
-const manifestUrl = new URL("../../crates/dbx-core/assets/database-drivers.manifest.json", import.meta.url);
-const manifest = JSON.parse(fs.readFileSync(manifestUrl, "utf8"));
-const drivers = manifest.drivers.map((driver) => ({
-  dbType: driver.dbType,
-  label: driver.label,
-  aliases: [...new Set([driver.dbType, driver.label, ...(extraAliases[driver.dbType] || [])])],
-}));
+const drivers = databaseIssueDrivers;
 const exactAsciiAliases = new Set(
   drivers.flatMap((driver) => driver.aliases.map((alias) => compactAscii(alias)).filter((alias) => alias.length >= 5)),
 );
@@ -432,15 +394,34 @@ async function githubRequest(method, path, body) {
   return payload;
 }
 
-async function ensureLabel(name, description, color) {
+function databaseLabelSpec(driver) {
+  return {
+    name: `${LABEL_PREFIX}${driver.dbType}`,
+    description: `Database: ${driver.label}`,
+    color: stablePaletteColor(driver.dbType),
+  };
+}
+
+export function allDatabaseLabelSpecs() {
+  return drivers.map(databaseLabelSpec);
+}
+
+async function ensureLabel({ name, description, color }, { updateExisting = false } = {}) {
   try {
     const dbType = name.startsWith(LABEL_PREFIX) ? name.slice(LABEL_PREFIX.length) : name;
     await githubRequest("POST", "/labels", { name, color: color || stablePaletteColor(dbType), description });
     console.log(`Created label ${name}`);
   } catch (error) {
-    // GitHub returns 422 when the label already exists; that is the common path
-    // after the first issue for a database type has been triaged.
     if (error.status === 422) {
+      if (updateExisting) {
+        await githubRequest("PATCH", `/labels/${encodeURIComponent(name)}`, {
+          new_name: name,
+          color,
+          description,
+        });
+        console.log(`Updated label ${name}`);
+        return;
+      }
       console.log(`Label ${name} already exists`);
       return;
     }
@@ -466,115 +447,146 @@ async function updateIssueTitle(issueNumber, title) {
   await githubRequest("PATCH", `/issues/${issueNumber}`, { title });
 }
 
-const issue = loadIssue();
-if (issue.pull_request) {
-  console.log("Skipping pull request event");
-  process.exit(0);
-}
+export function triageIssue(issue) {
+  if (!issue.number) {
+    throw new Error("Issue number is required");
+  }
 
-if (!issue.number) {
-  throw new Error("Issue number is required");
-}
+  const databaseField = extractDatabaseField(issue.body || "");
+  const hasDatabaseField = databaseField.length > 0;
+  const fieldIsGeneric = hasDatabaseField && isGenericDatabaseValue(databaseField);
+  const sourceText = hasDatabaseField ? databaseField : issue.title || "";
+  const matchedDrivers = isGenericDatabaseValue(sourceText)
+    ? []
+    : uniqueByDbType(matchDrivers(sourceText, { allowAmbiguous: hasDatabaseField }));
+  const titleMatchedDrivers = uniqueByDbType(matchDrivers(issue.title || "", { allowAmbiguous: false }));
+  if (hasDatabaseField && titleMatchedDrivers.length > 0) {
+    matchedDrivers.push(...titleMatchedDrivers);
+  }
+  if (hasDatabaseField && matchedDrivers.length === 0 && !fieldIsGeneric) {
+    matchedDrivers.push(
+      ...uniqueByDbType(matchDrivers(`${issue.title || ""}\n${databaseField}`, { allowAmbiguous: false })),
+    );
+  }
 
-const databaseField = extractDatabaseField(issue.body || "");
-const hasDatabaseField = databaseField.length > 0;
-const fieldIsGeneric = hasDatabaseField && isGenericDatabaseValue(databaseField);
-// Free-form bodies often mention comparison databases or examples; the title
-// and issue-form database field are the reliable labeling sources.
-const sourceText = hasDatabaseField ? databaseField : issue.title || "";
-const matchedDrivers = isGenericDatabaseValue(sourceText)
-  ? []
-  : uniqueByDbType(matchDrivers(sourceText, { allowAmbiguous: hasDatabaseField }));
-const titleMatchedDrivers = uniqueByDbType(matchDrivers(issue.title || "", { allowAmbiguous: false }));
-if (hasDatabaseField && titleMatchedDrivers.length > 0) {
-  matchedDrivers.push(...titleMatchedDrivers);
-}
-if (hasDatabaseField && matchedDrivers.length === 0 && !fieldIsGeneric) {
-  // Some issue forms contain only a version in the database field and put the
-  // actual database name in the title; keep that fallback conservative.
-  matchedDrivers.push(
-    ...uniqueByDbType(matchDrivers(`${issue.title || ""}\n${databaseField}`, { allowAmbiguous: false })),
+  const uniqueMatchedDrivers = uniqueByDbType(matchedDrivers);
+  const targetLabels = uniqueMatchedDrivers.map((driver) => `${LABEL_PREFIX}${driver.dbType}`);
+  const targetLabelColors = Object.fromEntries(
+    uniqueMatchedDrivers.map((driver) => [`${LABEL_PREFIX}${driver.dbType}`, stablePaletteColor(driver.dbType)]),
   );
-}
-const uniqueMatchedDrivers = uniqueByDbType(matchedDrivers);
-const targetLabels = uniqueMatchedDrivers.map((driver) => `${LABEL_PREFIX}${driver.dbType}`);
-const targetLabelColors = Object.fromEntries(
-  uniqueMatchedDrivers.map((driver) => [`${LABEL_PREFIX}${driver.dbType}`, stablePaletteColor(driver.dbType)]),
-);
-const priorityField = extractPriorityField(issue.body || "");
-const targetPriorityValue = matchPriorityLabel(priorityField);
-const targetPriorityLabel = targetPriorityValue ? `${USER_PRIORITY_PREFIX}${targetPriorityValue}` : null;
-if (targetPriorityValue) {
-  targetLabelColors[targetPriorityLabel] = USER_PRIORITY_LABELS[targetPriorityValue].color;
-}
-const existingLabels = labelNames(issue.labels);
-const titleToUpdate = inferIssueTitle(issue.title || "", issue.body || "");
-const existingDatabaseLabels = existingLabels.filter((name) => name.startsWith(LABEL_PREFIX));
-const staleDatabaseLabels = hasDatabaseField
-  ? existingDatabaseLabels.filter((name) => !targetLabels.includes(name))
-  : [];
-const existingPriorityLabels = existingLabels.filter((name) => name.startsWith(USER_PRIORITY_PREFIX));
-const stalePriorityLabels = targetPriorityLabel
-  ? existingPriorityLabels.filter((name) => name !== targetPriorityLabel)
-  : [];
-const labelsToAdd = [...targetLabels, targetPriorityLabel].filter(Boolean).filter((name) => !existingLabels.includes(name));
-const labelSpecs = [
-  ...uniqueMatchedDrivers.map((driver) => ({
-    name: `${LABEL_PREFIX}${driver.dbType}`,
-    description: `Database: ${driver.label}`,
-    color: stablePaletteColor(driver.dbType),
-  })),
-  ...(targetPriorityValue
-    ? [{ name: targetPriorityLabel, ...USER_PRIORITY_LABELS[targetPriorityValue] }]
-    : []),
-];
+  const priorityField = extractPriorityField(issue.body || "");
+  const targetPriorityValue = matchPriorityLabel(priorityField);
+  const targetPriorityLabel = targetPriorityValue ? `${USER_PRIORITY_PREFIX}${targetPriorityValue}` : null;
+  if (targetPriorityValue) {
+    targetLabelColors[targetPriorityLabel] = USER_PRIORITY_LABELS[targetPriorityValue].color;
+  }
 
-console.log(
-  JSON.stringify(
-    {
-      issue: issue.number,
-      databaseField: hasDatabaseField ? databaseField : null,
-      titleMatched: titleMatchedDrivers.map(({ dbType, label, matchedAlias }) => ({ dbType, label, matchedAlias })),
-      matched: uniqueMatchedDrivers.map(({ dbType, label, matchedAlias }) => ({ dbType, label, matchedAlias })),
-      priorityField: priorityField || null,
-      priorityLabel: targetPriorityLabel,
-      priorityValue: targetPriorityValue,
-      titleToUpdate,
-      labelsToAdd,
-      targetLabelColors,
-      staleDatabaseLabels,
-      stalePriorityLabels,
-    },
-    null,
-    2,
-  ),
-);
+  const existingLabels = labelNames(issue.labels);
+  const titleToUpdate = inferIssueTitle(issue.title || "", issue.body || "");
+  const existingDatabaseLabels = existingLabels.filter((name) => name.startsWith(LABEL_PREFIX));
+  const staleDatabaseLabels = hasDatabaseField
+    ? existingDatabaseLabels.filter((name) => !targetLabels.includes(name))
+    : [];
+  const existingPriorityLabels = existingLabels.filter((name) => name.startsWith(USER_PRIORITY_PREFIX));
+  const stalePriorityLabels = targetPriorityLabel
+    ? existingPriorityLabels.filter((name) => name !== targetPriorityLabel)
+    : [];
+  const labelsToAdd = [...targetLabels, targetPriorityLabel]
+    .filter(Boolean)
+    .filter((name) => !existingLabels.includes(name));
+  const labelSpecs = [
+    ...uniqueMatchedDrivers.map(databaseLabelSpec),
+    ...(targetPriorityValue
+      ? [{ name: targetPriorityLabel, ...USER_PRIORITY_LABELS[targetPriorityValue] }]
+      : []),
+  ];
+  const summary = {
+    issue: issue.number,
+    databaseField: hasDatabaseField ? databaseField : null,
+    titleMatched: titleMatchedDrivers.map(({ dbType, label, matchedAlias }) => ({ dbType, label, matchedAlias })),
+    matched: uniqueMatchedDrivers.map(({ dbType, label, matchedAlias }) => ({ dbType, label, matchedAlias })),
+    priorityField: priorityField || null,
+    priorityLabel: targetPriorityLabel,
+    priorityValue: targetPriorityValue,
+    titleToUpdate,
+    labelsToAdd,
+    targetLabelColors,
+    staleDatabaseLabels,
+    stalePriorityLabels,
+  };
 
-if (dryRun) {
-  console.log("Dry run enabled; no GitHub API calls were made");
-  process.exit(0);
+  return {
+    issue,
+    summary,
+    labelSpecs,
+    labelsToAdd,
+    staleDatabaseLabels,
+    stalePriorityLabels,
+    titleToUpdate,
+  };
 }
 
-for (const labelSpec of labelSpecs) {
-  await ensureLabel(labelSpec.name, labelSpec.description, labelSpec.color);
+async function runDatabaseLabelSync() {
+  const labelSpecs = allDatabaseLabelSpecs();
+  console.log(JSON.stringify({ databaseLabels: labelSpecs.map((label) => label.name) }, null, 2));
+  if (dryRun) {
+    console.log("Dry run enabled; no GitHub API calls were made");
+    return;
+  }
+
+  for (const labelSpec of labelSpecs) {
+    await ensureLabel(labelSpec, { updateExisting: true });
+  }
 }
 
-if (labelsToAdd.length > 0) {
-  await addLabels(issue.number, labelsToAdd);
-  console.log(`Added labels: ${labelsToAdd.join(", ")}`);
-} else {
-  console.log("No database labels to add");
+async function runIssueTriage(issue) {
+  const result = triageIssue(issue);
+  console.log(JSON.stringify(result.summary, null, 2));
+  if (dryRun) {
+    console.log("Dry run enabled; no GitHub API calls were made");
+    return;
+  }
+
+  for (const labelSpec of result.labelSpecs) {
+    await ensureLabel(labelSpec);
+  }
+
+  if (result.labelsToAdd.length > 0) {
+    await addLabels(issue.number, result.labelsToAdd);
+    console.log(`Added labels: ${result.labelsToAdd.join(", ")}`);
+  } else {
+    console.log("No database labels to add");
+  }
+
+  for (const label of result.staleDatabaseLabels) {
+    await removeLabel(issue.number, label);
+  }
+
+  for (const label of result.stalePriorityLabels) {
+    await removeLabel(issue.number, label);
+  }
+
+  if (result.titleToUpdate) {
+    await updateIssueTitle(issue.number, result.titleToUpdate);
+    console.log(`Updated title: ${result.titleToUpdate}`);
+  }
 }
 
-for (const label of staleDatabaseLabels) {
-  await removeLabel(issue.number, label);
+async function main() {
+  if (syncDatabaseLabels) {
+    await runDatabaseLabelSync();
+    return;
+  }
+
+  const issue = loadIssue();
+  if (issue.pull_request) {
+    console.log("Skipping pull request event");
+    return;
+  }
+
+  await runIssueTriage(issue);
 }
 
-for (const label of stalePriorityLabels) {
-  await removeLabel(issue.number, label);
-}
-
-if (titleToUpdate) {
-  await updateIssueTitle(issue.number, titleToUpdate);
-  console.log(`Updated title: ${titleToUpdate}`);
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  await main();
 }

@@ -44,7 +44,7 @@ function isDangerousElasticsearchRequest(method: "GET" | "POST" | "PUT" | "DELET
 }
 
 export function isDangerousSql(sql: string, databaseType?: DatabaseType): boolean {
-  if (databaseType === "elasticsearch") {
+  if (databaseType === "elasticsearch" || databaseType === "easysearch") {
     const requests = splitSqlStatementRanges(sql, databaseType)
       .map((statement) => parseElasticsearchRestRequestTarget(statement.sql))
       .filter((request): request is NonNullable<typeof request> => request !== null);
@@ -360,7 +360,7 @@ export function useSqlExecution(deps: {
 
 export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined, sql = ""): boolean {
   if (!connection) return false;
-  if (connection.db_type === "elasticsearch") return !isElasticsearchRestRequestText(sql);
+  if (connection.db_type === "elasticsearch" || connection.db_type === "easysearch") return !isElasticsearchRestRequestText(sql);
   return connection.db_type !== "redis" && connection.db_type !== "mongodb";
 }
 
@@ -373,5 +373,5 @@ export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionC
   // MySQL-compatible servers decide per statement whether a default database is required.
   // Keep interactive execution connection-scoped instead of rejecting valid qualified or constant queries.
   if (supportsConnectionLevelSqlExecution(connection)) return false;
-  return !["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);
+  return !["elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);
 }

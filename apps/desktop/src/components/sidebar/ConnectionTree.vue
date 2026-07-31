@@ -7,7 +7,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
-import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards } from "@/lib/sidebar/sidebarSearchTree";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
 import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -40,6 +40,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
@@ -382,9 +383,12 @@ function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
       indexed === null
         ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()))
         : indexed
-          ? buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) })
+          ? reuseLiveSidebarTreeNodes(
+              buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) }),
+              children,
+            )
           : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
-    return { ...node, children: matchingChildren, isExpanded: true };
+    return { ...node, children: matchingChildren };
   });
 }
 
@@ -667,10 +671,7 @@ watch(flatNodes, (nodes) => {
     }
   }
   stickyScrollTop.value = 0;
-  void nextTick(() => {
-    treeScrollerRef.value?.forceUpdate(true);
-    scheduleSidebarScrollMetricsUpdate();
-  });
+  void nextTick(scheduleSidebarScrollMetricsUpdate);
 });
 
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
@@ -1038,7 +1039,7 @@ function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: Qu
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean }) {
-  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "zookeeper-root") return;
+  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root") return;
   const connId = target.connectionId;
   if (!connId) return;
 
@@ -1060,7 +1061,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadRedisDatabases(connId);
       } else if (config.db_type === "mongodb") {
         await store.loadMongoDatabases(connId);
-      } else if (config.db_type === "elasticsearch") {
+      } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
         await store.loadElasticsearchIndices(connId);
       } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
         await store.loadVectorCollections(connId);
@@ -1181,6 +1182,11 @@ function onSearchToggle(node: TreeNode) {
   if (node.isExpanded) next.add(node.id);
   else next.delete(node.id);
   searchCollapsedIds.value = next;
+}
+
+function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
+  if (isTreeSearchFiltering.value) return;
+  syncSidebarTreeNodeExpansion(store.treeNodes, node, !wasExpanded);
 }
 
 function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void) {
@@ -1663,6 +1669,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :node="sidebarTreeRuntimeInitialNode"
       :depth="0"
       @search-toggle="onSearchToggle"
+      @node-toggled="onNodeToggled"
       @open-ddl="openSidebarDdl"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
@@ -1697,58 +1704,66 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
         <LightTooltip :text="t('sidebar.globalLocalSearchTooltip')" side="top" :delay="300">
           <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
         </LightTooltip>
-        <button class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
-          <Crosshair class="h-3.5 w-3.5" />
-        </button>
-        <LightDropdown
-          :model-value="settingsStore.editorSettings.sidebarConnectionSortMode"
-          :items="connectionListSortMenuItems"
-          :aria-label="t('sidebar.sortConnections')"
-          :label="t('sidebar.sortConnections')"
-          :trigger-title="t('sidebar.sortConnections')"
-          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', isConnectionListAlphabeticallySorted ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
-          trigger-icon-class="h-3.5 w-3.5"
-          item-icon-class="h-3.5 w-3.5"
-          content-class="w-max min-w-0"
-          selected-item-class="bg-primary/10 text-primary"
-          selected-check-class="text-primary"
-          :show-trigger-label="false"
-          :show-chevron="false"
-          align="end"
-          @update:model-value="updateConnectionListSortMode"
-        />
-        <LightDropdown
-          v-if="searchScopeOptions.length > 0"
-          model-value=""
-          :items="searchScopeMenuItems"
-          :selected-values="selectedSearchScopes"
-          :aria-label="t('sidebar.filterByType')"
-          :label="t('sidebar.filterByType')"
-          :trigger-title="t('sidebar.filterByType')"
-          :trigger-icon="ListFilter"
-          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
-          trigger-icon-class="h-3.5 w-3.5"
-          item-icon-class="h-3.5 w-3.5"
-          content-class="w-max min-w-0"
-          selected-item-class="bg-primary/10 text-primary"
-          selected-check-class="text-primary"
-          :show-trigger-label="false"
-          :show-chevron="false"
-          :close-on-select="false"
-          align="end"
-          @update:model-value="selectSearchScopeMenuItem"
-        />
-        <button
-          type="button"
-          class="shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
-          :class="showConnectedConnectionsOnly ? 'text-primary bg-primary/10 border-primary/30' : 'border-border text-muted-foreground hover:text-foreground'"
-          :aria-label="t('sidebar.showActiveConnectionsOnly')"
-          :aria-pressed="showConnectedConnectionsOnly"
-          :title="t('sidebar.showActiveConnectionsOnly')"
-          @click="showConnectedConnectionsOnly = !showConnectedConnectionsOnly"
-        >
-          <CircleDot class="h-3.5 w-3.5" />
-        </button>
+        <LightTooltip :text="t('sidebar.locateActiveTab')" side="top" :delay="300" nowrap>
+          <button type="button" class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :aria-label="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
+            <Crosshair class="h-3.5 w-3.5" />
+          </button>
+        </LightTooltip>
+        <LightTooltip :text="t('sidebar.sortConnections')" side="top" :delay="300" nowrap>
+          <span class="inline-flex">
+            <LightDropdown
+              :model-value="settingsStore.editorSettings.sidebarConnectionSortMode"
+              :items="connectionListSortMenuItems"
+              :aria-label="t('sidebar.sortConnections')"
+              :label="t('sidebar.sortConnections')"
+              :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', isConnectionListAlphabeticallySorted ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
+              trigger-icon-class="h-3.5 w-3.5"
+              item-icon-class="h-3.5 w-3.5"
+              content-class="w-max min-w-0"
+              selected-item-class="bg-primary/10 text-primary"
+              selected-check-class="text-primary"
+              :show-trigger-label="false"
+              :show-chevron="false"
+              align="end"
+              @update:model-value="updateConnectionListSortMode"
+            />
+          </span>
+        </LightTooltip>
+        <LightTooltip v-if="searchScopeOptions.length > 0" :text="t('sidebar.filterByType')" side="top" :delay="300" nowrap>
+          <span class="inline-flex">
+            <LightDropdown
+              model-value=""
+              :items="searchScopeMenuItems"
+              :selected-values="selectedSearchScopes"
+              :aria-label="t('sidebar.filterByType')"
+              :label="t('sidebar.filterByType')"
+              :trigger-icon="ListFilter"
+              :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
+              trigger-icon-class="h-3.5 w-3.5"
+              item-icon-class="h-3.5 w-3.5"
+              content-class="w-max min-w-0"
+              selected-item-class="bg-primary/10 text-primary"
+              selected-check-class="text-primary"
+              :show-trigger-label="false"
+              :show-chevron="false"
+              :close-on-select="false"
+              align="end"
+              @update:model-value="selectSearchScopeMenuItem"
+            />
+          </span>
+        </LightTooltip>
+        <LightTooltip :text="t('sidebar.showActiveConnectionsOnly')" side="top" :delay="300" nowrap>
+          <button
+            type="button"
+            class="shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
+            :class="showConnectedConnectionsOnly ? 'text-primary bg-primary/10 border-primary/30' : 'border-border text-muted-foreground hover:text-foreground'"
+            :aria-label="t('sidebar.showActiveConnectionsOnly')"
+            :aria-pressed="showConnectedConnectionsOnly"
+            @click="showConnectedConnectionsOnly = !showConnectedConnectionsOnly"
+          >
+            <CircleDot class="h-3.5 w-3.5" />
+          </button>
+        </LightTooltip>
       </div>
     </div>
     <CustomContextMenu ref="sidebarContextMenuRef" :items="sidebarContextMenuItems" v-slot="contextMenuSlot">

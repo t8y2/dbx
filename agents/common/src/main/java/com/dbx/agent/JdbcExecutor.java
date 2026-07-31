@@ -254,6 +254,7 @@ public final class JdbcExecutor {
             applySchema(conn, schema, setSchemaSql, resetSchemaSql);
 
             Statement stmt = conn.createStatement();
+            QuerySession createdSession = null;
             activeStatements.add(stmt);
             try {
                 applyQueryTimeout(stmt, options.getTimeoutSecs());
@@ -303,9 +304,13 @@ public final class JdbcExecutor {
                     Math.max(options.getMaxRows(), 1),
                     valueReader
                 );
+                createdSession = session;
                 targetSessions.put(sessionId, session);
                 return readSessionPage(targetSessions, session, options.getPageSize(), elapsed);
             } catch (Exception e) {
+                if (createdSession != null) {
+                    closeSession(targetSessions, createdSession.id);
+                }
                 activeStatements.remove(stmt);
                 try {
                     stmt.close();
@@ -354,6 +359,23 @@ public final class JdbcExecutor {
         // session-owned cursors as part of the same cancellation boundary.
         closeAllQuerySessions();
         closeAllTableReadSessions();
+    }
+
+    public boolean hasOpenSessions() {
+        return !sessions.isEmpty() || !tableReadSessions.isEmpty();
+    }
+
+    public boolean hasActiveStatements() {
+        return !activeStatements.isEmpty();
+    }
+
+    public int expireIdleResources() {
+        return expireIdleQuerySessions() + expireIdleTableReadSessions();
+    }
+
+    int expireIdleResources(long nowMillis, long idleTimeoutMillis) {
+        return expireIdleQuerySessions(nowMillis, idleTimeoutMillis)
+            + expireIdleTableReadSessions(nowMillis, idleTimeoutMillis);
     }
 
     public int expireIdleQuerySessions() {
@@ -516,7 +538,12 @@ public final class JdbcExecutor {
             throw new IllegalArgumentException(missingMessage);
         }
         synchronized (session) {
-            return readSessionPage(targetSessions, session, pageSize, 0L);
+            try {
+                return readSessionPage(targetSessions, session, pageSize, 0L);
+            } catch (RuntimeException | Error error) {
+                closeSession(targetSessions, sessionId);
+                throw error;
+            }
         }
     }
 

@@ -1,0 +1,43 @@
+name: Pull Request Labels
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pull-request-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch pull request head without checkout
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags origin "pull/${PULL_REQUEST_NUMBER}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "${EXPECTED_HEAD_SHA}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Synchronize pull request labels
+        run: node .github/scripts/label-pull-request.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

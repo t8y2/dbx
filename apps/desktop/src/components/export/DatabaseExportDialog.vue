@@ -81,7 +81,7 @@ const batchDatabaseTotal = ref(0);
 const batchRowsExported = ref(0);
 const activeDatabaseExportId = ref("");
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
 
 const canExport = computed(() => {
   const hasContent = includeStructure.value || includeData.value || includeObjects.value;

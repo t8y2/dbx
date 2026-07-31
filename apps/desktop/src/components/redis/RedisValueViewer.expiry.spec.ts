@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick } from "vue";
+import { createApp, defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { calendarDateTimeToUnixSeconds, parseLocalDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 
 const mocks = vi.hoisted(() => ({
   redisGetValue: vi.fn(),
+  redisGetTtl: vi.fn(),
   redisSetTtl: vi.fn(),
   redisSetExpireAt: vi.fn(),
   toast: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => ({
   redisGetValue: mocks.redisGetValue,
+  redisGetTtl: mocks.redisGetTtl,
   redisSetTtl: mocks.redisSetTtl,
   redisSetExpireAt: mocks.redisSetExpireAt,
 }));
@@ -34,15 +36,44 @@ import RedisValueViewer from "./RedisValueViewer.vue";
 
 const mountedApps: Array<{ unmount: () => void; host: HTMLElement }> = [];
 
+function createLocalStorage(): Storage {
+  const entries = new Map<string, string>();
+  return {
+    get length() {
+      return entries.size;
+    },
+    clear() {
+      entries.clear();
+    },
+    getItem(key) {
+      return entries.get(key) ?? null;
+    },
+    key(index) {
+      return [...entries.keys()][index] ?? null;
+    },
+    removeItem(key) {
+      entries.delete(key);
+    },
+    setItem(key, value) {
+      entries.set(key, String(value));
+    },
+  };
+}
+
 afterEach(() => {
   for (const { unmount, host } of mountedApps.splice(0)) {
     unmount();
     host.remove();
   }
+  localStorage.removeItem("dbx-redis-auto-refresh-enabled-v2");
+  localStorage.removeItem("dbx-redis-auto-refresh-interval-seconds-v2");
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal("localStorage", createLocalStorage());
 });
 
 async function settle() {
@@ -81,7 +112,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function mountViewer(onDeleted: (keyRaw: string) => void) {
+function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn()) {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(
@@ -94,6 +125,7 @@ function mountViewer(onDeleted: (keyRaw: string) => void) {
             keyDisplay: "key",
             keyRaw: "key",
             onDeleted,
+            onLoaded,
           });
       },
     }),
@@ -101,6 +133,42 @@ function mountViewer(onDeleted: (keyRaw: string) => void) {
   app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
+}
+
+function mountKeepAliveViewer(onDeleted = vi.fn()) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const active = ref(true);
+  const inactiveView = defineComponent({ setup: () => () => h("div") });
+  const app = createApp(
+    defineComponent({
+      setup() {
+        return () =>
+          h(KeepAlive, null, {
+            default: () =>
+              active.value
+                ? h(RedisValueViewer, {
+                    key: "viewer",
+                    connectionId: "connection",
+                    db: 0,
+                    keyDisplay: "key",
+                    keyRaw: "key",
+                    onDeleted,
+                  })
+                : h(inactiveView, { key: "inactive" }),
+          });
+      },
+    }),
+  );
+  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.mount(host);
+  mountedApps.push({ unmount: () => app.unmount(), host });
+  return {
+    async setActive(value: boolean) {
+      active.value = value;
+      await settle();
+    },
+  };
 }
 
 async function saveTtlFromEditor() {
@@ -153,6 +221,179 @@ async function setStringDraft(value: string) {
 }
 
 describe("RedisValueViewer expiry saving", () => {
+  it("defaults to manual refresh without TTL polling", async () => {
+    vi.useFakeTimers();
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+
+    mountViewer(vi.fn());
+    await settle();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(mocks.redisGetTtl).not.toHaveBeenCalled();
+    expect(document.querySelector<HTMLButtonElement>("[aria-label='grid.refresh']")?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("polls only the TTL at the configured interval", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "5");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+    mocks.redisGetTtl.mockResolvedValueOnce(45);
+    const loaded = vi.fn();
+
+    mountViewer(vi.fn(), loaded);
+    await settle();
+    await vi.advanceTimersByTimeAsync(5000);
+    await settle();
+
+    expect(mocks.redisGetTtl).toHaveBeenCalledWith("connection", 0, "key");
+    expect(mocks.redisGetValue).toHaveBeenCalledOnce();
+    expect(loaded).toHaveBeenCalledOnce();
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:45");
+  });
+
+  it("keeps polling when the loaded TTL starts at zero", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "1");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 0));
+    mocks.redisGetTtl.mockResolvedValueOnce(30);
+
+    mountViewer(vi.fn());
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+
+    expect(mocks.redisGetTtl).toHaveBeenCalledOnce();
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:30");
+  });
+
+  it("shows auto-refresh as stopped after a TTL polling error", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "1");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+    mocks.redisGetTtl.mockRejectedValueOnce(new Error("network unavailable"));
+
+    mountViewer(vi.fn());
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+
+    expect(document.querySelector<HTMLButtonElement>("[aria-label='grid.refresh']")?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps polling after an external PERSIST and picks up a later TTL", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "1");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+    mocks.redisGetTtl.mockResolvedValueOnce(-1).mockResolvedValueOnce(30);
+
+    mountViewer(vi.fn());
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("redis.noExpiry");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+
+    expect(mocks.redisGetTtl).toHaveBeenCalledTimes(2);
+    expect(document.querySelector<HTMLButtonElement>("[data-redis-value-refresh]")?.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:30");
+  });
+
+  it("pauses polling while the document is hidden and resumes when visible", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "1");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+    mocks.redisGetTtl.mockResolvedValue(45);
+    let visibilityState: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibilityState);
+
+    mountViewer(vi.fn());
+    await settle();
+    visibilityState = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mocks.redisGetTtl).not.toHaveBeenCalled();
+
+    visibilityState = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+
+    expect(mocks.redisGetTtl).toHaveBeenCalledOnce();
+  });
+
+  it("pauses polling while deactivated and resumes from the saved setting", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "1");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+    mocks.redisGetTtl.mockResolvedValue(45);
+
+    const viewer = mountKeepAliveViewer();
+    await settle();
+    await viewer.setActive(false);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mocks.redisGetTtl).not.toHaveBeenCalled();
+
+    await viewer.setActive(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+
+    expect(mocks.redisGetTtl).toHaveBeenCalledOnce();
+  });
+
+  it("pauses TTL polling while a value draft is unsaved", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "1");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+    const deleted = vi.fn();
+
+    mountViewer(deleted);
+    await settle();
+    await setStringDraft("draft");
+    await vi.advanceTimersByTimeAsync(5000);
+    await settle();
+
+    expect(mocks.redisGetTtl).not.toHaveBeenCalled();
+    expect(deleted).not.toHaveBeenCalled();
+    expect(document.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("draft");
+  });
+
+  it("ignores a missing-key response when a draft is created during TTL polling", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
+    localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "1");
+    mocks.redisGetValue.mockResolvedValueOnce(stringValue("dmFsdWU=", 60));
+    const ttlRequest = deferred<number>();
+    mocks.redisGetTtl.mockReturnValueOnce(ttlRequest.promise);
+    const deleted = vi.fn();
+
+    mountViewer(deleted);
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    expect(mocks.redisGetTtl).toHaveBeenCalledOnce();
+
+    await setStringDraft("draft");
+    ttlRequest.resolve(-2);
+    await settle();
+    await vi.advanceTimersByTimeAsync(5000);
+    await settle();
+
+    expect(mocks.redisGetTtl).toHaveBeenCalledOnce();
+    expect(deleted).not.toHaveBeenCalled();
+    expect(document.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("draft");
+  });
+
   it("removes a key that disappears while a TTL save fails", async () => {
     mocks.redisGetValue.mockResolvedValueOnce(stringValue()).mockResolvedValueOnce(missingValue());
     mocks.redisSetTtl.mockRejectedValueOnce(new Error("Redis key no longer exists; EXPIRE was not applied"));

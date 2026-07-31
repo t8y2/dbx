@@ -506,7 +506,12 @@ function isGroupLabel(node: TreeNode): boolean {
 async function toggle() {
   const node = activeNode.value;
   if (node.isLoading) {
-    if (!node.isExpanded) {
+    if (node.isExpanded) {
+      node.isExpanded = false;
+      if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+      connectionStore.cancelTreeNodeLoad(node.id);
+      emit("node-toggled", node, true);
+    } else {
       node.isExpanded = true;
       emit("node-toggled", node, false);
     }
@@ -569,7 +574,7 @@ async function toggle() {
         await connectionStore.loadZooKeeperRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
-      } else if (config?.db_type === "elasticsearch") {
+      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
         // Expand: list indices (like other db types list databases).
         await connectionStore.loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
@@ -604,6 +609,10 @@ async function toggle() {
       await connectionStore.ensureConnected(node.connectionId);
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:dashboard`;
       queryStore.createTab(node.connectionId, "", tabTitle, "etcd-dashboard");
+    } else if (node.type === "etcd-access-control" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:access-control`;
+      queryStore.createTab(node.connectionId, "", tabTitle, "etcd-access-control");
     } else if (node.type === "zookeeper-root" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "ZooKeeper"}:keys`;
@@ -630,18 +639,19 @@ async function toggle() {
       const collectionRef = (node.meta as { collectionId?: string } | undefined)?.collectionId ?? node.label;
       const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "vector");
       queryStore.updateSql(tab, collectionRef);
-      api
-        .vectorGetCollectionDetail(node.connectionId, node.database || "default", collectionRef)
-        .then((info) => {
-          if (info.dimension != null) {
+      if (connectionStore.getConfig(node.connectionId)?.db_type !== "milvus") {
+        api
+          .vectorGetCollectionDetail(node.connectionId, node.database || "default", collectionRef)
+          .then((info) => {
+            if (info.dimension == null) return;
             if (node.meta) {
               (node.meta as Record<string, unknown>).dimension = info.dimension;
             } else {
               node.meta = { dimension: info.dimension } as any;
             }
-          }
-        })
-        .catch(() => {});
+          })
+          .catch(() => {});
+      }
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       if (node.catalog && node.catalog !== "internal") {
         await connectionStore.loadDorisCatalogTables(node);
@@ -1073,8 +1083,8 @@ async function openSavedSqlFile() {
   if (node.type !== "saved-sql-file" || !node.savedSqlId) return;
   const file = await savedSqlStore.ensureFileContent(node.savedSqlId);
   if (!file) return;
-  queryStore.openSavedSql(file);
-  connectionStore.activeConnectionId = file.connectionId;
+  const tabId = queryStore.openSavedSql(file);
+  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
   void savedSqlStore.recordFileUsage(file.id);
 }
 
@@ -1137,7 +1147,7 @@ async function openServerDashboard() {
     connectionStore.activeConnectionId = node.connectionId;
     if (currentDatabaseType() === "nacos") {
       queryStore.openNacosDashboard(node.connectionId);
-    } else if (currentDatabaseType() === "postgres") {
+    } else if (connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId))) {
       queryStore.openPostgresDashboard(node.connectionId);
     } else {
       queryStore.openMysqlDashboard(node.connectionId);
@@ -3174,7 +3184,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(dbType || "");
+  return !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(dbType || "");
 });
 
 const canOpenDiagram = computed(() => {
@@ -3734,8 +3744,8 @@ function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | nul
 async function openSavedSqlHistoryFile(fileId: string) {
   const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
-  queryStore.openSavedSql(file);
-  connectionStore.activeConnectionId = file.connectionId;
+  const tabId = queryStore.openSavedSql(file);
+  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
   void savedSqlStore.recordFileUsage(file.id);
 }
 
@@ -4085,7 +4095,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "zookeeper-root") {
+  if (node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }

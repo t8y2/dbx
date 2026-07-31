@@ -97,6 +97,7 @@ test("limits preset field database types to create-table capable SQL structures"
   assert.ok(!TABLE_COLUMN_TEMPLATE_DATABASE_TYPES.includes("mongodb"));
   assert.ok(!TABLE_COLUMN_TEMPLATE_DATABASE_TYPES.includes("redis"));
   assert.ok(!TABLE_COLUMN_TEMPLATE_DATABASE_TYPES.includes("elasticsearch"));
+  assert.ok(!TABLE_COLUMN_TEMPLATE_DATABASE_TYPES.includes("easysearch"));
   assert.ok(!TABLE_COLUMN_TEMPLATE_DATABASE_TYPES.includes("manticoresearch"));
 });
 

@@ -44,9 +44,9 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
-import { sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
+import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { MAX_RESULT_PAGE_SIZE, normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
+import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -64,6 +64,7 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
 import { formatError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { SavedSqlFile } from "@/types/database";
@@ -93,6 +94,10 @@ interface BuildQueryResultExportRequestOptions {
   includeSqlSheet?: boolean;
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
+}
+
+interface OpenSavedSqlOptions {
+  targetMode?: SavedSqlOpenTargetMode;
 }
 
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
@@ -370,14 +375,6 @@ function annotateQueryResultSource(result: QueryResult, sourceStatement: string,
   const label = databaseType ? queryResultSourceLabel(sourceStatement, { database, databaseType }) : undefined;
   if (label) result.sourceLabel = label;
   return result;
-}
-
-const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
-
-function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType) {
-  if (databaseType !== "elasticsearch") return [];
-  const requests = splitSqlStatementRanges(sql, databaseType);
-  return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
 function elasticsearchHttpErrorStatus(result: QueryResult): number | undefined {
@@ -2206,6 +2203,7 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
+    clearInvalidDataTabSortState(tab, tableMeta.columns);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
     const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
     const orderBy = tab.orderByInput?.trim() || sortOrder;
@@ -2444,7 +2442,26 @@ export const useQueryStore = defineStore("query", () => {
     refreshExternalSqlFileTitles();
   }
 
-  function openSavedSql(file: SavedSqlFile) {
+  function currentSavedSqlExecutionTarget(): SavedSqlExecutionTarget | undefined {
+    const activeTab = tabs.value.find((tab) => tab.id === activeTabId.value);
+    const target = savedSqlExecutionTargetFromTab(activeTab);
+    if (!target || !useConnectionStore().getConfig(target.connectionId)) return undefined;
+    return target;
+  }
+
+  function applySavedSqlExecutionTarget(tab: QueryTab, target: SavedSqlExecutionTarget) {
+    updateConnection(tab.id, target.connectionId, target.database);
+    if (tab.catalog !== target.catalog || tab.database !== target.database) {
+      if (tab.catalog !== undefined || target.catalog !== undefined) updateCatalog(tab.id, target.catalog, target.database);
+      else updateDatabase(tab.id, target.database);
+    }
+    updateSchema(tab.id, target.schema);
+  }
+
+  function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
+    const targetMode = options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode;
+    const currentTarget = targetMode === "current" ? currentSavedSqlExecutionTarget() : undefined;
+    const target = resolveSavedSqlExecutionTarget(file, targetMode, currentTarget);
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
       persistSavedSqlEditorPosition(existing);
@@ -2455,6 +2472,7 @@ export const useQueryStore = defineStore("query", () => {
         existing.editorSelection = restored.selection;
         existing.editorViewport = restored.viewport;
       }
+      applySavedSqlExecutionTarget(existing, target);
       switchTab(existing.id);
       return existing.id;
     }
@@ -2465,9 +2483,10 @@ export const useQueryStore = defineStore("query", () => {
       id,
       title: file.name,
       customTitle: true,
-      connectionId: file.connectionId,
-      database: file.database,
-      schema: file.schema,
+      connectionId: target.connectionId,
+      database: target.database,
+      schema: target.schema,
+      catalog: target.catalog,
       sql: file.sql,
       savedSqlId: file.id,
       originalSql: file.sql,
@@ -2491,9 +2510,6 @@ export const useQueryStore = defineStore("query", () => {
       const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
       if (!file) continue;
       tab.title = tab.customTitle ? tab.title : file.name;
-      tab.connectionId = file.connectionId;
-      tab.database = file.database;
-      tab.schema = file.schema;
       tab.sql = file.sql;
       tab.originalSql = file.sql;
       const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
@@ -2578,6 +2594,7 @@ export const useQueryStore = defineStore("query", () => {
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
     tab.connectionId = connectionId;
+    tab.catalog = undefined;
     tab.database = database;
     tab.catalog = undefined;
     tab.objectBrowser = undefined;
@@ -2588,22 +2605,35 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+  }
 
-    // Sync connection change back to the saved SQL file if this tab is linked
-    if (tab.savedSqlId) {
-      const savedSqlStore = useSavedSqlStore();
-      void savedSqlStore.ensureFileContent(tab.savedSqlId).then((existing) => {
-        if (!existing) return;
-        return savedSqlStore.saveFile({
-          id: existing.id,
-          connectionId,
-          name: existing.name,
-          database,
-          schema: existing.schema,
-          sql: existing.sql,
-        });
-      });
+  function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {
+    if (tab.mode !== "data") return false;
+    const hasColumn = (name: string) => columns.some((column) => column.name === name);
+    const structuredSortMissing = !!tab.resultSortColumn && !hasColumn(tab.resultSortColumn);
+    const simpleOrderMissing = simpleDataGridOrderByReferencesMissingColumn(
+      tab.orderByInput,
+      columns.map((column) => column.name),
+    );
+    if (!structuredSortMissing && !simpleOrderMissing) return false;
+    if (structuredSortMissing) {
+      tab.resultSortColumn = undefined;
+      tab.resultSortColumnIndex = undefined;
+      tab.resultSortDirection = undefined;
+      tab.resultSortMode = undefined;
+      tab.resultSortedSql = undefined;
+      tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalMongoDocuments = undefined;
+      tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     }
+    if (simpleOrderMissing) tab.orderByInput = undefined;
+    return true;
+  }
+
+  function clearInvalidDataTabSort(id: string): boolean {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.tableMeta?.columns.length) return false;
+    return clearInvalidDataTabSortState(tab, tab.tableMeta.columns);
   }
 
   function setTableMeta(id: string, meta: NonNullable<QueryTab["tableMeta"]>) {
@@ -2611,6 +2641,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab) {
       tab.tableMeta = meta;
       tab.tableMetaUpdatedAt = Date.now();
+      if (meta.columns.length > 0) clearInvalidDataTabSortState(tab, meta.columns);
       // 只有真实元数据（columns 非空）落地才结束行标识等待；多处调用方会先写
       // columns/primaryKeys 为空的占位身份（如 useNavigationTargets），不得
       // 借此提前解除编辑门控。失败/中止路径不清除——标签页保持只读是安全
@@ -2759,8 +2790,10 @@ export const useQueryStore = defineStore("query", () => {
   function resolveEditableSourceMetadataTarget(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string): EditableSourceMetadataTarget {
     // Metadata must resolve in the same namespace as the query execution. An
     // empty query-tab database still executes in the connection's default DB,
-    // while database-tree dialects may override it with a qualified source.
-    const metadataDatabase = (connectionUsesDatabaseObjectTreeMode(conn) ? source.schema : undefined) || executionDatabase || conn?.database || tab.database;
+    // while database-tree dialects and SQL Server 3-part names may override it
+    // with a qualified source.
+    const qualifiedSourceDatabase = dbType === "sqlserver" ? source.catalog : connectionUsesDatabaseObjectTreeMode(conn) ? source.schema : undefined;
+    const metadataDatabase = qualifiedSourceDatabase || executionDatabase || conn?.database || tab.database;
     let schema = source.schema || tab.schema;
     if (!schema) {
       if (dbType === "postgres" || dbType === "kwdb") schema = "public";
@@ -3791,7 +3824,10 @@ export const useQueryStore = defineStore("query", () => {
       if (tab.mode === "query") {
         const prepared = await prepareEditableQueryExecution(tab, sqlToExecute, conn, effectiveDbType, executionDatabase, traceId, elapsed);
         sqlToExecute = prepared.sql;
-        queryMetadataSql = prepared.metadataSql;
+        // Database sorting executes a generated wrapper around the user's query.
+        // Keep editability metadata anchored to the original query so the wrapper
+        // does not turn an otherwise editable result into a complex read-only one.
+        queryMetadataSql = options?.resultSortedSql && !options?.querySort ? queryBaseSql : prepared.metadataSql;
         hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
         if (options?.querySort) {
           const sorted = await api.buildSortedQuerySql({
@@ -3821,6 +3857,21 @@ export const useQueryStore = defineStore("query", () => {
         pageOffset = plan.pageOffset;
         countSql = plan.countSql;
         useAgentResultSession = plan.useAgentResultSession;
+        const hasBoundedPagination = typeof pageLimit === "number" && typeof pageOffset === "number";
+        if (options?.appendResult && !hasBoundedPagination && !useAgentResultSession) {
+          const current = tabs.value.find((item) => item.id === id);
+          if (current?.executionId === executionId && current.result) {
+            current.result.has_more = false;
+            const activeResultIndex = current.activeResultIndex;
+            if (Array.isArray(current.results) && typeof activeResultIndex === "number" && activeResultIndex >= 0 && activeResultIndex < current.results.length) {
+              current.results[activeResultIndex]!.has_more = false;
+            }
+            touchResult(current);
+            syncDisplayedResultRun(current, queryBaseSql, openInNewResultTab);
+          }
+          queryExecutionLog("info", "append-result:pagination-unsupported", { traceId, elapsed: elapsed() });
+          return false;
+        }
       } else if (tab.mode === "data") {
         pageLimit = options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
         pageOffset = options?.pagination?.offset ?? 0;
@@ -4676,11 +4727,10 @@ export const useQueryStore = defineStore("query", () => {
     tab.querySourceColumns = snapshot.querySourceColumns;
     tab.queryEditabilityReason = snapshot.queryEditabilityReason;
     tab.mongoEditTarget = snapshot.mongoEditTarget;
-    // Data tab 快照可能是延迟元数据期间落盘的空列占位身份：不得用它回滚
-    // 之后已落地的真实元数据（否则 pending 已清除而行标识又变未知，编辑
-    // 门控失效）；若恢复后确实没有真实列，重新挂起编辑门控
-    if (tab.tableMeta?.columns.length && !snapshot.tableMeta?.columns.length) {
-      // 保留当前真实元数据，忽略快照中的占位身份
+    // Data tab 的结果快照可能早于最近一次结构变更。已持有真实元数据时，
+    // 不允许旧快照回滚列名或主键；若恢复后仍没有真实列，重新挂起编辑门控。
+    if (tab.mode === "data" && tab.tableMeta?.columns.length) {
+      // 保留当前真实元数据
     } else {
       tab.tableMeta = snapshot.tableMeta;
     }
@@ -5126,6 +5176,7 @@ export const useQueryStore = defineStore("query", () => {
     updateSchema,
     updateConnection,
     setTableMeta,
+    clearInvalidDataTabSort,
     invalidateTableStructure,
     tableStructureRefreshVersion,
     setObjectSource,

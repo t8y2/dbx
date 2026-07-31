@@ -1,6 +1,6 @@
 package com.dbx.agent.db2;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -17,8 +17,6 @@ import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -26,18 +24,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-public final class Db2Agent extends BaseDatabaseAgent {
+public final class Db2Agent extends AbstractJdbcAgent {
     private static final Set<String> NUMERIC_PRECISION_TYPES = Set.of(
         "DECIMAL", "NUMERIC", "INTEGER", "SMALLINT", "BIGINT", "REAL", "DOUBLE", "FLOAT"
     );
     private static final Set<String> NUMERIC_SCALE_TYPES = Set.of("DECIMAL", "NUMERIC");
     private static final Set<String> CHARACTER_LENGTH_TYPES = Set.of("VARCHAR", "CHAR", "CLOB", "GRAPHIC", "VARGRAPHIC");
 
-    private Connection connection;
-
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return "com.ibm.db2.jcc.DB2Driver";
     }
 
     @Override
@@ -46,21 +42,8 @@ public final class Db2Agent extends BaseDatabaseAgent {
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            Class.forName("com.ibm.db2.jcc.DB2Driver");
-            connection = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword());
-        });
-    }
-
-    @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            Class.forName("com.ibm.db2.jcc.DB2Driver");
-            try (Connection conn = DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword())) {
-                return conn.isValid(5);
-            }
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        return buildUrl(params);
     }
 
     @Override
@@ -395,21 +378,12 @@ public final class Db2Agent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::stringResultValue
+            this::resultValue
         );
     }
 
     @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-        });
-    }
-
-    private Object stringResultValue(ResultSet rs, int index, int sqlType) {
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();

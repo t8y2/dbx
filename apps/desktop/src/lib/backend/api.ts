@@ -392,6 +392,8 @@ export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
+export const redisGetTtl = forward("redisGetTtl");
+export const redisGetStreamEntries = forward("redisGetStreamEntries");
 export const redisGetStreamGroups = forward("redisGetStreamGroups");
 export const redisGetStreamConsumers = forward("redisGetStreamConsumers");
 export const redisGetStreamPending = forward("redisGetStreamPending");
@@ -429,6 +431,15 @@ export const etcdDelete = forward("etcdDelete");
 export const etcdRename = forward("etcdRename");
 export const etcdHistory = forward("etcdHistory");
 export const etcdStatus = forward("etcdStatus");
+export const etcdPreflight = forward("etcdPreflight");
+export const etcdCompact = forward("etcdCompact");
+export const etcdDefrag = forward("etcdDefrag");
+export const etcdWatchStart = forward("etcdWatchStart");
+export const etcdWatchPoll = forward("etcdWatchPoll");
+export const etcdWatchStop = forward("etcdWatchStop");
+export const etcdLeaseList = forward("etcdLeaseList");
+export const etcdLeaseCall = forward("etcdLeaseCall");
+export const etcdAuthCall = forward("etcdAuthCall");
 
 // ZooKeeper
 export const zookeeperListPrefix = forward("zookeeperListPrefix");
@@ -581,6 +592,7 @@ export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const downloadUpdate = forward("downloadUpdate");
+export const cancelUpdateDownload = forward("cancelUpdateDownload");
 export const installDownloadedUpdate = forward("installDownloadedUpdate");
 export const getAppVersion = forward("getAppVersion");
 export const getAppSupportInfo = forward("getAppSupportInfo");
@@ -640,6 +652,7 @@ export type {
   RedisStreamField,
   RedisStreamGroup,
   RedisStreamMetric,
+  RedisStreamPage,
   RedisStreamPendingEntry,
   RedisStreamPendingPage,
   RedisValue,
@@ -671,6 +684,20 @@ export type {
   KvStatusMember,
   KvPrometheusMetrics,
   KvStatusResponse,
+  EtcdDefragResponse,
+  EtcdDefragMemberResult,
+  EtcdWatchStartRequest,
+  EtcdWatchStartResponse,
+  EtcdWatchPollResponse,
+  EtcdLeaseListResponse,
+  EtcdLeaseDetail,
+  EtcdAuthUserListResponse,
+  EtcdAuthUserDetail,
+  EtcdAuthPermission,
+  EtcdAuthRoleListResponse,
+  EtcdAuthRoleDetail,
+  EtcdPreflightResponse,
+  EtcdDangerousApproval,
   DocumentQueryResult,
   MongoDocumentResult,
   HistoryEntry,

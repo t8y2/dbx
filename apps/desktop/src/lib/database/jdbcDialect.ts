@@ -5,8 +5,11 @@ import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect
 type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
+export type GaussdbConnectionMode = "native" | "m-jdbc";
 
 const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
+export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
+export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
 const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
 
@@ -87,6 +90,18 @@ export function gaussdbIdentifierQuoteOverride(connection: JdbcDialectConnection
   if (style === "double") return '"';
   if (style === "backtick") return "`";
   return undefined;
+}
+
+export function gaussdbConnectionMode(connection: JdbcDialectConnection | undefined): GaussdbConnectionMode {
+  return connection?.db_type === "gaussdb" && connection.driver_profile?.toLowerCase() === GAUSSDB_M_JDBC_DRIVER_PROFILE ? "m-jdbc" : "native";
+}
+
+export function setGaussdbConnectionMode(connection: JdbcDialectConnection, mode: GaussdbConnectionMode) {
+  if (connection.db_type !== "gaussdb") return;
+  connection.driver_profile = mode === "m-jdbc" ? GAUSSDB_M_JDBC_DRIVER_PROFILE : "gaussdb";
+  connection.driver_label = "GaussDB";
+  connection.jdbc_driver_class = mode === "m-jdbc" ? GAUSSDB_M_JDBC_DRIVER_CLASS : undefined;
+  connection.connection_string = undefined;
 }
 
 export function setGaussdbIdentifierQuoteStyle(

@@ -68,6 +68,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
+  let activeDownloadAttempt = 0;
+  let pendingCancellation: Promise<void> | undefined;
 
   function openUrl(url: string) {
     if (isTauriRuntime()) {
@@ -104,10 +106,16 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
 
   function formatUpdateError(message: string): string {
     const lower = message.toLowerCase();
+    if (lower.includes("canceled") || lower.includes("cancelled")) {
+      return t("updates.downloadCanceled");
+    }
     if (lower.includes("403") || lower.includes("rate limit")) {
       return t("updates.rateLimited");
     }
-    return t("updates.failed", { error: message });
+    if (lower.includes("stalled") || lower.includes("timeout") || lower.includes("all available mirrors") || lower.includes("error sending request") || lower.includes("failed to download")) {
+      return t("updates.networkOrMirrorFailed");
+    }
+    return t("updates.downloadFailed", { error: message });
   }
 
   function openLatestRelease() {
@@ -128,30 +136,30 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       return;
     }
     if (blockUpdateForActiveTasks()) return;
+    const attempt = ++activeDownloadAttempt;
     isDownloadingUpdate.value = true;
     downloadProgress.value = 0;
     let unlisten: (() => void) | undefined;
     const latestVersion = updateInfo.value?.latest_version;
-    let failureMessageKey = "updates.downloadFailed";
     try {
+      await pendingCancellation;
+      if (attempt !== activeDownloadAttempt) return;
       const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<UpdateDownloadProgress>("update-download-progress", (event) => {
+        if (attempt !== activeDownloadAttempt) return;
         const total = event.payload.total ?? 0;
         downloadProgress.value = total > 0 ? Math.round((event.payload.downloaded / total) * 100) : 0;
       });
       const result = await downloadAndInstallUpdateWhenIdle({
         getActiveTaskCount: () => activeTaskCount.value,
         download: async () => {
-          try {
-            await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
-            downloadProgress.value = 100;
-            updateDownloaded.value = true;
-          } finally {
-            isDownloadingUpdate.value = false;
-          }
+          await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
+          if (attempt !== activeDownloadAttempt) throw new Error("Download canceled by user.");
+          downloadProgress.value = 100;
+          updateDownloaded.value = true;
+          isDownloadingUpdate.value = false;
         },
         install: async () => {
-          failureMessageKey = "updates.installFailed";
           await installPendingUpdate();
         },
       });
@@ -159,10 +167,20 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
         blockUpdateForActiveTasks();
       }
     } catch (e: any) {
-      toast(t(failureMessageKey, { error: e?.message || String(e) }), 5000);
+      if (attempt !== activeDownloadAttempt) return;
+      downloadProgress.value = 0;
+      const rawMsg = e?.message || String(e);
+      console.error("[DBX update error]", rawMsg);
+      const lower = rawMsg.toLowerCase();
+      if (lower.includes("canceled") || lower.includes("cancelled")) {
+        return;
+      }
+      toast(formatUpdateError(rawMsg), 5000);
     } finally {
       unlisten?.();
-      isDownloadingUpdate.value = false;
+      if (attempt === activeDownloadAttempt) {
+        isDownloadingUpdate.value = false;
+      }
     }
   }
 
@@ -203,6 +221,25 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     }
   }
 
+  async function cancelDownload() {
+    if (isDownloadingUpdate.value) {
+      activeDownloadAttempt += 1;
+      isDownloadingUpdate.value = false;
+      downloadProgress.value = 0;
+      if (isTauriRuntime()) {
+        const cancellation = api.cancelUpdateDownload().catch(() => {});
+        pendingCancellation = cancellation;
+        try {
+          await cancellation;
+        } finally {
+          if (pendingCancellation === cancellation) {
+            pendingCancellation = undefined;
+          }
+        }
+      }
+    }
+  }
+
   return {
     checkingUpdates,
     updateInfo,
@@ -221,6 +258,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     formatUpdateError,
     openLatestRelease,
     downloadAndInstallUpdate,
+    cancelDownload,
     installDownloadedUpdate,
     restartApp,
   };

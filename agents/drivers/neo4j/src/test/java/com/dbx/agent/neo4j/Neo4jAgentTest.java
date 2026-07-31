@@ -1,5 +1,6 @@
 package com.dbx.agent.neo4j;
 
+import com.dbx.agent.ConnectParams;
 import com.dbx.agent.QueryResult;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
@@ -18,9 +19,8 @@ import org.junit.jupiter.api.Test;
 class Neo4jAgentTest {
     @Test
     void executesCypherWritesWithReturnThroughStatementExecute() throws Exception {
-        Neo4jAgent agent = new Neo4jAgent();
         List<String> calls = new ArrayList<>();
-        setConnectionForTest(agent, fakeConnection(calls));
+        Neo4jAgent agent = connectedAgent(fakeConnection(calls));
 
         QueryResult result = agent.executeQuery("CREATE (n:Person {name: 'Ada'}) RETURN n", null);
 
@@ -35,9 +35,8 @@ class Neo4jAgentTest {
 
     @Test
     void executesTransactionsThroughStatementExecute() throws Exception {
-        Neo4jAgent agent = new Neo4jAgent();
         List<String> calls = new ArrayList<>();
-        setConnectionForTest(agent, fakeConnection(calls));
+        Neo4jAgent agent = connectedAgent(fakeConnection(calls));
 
         QueryResult result = agent.executeTransaction(
             Arrays.asList(
@@ -55,10 +54,19 @@ class Neo4jAgentTest {
         Assertions.assertFalse(calls.contains("executeUpdate"));
     }
 
-    private static void setConnectionForTest(Neo4jAgent agent, Connection connection) throws Exception {
-        java.lang.reflect.Field field = Neo4jAgent.class.getDeclaredField("connection");
-        field.setAccessible(true);
-        field.set(agent, connection);
+    private static Neo4jAgent connectedAgent(Connection connection) {
+        Neo4jAgent agent = new Neo4jAgent() {
+            @Override
+            protected void loadDriver(ConnectParams params) {
+            }
+
+            @Override
+            protected Connection openConnection(ConnectParams params) {
+                return connection;
+            }
+        };
+        agent.connect(new ConnectParams());
+        return agent;
     }
 
     private static Connection fakeConnection(List<String> calls) {

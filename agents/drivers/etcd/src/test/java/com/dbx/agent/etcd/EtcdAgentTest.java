@@ -15,9 +15,11 @@ import io.etcd.jetcd.kv.TxnResponse;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -34,13 +36,19 @@ final class EtcdAgentTest {
 
         JsonObject result = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("result");
 
-        Assertions.assertEquals(1, result.get("protocolVersion").getAsInt());
+        Assertions.assertEquals(2, result.get("protocolVersion").getAsInt());
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_ttl\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_cas\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_list_values\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_status\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_history\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_compaction\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_defrag\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_watch\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_lease\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"etcd_auth\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"multi_session\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"connect\"")));
     }
 
@@ -63,6 +71,34 @@ final class EtcdAgentTest {
         ).getAsJsonObject();
 
         Assertions.assertEquals(List.of("http://127.0.0.1:2379"), EtcdAgent.endpoints(connection));
+    }
+
+    @Test
+    void connectTimeoutUsesConfiguredValueAndSafeBounds() {
+        Assertions.assertEquals(
+            45,
+            EtcdAgent.connectTimeoutSeconds(JsonParser.parseString("{\"connect_timeout_secs\":45}").getAsJsonObject())
+        );
+        Assertions.assertEquals(
+            1,
+            EtcdAgent.connectTimeoutSeconds(JsonParser.parseString("{\"connect_timeout_secs\":0}").getAsJsonObject())
+        );
+        Assertions.assertEquals(
+            300,
+            EtcdAgent.connectTimeoutSeconds(JsonParser.parseString("{\"connect_timeout_secs\":999}").getAsJsonObject())
+        );
+    }
+
+    @Test
+    void validateConnectionRequiresAnActiveSession() {
+        String response = EtcdAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"validate_connection\",\"params\":{}}"
+        );
+
+        JsonObject error = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
+
+        Assertions.assertEquals(-1, error.get("code").getAsInt());
+        Assertions.assertEquals("Not connected", error.get("message").getAsString());
     }
 
     @Test
@@ -208,6 +244,118 @@ final class EtcdAgentTest {
         Assertions.assertEquals("write timed out", error.getMessage());
         Assertions.assertEquals(1, revokeCalls.get());
         Assertions.assertEquals(123, revokedLeaseId.get());
+    }
+
+    @Test
+    void defragFailureMarksEveryRemainingEndpointAsNotExecuted() {
+        List<Map<String, Object>> members = new ArrayList<>();
+
+        EtcdAgent.appendUnexecutedDefragMembers(
+            members,
+            List.of("http://follower-2:2379", "http://follower-3:2379", "http://leader:2379"),
+            "http://follower-2:2379"
+        );
+
+        Assertions.assertEquals(
+            List.of("http://follower-3:2379", "http://leader:2379"),
+            members.stream().map(member -> member.get("endpoint")).toList()
+        );
+        Assertions.assertTrue(members.stream().allMatch(member -> "not_executed".equals(member.get("status"))));
+    }
+
+    @Test
+    void leaseListResponseParserReadsEveryLeaseId() throws Exception {
+        byte[] response = new byte[] {
+            0x12, 0x02, 0x08, 0x7b,
+            0x12, 0x03, 0x08, (byte) 0xc8, 0x03
+        };
+
+        Assertions.assertEquals(List.of(123L, 456L), EtcdAgent.leaseIdsFromResponse(response));
+    }
+
+    @Test
+    void leaseListPageUsesAStableCursorAndBoundsTheResult() {
+        List<Long> leaseIds = new ArrayList<>();
+        for (long id = 1000; id >= 1; id--) leaseIds.add(id);
+
+        List<Long> first = EtcdAgent.leasePageIds(leaseIds, null, 101);
+        List<Long> second = EtcdAgent.leasePageIds(leaseIds, first.get(99), 101);
+
+        Assertions.assertEquals(101, first.size());
+        Assertions.assertEquals(1L, first.get(0));
+        Assertions.assertEquals(101L, first.get(100));
+        Assertions.assertEquals(101L, second.get(0));
+        Assertions.assertEquals(201L, second.get(100));
+    }
+
+    @Test
+    void watchBufferRejectsLargeValueAndPreviousValuePayloads() {
+        long payloadBytes = EtcdAgent.estimatedBufferedBytes(2 * 1024 * 1024)
+            + EtcdAgent.estimatedBufferedBytes(2 * 1024 * 1024);
+
+        Assertions.assertTrue(payloadBytes > EtcdAgent.MAX_WATCH_BUFFER_BYTES);
+    }
+
+    @Test
+    void watchOverflowPreservesBufferedPayloadAndReportsTerminalState() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        EtcdAgent.EtcdWatchState watch = new EtcdAgent.EtcdWatchState("watch-1", session);
+        List<Map<String, Object>> events = List.of(Map.of("eventType", "put"));
+
+        watch.append(1, events, 4L * 1024 * 1024);
+        Assertions.assertEquals(4L * 1024 * 1024, session.watchBufferedBytes());
+
+        watch.append(2, events, 5L * 1024 * 1024);
+        Map<String, Object> result = watch.poll();
+
+        Assertions.assertEquals(0, session.watchBufferedBytes());
+        List<?> batches = (List<?>) result.get("batches");
+        Assertions.assertEquals(1, batches.size());
+        Assertions.assertEquals("1", ((Map<?, ?>) batches.get(0)).get("revision"));
+        Assertions.assertEquals("overflow", ((Map<?, ?>) result.get("terminal")).get("reason"));
+    }
+
+    @Test
+    void watchPollReleasesTheSessionByteBudget() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        EtcdAgent.EtcdWatchState watch = new EtcdAgent.EtcdWatchState("watch-1", session);
+
+        watch.append(1, List.of(Map.of("eventType", "put")), 1024);
+        Assertions.assertEquals(1024, session.watchBufferedBytes());
+
+        watch.poll();
+
+        Assertions.assertEquals(0, session.watchBufferedBytes());
+    }
+
+    @Test
+    void aggregateSessionBudgetTerminatesOnlyTheWatchThatExceedsIt() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        List<Map<String, Object>> events = List.of(Map.of("eventType", "put"));
+        EtcdAgent.EtcdWatchState first = new EtcdAgent.EtcdWatchState("watch-1", session);
+        EtcdAgent.EtcdWatchState second = new EtcdAgent.EtcdWatchState("watch-2", session);
+        EtcdAgent.EtcdWatchState third = new EtcdAgent.EtcdWatchState("watch-3", session);
+
+        first.append(1, events, EtcdAgent.MAX_WATCH_BUFFER_BYTES);
+        second.append(1, events, EtcdAgent.MAX_WATCH_BUFFER_BYTES);
+        third.append(1, events, 1);
+
+        Assertions.assertEquals(EtcdAgent.MAX_SESSION_WATCH_BUFFER_BYTES, session.watchBufferedBytes());
+        Assertions.assertEquals("overflow", ((Map<?, ?>) third.poll().get("terminal")).get("reason"));
+        Assertions.assertEquals(EtcdAgent.MAX_SESSION_WATCH_BUFFER_BYTES, session.watchBufferedBytes());
+    }
+
+    @Test
+    void terminalPollRemovesTheWatchSlot() {
+        EtcdAgent.EtcdSessionState session = new EtcdAgent.EtcdSessionState();
+        EtcdAgent.EtcdWatchState watch = new EtcdAgent.EtcdWatchState("watch-1", session);
+        session.addWatch("watch-1", watch);
+        watch.overflow();
+
+        Map<String, Object> result = EtcdAgent.pollWatchState(session, "watch-1");
+
+        Assertions.assertEquals("overflow", ((Map<?, ?>) result.get("terminal")).get("reason"));
+        Assertions.assertEquals(0, session.watchCount());
     }
 
     private static KV scriptedKv(

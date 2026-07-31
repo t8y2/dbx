@@ -459,6 +459,8 @@ pub enum DatabaseType {
     Oracle,
     #[serde(rename = "elasticsearch")]
     Elasticsearch,
+    #[serde(rename = "easysearch")]
+    Easysearch,
     Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
@@ -1012,6 +1014,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
+            | DatabaseType::Easysearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -1161,6 +1164,7 @@ impl ConnectionConfig {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Elasticsearch
+            | DatabaseType::Easysearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -2332,6 +2336,12 @@ mod tests {
     fn zookeeper_database_type_uses_stable_wire_name() {
         assert_eq!(serde_json::to_string(&DatabaseType::ZooKeeper).unwrap(), "\"zookeeper\"");
         assert_eq!(serde_json::from_str::<DatabaseType>("\"zookeeper\"").unwrap(), DatabaseType::ZooKeeper);
+    }
+
+    #[test]
+    fn easysearch_database_type_uses_stable_wire_name() {
+        assert_eq!(serde_json::to_string(&DatabaseType::Easysearch).unwrap(), "\"easysearch\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"easysearch\"").unwrap(), DatabaseType::Easysearch);
     }
 
     #[test]

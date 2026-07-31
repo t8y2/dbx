@@ -138,6 +138,25 @@ fn resolve_requested_export_columns(
     (resolved_columns, resolved_column_types, resolved_primary_keys)
 }
 
+fn requested_export_needs_column_extras(database_type: DatabaseType, format: &str) -> bool {
+    database_type == DatabaseType::Mysql && format.eq_ignore_ascii_case("sql")
+}
+
+fn resolve_requested_export_column_extras(
+    requested_columns: &[String],
+    table_columns: &[crate::db::ColumnInfo],
+) -> Vec<Option<String>> {
+    requested_columns
+        .iter()
+        .map(|requested| {
+            table_columns
+                .iter()
+                .find(|column| column.name.eq_ignore_ascii_case(requested))
+                .and_then(|column| column.extra.clone())
+        })
+        .collect()
+}
+
 fn write_json_row_object<W: Write>(writer: &mut W, columns: &[String], row: &[Value]) -> Result<(), String> {
     writer.write_all(b"{\n").map_err(|e| format!("Failed to write JSON: {e}"))?;
     let mut first = true;
@@ -229,7 +248,7 @@ fn table_cursor_sql(
     col_names: &[String],
     primary_keys: &[String],
 ) -> String {
-    let full_table = qualified_table(&request.table_name, request.schema.as_deref().unwrap_or(""), db_type);
+    let full_table = qualified_table(&request.table_name, request.schema.as_deref().unwrap_or(""), db_type, None);
     let col_list = col_names.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
     let predicate = crate::sql_dialect::normalize_where_input(request.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
@@ -1107,7 +1126,20 @@ async fn export_table_data_core_inner(
             request.column_types.as_deref(),
             request.primary_keys.as_deref(),
         );
-        (col_names, column_types, Vec::new(), primary_keys)
+        let column_extras = if requested_export_needs_column_extras(db_type, &request.format) {
+            let table_columns = crate::schema::get_columns_core(
+                state,
+                &request.connection_id,
+                &request.database,
+                request.schema.as_deref().unwrap_or(""),
+                &request.table_name,
+            )
+            .await?;
+            resolve_requested_export_column_extras(&col_names, &table_columns)
+        } else {
+            Vec::new()
+        };
+        (col_names, column_types, column_extras, primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
             state,
@@ -1155,6 +1187,7 @@ async fn export_table_data_core_inner(
             request.schema.as_deref().unwrap_or(""),
             &db_type,
             request.where_input.as_deref(),
+            None,
         );
         match execute_table_export_count(state, &pool_key, request, &count_query, cancel_token.clone()).await {
             Ok(result) => result
@@ -2128,6 +2161,33 @@ mod tests {
         let mysql_columns = vec!["__DBX_ROWID".to_string(), "name".to_string()];
         let (resolved_mysql, _, _) = resolve_requested_export_columns(DatabaseType::Mysql, &mysql_columns, None, None);
         assert_eq!(resolved_mysql, mysql_columns);
+    }
+
+    #[test]
+    fn requested_mysql_sql_export_resolves_generated_column_extras_only_for_sql() {
+        let table_columns = vec![
+            crate::db::ColumnInfo {
+                name: "ID".to_string(),
+                extra: Some("auto_increment".to_string()),
+                ..Default::default()
+            },
+            crate::db::ColumnInfo {
+                name: "virtual_total".to_string(),
+                extra: Some("VIRTUAL GENERATED".to_string()),
+                ..Default::default()
+            },
+        ];
+        let requested_columns = vec!["virtual_total".to_string(), "id".to_string(), "missing".to_string()];
+
+        assert!(requested_export_needs_column_extras(DatabaseType::Mysql, "SQL"));
+        for format in ["csv", "json", "xlsx"] {
+            assert!(!requested_export_needs_column_extras(DatabaseType::Mysql, format));
+        }
+        assert!(!requested_export_needs_column_extras(DatabaseType::Postgres, "sql"));
+        assert_eq!(
+            resolve_requested_export_column_extras(&requested_columns, &table_columns),
+            vec![Some("VIRTUAL GENERATED".to_string()), Some("auto_increment".to_string()), None]
+        );
     }
 
     #[test]

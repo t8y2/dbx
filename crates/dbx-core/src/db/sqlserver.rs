@@ -2061,15 +2061,7 @@ pub async fn list_triggers(
     schema: &str,
     table: &str,
 ) -> Result<Vec<TriggerInfo>, String> {
-    let sql = format!(
-        "SELECT t.name, te.type_desc, CASE WHEN t.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END \
-         FROM sys.triggers t \
-         JOIN sys.trigger_events te ON t.object_id = te.object_id \
-         WHERE t.parent_id = OBJECT_ID('{s}.{t}') \
-         ORDER BY t.name",
-        s = schema.replace('\'', "''"),
-        t = table.replace('\'', "''")
-    );
+    let sql = sqlserver_triggers_sql(schema, table);
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows
@@ -2078,9 +2070,22 @@ pub async fn list_triggers(
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             event: row.get::<&str, _>(1).unwrap_or("").to_string(),
             timing: row.get::<&str, _>(2).unwrap_or("AFTER").to_string(),
-            statement: None,
+            statement: row.get::<&str, _>(3).map(str::to_string),
         })
         .collect())
+}
+
+fn sqlserver_triggers_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT t.name, te.type_desc, CASE WHEN t.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END, \
+         OBJECT_DEFINITION(t.object_id) \
+         FROM sys.triggers t \
+         JOIN sys.trigger_events te ON t.object_id = te.object_id \
+         WHERE t.parent_id = OBJECT_ID('{s}.{t}') \
+         ORDER BY t.name",
+        s = schema.replace('\'', "''"),
+        t = table.replace('\'', "''")
+    )
 }
 
 pub async fn execute_query(client: &mut SqlServerClient, sql: &str) -> Result<QueryResult, String> {
@@ -2486,9 +2491,9 @@ mod tests {
         sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
         sqlserver_legacy_probe_with_nonce, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
         sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate,
-        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerResultSet,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_table_comment_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerResultSet, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -2902,6 +2907,17 @@ mod tests {
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("QUOTENAME('dbo')"));
         assert!(sql.contains("QUOTENAME('users')"));
+    }
+
+    #[test]
+    fn sqlserver_triggers_sql_includes_definition_for_legacy_versions() {
+        let sql = sqlserver_triggers_sql("d'bo", "t'able");
+
+        assert!(sql.contains("OBJECT_DEFINITION(t.object_id)"));
+        assert!(sql.contains("JOIN sys.trigger_events te ON t.object_id = te.object_id"));
+        assert!(sql.contains("OBJECT_ID('d''bo.t''able')"));
+        assert!(sql.contains("ORDER BY t.name"));
+        assert!(!sql.contains("STRING_AGG"));
     }
 
     #[test]

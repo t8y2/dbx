@@ -1,6 +1,7 @@
 import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { isInternalDorisCatalog } from "@/lib/database/databaseFeatureSupport";
 import type { CatalogInfo, ConnectionConfig } from "@/types/database";
@@ -56,6 +57,14 @@ export async function fetchNamespaceOptionsForConnection(connectionId: string, c
   );
 }
 
+export async function fetchCatalogNamespaceOptions(connectionId: string, catalog: string, connection: NamespaceOptionsConnection): Promise<string[]> {
+  const dbs = await api.listDorisCatalogDatabases(connectionId, catalog);
+  return databaseOptionsForConnection(
+    dbs.map((db) => db.name),
+    connection,
+  );
+}
+
 export async function fetchSqlFileTargetOptions(connectionId: string, connection: NamespaceOptionsConnection): Promise<string[]> {
   return fetchNamespaceOptionsForConnection(connectionId, connection);
 }
@@ -72,7 +81,7 @@ export function useDatabaseOptions() {
   const catalogRequests = new Map<string, Promise<CatalogInfo[]>>();
   const catalogDatabaseRequests = new Map<string, Promise<string[]>>();
 
-  async function loadDatabaseOptions(connectionId: string) {
+  async function loadDatabaseOptions(connectionId: string, catalog?: string) {
     const connection = connectionStore.getConfig(connectionId);
     if (!connection || loadingDatabaseOptions.value[connectionId]) return;
 
@@ -87,6 +96,12 @@ export function useDatabaseOptions() {
         );
       } else if (connection.db_type === "mongodb") {
         databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(await api.mongoListDatabases(connectionId), connection);
+      } else if (catalog && isDorisFamilyCatalogCapable(connection?.db_type, connection?.driver_profile)) {
+        const dbs = await api.listDorisCatalogDatabases(connectionId, catalog);
+        databaseOptions.value[connectionId] = databaseOptionsForConnection(
+          dbs.map((db) => db.name),
+          connection,
+        );
       } else {
         const dbs = await api.listDatabases(connectionId);
         databaseOptions.value[connectionId] = databaseOptionsForConnection(

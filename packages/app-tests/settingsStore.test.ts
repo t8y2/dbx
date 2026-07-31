@@ -262,6 +262,21 @@ test("defaults unsaved SQL close confirmation to enabled", () => {
   assert.equal(normalizeEditorSettings({ confirmUnsavedSqlClose: false }).confirmUnsavedSqlClose, false);
 });
 
+test("defaults saved SQL to its saved target and normalizes persisted target modes", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode, "saved");
+  assert.equal(normalizeEditorSettings({}).savedSqlOpenTargetMode, "saved");
+  assert.equal(normalizeEditorSettings({ savedSqlOpenTargetMode: "current" }).savedSqlOpenTargetMode, "current");
+  assert.equal(normalizeEditorSettings({ savedSqlOpenTargetMode: "invalid" as any }).savedSqlOpenTargetMode, "saved");
+});
+
+test("shows the saved SQL target selector in Editor settings", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+
+  assert.match(source, /id="editor-saved-sql-open-target"/);
+  assert.match(source, /<SelectItem value="saved">/);
+  assert.match(source, /<SelectItem value="current">/);
+});
+
 test("defaults Vim mode to off and preserves saved booleans", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.vimModeEnabled, false);
   assert.equal(normalizeEditorSettings({}).vimModeEnabled, false);
@@ -503,6 +518,11 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS.gemini.model, "gemini-1.5-pro");
   assert.equal(AI_PROVIDER_PRESETS.deepseek.endpoint, "https://api.deepseek.com/v1");
   assert.equal(AI_PROVIDER_PRESETS.deepseek.model, "deepseek-v4-flash");
+  assert.equal(AI_PROVIDER_PRESETS.minimax.endpoint, "https://api.minimax.io/v1");
+  assert.equal(AI_PROVIDER_PRESETS.minimax.model, "MiniMax-M3");
+  assert.equal(AI_PROVIDER_PRESETS.minimax.authMethod, "bearer");
+  assert.equal(AI_PROVIDER_PRESETS.minimax.requiresApiKey, true);
+  assert.equal(AI_PROVIDER_PRESETS.minimax.iconSlug, "minimax");
   assert.equal(AI_PROVIDER_PRESETS.qwen.endpoint, "https://dashscope.aliyuncs.com/compatible-mode/v1");
   assert.equal(AI_PROVIDER_PRESETS.ollama.endpoint, "http://localhost:11434/v1");
   assert.equal(AI_PROVIDER_PRESETS.ollama.requiresApiKey, false);
@@ -521,6 +541,8 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].iconSlug, "pi");
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].requiresApiKey, false);
   assert.equal(Object.keys(AI_PROVIDER_PRESETS).indexOf("anthropic-compatible") + 1, Object.keys(AI_PROVIDER_PRESETS).indexOf("openai-compatible"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("qwen") < Object.keys(AI_PROVIDER_PRESETS).indexOf("minimax"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("minimax") < Object.keys(AI_PROVIDER_PRESETS).indexOf("ollama"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
@@ -594,6 +616,15 @@ test("infers legacy AI provider from saved endpoint and model", () => {
   assert.equal(deepseek.provider, "deepseek");
   assert.equal(deepseek.endpoint, "https://api.deepseek.com/anthropic/v1/messages");
   assert.equal(deepseek.model, "deepseek-v4-pro");
+
+  const minimax = normalizeAiConfig({
+    apiKey: "key",
+    endpoint: "https://api.minimax.io/v1",
+    model: "MiniMax-M3",
+  } as any);
+  assert.equal(minimax.provider, "minimax");
+  assert.equal(minimax.endpoint, "https://api.minimax.io/v1");
+  assert.equal(minimax.model, "MiniMax-M3");
 });
 
 test("normalizeEditorSettings falls back to the default UI scale", () => {

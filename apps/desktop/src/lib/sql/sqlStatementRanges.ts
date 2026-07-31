@@ -1,7 +1,7 @@
 import type { SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import type { DatabaseType } from "@/types/database";
+import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
 
 /**
  * A contiguous range of SQL text expressed as document offsets plus the
@@ -13,10 +13,18 @@ export interface SqlTextRange {
   sql: string;
 }
 
-const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "neo4j"]);
+const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
+
+export function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType): SqlTextRange[] {
+  if (!isElasticsearchCompatibleDatabaseType(databaseType)) return [];
+  const requests = splitSqlStatementRanges(sql, databaseType);
+  return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
+}
+
+const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "neo4j"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
-  return !!databaseType && (databaseType === "redis" || databaseType === "elasticsearch" || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
+  return !!databaseType && (databaseType === "redis" || isElasticsearchCompatibleDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
 }
 
 export function hasMultipleExecutionTargets(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
@@ -233,6 +241,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   redis: [],
   mongodb: [],
   elasticsearch: [],
+  easysearch: [],
   qdrant: [],
   milvus: [],
   weaviate: [],
@@ -274,7 +283,7 @@ const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
  * whitespace are excluded so editor highlights stay tight).
  */
 export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
-  if (databaseType === "elasticsearch") {
+  if (isElasticsearchCompatibleDatabaseType(databaseType)) {
     const requests = splitElasticsearchRestRequestRanges(sql);
     if (requests) return requests;
   }
@@ -567,7 +576,7 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     // Cursor in indentation or inter-statement whitespace immediately before
     // the statement should still target that statement, while the returned
     // execution range remains tight around the SQL text itself.
-    if (pos >= statement.hitFrom && pos < statement.from && (sql.slice(pos, statement.from).trim() === "" || (databaseType === "elasticsearch" && isElasticsearchRequestPreamble(sql.slice(statement.hitFrom, statement.from))))) {
+    if (pos >= statement.hitFrom && pos < statement.from && (sql.slice(pos, statement.from).trim() === "" || (isElasticsearchCompatibleDatabaseType(databaseType) && isElasticsearchRequestPreamble(sql.slice(statement.hitFrom, statement.from))))) {
       const previous = statements[index - 1];
       if (previous && isCursorInSameLineDelimiterGap(sql, previous.to, pos)) {
         const previousSoftRanges = splitStatementRangeAtSoftStarts(sql, previous, databaseType, parameterOptions);

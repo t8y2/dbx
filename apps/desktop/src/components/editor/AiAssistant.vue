@@ -1404,7 +1404,10 @@ async function openMessageMention(mention: AiMessageMention) {
   try {
     if (mention.kind === "sqlFile") {
       const file = await savedSqlStore.ensureFileContent(mention.id);
-      if (file) queryStore.openSavedSql(file);
+      if (file) {
+        const tabId = queryStore.openSavedSql(file);
+        connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
+      }
       return;
     }
     await openTableTarget({

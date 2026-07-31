@@ -90,7 +90,7 @@
 
 ### 70+ 种数据库，一个工具搞定
 
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、IRIS 等。全部装进约 20 MB 的应用里，不内嵌 Chromium。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、IRIS 等。全部装进约 20 MB 的应用里，不内嵌 Chromium。
 
 ### 查询编辑器
 
@@ -397,7 +397,7 @@ make package
 
 DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础设施建设和版本发布都需要长期投入时间与资源。
 
-### 基础设施赞助
+### 基础设施赞助商
 
 <table>
   <tr>
@@ -411,6 +411,19 @@ DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础�
     </td>
     <td align="center" width="140">
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="180">
+      <a href="https://www.qiniu.com/" target="_blank">
+        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="七牛云" height="64" />
+      </a>
+    </td>
+    <td>
+      七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。
+    </td>
+    <td align="center" width="140">
+      <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
     </td>
   </tr>
 </table>
@@ -443,7 +456,7 @@ DBX 仅 20 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 
 
 <details>
 <summary><strong>支持哪些数据库？</strong></summary>
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
 </details>
 
 <details>

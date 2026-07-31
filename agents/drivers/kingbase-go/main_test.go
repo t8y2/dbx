@@ -1065,6 +1065,29 @@ func TestColumnDDLDefinitionPreservesCompatibilityExtras(t *testing.T) {
 	}
 }
 
+func TestColumnDDLDefinitionRestoresMySQLCompatibilityTypeModifiers(t *testing.T) {
+	length := 64
+	precision := 12
+	scale := 4
+	tests := []struct {
+		name   string
+		column columnInfo
+		want   string
+	}{
+		{name: "varchar length", column: columnInfo{Name: "label", DataType: "varchar", IsNullable: true, CharacterMaximumLength: &length}, want: `"label" varchar(64)`},
+		{name: "numeric precision and scale", column: columnInfo{Name: "amount", DataType: "numeric", IsNullable: true, NumericPrecision: &precision, NumericScale: &scale}, want: `"amount" numeric(12,4)`},
+		{name: "existing modifier", column: columnInfo{Name: "code", DataType: "VARCHAR(64)", IsNullable: true, CharacterMaximumLength: &length}, want: `"code" VARCHAR(64)`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := columnDDLDefinition(test.column); got != test.want {
+				t.Fatalf("unexpected column DDL: got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestAppendDDLStatementEnsuresSingleTerminator(t *testing.T) {
 	got := appendDDLStatement("CREATE TABLE \"public\".\"orders\" (\n  \"id\" integer\n)\n", "CREATE INDEX orders_id_idx ON public.orders (id)")
 	want := "CREATE TABLE \"public\".\"orders\" (\n  \"id\" integer\n);\n\nCREATE INDEX orders_id_idx ON public.orders (id);"

@@ -875,7 +875,7 @@ func ensureStatementTerminator(statement string) string {
 }
 
 func columnDDLDefinition(column columnInfo) string {
-	definition := quoteIdentifier(column.Name) + " " + column.DataType
+	definition := quoteIdentifier(column.Name) + " " + columnDDLDataType(column)
 	if column.Extra != nil && *column.Extra != "" {
 		// Identity clauses belong immediately after the data type in both
 		// PostgreSQL-compatible and SQL Server-compatible Kingbase modes.
@@ -888,6 +888,28 @@ func columnDDLDefinition(column columnInfo) string {
 		definition += " DEFAULT " + *column.ColumnDefault
 	}
 	return definition
+}
+
+func columnDDLDataType(column columnInfo) string {
+	dataType := strings.TrimSpace(column.DataType)
+	if strings.Contains(dataType, "(") {
+		return dataType
+	}
+	normalized := strings.Join(strings.Fields(strings.ToLower(dataType)), " ")
+	switch normalized {
+	case "varchar", "character varying", "char", "character":
+		if column.CharacterMaximumLength != nil && *column.CharacterMaximumLength > 0 {
+			return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
+		}
+	case "numeric", "decimal":
+		if column.NumericPrecision != nil && *column.NumericPrecision > 0 {
+			if column.NumericScale != nil {
+				return fmt.Sprintf("%s(%d,%d)", dataType, *column.NumericPrecision, *column.NumericScale)
+			}
+			return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
+		}
+	}
+	return dataType
 }
 
 func kingbaseIdentityClause(code string) *string {

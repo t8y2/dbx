@@ -4925,15 +4925,8 @@ function onCanvasMouseMove(event: MouseEvent) {
   const next = hit && hitItem ? { rowIndex: hitItem.displayIndex, visibleColIdx: hit.rowNumber ? -1 : hit.visibleColIdx } : null;
   const actualColIdx = next ? visibleColumnIndexes.value[next.visibleColIdx] : undefined;
   if (canvasRef.value) {
-    const overBooleanInteractive =
-      hit != null && !hit.rowNumber && hitItem != null && actualColIdx !== undefined && isBooleanGridColumn(actualColIdx) && canEditCellItem(hitItem, actualColIdx) && booleanInteractiveHitFromCanvasEvent(hitItem, hit, actualColIdx, event);
-    canvasRef.value.style.cursor = hit?.rowNumber
-      ? "default"
-      : overBooleanInteractive
-        ? "pointer"
-        : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx)
-          ? "text"
-          : "cell";
+    const overBooleanInteractive = hit != null && !hit.rowNumber && hitItem != null && actualColIdx !== undefined && isBooleanGridColumn(actualColIdx) && canEditCellItem(hitItem, actualColIdx) && booleanInteractiveHitFromCanvasEvent(hitItem, hit, actualColIdx, event);
+    canvasRef.value.style.cursor = hit?.rowNumber ? "default" : overBooleanInteractive ? "pointer" : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx) ? "text" : "cell";
   }
   if (next?.rowIndex === canvasHoverCell.value?.rowIndex && next?.visibleColIdx === canvasHoverCell.value?.visibleColIdx) {
     return;

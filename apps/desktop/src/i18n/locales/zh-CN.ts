@@ -1091,6 +1091,7 @@ export default withEnglishFallback({
     copyColumnNamesTitle: "复制列名（{count} 列）",
     copyColumnNamesSeparator: "列分隔符",
     copyColumnNamesQuote: "转义列名",
+    copyColumnNamesShowComment: "按注释显示",
     copyColumnNamesPreview: "预览",
     copyAll: "复制全部 (TSV)",
     selectionSum: "SUM: {value}",

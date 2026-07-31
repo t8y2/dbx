@@ -11,22 +11,25 @@ import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
-const props = defineProps<{ columnNames: string[]; databaseType?: DatabaseType }>();
+const props = defineProps<{ columnNames: string[]; databaseType?: DatabaseType; columnComments?: Map<string, string> }>();
 const emit = defineEmits<{ copy: [text: string] }>();
 
 const separator = ref<ColumnNameCopySeparator>(loadColumnNameCopySeparator());
 const quote = ref(false);
+const showByComment = ref(false);
 
 // 每次打开时重新读取上次分隔符选择；转义选项每次默认关闭
 watch(open, (value) => {
   if (!value) return;
   separator.value = loadColumnNameCopySeparator();
   quote.value = false;
+  showByComment.value = false;
 });
 
 const showQuoteOption = computed(() => supportsColumnNameQuoting(props.databaseType));
+const showCommentOption = computed(() => !!(props.columnComments && props.columnComments.size > 0));
 
-const previewText = computed(() => formatColumnNamesForCopy(props.columnNames, { separator: separator.value, quote: quote.value, databaseType: props.databaseType }));
+const previewText = computed(() => formatColumnNamesForCopy(props.columnNames, { separator: separator.value, quote: quote.value, databaseType: props.databaseType, showByComment: showByComment.value, commentByColumn: props.columnComments }));
 
 function onSeparatorChange(value: unknown) {
   if (isColumnNameCopySeparator(value)) separator.value = value;
@@ -60,6 +63,10 @@ function confirmCopy() {
         <div v-if="showQuoteOption" class="flex items-center justify-between gap-3">
           <Label class="shrink-0 text-sm" for="copy-column-names-quote">{{ t("grid.copyColumnNamesQuote") }}</Label>
           <Switch id="copy-column-names-quote" v-model="quote" />
+        </div>
+        <div v-if="showCommentOption" class="flex items-center justify-between gap-3">
+          <Label class="shrink-0 text-sm" for="copy-column-names-comment">{{ t("grid.copyColumnNamesShowComment") }}</Label>
+          <Switch id="copy-column-names-comment" v-model="showByComment" />
         </div>
         <div class="space-y-1.5">
           <Label class="text-sm">{{ t("grid.copyColumnNamesPreview") }}</Label>

@@ -113,6 +113,7 @@ import {
   buildCopyTableDataSql,
   buildEmptyTableSql,
   buildTruncateTableSql,
+  duplicateTableStructureRequiresScript,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   supportsSchemaComment,
@@ -921,6 +922,7 @@ function requestPasteTreeClipboard(): boolean {
     connectionId: entry.connectionId,
     database: entry.database,
     schema: normalizeTreeClipboardSchema(entry.connectionId, entry.database, entry.schema),
+    tableComment: entry.tableComment,
   }));
   showPasteDialog.value = true;
   return true;
@@ -1421,6 +1423,7 @@ function updateTreeClipboardForNodes(nodes: TreeNode[]) {
       database: node.database,
       schema: normalizeTreeClipboardSchema(node.connectionId, node.database, node.schema),
       tableName: node.label,
+      tableComment: node.comment,
     })),
   };
 }
@@ -1923,7 +1926,7 @@ function openRenameObjectDialog() {
   showRenameObjectDialog.value = true;
 }
 
-async function executeTreeNodeSqlWithProductionGuard(node: Pick<TreeNode, "connectionId" | "database" | "schema">, sql: string, options: { database?: string; schema?: string } = {}) {
+async function executeTreeNodeSqlWithProductionGuard(node: Pick<TreeNode, "connectionId" | "database" | "schema">, sql: string, options: { database?: string; schema?: string; executeAsScript?: boolean } = {}) {
   if (!node.connectionId) return undefined;
   const database = options.database ?? node.database ?? "";
   return executeWithProductionSqlGuard({
@@ -1931,7 +1934,7 @@ async function executeTreeNodeSqlWithProductionGuard(node: Pick<TreeNode, "conne
     database,
     sql,
     source: t("production.sourceSidebar"),
-    execute: () => api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema),
+    execute: () => (options.executeAsScript ? api.executeScript(node.connectionId!, database, sql, options.schema ?? node.schema) : api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema)),
   });
 }
 
@@ -2989,8 +2992,13 @@ async function confirmDuplicateStructure() {
       schema: node.schema,
       sourceName: node.label,
       targetName: newName,
+      tableComment: node.comment,
     });
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    await executeTreeNodeSqlWithProductionGuard(node, sql, {
+      database: node.database,
+      schema: node.schema,
+      executeAsScript: duplicateTableStructureRequiresScript(sql),
+    });
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }), 3000);
     await refreshTableList(node);
   } catch (e: any) {
@@ -3031,8 +3039,13 @@ async function confirmPasteTable() {
           schema: entry.schema,
           sourceName: entry.sourceName,
           targetName,
+          tableComment: entry.tableComment,
         });
-        const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, structureSql, { database: entry.database, schema: entry.schema });
+        const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, structureSql, {
+          database: entry.database,
+          schema: entry.schema,
+          executeAsScript: duplicateTableStructureRequiresScript(structureSql),
+        });
         if (!structureExecuted) {
           pasteCancelled = true;
           break;
@@ -3121,6 +3134,7 @@ function openPasteTableDialog() {
     connectionId: entry.connectionId,
     database: entry.database,
     schema: normalizeTreeClipboardSchema(entry.connectionId, entry.database, entry.schema),
+    tableComment: entry.tableComment,
   }));
   showPasteDialog.value = true;
 }

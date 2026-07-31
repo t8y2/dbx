@@ -55,6 +55,7 @@ export interface DuplicateTableStructureSqlOptions {
   schema?: string | null;
   sourceName: string;
   targetName: string;
+  tableComment?: string | null;
   columnComments?: Array<{ name: string; comment: string }>;
 }
 
@@ -151,6 +152,10 @@ export function buildSetSchemaCommentSql(options: SchemaCommentSqlOptions): stri
 
 export function buildDuplicateTableStructureSql(options: DuplicateTableStructureSqlOptions): Promise<string> {
   return api.buildDuplicateTableStructureSql(options);
+}
+
+export function duplicateTableStructureRequiresScript(sql: string): boolean {
+  return /;\s*\n\s*COMMENT ON (?:TABLE|COLUMN)\b/i.test(sql);
 }
 
 export function buildCopyTableDataSql(options: CopyTableDataSqlOptions): Promise<string> {

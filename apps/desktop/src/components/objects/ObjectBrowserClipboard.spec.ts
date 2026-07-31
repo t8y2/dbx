@@ -30,4 +30,10 @@ describe("ObjectBrowser table clipboard context menu", () => {
     expect(objectBrowserSource).toMatch(/if \(!executed\) \{[\s\S]*?pasteCancelled = true;[\s\S]*?break;/);
     expect(objectBrowserSource).toMatch(/if \(pasteCancelled\) \{[\s\S]*?if \(hasMutatedTable\)[\s\S]*?await reload\(\)[\s\S]*?refreshObjectListTreeNode[\s\S]*?pasteTableCancelledAfterPartial[\s\S]*?return;/);
   });
+
+  it("carries table comments through local copy and paste", () => {
+    expect(objectBrowserSource).toMatch(/tableName: row\.name,\s*tableComment: row\.comment/);
+    expect(objectBrowserSource).toMatch(/targetName: `\$\{entry\.tableName\}_copy`,[\s\S]*?tableComment: entry\.tableComment/);
+    expect(objectBrowserSource).toMatch(/buildDuplicateStructurePlan\(entry\.sourceName, targetName, schema, entry\.tableComment/);
+  });
 });

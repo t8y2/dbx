@@ -249,6 +249,7 @@ interface TreeClipboardTableEntry {
   database: string;
   schema?: string;
   tableName: string;
+  tableComment?: string | null;
 }
 
 interface TreeClipboardConnectionEntry {

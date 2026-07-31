@@ -186,6 +186,14 @@ test("last page always re-counts when a count path is available", () => {
   assert.ok(knownTotalIdx < 0 || knownTotalIdx > countSqlIdx, "known totals are only a fallback after re-COUNT");
 });
 
+test("jumping to last page does not rewrite indexes before the new page loads", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const jumpFn = source.match(/function jumpToCountedLastPage\(total: number\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(jumpFn, /emit\("paginate"/);
+  assert.doesNotMatch(jumpFn, /currentPage\.value\s*=/);
+  assert.match(source, /function rowNumberPageOffset/);
+});
+
 test("row number gutter width tracks the largest visible row index", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
   assert.match(source, /dataGridRowNumberColumnWidth/);

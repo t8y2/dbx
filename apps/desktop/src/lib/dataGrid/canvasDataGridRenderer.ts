@@ -71,7 +71,7 @@ export interface DrawCanvasDataGridOptions {
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
   infiniteScrollEnabled: boolean;
   pageSize: number;
-  currentPage: number;
+  pageOffset: number;
   frozenColumnCount?: number;
   columnAligns?: readonly ("left" | "right")[];
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
@@ -268,7 +268,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     cellCanHover,
     infiniteScrollEnabled,
     pageSize,
-    currentPage,
+    pageOffset,
     frozenColumnCount = 0,
     columnAligns,
     rightAlignedActionCell,
@@ -371,7 +371,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     } else if (infiniteScrollEnabled) {
       ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
     } else {
-      ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
+      ctx.fillText(String(item.displayIndex + 1 + pageOffset), rowNumberTextX, textY);
     }
     ctx.restore();
     ctx.font = normalFont;

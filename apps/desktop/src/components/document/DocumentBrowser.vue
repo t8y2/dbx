@@ -801,13 +801,12 @@ function resetElasticsearchTotals(options: { preservePaginationTotal?: boolean }
   totalIsExact.value = nextTotals.totalIsExact;
 }
 
-function clampPageToPaginationTotal(): boolean {
+function clampPageToPaginationTotal(): number | undefined {
   const cap = paginationTotal.value;
-  if (cap === undefined) return false;
+  if (cap === undefined) return undefined;
   const nextPage = clampDocumentPage(page.value, pageSize.value, cap);
-  if (page.value === nextPage) return false;
-  page.value = nextPage;
-  return true;
+  if (page.value === nextPage) return undefined;
+  return nextPage;
 }
 
 function startElasticsearchExactCount(filter: string | undefined) {
@@ -828,7 +827,8 @@ function startElasticsearchExactCount(filter: string | undefined) {
       total.value = totals.total;
       totalIsExact.value = totals.totalIsExact;
       paginationTotal.value = totals.paginationTotal;
-      if (clampPageToPaginationTotal()) void load();
+      const clampedPage = clampPageToPaginationTotal();
+      if (clampedPage !== undefined) void load({ page: clampedPage });
     })
     .catch(() => {
       // The lower-bound result remains truthful when a background count fails.
@@ -873,7 +873,7 @@ function applyElasticsearchSearchTotal(searchTotal: number, isExact: boolean, fi
   startElasticsearchExactCount(filter);
 }
 
-async function load() {
+async function load(options: { page?: number } = {}) {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
   const requestGeneration = ++documentRequestGeneration;
   const executionId = uuid();
@@ -882,6 +882,7 @@ async function load() {
   documentLoadCancelling.value = false;
   startDocumentLoadingTimer();
   error.value = "";
+  const requestPage = options.page ?? page.value;
   const previousSelectedIdx = selectedIdx.value;
   const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
@@ -895,7 +896,7 @@ async function load() {
       resetElasticsearchTotals();
     }
     const sort = currentDocumentSortJson(sortInput.value);
-    const skip = page.value * pageSize.value;
+    const skip = requestPage * pageSize.value;
     const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
@@ -911,6 +912,8 @@ async function load() {
         : result.documents.map(asRecord);
     const hasTypePreservingCopyDocuments = result.extended_documents?.length === nextDocuments.length;
     const nextCopyDocuments = hasTypePreservingCopyDocuments ? result.extended_documents!.map(asRecord) : nextDocuments;
+    // Commit page + rows together so stale rows never briefly show last-page indexes.
+    if (options.page !== undefined) page.value = options.page;
     documents.value = nextDocuments;
     copyDocuments.value = nextCopyDocuments;
     mongoCopyDocumentsAvailable.value = hasTypePreservingCopyDocuments;
@@ -930,7 +933,7 @@ async function load() {
     } else {
       cancelElasticsearchCount();
       const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false, {
-        page: page.value,
+        page: requestPage,
         pageSize: pageSize.value,
         rowCount: nextDocuments.length,
       });
@@ -1010,8 +1013,8 @@ function paginate(offset: number, limit: number) {
   const normalizedLimit = normalizeResultPageSize(limit, pageSize.value);
   pageSize.value = normalizedLimit;
   const requestedPage = Math.floor(Math.max(0, offset) / normalizedLimit);
-  page.value = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
-  void load();
+  const nextPage = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
+  void load({ page: nextPage });
 }
 
 function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" | null) {

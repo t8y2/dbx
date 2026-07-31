@@ -2720,7 +2720,8 @@ function jumpToCountedLastPage(total: number) {
   if (total <= 0) return;
   const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
   if (lastPageNum <= currentPage.value) return;
-  currentPage.value = lastPageNum;
+  // Do not bump currentPage before the new page loads — otherwise stale rows
+  // briefly render with last-page indexes (e.g. 12001-13000) and flash a fake full page.
   resetGridVerticalScroll(true);
   emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
 }
@@ -2752,6 +2753,8 @@ async function lastPage() {
       if (typeof total !== "number" || !Number.isFinite(total) || total < 0) return;
       manualTotalRowCount.value = total;
       jumpToCountedLastPage(total);
+      // Keep the busy overlay until the parent query loading flag can take over.
+      await nextTick();
     } catch (e: any) {
       toast(t("grid.calculateTotalRowsFailed", { message: e?.message || String(e) }), 5000);
     } finally {
@@ -2770,6 +2773,7 @@ async function lastPage() {
       if (!Number.isFinite(total) || total < 0) return;
       manualTotalRowCount.value = total;
       jumpToCountedLastPage(total);
+      await nextTick();
     } catch {
       // COUNT query failed — ignore silently
     } finally {
@@ -4451,10 +4455,16 @@ function formatCellCached(value: CellValue, columnIndex?: number): string {
   return rememberPrimitiveCellFormat(key, formatCell(value, columnIndex));
 }
 
+function rowNumberPageOffset(): number {
+  if (infiniteScrollEnabled.value) return 0;
+  if (typeof props.pageOffset === "number" && props.pageOffset >= 0) return props.pageOffset;
+  return (currentPage.value - 1) * pageSize.value;
+}
+
 function rowNumberText(item: RowItem | undefined): string {
   if (!item) return "";
   if (item.isDraft) return "*";
-  return String(infiniteScrollEnabled.value ? item.displayIndex + 1 : item.displayIndex + 1 + (currentPage.value - 1) * pageSize.value);
+  return String(item.displayIndex + 1 + rowNumberPageOffset());
 }
 
 function draftCellPlaceholder(item: RowItem | undefined, columnIndex: number): string | null {
@@ -5120,7 +5130,7 @@ function drawCanvasGrid() {
     cellCanHover: canEditCellItem,
     infiniteScrollEnabled: infiniteScrollEnabled.value,
     pageSize: pageSize.value,
-    currentPage: currentPage.value,
+    pageOffset: rowNumberPageOffset(),
     frozenColumnCount: frozenColumnCount.value,
     columnAligns: columnAligns.value,
     rightAlignedActionCell: canvasRightAlignedActionCell.value,

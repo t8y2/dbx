@@ -64,7 +64,7 @@ function createBaseOptions(overrides: Partial<DrawCanvasDataGridOptions> = {}): 
     cellCanHover: () => true,
     infiniteScrollEnabled: false,
     pageSize: 100,
-    currentPage: 1,
+    pageOffset: 0,
     ...overrides,
   };
 }

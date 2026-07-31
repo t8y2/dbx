@@ -75,6 +75,13 @@ test("document table wires on-demand exact total counting for estimated mongo to
   assert.match(source, /"accurate"/);
 });
 
+test("document pagination commits page index with fetched rows", () => {
+  const source = documentBrowserSource();
+  assert.match(source, /async function load\(options: \{ page\?: number \} = \{\}\)/);
+  assert.match(source, /void load\(\{ page: nextPage \}\)/);
+  assert.match(source, /if \(options\.page !== undefined\) page\.value = options\.page;/);
+});
+
 test("document query inputs apply on Enter and reserve Shift+Enter for newlines", () => {
   const source = documentBrowserSource();
   assert.equal(source.match(/@keydown\.enter\.exact\.prevent="applyFilter"/g)?.length, 2);

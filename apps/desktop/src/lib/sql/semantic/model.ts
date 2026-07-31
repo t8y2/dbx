@@ -597,13 +597,13 @@ function trailingIdentifier(tokens: readonly SqlSemanticToken[], cursor: number,
 }
 
 function previousWord(tokens: readonly SqlSemanticToken[], cursor: number): string {
-  const before = tokens.filter((item) => item.span.end <= cursor && item.kind === "word");
-  return before[before.length - 1]?.normalized ?? "";
+  const before = tokens.filter((item) => item.span.end <= cursor && item.kind !== "comment");
+  return nearestPreviousIdentifierName(before);
 }
 
 function wordBeforePosition(tokens: readonly SqlSemanticToken[], position: number): string {
-  const before = tokens.filter((item) => item.span.end <= position && item.kind === "word");
-  return before[before.length - 1]?.normalized ?? "";
+  const before = tokens.filter((item) => item.span.end <= position && item.kind !== "comment");
+  return nearestPreviousIdentifierName(before);
 }
 
 function wordBeforeTrailingIdentifier(tokens: readonly SqlSemanticToken[], cursor: number, trailing: TrailingIdentifier): string {
@@ -619,7 +619,26 @@ function wordBeforeTrailingIdentifier(tokens: readonly SqlSemanticToken[], curso
     identifiersToSkip -= 1;
     index -= 1;
   }
-  return before[index]?.kind === "word" ? before[index].normalized : "";
+  return nearestPreviousIdentifierName(before.slice(0, index + 1));
+}
+
+/**
+ * Scans backward from the end of `before` for the nearest identifier and returns
+ * its normalized name. Plain `word` tokens use their normalized (case-folded)
+ * spelling; `quoted_identifier` tokens (e.g. a prefilled `SELECT * FROM "users"`)
+ * are treated as an ordinary previous word too, so a following keyword such as
+ * `where` is not misclassified as a continued `FROM` table reference.
+ */
+function nearestPreviousIdentifierName(tokens: readonly SqlSemanticToken[]): string {
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    const item = tokens[index];
+    if (!item) continue;
+    if (item.kind === "word") return item.normalized;
+    if (item.kind === "quoted_identifier") return unquoteSqlSemanticIdentifier(item);
+    if (item.text === "." || item.kind === "comment") continue;
+    break;
+  }
+  return "";
 }
 
 function isTableListContinuation(tokens: readonly SqlSemanticToken[], position: number): boolean {

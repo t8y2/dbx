@@ -2453,9 +2453,9 @@ const inferredBackendTotalRowCount = computed(() => {
   if (affected <= props.result.rows.length) return undefined;
   return affected;
 });
-const serverKnownTotalRowCount = computed(() => props.totalRowCount ?? manualTotalRowCount.value);
+const serverKnownTotalRowCount = computed(() => (typeof manualTotalRowCount.value === "number" ? manualTotalRowCount.value : props.totalRowCount));
 const displayedTotalRowCount = computed(() => serverKnownTotalRowCount.value ?? inferredBackendTotalRowCount.value);
-const totalRowCountIsExact = computed(() => props.totalRowCountIsExact !== false);
+const totalRowCountIsExact = computed(() => typeof manualTotalRowCount.value === "number" || props.totalRowCountIsExact !== false);
 // A backend can expose an exact display total while deliberately restricting
 // offset pagination to a smaller safe range.
 const paginationTotalRowCount = computed(() =>
@@ -2585,7 +2585,7 @@ function currentOrderBy(): string | undefined {
 }
 
 watch(
-  () => [props.countSql ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", currentWhereInput() ?? "", props.database ?? "", props.connectionId ?? "", props.result],
+  () => [props.countSql ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", currentWhereInput() ?? "", props.database ?? "", props.connectionId ?? ""],
   () => {
     manualTotalRowCount.value = undefined;
     // Reset infinite-scroll allLoaded when query context changes

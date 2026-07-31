@@ -175,3 +175,12 @@ test("last-page COUNT shows grid busy overlay before executeQuery", () => {
   assert.match(lastPageFn, /buildCurrentCountTarget\(\)/);
   assert.ok(lastPageFn.indexOf("beginManualTotalRowCount") < lastPageFn.indexOf("buildCurrentCountTarget"), "busy UI must start before COUNT SQL is built");
 });
+
+test("manual total row count survives pagination result updates", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const clearWatch = source.match(/watch\(\s*\(\) => \[props\.countSql[\s\S]*?manualTotalRowCount\.value = undefined;[\s\S]*?\},\s*\);/)?.[0] ?? "";
+  assert.match(clearWatch, /props\.countSql/);
+  assert.match(clearWatch, /currentWhereInput/);
+  assert.doesNotMatch(clearWatch, /props\.result/);
+  assert.match(source, /typeof manualTotalRowCount\.value === "number" \? manualTotalRowCount\.value : props\.totalRowCount/);
+});

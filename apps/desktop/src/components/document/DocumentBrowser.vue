@@ -910,11 +910,18 @@ async function load() {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
     } else {
       cancelElasticsearchCount();
-      const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false, {
-        page: page.value,
-        pageSize: pageSize.value,
-        rowCount: nextDocuments.length,
-      });
+      const totals = resolveDocumentQueryTotals(
+        result.total,
+        result.total_is_exact !== false,
+        {
+          page: page.value,
+          pageSize: pageSize.value,
+          rowCount: nextDocuments.length,
+        },
+        {
+          retainExactTotal: totalIsExact.value ? paginationTotal.value : undefined,
+        },
+      );
       total.value = totals.total;
       totalIsExact.value = totals.totalIsExact;
       paginationTotal.value = totals.paginationTotal;
@@ -980,7 +987,12 @@ async function cancelDocumentLoad() {
 
 function applyFilter() {
   page.value = 0;
-  if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals();
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    resetElasticsearchTotals();
+  } else {
+    paginationTotal.value = undefined;
+    totalIsExact.value = false;
+  }
   void load();
 }
 

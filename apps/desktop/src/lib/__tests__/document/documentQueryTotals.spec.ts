@@ -40,4 +40,12 @@ describe("document query totals", () => {
       paginationTotal: undefined,
     });
   });
+
+  it("retains a previously counted exact total when later pages only return estimates", () => {
+    expect(resolveDocumentQueryTotals(658_320, false, { page: 0, pageSize: 500, rowCount: 500 }, { retainExactTotal: 658_401 })).toEqual({
+      total: 658_401,
+      totalIsExact: true,
+      paginationTotal: 658_401,
+    });
+  });
 });

@@ -49,6 +49,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   const columnWidths = ref<number[]>([]);
   let isResizing = false;
   let previousColumnIndexes: number[] = [];
+  let userSizedColumnIndexes = new Set<number>();
 
   function columnWidthStateIdentity() {
     return {
@@ -59,7 +60,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   }
 
   function persistColumnWidths() {
-    saveDataGridColumnWidthState(columnWidthStateIdentity(), previousColumnIndexes, columnWidths.value);
+    saveDataGridColumnWidthState(columnWidthStateIdentity(), previousColumnIndexes, columnWidths.value, userSizedColumnIndexes);
   }
 
   function sampleColumnValues(visibleColIdx: number): CellValue[] {
@@ -81,13 +82,18 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
   }
 
+  const neededColumnWidths = computed(() => columns.value.map((_, colIdx) => neededColumnWidth(colIdx)));
+  const neededColumnWidthSignature = computed(() => neededColumnWidths.value.join("|"));
+
   /** Grow-only: late pages with larger keys must not stay stuck at a short-header / early-page width. */
-  function growColumnWidthsToFitSamples() {
+  function growColumnWidthsToFitSamples(neededWidths = neededColumnWidths.value) {
     if (columnWidths.value.length !== columns.value.length || columns.value.length === 0) return;
     let grew = false;
     const next = columnWidths.value.slice();
     for (let colIdx = 0; colIdx < columns.value.length; colIdx++) {
-      const needed = neededColumnWidth(colIdx);
+      const actualColIdx = columnIndexes.value[colIdx];
+      if (actualColIdx === undefined || userSizedColumnIndexes.has(actualColIdx)) continue;
+      const needed = neededWidths[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
       if (needed > (next[colIdx] ?? 0)) {
         next[colIdx] = needed;
         grew = true;
@@ -98,49 +104,35 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     persistColumnWidths();
   }
 
-  function sampleFitSignature(): string {
-    const preset = COLUMN_WIDTH_DENSITY_PRESETS[density.value];
-    return columnIndexes.value
-      .map((actualColIdx) => {
-        const values = sampleDataGridColumnValues(sourceRows.value, actualColIdx, preset.sampleRows);
-        let maxLen = 0;
-        for (const value of values) {
-          if (value == null) continue;
-          const text = typeof value === "object" ? JSON.stringify(value) : String(value);
-          maxLen = Math.max(maxLen, Math.min(text.length, preset.valueTextLimit));
-        }
-        return `${actualColIdx}:${maxLen}`;
-      })
-      .join("|");
+  function markColumnUserSized(visibleColIdx: number) {
+    const actualColIdx = columnIndexes.value[visibleColIdx];
+    if (actualColIdx !== undefined) userSizedColumnIndexes.add(actualColIdx);
   }
 
   function initColumnWidths(force = false) {
+    if (force) userSizedColumnIndexes.clear();
     const previousWidthsByColumnIndex = new Map<number, number>();
     previousColumnIndexes.forEach((columnIndex, visibleIndex) => {
       const width = columnWidths.value[visibleIndex];
       if (width !== undefined) previousWidthsByColumnIndex.set(columnIndex, width);
     });
     const nextColumnIndexes = [...columnIndexes.value];
-    const cachedWidths = !force && previousColumnIndexes.length === 0 ? loadDataGridColumnWidthState(columnWidthStateIdentity(), nextColumnIndexes) : undefined;
+    const cachedState = !force && previousColumnIndexes.length === 0 ? loadDataGridColumnWidthState(columnWidthStateIdentity(), nextColumnIndexes) : undefined;
+    if (cachedState) userSizedColumnIndexes = new Set(cachedState.userSizedColumnIndexes);
+    const currentNeededWidths = neededColumnWidths.value;
     if (force || columnWidths.value.length !== columns.value.length || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
-      columnWidths.value = columns.value.map((colName, colIdx) => {
+      columnWidths.value = columns.value.map((_, colIdx) => {
         if (!force) {
           const existingWidth = previousWidthsByColumnIndex.get(nextColumnIndexes[colIdx]);
           if (existingWidth !== undefined) return existingWidth;
-          const cachedWidth = cachedWidths?.[colIdx];
+          const cachedWidth = cachedState?.widths[colIdx];
           if (cachedWidth !== undefined) return cachedWidth;
         }
-        return calculateDataGridColumnWidth({
-          columnName: colName,
-          sampleValues: sampleColumnValues(colIdx),
-          density: density.value,
-          compactColumnHeaderActions: compactColumnHeaderActions.value,
-          headerTextWidth: measureHeaderText?.(colName),
-        });
+        return currentNeededWidths[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
       });
     }
     previousColumnIndexes = nextColumnIndexes;
-    growColumnWidthsToFitSamples();
+    growColumnWidthsToFitSamples(currentNeededWidths);
   }
 
   function onResizeStart(colIdx: number, event: MouseEvent) {
@@ -177,6 +169,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       cancelPendingFrame();
       pendingClientX = e.clientX;
       applyPendingWidth();
+      markColumnUserSized(colIdx);
       persistColumnWidths();
       requestAnimationFrame(() => {
         isResizing = false;
@@ -199,6 +192,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       includeValues: true,
       headerTextWidth: measureHeaderText?.(colName),
     });
+    markColumnUserSized(colIdx);
     persistColumnWidths();
   }
 
@@ -229,6 +223,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   watch([() => options.cacheKey?.value, options.columnStructureSignature], () => {
     columnWidths.value = [];
     previousColumnIndexes = [];
+    userSizedColumnIndexes.clear();
     initColumnWidths();
   });
   watch([density, compactColumnHeaderActions, () => options.headerMeasurementKey?.value], () => {
@@ -236,7 +231,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     removeDataGridColumnWidthState(options.cacheKey?.value);
     initColumnWidths(true);
   });
-  watch(sampleFitSignature, () => growColumnWidthsToFitSamples());
+  watch(neededColumnWidthSignature, () => growColumnWidthsToFitSamples(neededColumnWidths.value));
 
   return {
     columnWidths,

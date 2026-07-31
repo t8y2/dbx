@@ -185,3 +185,10 @@ test("last page always re-counts when a count path is available", () => {
   assert.ok(countCallbackIdx >= 0 && countSqlIdx >= 0, "last page must keep count paths");
   assert.ok(knownTotalIdx < 0 || knownTotalIdx > countSqlIdx, "known totals are only a fallback after re-COUNT");
 });
+
+test("row number gutter width tracks the largest visible row index", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  assert.match(source, /dataGridRowNumberColumnWidth/);
+  assert.match(source, /resolveDataGridMaxRowNumber/);
+  assert.match(source, /rowNumberWidth,/);
+});

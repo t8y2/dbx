@@ -5,7 +5,27 @@ import type { ColumnWidthDensity } from "@/stores/settingsStore";
 
 type CellValue = string | number | boolean | null;
 
+/** Minimum row-number gutter; fits ~4 digits with px-2 padding. */
 export const DATA_GRID_ROW_NUM_WIDTH = 48;
+
+/** Largest absolute row number that may appear in the gutter for the current view. */
+export function resolveDataGridMaxRowNumber(options: { infiniteScroll: boolean; allRowsLoaded: boolean; currentPage: number; pageSize: number; rowCount: number; knownTotal?: number }): number {
+  const knownTotal = typeof options.knownTotal === "number" && Number.isFinite(options.knownTotal) ? Math.max(0, Math.floor(options.knownTotal)) : 0;
+  if (options.infiniteScroll || options.allRowsLoaded) {
+    return Math.max(1, options.rowCount, knownTotal);
+  }
+  const pageSize = Math.max(1, options.pageSize);
+  const pageEnd = Math.max(0, options.currentPage - 1) * pageSize + Math.max(options.rowCount, 1);
+  return Math.max(1, pageEnd, knownTotal);
+}
+
+/** Grow the sticky # column so multi-million row indexes are not clipped. */
+export function dataGridRowNumberColumnWidth(maxRowNumber: number, fontSize = 12): number {
+  const digits = String(Math.max(1, Math.floor(Math.max(0, maxRowNumber)))).length;
+  const charWidth = Math.max(7, Math.ceil(fontSize * 0.62));
+  // px-2 (16) keeps ~4 digits in the default 48px gutter; larger indexes grow.
+  return Math.max(DATA_GRID_ROW_NUM_WIDTH, digits * charWidth + 16);
+}
 
 export function resizeDataGridColumnWidth(startWidth: number, deltaX: number): number {
   return Math.max(DATA_GRID_COL_MIN_WIDTH, startWidth + deltaX);
@@ -21,6 +41,7 @@ export interface UseDataGridColumnResizeOptions {
   columnStructureSignature: ComputedRef<string>;
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
+  rowNumberWidth?: Ref<number> | ComputedRef<number>;
 }
 
 export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions) {
@@ -143,14 +164,16 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
 
   const renderedColumnWidths = computed(() => columnWidths.value.slice());
 
-  const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + DATA_GRID_ROW_NUM_WIDTH);
+  const resolvedRowNumberWidth = computed(() => options.rowNumberWidth?.value ?? DATA_GRID_ROW_NUM_WIDTH);
+
+  const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + resolvedRowNumberWidth.value);
 
   const columnVars = computed(() => {
     const vars: Record<string, string> = {};
     renderedColumnWidths.value.forEach((w, i) => {
       vars[`--col-w-${i}`] = `${w}px`;
     });
-    vars["--row-num-w"] = `${DATA_GRID_ROW_NUM_WIDTH}px`;
+    vars["--row-num-w"] = `${resolvedRowNumberWidth.value}px`;
     vars["--total-w"] = `${totalWidth.value}px`;
     return vars;
   });

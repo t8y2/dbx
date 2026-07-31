@@ -4,7 +4,7 @@ import { computed, nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH } from "@/lib/dataGrid/dataGridColumnWidth";
 import { clearDataGridColumnWidthStates, createDataGridColumnMeasurementSignature, createDataGridColumnStructureSignature, DATA_GRID_COLUMN_WIDTH_STATE_LIMIT, dataGridColumnWidthStateCount, loadDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
-import { DATA_GRID_ROW_NUM_WIDTH, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
+import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resizeDataGridColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 
 function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[]; columnTypes?: string[]; cacheKey?: string; density?: "compact" | "standard" | "comfortable"; compactColumnHeaderActions?: boolean; headerTextWidth?: number }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
@@ -299,5 +299,29 @@ describe("useDataGridColumnResize", () => {
     comf.initColumnWidths();
 
     expect(comf.columnWidths.value[0]).toBeGreaterThanOrEqual(std.columnWidths.value[0]);
+  });
+});
+
+describe("dataGridRowNumberColumnWidth", () => {
+  it("keeps the default width for small page indexes", () => {
+    expect(dataGridRowNumberColumnWidth(999)).toBe(DATA_GRID_ROW_NUM_WIDTH);
+    expect(dataGridRowNumberColumnWidth(9999)).toBe(DATA_GRID_ROW_NUM_WIDTH);
+  });
+
+  it("widens the gutter for multi-million row numbers", () => {
+    expect(dataGridRowNumberColumnWidth(4_215_101)).toBeGreaterThan(DATA_GRID_ROW_NUM_WIDTH);
+    expect(dataGridRowNumberColumnWidth(4_215_101)).toBe(dataGridRowNumberColumnWidth(9_999_999));
+  });
+
+  it("resolves the max visible row number from the current page window", () => {
+    expect(
+      resolveDataGridMaxRowNumber({
+        infiniteScroll: false,
+        allRowsLoaded: false,
+        currentPage: 42152,
+        pageSize: 100,
+        rowCount: 38,
+      }),
+    ).toBe(4_215_138);
   });
 });

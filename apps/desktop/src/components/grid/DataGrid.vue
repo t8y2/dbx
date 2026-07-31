@@ -184,7 +184,7 @@ import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFro
 import { claimDataGridPaste, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, extractorUnavailableForDatabase, type DataGridCopyExtractorId } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
-import { DATA_GRID_ROW_NUM_WIDTH, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
+import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
 import { useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
@@ -245,6 +245,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
+const rowNumberWidth = ref(DATA_GRID_ROW_NUM_WIDTH);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
 const { isDark, themePalette } = useTheme();
@@ -1899,6 +1900,7 @@ const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, to
   columnStructureSignature,
   measureHeaderText: measureColumnHeaderText,
   headerMeasurementKey: columnHeaderMeasurementKey,
+  rowNumberWidth,
 });
 const gridStyle = computed(() => ({
   ...columnVars.value,
@@ -1933,7 +1935,7 @@ const {
   renderedColumnWidths,
   scrollLeft: gridHorizontalScrollLeft,
   viewportWidth: gridViewportWidth,
-  rowNumberWidth: DATA_GRID_ROW_NUM_WIDTH,
+  rowNumberWidth,
   headerRef,
   orderedColumnIndexes: orderedDisplayableColumnIndexes,
   hiddenColumnIndexes,
@@ -2512,6 +2514,24 @@ const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || 
 const gridSurfaceBusy = computed(() => props.loading === true || totalRowCountBusy.value);
 const canCalculateTotalRowCount = computed(() => !!props.countTotalRows || (!!props.connectionId && (!!props.tableMeta || !!props.countSql)));
 const showExactTotalCountAction = computed(() => canCalculateTotalRowCount.value && (totalRowCountIsExact.value === false || typeof displayedTotalRowCount.value !== "number"));
+watch(
+  [
+    () =>
+      resolveDataGridMaxRowNumber({
+        infiniteScroll: infiniteScrollEnabled.value,
+        allRowsLoaded: allRowsLoaded.value,
+        currentPage: currentPage.value,
+        pageSize: pageSize.value,
+        rowCount: props.result.rows.length,
+        knownTotal: hasKnownPaginationTotalRowCount.value ? paginationTotalRowCount.value : undefined,
+      }),
+    tableFontSize,
+  ],
+  ([maxRowNumber, fontSize]) => {
+    rowNumberWidth.value = dataGridRowNumberColumnWidth(maxRowNumber, fontSize);
+  },
+  { immediate: true },
+);
 // When a refresh/rollback completes and the current page exceeds the last
 // available page (e.g. data was deleted while viewing), auto-navigate to the
 // last available page instead of showing an empty page.
@@ -4583,12 +4603,12 @@ function dataGridCellFromClientPoint(clientX: number, clientY: number): { rowInd
   const scroller = dataGridSelectionScroller();
   if (!scroller) return null;
   const rect = scroller.getBoundingClientRect();
-  const clampedX = Math.min(rect.right - 1, Math.max(rect.left + DATA_GRID_ROW_NUM_WIDTH + 1, clientX));
+  const clampedX = Math.min(rect.right - 1, Math.max(rect.left + rowNumberWidth.value + 1, clientX));
   const clampedY = Math.min(rect.bottom - 1, Math.max(rect.top + 1, clientY));
 
   if (useCanvasGridRows.value) {
     const rowIndex = Math.floor((scroller.scrollTop + clampedY - rect.top) / CANVAS_DATA_GRID_ROW_HEIGHT);
-    const visibleColIdx = canvasColumnAt(scroller.scrollLeft + clampedX - rect.left - DATA_GRID_ROW_NUM_WIDTH);
+    const visibleColIdx = canvasColumnAt(scroller.scrollLeft + clampedX - rect.left - rowNumberWidth.value);
     if (rowIndex < 0 || rowIndex >= displayRowCount.value || visibleColIdx < 0) return null;
     const item = displayItemAt(rowIndex);
     return item ? { rowIndex: item.displayIndex, colIndex: visibleColIdx } : null;
@@ -4615,7 +4635,7 @@ function dataGridRowFromClientPoint(_clientX: number, clientY: number): number |
     return item?.displayIndex ?? null;
   }
 
-  const target = document.elementFromPoint(rect.left + Math.min(DATA_GRID_ROW_NUM_WIDTH / 2, rect.width / 2), clampedY);
+  const target = document.elementFromPoint(rect.left + Math.min(rowNumberWidth.value / 2, rect.width / 2), clampedY);
   const row = target instanceof Element ? target.closest<HTMLElement>("[data-row-index]") : null;
   const rowIndex = Number(row?.dataset.rowIndex);
   return Number.isInteger(rowIndex) ? rowIndex : null;
@@ -4713,14 +4733,14 @@ function canvasHitTest(event: MouseEvent): { rowIndex: number; visibleColIdx: nu
   const y = event.clientY - rect.top;
   const rowIndex = Math.floor((scroller.scrollTop + y) / CANVAS_DATA_GRID_ROW_HEIGHT);
   if (rowIndex < 0 || rowIndex >= displayRowCount.value) return null;
-  if (x < DATA_GRID_ROW_NUM_WIDTH) return { rowIndex, visibleColIdx: -1, rowNumber: true };
+  if (x < rowNumberWidth.value) return { rowIndex, visibleColIdx: -1, rowNumber: true };
   // 冻结列区域不受 scrollLeft 影响，需要特殊处理
   const frozenWidth = frozenColumnCount.value > 0 ? (renderedColumnOffsets.value[frozenColumnCount.value] ?? 0) : 0;
   let contentX: number;
-  if (frozenWidth > 0 && x - DATA_GRID_ROW_NUM_WIDTH < frozenWidth) {
-    contentX = x - DATA_GRID_ROW_NUM_WIDTH;
+  if (frozenWidth > 0 && x - rowNumberWidth.value < frozenWidth) {
+    contentX = x - rowNumberWidth.value;
   } else {
-    contentX = scroller.scrollLeft + x - DATA_GRID_ROW_NUM_WIDTH;
+    contentX = scroller.scrollLeft + x - rowNumberWidth.value;
   }
   const visibleColIdx = canvasColumnAt(contentX);
   if (visibleColIdx < 0) return null;
@@ -4940,7 +4960,7 @@ function canvasCellViewportRect(rowIndex: number, visibleColIdx: number) {
   if (colWidth === undefined) return null;
   // 冻结列不受 scrollLeft 影响
   const isFrozen = visibleColIdx < frozenColumnCount.value;
-  const left = DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - (isFrozen ? 0 : gridHorizontalScrollLeft.value);
+  const left = rowNumberWidth.value + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - (isFrozen ? 0 : gridHorizontalScrollLeft.value);
   return {
     left,
     top: rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - canvasScrollTop.value,
@@ -4963,7 +4983,7 @@ function canvasEditingCellIsVisible() {
   if (!rect) return false;
   const viewportWidth = canvasEffectiveViewportWidth();
   const viewportHeight = canvasEffectiveViewportHeight();
-  const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
+  const clippedLeft = Math.max(rowNumberWidth.value, rect.left);
   const clippedRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   return rect.top + rect.height > 0 && rect.top < viewportHeight && clippedRight - clippedLeft > 0;
 }
@@ -5006,7 +5026,7 @@ const canvasEditingCellStyle = computed(() => {
   const cell = canvasEditingCell.value;
   if (!cell) return {};
   const viewportWidth = canvasEffectiveViewportWidth();
-  const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left);
+  const clippedLeft = Math.max(rowNumberWidth.value, cell.rect.left);
   const clippedRight = viewportWidth > 0 ? Math.min(viewportWidth, cell.rect.left + cell.rect.width) : cell.rect.left + cell.rect.width;
   return {
     left: `${clippedLeft}px`,
@@ -5028,7 +5048,7 @@ const canvasDetailButtonCell = computed(() => {
   if (!rect) return null;
   const viewportWidth = canvasEffectiveViewportWidth();
   const viewportHeight = canvasEffectiveViewportHeight();
-  const visibleLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
+  const visibleLeft = Math.max(rowNumberWidth.value, rect.left);
   const visibleRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   const canQuickDownload = canQuickDownloadCellValue(target.rowIndex, target.col);
   const minWidth = canQuickDownload ? 46 : 24;
@@ -5042,7 +5062,7 @@ const canvasDetailButtonStyle = computed(() => {
   const actionWidth = cell.canQuickDownload ? 44 : 22;
   const edgeGap = 6;
   return {
-    left: `${Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left + cell.rect.width - actionWidth - edgeGap)}px`,
+    left: `${Math.max(rowNumberWidth.value, cell.rect.left + cell.rect.width - actionWidth - edgeGap)}px`,
     top: `${cell.rect.top + cell.rect.height / 2}px`,
   };
 });
@@ -5077,7 +5097,7 @@ function drawCanvasGrid() {
     columnPreviewOffsets: columnHeaderPreviewOffsets.value,
     columnPreviewSourceVisibleIndex: columnHeaderPreviewSourceVisibleIndex.value,
     visibleColumnIndexes: visibleColumnIndexes.value,
-    rowNumberWidth: DATA_GRID_ROW_NUM_WIDTH,
+    rowNumberWidth: rowNumberWidth.value,
     hoverCell: canvasHoverCell.value,
     isScrolling: isScrolling.value,
     editingCell: editingCell.value,
@@ -5943,11 +5963,11 @@ function scrollGridColumnIntoView(visibleColIdx: number) {
   const colLeft = columnContentOffsetLeft(visibleColIdx);
   const colRight = colLeft + (renderedColumnWidths.value[visibleColIdx] ?? 0);
   const frozenWidth = frozenColumnCount.value > 0 ? (renderedColumnOffsets.value[frozenColumnCount.value] ?? 0) : 0;
-  const viewportLeft = scroller.scrollLeft + DATA_GRID_ROW_NUM_WIDTH + frozenWidth;
+  const viewportLeft = scroller.scrollLeft + rowNumberWidth.value + frozenWidth;
   const viewportRight = scroller.scrollLeft + scroller.clientWidth;
 
   if (colLeft < viewportLeft) {
-    scroller.scrollLeft = Math.max(0, colLeft - DATA_GRID_ROW_NUM_WIDTH - frozenWidth);
+    scroller.scrollLeft = Math.max(0, colLeft - rowNumberWidth.value - frozenWidth);
   } else if (colRight > viewportRight) {
     scroller.scrollLeft = Math.max(0, colRight - scroller.clientWidth);
   }

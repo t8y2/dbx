@@ -2243,8 +2243,9 @@ async function openExternalUrl(url: string) {
               </div>
             </div>
 
-            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex flex-col">
-              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
+            <!-- Keep the metadata row as wide as the reply card so its export action stays right-aligned. -->
+            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex w-full max-w-[95%] min-w-0 flex-col">
+              <div class="w-full rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
                 <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
                   <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
                     <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />
@@ -2331,7 +2332,7 @@ async function openExternalUrl(url: string) {
                   </Button>
                 </div>
               </div>
-              <div v-if="msg.content && !isGenerating" class="mt-1 flex items-center justify-between pr-2">
+              <div v-if="msg.content && !isGenerating" class="mt-1 flex items-center justify-between">
                 <span v-if="msg.tokens" class="text-[10px] text-muted-foreground">&#8593;{{ msg.tokens.input.toLocaleString() }} &#8595;{{ msg.tokens.output.toLocaleString() }} tokens</span>
                 <span v-else />
                 <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">

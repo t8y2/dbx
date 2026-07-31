@@ -52,10 +52,11 @@ test("user message edit action remains available by pointer and keyboard", () =>
   assert.match(template, /v-if="!isGenerating"/);
 });
 
-test("assistant messages wrap long paths and continuous error text inside the bubble", () => {
+test("assistant messages keep metadata aligned with the bubble and wrap long text", () => {
   const template = assistantMessageTemplate();
 
-  assert.match(template, /max-w-\[95%\][^"\n]*\[overflow-wrap:anywhere\]/);
+  assert.match(template, /class="flex w-full max-w-\[95%\] min-w-0 flex-col"/);
+  assert.match(template, /class="w-full[^"\n]*\[overflow-wrap:anywhere\]"/);
 });
 
 test("AI request failures use localized backend diagnostics", () => {

@@ -3573,7 +3573,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         });
     }
 
-    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(16));
     let mut stream = result
         .stream::<mysql_async::Row>()
         .await
@@ -3630,7 +3630,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
     let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
 
-    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(16));
     let mut stream = result
         .stream::<mysql_async::Row>()
         .await

@@ -2432,7 +2432,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
             let column_decl_types =
                 stmt.columns().iter().map(|column| column.decl_type().map(str::to_string)).collect::<Vec<_>>();
             let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-            let mut result_rows = Vec::new();
+            let mut result_rows = Vec::with_capacity(row_limit.min(16));
 
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
                 let mut values = Vec::with_capacity(columns.len());

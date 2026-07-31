@@ -1655,6 +1655,27 @@ fn sqlserver_schema_name_predicate(schema: &str, schema_name_expression: &str) -
     format!("{schema_name_expression} = N'{}'", schema.replace('\'', "''"))
 }
 
+fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
+    let table = table.replace('\'', "''");
+    if schema.trim().is_empty() {
+        return format!("OBJECT_ID(QUOTENAME(N'{table}'))");
+    }
+
+    let schema = schema.replace('\'', "''");
+    format!("OBJECT_ID(QUOTENAME(N'{schema}') + N'.' + QUOTENAME(N'{table}'))")
+}
+
+fn sqlserver_object_schema_name_predicate(schema: &str, table: &str, schema_name_expression: &str) -> String {
+    if schema.trim().is_empty() {
+        return format!(
+            "{schema_name_expression} = OBJECT_SCHEMA_NAME({})",
+            sqlserver_object_id_expression(schema, table)
+        );
+    }
+
+    sqlserver_schema_name_predicate(schema, schema_name_expression)
+}
+
 fn escape_like_literal(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "''").replace('%', "\\%").replace('_', "\\_").replace('[', "\\[")
 }
@@ -1870,7 +1891,7 @@ fn sqlserver_column_metadata_from_row(row: &Row) -> SqlServerColumnMetadata {
 
 fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
     let t = table.replace('\'', "''");
-    let schema_filter = sqlserver_schema_name_predicate(schema, "s.name");
+    let schema_filter = sqlserver_object_schema_name_predicate(schema, table, "s.name");
     // COLUMNPROPERTY keeps hidden/generated flags separate and returns NULL on
     // SQL Server versions that do not expose a newer property.
     format!(
@@ -1974,6 +1995,7 @@ fn sqlserver_indexes_sql_with_filter_definition(schema: &str, table: &str, inclu
     } else {
         "CAST(NULL AS NVARCHAR(MAX)) AS filter_definition"
     };
+    let object_id = sqlserver_object_id_expression(schema, table);
     format!(
         "SELECT i.name, \
          STUFF((SELECT ',' + c2.name \
@@ -1993,10 +2015,8 @@ fn sqlserver_indexes_sql_with_filter_definition(schema: &str, table: &str, inclu
          ep.value AS index_comment \
          FROM sys.indexes i \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = i.object_id AND ep.minor_id = i.index_id AND ep.name = N'MS_Description' AND ep.class = 7) ep \
-         WHERE i.object_id = OBJECT_ID('{s}.{t}') AND i.name IS NOT NULL \
+         WHERE i.object_id = {object_id} AND i.name IS NOT NULL \
          ORDER BY i.name",
-        s = schema.replace('\'', "''"),
-        t = table.replace('\'', "''")
     )
 }
 
@@ -2928,7 +2948,7 @@ mod tests {
         assert!(columns_sql.contains("s.name = N'd''bo'"));
         assert!(columns_sql.contains("o.name = 't''able'"));
         assert!(columns_sql.contains("sys.identity_columns"));
-        assert!(indexes_sql.contains("OBJECT_ID('d''bo.t''able')"));
+        assert!(indexes_sql.contains("OBJECT_ID(QUOTENAME(N'd''bo') + N'.' + QUOTENAME(N't''able'))"));
     }
 
     #[test]
@@ -2940,7 +2960,9 @@ mod tests {
             "s.name = COALESCE((SELECT default_schema.name FROM sys.schemas default_schema WHERE default_schema.name = SCHEMA_NAME()), N'dbo')"
         );
         assert!(sqlserver_list_tables_sql("", None, None, None).contains(&predicate));
-        assert!(sqlserver_columns_sql("\t", "orders").contains(&predicate));
+        assert!(sqlserver_columns_sql("\t", "orders")
+            .contains("s.name = OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(N'orders')))"),);
+        assert!(sqlserver_indexes_sql("", "orders").contains("OBJECT_ID(QUOTENAME(N'orders'))"));
     }
 
     #[test]

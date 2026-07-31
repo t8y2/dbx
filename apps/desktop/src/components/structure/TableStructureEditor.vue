@@ -2576,7 +2576,7 @@ watch(
   (tab) => {
     if (tab === "ddl") {
       void fetchDdl();
-    } else if (!isCreateMode.value && !structureMetadataLoaded.value && !loading.value) {
+    } else if (!isCreateMode.value && !props.draft?.initialized && !structureMetadataLoaded.value && !loading.value) {
       void loadStructure(false, visibleTableStructureRefreshScope(tab), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
     }
   },

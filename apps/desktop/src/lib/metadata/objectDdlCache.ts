@@ -35,6 +35,30 @@ export interface ObjectDdlLoadResult {
 const remoteLoads = new Map<string, InFlightDdlLoad>();
 const pendingInvalidations = new Map<string, Promise<void>>();
 
+async function loadSchemaCacheSafe<T>(cacheKey: string): Promise<T | null> {
+  try {
+    return await api.loadSchemaCache<T>(cacheKey);
+  } catch {
+    return null;
+  }
+}
+
+async function saveSchemaCacheSafe(cacheKey: string, payload: unknown): Promise<void> {
+  try {
+    await api.saveSchemaCache(cacheKey, payload);
+  } catch {
+    // Cache persistence is best effort and must not block DDL rendering.
+  }
+}
+
+async function deleteSchemaCachePrefixSafe(prefix: string): Promise<void> {
+  try {
+    await api.deleteSchemaCachePrefix(prefix);
+  } catch {
+    // Cache invalidation is best effort when running with a reduced backend.
+  }
+}
+
 function cacheSegment(value: string | undefined): string {
   return encodeURIComponent(value ?? "");
 }
@@ -80,7 +104,7 @@ async function loadRemoteDdl(request: ObjectDdlRequest, cacheKey: string, force:
     .then(async (ddl) => {
       if (!entry.invalidated && ddl.length <= MAX_PERSISTED_DDL_CHARS) {
         const envelope: ObjectDdlCacheEnvelope = { version: 1, cachedAt: new Date().toISOString(), ddl };
-        await api.saveSchemaCache(cacheKey, envelope).catch(() => undefined);
+        await saveSchemaCacheSafe(cacheKey, envelope);
       }
       return ddl;
     })
@@ -96,7 +120,7 @@ export async function loadObjectDdl(request: ObjectDdlRequest, options?: { force
   await waitForPendingInvalidations(cacheKey);
 
   if (!options?.force) {
-    const cached = decodeCachedDdl(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
+    const cached = decodeCachedDdl(await loadSchemaCacheSafe<unknown>(cacheKey));
     if (cached !== null) return { ddl: cached, cacheStatus: "disk" };
   }
 
@@ -113,12 +137,9 @@ export async function invalidateObjectDdlCache(match: MetadataCacheInvalidation)
 
   const existing = pendingInvalidations.get(prefix);
   if (existing) return existing;
-  const deletion = api
-    .deleteSchemaCachePrefix(prefix)
-    .catch(() => undefined)
-    .finally(() => {
-      if (pendingInvalidations.get(prefix) === deletion) pendingInvalidations.delete(prefix);
-    });
+  const deletion = deleteSchemaCachePrefixSafe(prefix).finally(() => {
+    if (pendingInvalidations.get(prefix) === deletion) pendingInvalidations.delete(prefix);
+  });
   pendingInvalidations.set(prefix, deletion);
   await Promise.all([deletion, invalidateObjectMetadataCache(match)]);
 }
@@ -131,7 +152,7 @@ export async function invalidateObjectDdl(request: ObjectDdlRequest): Promise<vo
     remoteLoads.delete(cacheKey);
   }
   await Promise.all([
-    api.deleteSchemaCachePrefix(cacheKey).catch(() => undefined),
+    deleteSchemaCachePrefixSafe(cacheKey),
     invalidateObjectMetadataCache({
       connectionId: request.connectionId,
       database: request.database,

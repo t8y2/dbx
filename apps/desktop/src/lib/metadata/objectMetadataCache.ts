@@ -20,6 +20,30 @@ interface InFlightLoad<T> {
 const inFlightLoads = new Map<string, InFlightLoad<unknown>>();
 const pendingInvalidations = new Map<string, Promise<void>>();
 
+async function loadSchemaCacheSafe<T>(cacheKey: string): Promise<T | null> {
+  try {
+    return await api.loadSchemaCache<T>(cacheKey);
+  } catch {
+    return null;
+  }
+}
+
+async function saveSchemaCacheSafe(cacheKey: string, payload: unknown): Promise<void> {
+  try {
+    await api.saveSchemaCache(cacheKey, payload);
+  } catch {
+    // Cache persistence is best effort and must not block metadata rendering.
+  }
+}
+
+async function deleteSchemaCachePrefixSafe(prefix: string): Promise<void> {
+  try {
+    await api.deleteSchemaCachePrefix(prefix);
+  } catch {
+    // Cache invalidation is best effort when running with a reduced backend.
+  }
+}
+
 export type ObjectMetadataFacet = "columns" | "indexes" | "foreign-keys" | "triggers" | "comment";
 
 function cacheSegment(value: string | undefined): string {
@@ -60,7 +84,7 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
   await waitForPendingInvalidations(cacheKey);
 
   if (!options?.force) {
-    const cached = decodeEnvelope<T>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
+    const cached = decodeEnvelope<T>(await loadSchemaCacheSafe<unknown>(cacheKey));
     if (cached !== null) return { value: cached, cacheStatus: "disk" };
   }
 
@@ -77,7 +101,7 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
       const serialized = JSON.stringify(value);
       if (!entry.invalidated && serialized.length <= MAX_PERSISTED_METADATA_CHARS) {
         const envelope: ObjectMetadataCacheEnvelope<T> = { version: 1, cachedAt: new Date().toISOString(), value };
-        await api.saveSchemaCache(cacheKey, envelope).catch(() => undefined);
+        await saveSchemaCacheSafe(cacheKey, envelope);
       }
       return value;
     })
@@ -98,12 +122,9 @@ export async function invalidateObjectMetadataCache(match: MetadataCacheInvalida
 
   const existing = pendingInvalidations.get(prefix);
   if (existing) return existing;
-  const deletion = api
-    .deleteSchemaCachePrefix(prefix)
-    .catch(() => undefined)
-    .finally(() => {
-      if (pendingInvalidations.get(prefix) === deletion) pendingInvalidations.delete(prefix);
-    });
+  const deletion = deleteSchemaCachePrefixSafe(prefix).finally(() => {
+    if (pendingInvalidations.get(prefix) === deletion) pendingInvalidations.delete(prefix);
+  });
   pendingInvalidations.set(prefix, deletion);
   return deletion;
 }

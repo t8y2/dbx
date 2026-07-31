@@ -949,6 +949,58 @@ impl TunnelManager {
         Ok(final_local_port)
     }
 
+    /// Starts a loopback TCP bridge whose accepted connections are forwarded
+    /// through SSH session exec channels. This is used for HTTP-over-command
+    /// transports such as `nc -U /var/run/docker.sock`.
+    pub async fn start_command_tunnel(
+        &self,
+        connection_id: &str,
+        ssh: &SshTunnelConfig,
+        command: &str,
+    ) -> Result<u16, String> {
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
+        }
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
+        }
+
+        let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
+        let listener = TcpListener::bind(("127.0.0.1", local_port))
+            .await
+            .map_err(|error| format!("Failed to bind SSH command bridge: {error}"))?;
+        let session = connect_and_authenticate(
+            &ssh.host,
+            ssh.port,
+            &ssh.host,
+            ssh.port,
+            &ssh.user,
+            &ssh.password,
+            &ssh.key_path,
+            &ssh.key_passphrase,
+            ssh.use_ssh_agent,
+            &ssh.ssh_agent_sock_path,
+            &ssh.auth_method,
+            effective_hop_timeout(ssh),
+            &self.known_hosts_path,
+        )
+        .await?;
+        let command = command.to_string();
+        let handle = tokio::spawn(async move {
+            command_forward_loop(session, listener, command).await;
+        });
+        self.tunnels.lock().await.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
+        Ok(local_port)
+    }
+
     pub async fn local_port(&self, connection_id: &str) -> Option<u16> {
         self.tunnels.lock().await.get(connection_id).map(|entry| entry.local_port)
     }
@@ -987,6 +1039,65 @@ impl TunnelManager {
             }
         }
         self.start_locks.lock().await.clear();
+    }
+}
+
+async fn command_forward_loop(session: Handle<SshClient>, listener: TcpListener, command: String) {
+    loop {
+        let (mut stream, _) = match listener.accept().await {
+            Ok(value) => value,
+            Err(error) => {
+                log::error!("SSH command bridge listener failed: {error}");
+                return;
+            }
+        };
+        let mut channel = match session.channel_open_session().await {
+            Ok(channel) => channel,
+            Err(error) => {
+                log::error!("SSH command bridge channel failed: {error}");
+                return;
+            }
+        };
+        if let Err(error) = channel.exec(true, command.as_bytes()).await {
+            log::error!("SSH command bridge exec failed: {error}");
+            return;
+        }
+        tokio::spawn(async move {
+            let mut buffer = vec![0u8; 65536];
+            let mut stream_closed = false;
+            loop {
+                tokio::select! {
+                    read = stream.read(&mut buffer), if !stream_closed => {
+                        match read {
+                            Ok(0) => {
+                                stream_closed = true;
+                                let _ = channel.eof().await;
+                            }
+                            Ok(count) => {
+                                if channel.data(&buffer[..count]).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    message = channel.wait() => {
+                        match message {
+                            Some(ChannelMsg::Data { ref data }) => {
+                                if stream.write_all(data).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                                log::warn!("SSH command bridge stderr: {}", String::from_utf8_lossy(data));
+                            }
+                            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 

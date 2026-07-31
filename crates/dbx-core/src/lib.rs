@@ -31,6 +31,7 @@ pub mod database_search_sql;
 pub mod db;
 pub mod db_admin_sql;
 pub mod dml_binding;
+pub mod docker;
 pub mod document_ops;
 pub mod driver_runtime;
 pub mod external;

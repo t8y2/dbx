@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use dbx_core::connection::AppState;
-use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo};
+use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType};
 use serde::Deserialize;
 
 use crate::error::AppError;
@@ -75,6 +75,16 @@ async fn run_temporary_connection_test(
     include_database_info: bool,
 ) -> Result<ConnectionTestResult, String> {
     let temp_id = format!("__test_{}", uuid::Uuid::new_v4());
+    if config.db_type == DatabaseType::Docker {
+        let result = dbx_core::docker::docker_test_connection_config_core(app, &temp_id, &config).await;
+        app.reset_connection_transport_for_config(&temp_id, &config).await;
+        return result.map(|info| {
+            ConnectionTestResult::success(format!(
+                "Docker connection successful (Engine {}, API {})",
+                info.engine_version, info.api_version
+            ))
+        });
+    }
     app.configs.write().await.insert(temp_id.clone(), config.clone());
 
     let pool_result = app.get_or_create_pool(&temp_id, config.database.as_deref()).await;

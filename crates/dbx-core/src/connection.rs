@@ -115,6 +115,8 @@ pub enum PoolKind {
     MessageQueue,
     /// Nacos admin connection marker.
     Nacos,
+    /// Docker Engine admin connection marker.
+    Docker,
 }
 
 enum ConnectionDatabaseInfoSource {
@@ -1344,12 +1346,20 @@ impl AppState {
 
         validate_h2_file_connection(&db_config)?;
         self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
-        let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
+        // Docker owns its transport setup (including Unix sockets and SSH
+        // command bridges), so the generic TCP endpoint probe must not run.
+        let (host, port) = if db_config.db_type == DatabaseType::Docker {
+            (db_config.host.clone(), db_config.port)
+        } else {
+            self.connection_host_port(connection_id, &db_config).await?
+        };
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.reset_connection_transport_for_config(connection_id, &db_config).await;
             return Err(err);
         }
-        probe_connection_endpoint(&db_config, &host, port).await?;
+        if db_config.db_type != DatabaseType::Docker {
+            probe_connection_endpoint(&db_config, &host, port).await?;
+        }
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.reset_connection_transport_for_config(connection_id, &db_config).await;
             return Err(err);
@@ -1616,6 +1626,10 @@ impl AppState {
                 let adapter = self.nacos_registry.build_transient_config(admin_config).await?;
                 adapter.test_connection().await?;
                 PoolKind::Nacos
+            }
+            DatabaseType::Docker => {
+                crate::docker::docker_test_connection_core(self, connection_id).await?;
+                PoolKind::Docker
             }
             agent_connection_pool_database_type!() => {
                 let connect_params =
@@ -2528,7 +2542,8 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Nacos => false,
+                | PoolKind::Nacos
+                | PoolKind::Docker => false,
             }
         };
 
@@ -3028,6 +3043,7 @@ impl AppState {
     }
 
     async fn reset_connection_transport_layers(&self, connection_id: &str, layer_count: usize) {
+        self.tunnels.stop_tunnels_with_prefix(&format!("{connection_id}:docker-")).await;
         let redis_cluster_prefix = redis_cluster_transport_prefix(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
@@ -3245,7 +3261,8 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Nacos => true,
+                | PoolKind::Nacos
+                | PoolKind::Docker => true,
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy {
@@ -3765,6 +3782,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         }
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
+        PoolKind::Docker => PoolKind::Docker,
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
     }
 }
@@ -3821,6 +3839,7 @@ pub async fn close_pool_kind(pool: PoolKind) {
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
+        PoolKind::Docker => {}
     }
 }
 

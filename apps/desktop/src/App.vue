@@ -1303,6 +1303,8 @@ async function newQuery() {
       } else if (connectionTarget.kind === "nacos-admin") {
         await connectionStore.loadNacosNamespaces(target.connectionId);
         queryStore.openNacosAdmin(target.connectionId);
+      } else if (connectionTarget.kind === "docker") {
+        queryStore.openDockerWorkbench(target.connectionId);
       } else {
         queryStore.createTab(target.connectionId, "", `${conn.name}:keys`, connectionTarget.kind);
       }
@@ -1358,6 +1360,20 @@ async function openConnectionQuery(connectionId: string) {
     try {
       await connectionStore.ensureConnected(connectionId);
       await connectionStore.loadNacosNamespaces(connectionId);
+    } catch (e: any) {
+      toast(
+        t("connection.connectFailed", {
+          message: translateBackendError(t, e?.message || String(e)),
+        }),
+        5000,
+      );
+    }
+    return;
+  }
+  if (initialTarget.kind === "docker") {
+    try {
+      await connectionStore.ensureConnected(connectionId);
+      queryStore.openDockerWorkbench(connectionId);
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {

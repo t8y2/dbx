@@ -1679,6 +1679,31 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openDockerWorkbench(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "docker" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: conn?.name || "Docker",
+      connectionId,
+      database: "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "docker",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function clearNacosNavigationTarget(connectionId: string, namespace: string, requestId?: number) {
     const tab = tabs.value.find((candidate) => candidate.mode === "nacos" && candidate.connectionId === connectionId && (candidate.nacosNamespace || "") === namespace);
     if (!tab || (requestId !== undefined && tab.nacosTargetRequestId !== requestId)) return;
@@ -5162,6 +5187,7 @@ export const useQueryStore = defineStore("query", () => {
     openDamengJobAdmin,
     openMqAdmin,
     openNacosAdmin,
+    openDockerWorkbench,
     clearNacosNavigationTarget,
     openTableStructure,
     linkSavedSql,

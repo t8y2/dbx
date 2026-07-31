@@ -2614,6 +2614,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMqTenants(connectionId, { force: true });
     } else if (config.db_type === "nacos") {
       await loadNacosNamespaces(connectionId, { force: true });
+    } else if (config.db_type === "docker") {
+      return;
     } else {
       await loadDatabases(connectionId, { force: true });
     }
@@ -5027,6 +5029,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMqTenants(node.connectionId, options);
       } else if (config?.db_type === "nacos") {
         await loadNacosNamespaces(node.connectionId, options);
+      } else if (config?.db_type === "docker") {
+        return;
       } else {
         await loadDatabases(node.connectionId, options);
       }

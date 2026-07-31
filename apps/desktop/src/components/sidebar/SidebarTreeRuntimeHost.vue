@@ -53,6 +53,7 @@ import {
   Info,
   X,
   Settings2,
+  Container,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -585,6 +586,8 @@ async function toggle() {
         await connectionStore.loadMqTenants(node.connectionId);
       } else if (config?.db_type === "nacos") {
         await connectionStore.loadNacosNamespaces(node.connectionId);
+      } else if (config?.db_type === "docker") {
+        queryStore.openDockerWorkbench(node.connectionId);
       } else {
         await connectionStore.loadDatabases(node.connectionId);
       }
@@ -3788,12 +3791,20 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   const { node, items } = context;
   // 2. Connection
   if (node.type === "connection") {
+    const isDockerConnection = currentDatabaseType() === "docker";
     if (isConnecting.value) {
       items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
     } else if (!isConnected.value) {
       items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     } else {
       items.push({ label: t("contextMenu.closeConnection"), action: disconnectConnection, icon: Unplug });
+    }
+    if (isDockerConnection && node.connectionId) {
+      items.push({
+        label: t("docker.openWorkbench"),
+        action: () => queryStore.openDockerWorkbench(node.connectionId!),
+        icon: Container,
+      });
     }
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
@@ -3827,7 +3838,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (canOpenSqlFileExecution.value) {
       items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
     }
-    if (canExportAllDatabases.value) {
+    if (!isDockerConnection && canExportAllDatabases.value) {
       items.push({ label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
       if (isTauriRuntime()) {
         items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });

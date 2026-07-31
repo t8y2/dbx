@@ -760,6 +760,16 @@ async fn test_connection_with_info_inner(
     config: ConnectionConfig,
 ) -> Result<ConnectionTestResult, String> {
     let tunnel_id = format!("{}:test", config.id);
+    if config.db_type == DatabaseType::Docker {
+        let result = dbx_core::docker::docker_test_connection_config_core(state, &tunnel_id, &config).await;
+        state.reset_connection_transport_for_config(&tunnel_id, &config).await;
+        return result.map(|info| {
+            ConnectionTestResult::success(format!(
+                "Docker connection successful (Engine {}, API {})",
+                info.engine_version, info.api_version
+            ))
+        });
+    }
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
     let (host, port) = state.connection_host_port(connection_id, &config).await?;

@@ -28,6 +28,10 @@ describe("quickConnectionOpenTarget", () => {
     expect(quickConnectionOpenTarget(connection("nacos"))).toEqual({ kind: "nacos-admin" });
   });
 
+  it("opens Docker connections in the Docker workbench", () => {
+    expect(quickConnectionOpenTarget(connection("docker"))).toEqual({ kind: "docker" });
+  });
+
   it("opens Etcd connections in the key browser", () => {
     expect(quickConnectionOpenTarget(connection("etcd"))).toEqual({ kind: "etcd" });
   });

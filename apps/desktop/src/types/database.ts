@@ -66,7 +66,8 @@ export type DatabaseType =
   | "influxdb"
   | "jdbc"
   | "mq"
-  | "nacos";
+  | "nacos"
+  | "docker";
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
@@ -983,6 +984,7 @@ export interface QueryTab {
     | "mq"
     | "nacos"
     | "nacos-dashboard"
+    | "docker"
     | "objects"
     | "structure"
     | "users"

@@ -1069,6 +1069,8 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadMqTenants(connId, loadOptions);
       } else if (config.db_type === "nacos") {
         await store.loadNacosNamespaces(connId, loadOptions);
+      } else if (config.db_type === "docker") {
+        return;
       } else {
         await store.loadDatabases(connId, loadOptions);
       }
@@ -1077,7 +1079,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
-  if (config.db_type === "mq" || config.db_type === "nacos") return;
+  if (config.db_type === "mq" || config.db_type === "nacos" || config.db_type === "docker") return;
   if (!("database" in target) || !target.database) return;
 
   // Find the database node

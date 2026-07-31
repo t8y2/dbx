@@ -423,8 +423,12 @@ WHERE a.id = b.fk_kpi_set_score_id`,
   it.each([
     ["PostgreSQL quoted table", 'SELECT * FROM "users" wh|', "postgres", "postgres"],
     ["PostgreSQL quoted schema.table", 'SELECT * FROM "public"."users" wh|', "postgres", "postgres"],
+    ["PostgreSQL quoted keyword table", 'SELECT * FROM "from" wh|', "postgres", "postgres"],
+    ["PostgreSQL quoted schema.keyword table", 'SELECT * FROM "public"."from" wh|', "postgres", "postgres"],
     ["MySQL backtick table", "SELECT * FROM `users` wh|", "mysql", "mysql"],
+    ["MySQL backtick keyword table", "SELECT * FROM `join` wh|", "mysql", "mysql"],
     ["SQL Server bracket table", "SELECT * FROM [users] wh|", "sqlserver", "sqlserver"],
+    ["SQL Server bracket keyword table", "SELECT * FROM [update] wh|", "sqlserver", "sqlserver"],
   ] as const)("offers WHERE keyword completion after a quoted prefilled table (%s)", (_label, markedSql, databaseType, dialect) => {
     const { context, items } = semanticCompletion(markedSql, {}, { databaseType, dialect });
 

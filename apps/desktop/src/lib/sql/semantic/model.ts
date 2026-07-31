@@ -598,12 +598,12 @@ function trailingIdentifier(tokens: readonly SqlSemanticToken[], cursor: number,
 
 function previousWord(tokens: readonly SqlSemanticToken[], cursor: number): string {
   const before = tokens.filter((item) => item.span.end <= cursor && item.kind !== "comment");
-  return nearestPreviousIdentifierName(before);
+  return nearestPreviousSyntaxWord(before);
 }
 
 function wordBeforePosition(tokens: readonly SqlSemanticToken[], position: number): string {
   const before = tokens.filter((item) => item.span.end <= position && item.kind !== "comment");
-  return nearestPreviousIdentifierName(before);
+  return nearestPreviousSyntaxWord(before);
 }
 
 function wordBeforeTrailingIdentifier(tokens: readonly SqlSemanticToken[], cursor: number, trailing: TrailingIdentifier): string {
@@ -619,22 +619,20 @@ function wordBeforeTrailingIdentifier(tokens: readonly SqlSemanticToken[], curso
     identifiersToSkip -= 1;
     index -= 1;
   }
-  return nearestPreviousIdentifierName(before.slice(0, index + 1));
+  return nearestPreviousSyntaxWord(before.slice(0, index + 1));
 }
 
 /**
- * Scans backward from the end of `before` for the nearest identifier and returns
- * its normalized name. Plain `word` tokens use their normalized (case-folded)
- * spelling; `quoted_identifier` tokens (e.g. a prefilled `SELECT * FROM "users"`)
- * are treated as an ordinary previous word too, so a following keyword such as
- * `where` is not misclassified as a continued `FROM` table reference.
+ * Scans backward from the end of `before` for the nearest unquoted syntax word.
+ * A quoted identifier is a barrier: its object name must not participate in
+ * keyword comparisons even when it is named `from`, `join`, or `update`.
  */
-function nearestPreviousIdentifierName(tokens: readonly SqlSemanticToken[]): string {
+function nearestPreviousSyntaxWord(tokens: readonly SqlSemanticToken[]): string {
   for (let index = tokens.length - 1; index >= 0; index -= 1) {
     const item = tokens[index];
     if (!item) continue;
     if (item.kind === "word") return item.normalized;
-    if (item.kind === "quoted_identifier") return unquoteSqlSemanticIdentifier(item);
+    if (item.kind === "quoted_identifier") return "";
     if (item.text === "." || item.kind === "comment") continue;
     break;
   }

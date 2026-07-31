@@ -1937,6 +1937,8 @@ export default withEnglishFallback({
     templateSelectorLoading: "불러오는 중...",
     templateSelectorEmpty: "템플릿이 없습니다. 추가하려면 관리를 클릭하세요.",
     templateSelectorTooLong: "선택한 템플릿이 전체 내용 한도를 초과합니다 ({max}자). 계속하려면 일부를 선택 해제하세요.",
+    exportMarkdown: "Markdown으로 내보내기",
+    analysis: "AI 분석",
   },
   contextMenu: {
     openConnection: "연결 열기",

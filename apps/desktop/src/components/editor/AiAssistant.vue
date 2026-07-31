@@ -16,6 +16,7 @@ import {
   Copy,
   Database,
   FileCode,
+  FileDown,
   FlaskConical,
   GitBranch,
   HelpCircle,
@@ -86,6 +87,7 @@ import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/
 import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
+import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -1899,6 +1901,21 @@ async function copyCode(code: string, key: string) {
   }
 }
 
+async function exportMessageAsMarkdown(msg: ChatMessage) {
+  if (!msg.content) return;
+
+  try {
+    const connectionName = props.connection?.name ? sanitizeExportBaseName(props.connection.name) || "ai" : "ai";
+    const headerLines = [`# ${props.connection?.name || "AI"} · ${t("ai.analysis")}`, `${new Date().toLocaleString()}`, ""];
+    const content = headerLines.join("\n") + msg.content;
+    const defaultFileName = `${connectionName}_${compactLocalTimestamp()}.md`;
+    await saveTextFile(content, defaultFileName, "Markdown", "md");
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(t("grid.exportFailed", { message }), 5000);
+  }
+}
+
 function clearMessages() {
   messages.value = [];
   conversationId.value = "";
@@ -2308,6 +2325,11 @@ async function openExternalUrl(url: string) {
                     <X class="h-3 w-3" />
                     {{ t("ai.proposalConfirmNo") }}
                   </Button>
+                </div>
+                <div v-if="msg.content && !isGenerating" class="mt-2 flex justify-end">
+                  <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">
+                    <FileDown class="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
             </div>

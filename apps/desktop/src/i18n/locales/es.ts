@@ -1835,6 +1835,8 @@ export default withEnglishFallback({
     templateSelectorLoading: "Cargando...",
     templateSelectorEmpty: "Sin plantillas. Haz clic en Gestionar para añadir.",
     templateSelectorTooLong: "Las plantillas seleccionadas superan el límite total de contenido ({max} caracteres). Deselecciona algunas para continuar.",
+    exportMarkdown: "Exportar como Markdown",
+    analysis: "AI Analysis",
     agentSteps: {
       generated: "SQL generado",
       noSql: "No se encontró SQL",

@@ -1776,6 +1776,8 @@ export default withEnglishFallback({
     templateSelectorLoading: "載入中...",
     templateSelectorEmpty: "尚無範本，請點擊管理以新增。",
     templateSelectorTooLong: "已選範本內容合計超過限制（最多 {max} 字元），請取消部分選取。",
+    exportMarkdown: "匯出為 Markdown",
+    analysis: "AI 分析",
     agentSteps: {
       generated: "已產生 SQL",
       noSql: "未找到 SQL",

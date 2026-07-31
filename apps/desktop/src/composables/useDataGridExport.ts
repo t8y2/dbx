@@ -2,6 +2,7 @@ import { computed, type ComputedRef, type Ref, createApp } from "vue";
 import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
@@ -1287,50 +1288,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   };
 }
 
-async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string) {
-  if (isTauriRuntime()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: defaultFileName,
-      filters: [{ name: filterName, extensions: [filterExt] }],
-    });
-    if (path) await writeTextFile(path, content);
-    return;
-  }
-
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = defaultFileName;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean } = {}): string {
   const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
   const suffix = options.allResults ? "results" : options.page ? "page" : "";
   return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
-}
-
-function sanitizeExportBaseName(value: string): string {
-  return replaceControlCharacters(
-    value
-      .trim()
-      .replace(/\.[sS][qQ][lL]$/, "")
-      .replace(/[<>:"/\\|?*]/g, "_"),
-    "_",
-  )
-    .replace(/\s+/g, " ")
-    .replace(/[._\s-]+$/g, "")
-    .slice(0, 120);
-}
-
-function replaceControlCharacters(value: string, replacement: string): string {
-  return Array.from(value)
-    .map((char) => (char.charCodeAt(0) < 32 ? replacement : char))
-    .join("");
 }
 
 function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: RowItem[]; mongoDocuments?: unknown[]; excludePrimaryKeys?: boolean; insertMode?: DataGridCopyInsertMode }): string | undefined {
@@ -1363,16 +1324,6 @@ function formatMongoCopyStatement(statement: string | undefined): string | undef
 
 function yieldToMainThread(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function compactLocalTimestamp(date = new Date()): string {
-  const yy = String(date.getFullYear() % 100).padStart(2, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  const second = String(date.getSeconds()).padStart(2, "0");
-  return `${yy}${month}${day}${hour}${minute}${second}`;
 }
 
 function effectiveColumns(sourceColumns: Array<string | undefined> | undefined, columns: string[]): Array<string | undefined> {

@@ -1969,6 +1969,8 @@ export default withEnglishFallback({
     templateSelectorLoading: "加载中...",
     templateSelectorEmpty: "暂无模板，请点击管理添加。",
     templateSelectorTooLong: "已选模板内容合计超过限制（最多 {max} 字符），请取消部分勾选。",
+    exportMarkdown: "导出为 Markdown",
+    analysis: "AI 分析",
   },
   contextMenu: {
     openConnection: "打开连接",

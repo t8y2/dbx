@@ -1968,6 +1968,8 @@ export default {
     templateSelectorLoading: "Loading...",
     templateSelectorEmpty: "No templates. Click Manage to add.",
     templateSelectorTooLong: "Selected templates exceed the total content limit ({max} characters). Deselect some to continue.",
+    exportMarkdown: "Export as Markdown",
+    analysis: "AI Analysis",
   },
   contextMenu: {
     openConnection: "Open Connection",

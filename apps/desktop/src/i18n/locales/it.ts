@@ -1775,6 +1775,8 @@ export default withEnglishFallback({
     templateSelectorLoading: "Caricamento...",
     templateSelectorEmpty: "Nessun modello. Clicca Gestisci per aggiungerne.",
     templateSelectorTooLong: "I modelli selezionati superano il limite totale di contenuto ({max} caratteri). Deseleziona alcuni per continuare.",
+    exportMarkdown: "Esporta come Markdown",
+    analysis: "AI Analysis",
     agentSteps: {
       generated: "SQL generato",
       noSql: "Nessun SQL trovato",

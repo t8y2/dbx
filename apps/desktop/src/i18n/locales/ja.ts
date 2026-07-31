@@ -1869,6 +1869,8 @@ export default withEnglishFallback({
     templateSelectorLoading: "読み込み中...",
     templateSelectorEmpty: "テンプレートがありません。「管理」をクリックして追加してください。",
     templateSelectorTooLong: "選択されたテンプレートの合計が上限（{max}文字）を超えています。選択を解除してください。",
+    exportMarkdown: "Markdown としてエクスポート",
+    analysis: "AI 分析",
     agentSteps: {
       generated: "SQL生成完了",
       noSql: "SQLが見つかりません",

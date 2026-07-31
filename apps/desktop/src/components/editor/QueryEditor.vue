@@ -46,8 +46,8 @@ import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletio
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { mergeSqlCompletionQualifierNames, resolveSqlCompletionRoutineLookupTarget, resolveSqlCompletionSchemaLookupDatabase, resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
-import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
-import { buildHoverTableSql, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
+import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationSourceKind, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -80,7 +80,8 @@ import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
-import { loadTableMetadata, type TableMetadataLoadResult } from "@/lib/metadata/tableMetadataCache";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -426,8 +427,7 @@ const cachedInsertValueHintColumnsByTable = new Map<string, string[]>();
 const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
 const loadedColumnsByTable = new Set<string>();
 
-// Hover tooltip uses the shared table metadata cache (loadTableMetadata)
-// which provides TTL, invalidation, and in-flight deduplication.
+// Hover tooltip shares the persisted object cache with the DDL and structure views.
 let hoverSqlHighlighter: SqlHighlighter | null = null;
 
 function sqlCompletionDialectOptions() {
@@ -1922,15 +1922,22 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       const hoverDatabase = hoverScope.database;
       const hoverSchema = hoverScope.schema ?? table.schema ?? "";
       const hoverQualifiedName = [hoverScope.catalog, hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
+      const objectMetadataRequest = {
+        connectionId: props.connectionId,
+        database: hoverDatabase,
+        schema: hoverSchema,
+        tableName: table.name,
+        catalog: hoverScope.catalog,
+        objectType: sqlObjectNavigationSourceKind(table),
+      };
       let sqlContent: string | undefined;
       let metadataLoadFailed = false;
 
-      // Primary path: the backend's raw getTableDdl (SHOW CREATE TABLE, pg_ddl,
-      // build_sqlserver_ddl, ...) is authoritative. Parse it into structured
-      // fields and rebuild with vertical field alignment (name, type, extra,
-      // default, nullable, comment), stripping charset/COLLATE noise.
+      // The persisted display DDL is canonical across the full-page and hover
+      // views. Hover only removes PostgreSQL's appended access-control tail.
       try {
-        const rawDdl = await api.getTableDdl(props.connectionId, hoverDatabase, hoverSchema, table.name, undefined, hoverScope.catalog);
+        const { ddl } = await loadObjectDdl(objectMetadataRequest);
+        const rawDdl = ddlForHoverPreview(ddl);
         if (rawDdl && rawDdl.trim()) {
           sqlContent = reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
         }
@@ -1945,24 +1952,20 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         let fullIndexes: IndexInfo[] = [];
         let tableComment: string | undefined;
         try {
-          const result: TableMetadataLoadResult = await loadTableMetadata({
-            connectionId: props.connectionId,
-            database: hoverDatabase,
-            schema: hoverSchema,
-            tableName: table.name,
-            databaseType: props.databaseType ?? "",
-            catalog: hoverScope.catalog,
-          });
-          fullColumns = result.metadata.columns;
-          fullIndexes = result.metadata.indexes;
+          const [columnsResult, indexesResult] = await Promise.all([
+            loadObjectMetadataFacet(objectMetadataRequest, "columns", () => api.getColumns(props.connectionId!, hoverDatabase, hoverSchema, table.name, hoverScope.catalog)),
+            loadObjectMetadataFacet(objectMetadataRequest, "indexes", () => api.listIndexes(props.connectionId!, hoverDatabase, hoverSchema, table.name, hoverScope.catalog).catch(() => [])),
+          ]);
+          fullColumns = columnsResult.value;
+          fullIndexes = indexesResult.value;
         } catch (error) {
           metadataLoadFailed = true;
           console.warn(`[DBX] Failed to load table metadata for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
         }
         if (!metadataLoadFailed) {
           try {
-            const commentResult = await api.getTableComment(props.connectionId, hoverDatabase, hoverSchema, table.name, hoverScope.catalog);
-            if (commentResult) tableComment = commentResult;
+            const commentResult = await loadObjectMetadataFacet(objectMetadataRequest, "comment", () => api.getTableComment(props.connectionId!, hoverDatabase, hoverSchema, table.name, hoverScope.catalog));
+            if (commentResult.value) tableComment = commentResult.value;
           } catch (error) {
             console.warn(`[DBX] Failed to load table comment for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
           }

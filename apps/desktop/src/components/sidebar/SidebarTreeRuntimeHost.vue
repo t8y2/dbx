@@ -90,6 +90,7 @@ import {
   supportsTableStructureEditing,
   supportsTransfer,
   usesTreeSchemaMode,
+  isSingleDatabase,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -2290,7 +2291,8 @@ const canCreateSchema = computed(() => {
 
 const canDropSchema = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "schema" && !isSqlServerLinkedNode(activeNode.value) && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
+  const dbType = effectiveDatabaseTypeForConnection(config);
+  return activeNode.value.type === "schema" && !isSqlServerLinkedNode(activeNode.value) && (usesTreeSchemaMode(dbType) || dbType === "dameng") && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 const canEditSchemaComment = computed(() => {
@@ -2949,17 +2951,30 @@ async function confirmDropSchema() {
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
+    const config = connectionStore.getConfig(node.connectionId);
+    const dbType = effectiveDatabaseTypeForConnection(config);
     const sql =
       dropSchemaPreviewSql.value ||
       (await buildDropSchemaSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
       }));
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database });
+    // Dameng refuses to drop the schema the session is currently using (DM
+    // error "当前对象被占用"), and the JDBC agent switches the session to the
+    // target schema (node.schema) before executing any statement. Run the drop
+    // from a different schema: the connected user's own schema, or SYSDBA when
+    // the user's own schema is the one being dropped.
+    let dropExecutionSchema: string | undefined;
+    if (dbType === "dameng") {
+      const username = config?.username?.trim().toUpperCase();
+      dropExecutionSchema = username && username !== node.label.trim().toUpperCase() ? username : "SYSDBA";
+    }
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: dropExecutionSchema });
     toast(t("contextMenu.dropSchemaSuccess", { name: node.label }), 3000);
-    const config = connectionStore.getConfig(node.connectionId);
     if (config?.db_type === "sqlserver") {
       await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database, { force: true });
+    } else if (isSingleDatabase(dbType)) {
+      await connectionStore.loadDatabases(node.connectionId, { force: true });
     } else {
       await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
     }

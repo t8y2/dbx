@@ -587,7 +587,10 @@ pub fn build_create_schema_sql(options: SchemaNameSqlOptions) -> Result<String, 
 
 pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
     let schema = quote_table_identifier(options.database_type, &options.name);
-    if matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb)) {
+    if matches!(
+        options.database_type,
+        Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::Dameng)
+    ) {
         format!("DROP SCHEMA {schema} CASCADE;")
     } else {
         format!("DROP SCHEMA {schema};")
@@ -1423,6 +1426,13 @@ mod tests {
         assert_eq!(
             build_drop_schema_sql(SchemaNameSqlOptions {
                 database_type: Some(DatabaseType::Kwdb),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
                 name: "analytics".to_string(),
             }),
             "DROP SCHEMA \"analytics\" CASCADE;"

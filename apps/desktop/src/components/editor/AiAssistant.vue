@@ -87,7 +87,8 @@ import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/
 import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
-import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
+import { saveTextFile } from "@/lib/export/saveTextFile";
+import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -1905,11 +1906,14 @@ async function exportMessageAsMarkdown(msg: ChatMessage) {
   if (!msg.content) return;
 
   try {
-    const connectionName = props.connection?.name ? sanitizeExportBaseName(props.connection.name) || "ai" : "ai";
-    const headerLines = [`# ${props.connection?.name || "AI"} · ${t("ai.analysis")}`, `${new Date().toLocaleString()}`, ""];
-    const content = headerLines.join("\n") + msg.content;
-    const defaultFileName = `${connectionName}_${compactLocalTimestamp()}.md`;
-    await saveTextFile(content, defaultFileName, "Markdown", "md");
+    const result = buildAiAnalysisExport({
+      connectionName: props.connection?.name,
+      content: msg.content,
+      analysisLabel: t("ai.analysis"),
+      dateLabel: new Date().toLocaleString(),
+    });
+    if (!result) return;
+    await saveTextFile(result.markdown, result.defaultFileName, "Markdown", "md");
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     toast(t("grid.exportFailed", { message }), 5000);

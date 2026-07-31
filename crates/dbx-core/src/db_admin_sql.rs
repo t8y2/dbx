@@ -608,9 +608,14 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     };
 
     let mut comment_sql = Vec::new();
-    if options.database_type.is_some_and(supports_duplicate_table_comment) {
+    if let Some(database_type) =
+        options.database_type.filter(|database_type| supports_duplicate_table_comment(*database_type))
+    {
         if let Some(comment) = options.table_comment.as_deref().filter(|comment| !comment.trim().is_empty()) {
-            comment_sql.push(format!("COMMENT ON TABLE {target} IS {}", quote_sql_string(comment)));
+            comment_sql.push(format!(
+                "COMMENT ON TABLE {target} IS {}",
+                quote_duplicate_table_comment(database_type, comment)
+            ));
         }
     }
     if options.database_type == Some(DatabaseType::Dameng) {
@@ -841,6 +846,36 @@ fn clean_sql_option(value: Option<&str>) -> String {
 
 fn quote_sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn quote_duplicate_table_comment(database_type: DatabaseType, value: &str) -> String {
+    if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
+        return quote_sql_string(value);
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\'' => escaped.push_str("\\'"),
+            character if character.is_ascii_control() => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                let byte = character as u8;
+                escaped.push_str("\\x");
+                escaped.push(HEX[(byte >> 4) as usize] as char);
+                escaped.push(HEX[(byte & 0x0F) as usize] as char);
+            }
+            character => escaped.push(character),
+        }
+    }
+
+    let prefix = if database_type == DatabaseType::Redshift { "" } else { "E" };
+    format!("{prefix}'{escaped}'")
 }
 
 fn comment_literal(value: Option<&str>) -> String {
@@ -1552,6 +1587,35 @@ mod tests {
                 "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  '".to_string(),
             ]
         );
+        for database_type in [
+            DatabaseType::Postgres,
+            DatabaseType::Redshift,
+            DatabaseType::Gaussdb,
+            DatabaseType::Kwdb,
+            DatabaseType::OpenGauss,
+        ] {
+            let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(database_type),
+                schema: Some("public".to_string()),
+                source_name: "source".to_string(),
+                target_name: "copy".to_string(),
+                table_comment: Some("owner\\'s; archive".to_string()),
+                column_comments: vec![],
+            });
+            let expected_literal = if database_type == DatabaseType::Redshift {
+                "'owner\\\\\\'s; archive'"
+            } else {
+                "E'owner\\\\\\'s; archive'"
+            };
+            assert!(sql.ends_with(&format!("COMMENT ON TABLE \"public\".\"copy\" IS {expected_literal};")));
+            assert_eq!(
+                crate::sql::split_sql_statements_for_database(&sql, database_type),
+                vec![
+                    "CREATE TABLE \"public\".\"copy\" (LIKE \"public\".\"source\" INCLUDING ALL)".to_string(),
+                    format!("COMMENT ON TABLE \"public\".\"copy\" IS {expected_literal}"),
+                ]
+            );
+        }
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
                 database_type: Some(DatabaseType::Iris),

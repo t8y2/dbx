@@ -207,7 +207,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
-import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
+import { isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
@@ -458,12 +458,13 @@ const columnCommentMap = computed(() => {
   return map;
 });
 const dataGridTopbarWidth = ref(0);
+const dataGridViewportWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
-const compactDataGridToolbar = computed(() => dataGridTopbarWidth.value > 0 && dataGridTopbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
+const compactDataGridToolbar = computed(() => isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const infiniteScrollMaxRows = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
 const expandedCellEditor = ref<{ rowId: number; col: number } | null>(null);
@@ -2068,6 +2069,7 @@ function observeGridHorizontalScrollbarScroller() {
 
 function updateDataGridTopbarWidth() {
   dataGridTopbarWidth.value = dataGridTopbarRef.value?.clientWidth ?? 0;
+  dataGridViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
 }
 
 function observeDataGridTopbarWidth() {
@@ -4603,6 +4605,11 @@ function scheduleCanvasPixelRatioRefresh() {
   canvasRuntime.schedulePixelRatioRefresh();
 }
 
+function refreshDataGridViewportMetrics() {
+  scheduleCanvasPixelRatioRefresh();
+  updateDataGridTopbarWidth();
+}
+
 function attachCanvasPixelRatioWatcher() {
   canvasPixelRatioMediaQueryCleanup?.();
   canvasPixelRatioMediaQueryCleanup = null;
@@ -5131,9 +5138,9 @@ onMounted(resumeCanvasGridWork);
 onActivated(resumeCanvasGridWork);
 onMounted(() => {
   if (typeof window === "undefined") return;
-  window.addEventListener("resize", scheduleCanvasPixelRatioRefresh);
-  window.visualViewport?.addEventListener("resize", scheduleCanvasPixelRatioRefresh);
-  window.addEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
+  window.addEventListener("resize", refreshDataGridViewportMetrics);
+  window.visualViewport?.addEventListener("resize", refreshDataGridViewportMetrics);
+  window.addEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
   window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
   window.addEventListener("blur", clearInternalClipboardCopy);
   document.addEventListener("visibilitychange", clearInternalClipboardCopy);
@@ -5151,9 +5158,9 @@ onUnmounted(() => {
   if (columnLayoutRefreshFrame) cancelAnimationFrame(columnLayoutRefreshFrame);
   columnLayoutRefreshFrame = 0;
   if (typeof window === "undefined") return;
-  window.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
-  window.visualViewport?.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
-  window.removeEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
+  window.removeEventListener("resize", refreshDataGridViewportMetrics);
+  window.visualViewport?.removeEventListener("resize", refreshDataGridViewportMetrics);
+  window.removeEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
   window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
   window.removeEventListener("blur", clearInternalClipboardCopy);
   document.removeEventListener("visibilitychange", clearInternalClipboardCopy);

@@ -1,4 +1,15 @@
-export const DATA_GRID_COMPACT_TOPBAR_WIDTH = 1050;
+const DATA_GRID_COMPACT_TOPBAR_MIN_WIDTH = 900;
+const DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH = 1050;
+const DATA_GRID_COMPACT_TOPBAR_VIEWPORT_RATIO = 0.75;
+
+export function dataGridToolbarCompactBreakpoint(viewportWidth: number): number {
+  const normalizedViewportWidth = Number.isFinite(viewportWidth) ? Math.max(0, viewportWidth) : DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH;
+  return Math.min(DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH, Math.max(DATA_GRID_COMPACT_TOPBAR_MIN_WIDTH, normalizedViewportWidth * DATA_GRID_COMPACT_TOPBAR_VIEWPORT_RATIO));
+}
+
+export function isDataGridToolbarCompact(toolbarWidth: number, viewportWidth: number): boolean {
+  return toolbarWidth > 0 && toolbarWidth < dataGridToolbarCompactBreakpoint(viewportWidth);
+}
 
 export type DataGridReloadIntent = "refresh";
 

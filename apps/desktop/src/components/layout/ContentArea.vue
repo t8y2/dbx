@@ -89,7 +89,7 @@ import * as api from "@/lib/backend/api";
 import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
-import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
+import { isDataGridToolbarCompact, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -188,6 +188,9 @@ onMounted(() => {
     setTimeout(preload, 300);
   }
   window.addEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+  window.addEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.visualViewport?.addEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.addEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
 });
 
 watch(
@@ -208,6 +211,7 @@ const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
+const standaloneResultToolbarViewportWidth = ref(0);
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
 const dataGridViewOptionsOpen = ref(false);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
@@ -417,18 +421,21 @@ const hasTabularResult = computed(() => {
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
 const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
-const standaloneResultToolbarCompact = computed(() => standaloneResultToolbarWidth.value > 0 && standaloneResultToolbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
+const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
+
+function updateStandaloneResultToolbarDimensions() {
+  standaloneResultToolbarWidth.value = standaloneResultToolbarRef.value?.clientWidth ?? 0;
+  standaloneResultToolbarViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
+}
 
 function observeStandaloneResultToolbar() {
   standaloneResultToolbarResizeObserver?.disconnect();
   standaloneResultToolbarResizeObserver = undefined;
   const toolbar = standaloneResultToolbarRef.value;
-  standaloneResultToolbarWidth.value = toolbar?.clientWidth ?? 0;
+  updateStandaloneResultToolbarDimensions();
   if (toolbar && typeof ResizeObserver !== "undefined") {
-    standaloneResultToolbarResizeObserver = new ResizeObserver(() => {
-      standaloneResultToolbarWidth.value = toolbar.clientWidth;
-    });
+    standaloneResultToolbarResizeObserver = new ResizeObserver(updateStandaloneResultToolbarDimensions);
     standaloneResultToolbarResizeObserver.observe(toolbar);
   }
 }
@@ -560,6 +567,9 @@ onUnmounted(() => {
   stopQueryRunningElapsedTimer();
   standaloneResultToolbarResizeObserver?.disconnect();
   window.removeEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+  window.removeEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.visualViewport?.removeEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.removeEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
 });
 
 watch(

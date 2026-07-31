@@ -130,6 +130,8 @@ interface ChatMessage {
   agentSteps?: AiAgentStepItem[];
   /** Hidden system-generated context summary; not rendered in chat UI but included in LLM history. */
   kind?: "contextSummary";
+  /** Per-message token stats from the last agent run; ephemeral, not persisted. */
+  tokens?: { input: number; output: number };
 }
 
 const props = defineProps<{
@@ -232,7 +234,6 @@ const userPausedAutoScroll = ref(false);
 const showScrollToBottom = ref(false);
 const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
-const agentTokens = ref<{ input: number; output: number } | null>(null);
 const promptHistory = ref<string[]>([]);
 const historyIndex = ref(-1);
 const draftBeforeHistory = ref("");
@@ -1749,7 +1750,6 @@ async function send() {
   const sessionId = uuid();
   currentSessionId.value = sessionId;
   const agentEvents: AgentEvent[] = [];
-  agentTokens.value = null;
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
     const context = await buildAiContext(tab, connection, {
@@ -1780,7 +1780,8 @@ async function send() {
         }
         if (event.type === "agent_end") {
           if (event.input_tokens || event.output_tokens) {
-            agentTokens.value = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
+            const msg = messages.value[assistantIdx];
+            if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
           }
         }
         if (event.type === "context_compacted") {
@@ -1965,7 +1966,6 @@ function selectConversation(conv: AiConversation) {
     reasoning: m.reasoning,
     kind: m.kind,
   }));
-  agentTokens.value = null;
   pendingCompaction.value = null;
   showConversationList.value = false;
   scrollToBottom({ force: true });
@@ -2243,7 +2243,7 @@ async function openExternalUrl(url: string) {
               </div>
             </div>
 
-            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
+            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex flex-col">
               <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
                 <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
                   <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
@@ -2330,11 +2330,13 @@ async function openExternalUrl(url: string) {
                     {{ t("ai.proposalConfirmNo") }}
                   </Button>
                 </div>
-                <div v-if="msg.content && !isGenerating" class="mt-2 flex justify-end">
-                  <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">
-                    <FileDown class="h-3.5 w-3.5" />
-                  </button>
-                </div>
+              </div>
+              <div v-if="msg.content && !isGenerating" class="mt-1 flex items-center justify-between pr-2">
+                <span v-if="msg.tokens" class="text-[10px] text-muted-foreground">&#8593;{{ msg.tokens.input.toLocaleString() }} &#8595;{{ msg.tokens.output.toLocaleString() }} tokens</span>
+                <span v-else />
+                <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">
+                  <FileDown class="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
           </template>
@@ -2342,9 +2344,6 @@ async function openExternalUrl(url: string) {
           <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
             <span>{{ t("ai.thinking") }}</span>
-          </div>
-          <div v-if="agentTokens && !isGenerating" class="flex items-center gap-1 text-[10px] text-muted-foreground px-2 pb-1">
-            <span>&#8593;{{ agentTokens.input.toLocaleString() }} &#8595;{{ agentTokens.output.toLocaleString() }} tokens</span>
           </div>
         </div>
       </ScrollArea>

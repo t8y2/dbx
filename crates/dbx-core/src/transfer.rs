@@ -143,6 +143,14 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
     quote_transfer_identifier(name, db_type)
 }
 
+fn quote_identifier_with_identifier_quote(
+    name: &str,
+    db_type: &DatabaseType,
+    identifier_quote: Option<&str>,
+) -> String {
+    crate::sql_dialect::quote_table_data_identifier(Some(*db_type), name, identifier_quote)
+}
+
 /// Resolve an optional catalog for external-catalog routing in the transfer
 /// pipeline.  Returns `Some(catalog)` only when:
 ///   - the catalog is non-empty and not a built-in catalog name, AND
@@ -215,6 +223,25 @@ pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType, catalo
     // Only use 3-part catalog-qualified names for Doris/StarRocks external catalogs.
     let effective_catalog = resolve_external_transfer_catalog(catalog, db_type);
     qualified_transfer_table(table, schema, db_type, effective_catalog)
+}
+
+fn qualified_table_with_identifier_quote(
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    identifier_quote: Option<&str>,
+) -> String {
+    if crate::sql_dialect::uses_connection_identifier_quote(Some(*db_type), identifier_quote) {
+        crate::sql_dialect::table_data_qualified_table_name(
+            Some(*db_type),
+            (!schema.trim().is_empty()).then_some(schema),
+            table,
+            identifier_quote,
+        )
+    } else {
+        qualified_table(table, schema, db_type, catalog)
+    }
 }
 
 pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result<(), String> {
@@ -851,10 +878,24 @@ fn parse_mysql_extra_clauses(extra: Option<&str>) -> MysqlExtraClauses {
 }
 
 fn postgres_order_by_expression(columns: &[String], db_type: &DatabaseType) -> Option<String> {
+    postgres_order_by_expression_with_identifier_quote(columns, db_type, None)
+}
+
+fn postgres_order_by_expression_with_identifier_quote(
+    columns: &[String],
+    db_type: &DatabaseType,
+    identifier_quote: Option<&str>,
+) -> Option<String> {
     if columns.is_empty() {
         return None;
     }
-    Some(columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", "))
+    Some(
+        columns
+            .iter()
+            .map(|column| quote_identifier_with_identifier_quote(column, db_type, identifier_quote))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn oracle_rownum_page_sql(col_list: &str, base_sql: String, offset: u64, limit: usize) -> String {
@@ -2625,15 +2666,45 @@ pub fn pagination_sql_with_filter_order(
     order_by: Option<&str>,
     default_order_columns: &[String],
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type, None);
-    let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+    pagination_sql_with_filter_order_and_identifier_quote(
+        columns,
+        table,
+        schema,
+        db_type,
+        offset,
+        limit,
+        where_input,
+        order_by,
+        default_order_columns,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn pagination_sql_with_filter_order_and_identifier_quote(
+    columns: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    offset: u64,
+    limit: usize,
+    where_input: Option<&str>,
+    order_by: Option<&str>,
+    default_order_columns: &[String],
+    identifier_quote: Option<&str>,
+) -> String {
+    let full_table = qualified_table_with_identifier_quote(table, schema, db_type, None, identifier_quote);
+    let col_list = columns
+        .iter()
+        .map(|c| quote_identifier_with_identifier_quote(c, db_type, identifier_quote))
+        .collect::<Vec<_>>()
+        .join(", ");
     let predicate = crate::sql_dialect::normalize_where_input(where_input);
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
-    let order_expression = order_by
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| postgres_order_by_expression(default_order_columns, db_type));
+    let order_expression =
+        order_by.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).or_else(|| {
+            postgres_order_by_expression_with_identifier_quote(default_order_columns, db_type, identifier_quote)
+        });
 
     match db_type {
         DatabaseType::Oracle => {
@@ -2670,7 +2741,18 @@ pub fn count_sql_with_where(
     where_input: Option<&str>,
     catalog: Option<&str>,
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type, catalog);
+    count_sql_with_where_and_identifier_quote(table, schema, db_type, where_input, catalog, None)
+}
+
+pub fn count_sql_with_where_and_identifier_quote(
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    where_input: Option<&str>,
+    catalog: Option<&str>,
+    identifier_quote: Option<&str>,
+) -> String {
+    let full_table = qualified_table_with_identifier_quote(table, schema, db_type, catalog, identifier_quote);
     let predicate = crate::sql_dialect::normalize_where_input(where_input);
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     format!("SELECT COUNT(*) FROM {full_table}{where_clause}")
@@ -2685,12 +2767,42 @@ pub fn keyset_pagination_sql(
     last_pk_values: &[serde_json::Value],
     limit: usize,
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type, None);
-    let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-    let order =
-        primary_keys.iter().map(|pk| format!("{} ASC", quote_identifier(pk, db_type))).collect::<Vec<_>>().join(", ");
+    keyset_pagination_sql_with_identifier_quote(
+        columns,
+        table,
+        schema,
+        db_type,
+        primary_keys,
+        last_pk_values,
+        limit,
+        None,
+    )
+}
 
-    let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type);
+#[allow(clippy::too_many_arguments)]
+pub fn keyset_pagination_sql_with_identifier_quote(
+    columns: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    primary_keys: &[String],
+    last_pk_values: &[serde_json::Value],
+    limit: usize,
+    identifier_quote: Option<&str>,
+) -> String {
+    let full_table = qualified_table_with_identifier_quote(table, schema, db_type, None, identifier_quote);
+    let col_list = columns
+        .iter()
+        .map(|c| quote_identifier_with_identifier_quote(c, db_type, identifier_quote))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = primary_keys
+        .iter()
+        .map(|pk| format!("{} ASC", quote_identifier_with_identifier_quote(pk, db_type, identifier_quote)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type, identifier_quote);
 
     match db_type {
         DatabaseType::Oracle => {
@@ -2712,12 +2824,16 @@ fn keyset_where_clause(
     primary_keys: &[String],
     last_pk_values: &[serde_json::Value],
     db_type: &DatabaseType,
+    identifier_quote: Option<&str>,
 ) -> String {
     if primary_keys.is_empty() || last_pk_values.is_empty() {
         return String::new();
     }
 
-    let quoted_keys = primary_keys.iter().map(|pk| quote_identifier(pk, db_type)).collect::<Vec<_>>();
+    let quoted_keys = primary_keys
+        .iter()
+        .map(|pk| quote_identifier_with_identifier_quote(pk, db_type, identifier_quote))
+        .collect::<Vec<_>>();
     let literals = last_pk_values.iter().map(|v| value_to_sql_literal(v, db_type)).collect::<Vec<_>>();
     let comparison_count = quoted_keys.len().min(literals.len());
     if comparison_count == 0 {

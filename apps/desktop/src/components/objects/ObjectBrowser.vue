@@ -1876,6 +1876,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", co
       connectionId: props.connection.id,
       database: props.database,
       schema,
+      identifierQuote: connectionStore.connectionIdentifierQuote(props.connection.id),
       tableName: row.name,
       filePath,
       format,

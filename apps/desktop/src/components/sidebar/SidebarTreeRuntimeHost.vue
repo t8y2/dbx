@@ -1248,7 +1248,8 @@ async function loadTemplateContext(allowView = false) {
     }
   }
 
-  return { node, dbType, tableSchema, columns, tableType };
+  const identifierQuote = connectionStore.connectionIdentifierQuote(node.connectionId);
+  return { node, dbType, identifierQuote, tableSchema, columns, tableType };
 }
 
 function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {
@@ -1262,6 +1263,7 @@ async function newSelectTemplate() {
     if (!context) return;
     const sql = buildTableSelectTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
@@ -1280,6 +1282,7 @@ async function newInsertTemplate() {
     if (!context) return;
     const sql = buildTableInsertTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
@@ -1299,6 +1302,7 @@ async function newUpdateTemplate() {
     if (!context) return;
     const sql = buildTableUpdateTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
@@ -1317,6 +1321,7 @@ async function newDeleteTemplate() {
     if (!context) return;
     const sql = buildTableDeleteTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,

@@ -5223,6 +5223,7 @@ const {
   copyInsertTargetLabel: computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel),
   mongoUpdateTarget: computed(() => props.mongoUpdateTarget),
   databaseType: computed(() => props.databaseType),
+  identifierQuote: computed(() => connectionStore.connectionIdentifierQuote(props.connectionId)),
   connectionId: computed(() => props.connectionId),
   database: computed(() => props.executionDatabase ?? props.database),
   context: computed(() => props.context),

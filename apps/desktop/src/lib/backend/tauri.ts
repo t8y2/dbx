@@ -3538,6 +3538,7 @@ export interface TableExportRequest {
   connectionId: string;
   database: string;
   schema?: string;
+  identifierQuote?: string;
   tableName: string;
   filePath: string;
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";

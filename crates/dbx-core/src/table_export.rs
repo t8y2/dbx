@@ -17,8 +17,8 @@ use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
 use crate::query::{close_query_session, execute_sql_statement_with_options, QueryExecutionOptions};
 use crate::transfer::{
-    count_sql_with_where, execute_read_on_pool, execute_read_on_pool_with_max_rows, keyset_pagination_sql,
-    pagination_sql_with_filter_order, qualified_table, quote_identifier,
+    count_sql_with_where_and_identifier_quote, execute_read_on_pool, execute_read_on_pool_with_max_rows,
+    keyset_pagination_sql_with_identifier_quote, pagination_sql_with_filter_order_and_identifier_quote,
 };
 use crate::types::QueryResult;
 use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options};
@@ -37,6 +37,8 @@ pub struct TableExportRequest {
     pub connection_id: String,
     pub database: String,
     pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
     pub table_name: String,
     pub file_path: String,
     /// "csv", "xlsx", "json", "markdown", "sql", or "txt"
@@ -218,7 +220,7 @@ fn table_page_sql(
     batch_size: usize,
 ) -> String {
     if use_keyset {
-        keyset_pagination_sql(
+        keyset_pagination_sql_with_identifier_quote(
             col_names,
             &request.table_name,
             request.schema.as_deref().unwrap_or(""),
@@ -226,9 +228,10 @@ fn table_page_sql(
             primary_keys,
             last_pk_values,
             batch_size,
+            request.identifier_quote.as_deref(),
         )
     } else {
-        pagination_sql_with_filter_order(
+        pagination_sql_with_filter_order_and_identifier_quote(
             col_names,
             &request.table_name,
             request.schema.as_deref().unwrap_or(""),
@@ -238,6 +241,7 @@ fn table_page_sql(
             request.where_input.as_deref(),
             request.order_by.as_deref(),
             primary_keys,
+            request.identifier_quote.as_deref(),
         )
     }
 }
@@ -248,8 +252,19 @@ fn table_cursor_sql(
     col_names: &[String],
     primary_keys: &[String],
 ) -> String {
-    let full_table = qualified_table(&request.table_name, request.schema.as_deref().unwrap_or(""), db_type, None);
-    let col_list = col_names.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+    let full_table = crate::sql_dialect::table_data_qualified_table_name(
+        Some(*db_type),
+        request.schema.as_deref(),
+        &request.table_name,
+        request.identifier_quote.as_deref(),
+    );
+    let col_list = col_names
+        .iter()
+        .map(|column| {
+            crate::sql_dialect::quote_table_data_identifier(Some(*db_type), column, request.identifier_quote.as_deref())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let predicate = crate::sql_dialect::normalize_where_input(request.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     let order_by = request
@@ -265,7 +280,16 @@ fn table_cursor_sql(
                 Some(
                     primary_keys
                         .iter()
-                        .map(|column| format!("{} ASC", quote_identifier(column, db_type)))
+                        .map(|column| {
+                            format!(
+                                "{} ASC",
+                                crate::sql_dialect::quote_table_data_identifier(
+                                    Some(*db_type),
+                                    column,
+                                    request.identifier_quote.as_deref(),
+                                )
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(", "),
                 )
@@ -1182,12 +1206,13 @@ async fn export_table_data_core_inner(
     let total_rows = if request.skip_count {
         None
     } else {
-        let count_query = count_sql_with_where(
+        let count_query = count_sql_with_where_and_identifier_quote(
             &request.table_name,
             request.schema.as_deref().unwrap_or(""),
             &db_type,
             request.where_input.as_deref(),
             None,
+            request.identifier_quote.as_deref(),
         );
         match execute_table_export_count(state, &pool_key, request, &count_query, cancel_token.clone()).await {
             Ok(result) => result
@@ -1906,6 +1931,7 @@ mod tests {
             connection_id: "conn-1".to_string(),
             database: "PUBLIC".to_string(),
             schema: Some("PUBLIC".to_string()),
+            identifier_quote: None,
             table_name: "EXPORT_SAMPLE".to_string(),
             file_path: output.to_string_lossy().into_owned(),
             format: "csv".to_string(),
@@ -2068,6 +2094,7 @@ mod tests {
             connection_id: "conn-1".to_string(),
             database: "ORCL".to_string(),
             schema: Some("APP".to_string()),
+            identifier_quote: None,
             table_name: "events".to_string(),
             file_path: "events.csv".to_string(),
             format: "csv".to_string(),
@@ -2101,6 +2128,57 @@ mod tests {
     }
 
     #[test]
+    fn gaussdb_m_table_export_uses_backticks_across_all_query_paths() {
+        let request = TableExportRequest {
+            export_id: "export-gaussdb-m".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "app".to_string(),
+            schema: Some("app_schema".to_string()),
+            identifier_quote: Some("`".to_string()),
+            table_name: "order".to_string(),
+            file_path: "order.csv".to_string(),
+            format: "csv".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: false,
+            batch_size: Some(100),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+        };
+        let columns = vec!["id".to_string(), "DisplayName".to_string()];
+        let primary_keys = vec!["id".to_string()];
+
+        assert_eq!(
+            table_cursor_sql(&request, &DatabaseType::Gaussdb, &columns, &primary_keys),
+            "SELECT id, `DisplayName` FROM app_schema.`order` ORDER BY id ASC"
+        );
+        assert_eq!(
+            table_page_sql(&request, &DatabaseType::Gaussdb, &columns, &primary_keys, false, &[], 100, 100),
+            "SELECT id, `DisplayName` FROM app_schema.`order` ORDER BY id LIMIT 100 OFFSET 100"
+        );
+        assert_eq!(
+            table_page_sql(&request, &DatabaseType::Gaussdb, &columns, &primary_keys, true, &[json!(10)], 0, 100,),
+            "SELECT id, `DisplayName` FROM app_schema.`order` WHERE id > 10 ORDER BY id ASC LIMIT 100"
+        );
+        assert_eq!(
+            count_sql_with_where_and_identifier_quote(
+                &request.table_name,
+                request.schema.as_deref().unwrap(),
+                &DatabaseType::Gaussdb,
+                None,
+                None,
+                request.identifier_quote.as_deref(),
+            ),
+            "SELECT COUNT(*) FROM app_schema.`order`"
+        );
+    }
+
+    #[test]
     fn oracle_requested_export_columns_omit_synthetic_rowid_and_keep_metadata_aligned() {
         let columns = vec!["__DBX_ROWID".to_string(), "ID".to_string(), "NAME".to_string()];
         let column_types = vec![Some("VARCHAR2".to_string()), Some("NUMBER".to_string()), Some("VARCHAR2".to_string())];
@@ -2118,6 +2196,7 @@ mod tests {
             connection_id: "conn-1".to_string(),
             database: "ORCL".to_string(),
             schema: Some("APP".to_string()),
+            identifier_quote: None,
             table_name: "USERS".to_string(),
             file_path: "users.sql".to_string(),
             format: "sql".to_string(),

@@ -76,6 +76,7 @@ export interface UseDataGridExportOptions {
   copyInsertTargetLabel?: ComputedRef<string | undefined>;
   mongoUpdateTarget?: ComputedRef<MongoCopyUpdateTarget | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
+  identifierQuote?: ComputedRef<string | undefined>;
   connectionId: ComputedRef<string | undefined>;
   database: ComputedRef<string | undefined>;
   context: ComputedRef<"results" | "table-data" | undefined>;
@@ -1002,6 +1003,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           connectionId: connectionId.value,
           database: database.value,
           schema: meta.schema,
+          identifierQuote: options.identifierQuote?.value,
           tableName: meta.tableName,
           filePath: outputPath,
           format,

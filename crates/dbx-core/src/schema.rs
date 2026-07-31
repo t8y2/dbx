@@ -1,5 +1,6 @@
 use crate::connection::{
-    connection_url_for_endpoint, database_connection_config, task_client_session_id, AppState, MysqlMode, PoolKind,
+    connection_url_for_endpoint, database_connection_config, gaussdb_uses_m_jdbc_driver, task_client_session_id,
+    AppState, MysqlMode, PoolKind,
 };
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
@@ -2461,7 +2462,7 @@ mod tests {
     use super::{
         clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
-        ephemeral_agent_metadata_session_id, filter_mongodb_agent_collections,
+        ephemeral_agent_metadata_session_id, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
         is_retryable_metadata_error, metadata_name_or_comment_matches, mysql_external_driver_ddl_from_query_result,
@@ -2589,6 +2590,22 @@ mod tests {
 
         config.jdbc_driver_class = Some("org.mariadb.jdbc.Driver".to_string());
         assert!(!is_mysql_external_driver_config(&config));
+    }
+
+    #[test]
+    fn gaussdb_m_external_driver_uses_mysql_style_ddl() {
+        let mut config = test_connection_config(DatabaseType::Gaussdb);
+        config.driver_profile = Some("gaussdb-m".to_string());
+        config.jdbc_driver_class = Some("com.huawei.gaussdb.jdbc.Driver".to_string());
+
+        assert!(external_driver_uses_mysql_ddl(&config));
+        assert_eq!(
+            mysql_external_driver_ddl_sql("app", "app_schema", "order"),
+            "SHOW CREATE TABLE `app_schema`.`order`"
+        );
+
+        config.driver_profile = Some("gaussdb".to_string());
+        assert!(!external_driver_uses_mysql_ddl(&config));
     }
 
     #[test]
@@ -5418,7 +5435,7 @@ async fn get_table_ddl_core_with_options(
     {
         let connections = state.connections.read().await;
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
-            if is_mysql_external_driver_config(config.as_ref()) {
+            if external_driver_uses_mysql_ddl(config.as_ref()) {
                 let config = config.clone();
                 let session = session.clone();
                 drop(connections);
@@ -5675,6 +5692,10 @@ fn is_mysql_external_driver_config(config: &ConnectionConfig) -> bool {
         (None, Some(driver_matches)) => driver_matches,
         (None, None) => false,
     }
+}
+
+fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
+    is_mysql_external_driver_config(config) || gaussdb_uses_m_jdbc_driver(config)
 }
 
 fn mysql_external_driver_ddl_sql(database: &str, schema: &str, table: &str) -> String {

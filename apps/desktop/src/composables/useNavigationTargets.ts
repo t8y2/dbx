@@ -1,12 +1,13 @@
 import * as api from "@/lib/backend/api";
 import { connectionObjectTreeNodeSchema, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
-import { canApplyDataTabMetadata } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, findExistingDataTabCandidate } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult } from "@/lib/query/queryResultError";
-import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, normalizeWhereInput } from "@/lib/table/tableSelectSql";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
+import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -38,6 +39,26 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     await connectionStore.ensureConnected(target.connectionId);
     const tabId = queryStore.createTab(target.connectionId, target.database || "default", tabTitle, "vector");
     queryStore.updateSql(tabId, target.tableName);
+    return;
+  }
+  // 复用已打开的同一张表标签页（受 reuseDataTab 设置控制，同表匹配不受其控制）。
+  // 仅当同表 + 相同 whereInput + 标签页已成功加载过数据时复用：canActivateExistingDataTableTab
+  // 对无 result 的标签页返回 false，天然排除持久化恢复的空标签页（避免覆盖恢复的查询）。
+  const dataTabTarget = {
+    connectionId: target.connectionId,
+    database: target.database,
+    schema: tableSchema,
+    catalog: target.catalog,
+    tableName: target.tableName,
+  };
+  const existingCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, {
+    openMode: "default",
+    reuseDataTab: settingsStore.editorSettings.reuseDataTab,
+  });
+  const normalizedWhere = normalizeWhereInput(target.whereInput);
+  const existingSameTableTab = existingCandidate?.match === "same-table" && normalizeWhereInput(existingCandidate.tab.whereInput) === normalizedWhere ? existingCandidate.tab : undefined;
+  if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false })) {
+    queryStore.switchTab(existingSameTableTab.id);
     return;
   }
   const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema, undefined, undefined, { forceNew: true });

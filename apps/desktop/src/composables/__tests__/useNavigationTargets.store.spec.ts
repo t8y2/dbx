@@ -131,6 +131,22 @@ describe("useNavigationTargets with the real query store", () => {
     expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(['SELECT * FROM users WHERE "id" = 1', 'SELECT * FROM users WHERE "id" = 2']);
   });
 
+  it("reuses an existing same-table tab instead of opening a new one", async () => {
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+
+    await navigation.openTableTarget(target);
+    expect(queryStore.tabs).toHaveLength(1);
+    const firstTabId = queryStore.tabs[0]!.id;
+    expect(queryStore.tabs[0]!.result).toBeDefined();
+
+    await navigation.openTableTarget(target);
+
+    expect(queryStore.tabs).toHaveLength(1);
+    expect(queryStore.tabs[0]!.id).toBe(firstTabId);
+    expect(queryStore.activeTabId).toBe(firstTabId);
+  });
+
   it("creates a new target tab even when the same table was restored", async () => {
     mocks.loadOpenTabsState.mockResolvedValue({
       tabs: [

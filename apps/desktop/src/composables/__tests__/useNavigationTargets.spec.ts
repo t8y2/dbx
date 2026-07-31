@@ -80,9 +80,13 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({ editorSettings: { reuseDataTab: true } }),
 }));
 
-vi.mock("@/lib/table/tableSelectSql", () => ({
-  buildTableSelectSql: async ({ tableName }: { tableName: string }) => `SELECT * FROM ${tableName}`,
-}));
+vi.mock("@/lib/table/tableSelectSql", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/table/tableSelectSql")>();
+  return {
+    ...actual,
+    buildTableSelectSql: async ({ tableName }: { tableName: string }) => `SELECT * FROM ${tableName}`,
+  };
+});
 
 const dialogs = {
   showFieldLineageDialog: { value: false },

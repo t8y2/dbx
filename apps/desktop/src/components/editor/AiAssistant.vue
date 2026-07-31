@@ -124,6 +124,8 @@ type AiMessageMention =
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Connection that produced this assistant response; ephemeral export metadata. */
+  sourceConnectionName?: string;
   mentions?: AiMessageMention[];
   reasoning?: string;
   isThinking?: boolean;
@@ -1745,7 +1747,7 @@ async function send() {
   confirmedWriteSqlText = undefined;
   confirmedConnectionId = undefined;
   confirmedDatabase = undefined;
-  messages.value.push({ role: "assistant", content: "" });
+  messages.value.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
   currentSessionId.value = sessionId;
@@ -1908,7 +1910,7 @@ async function exportMessageAsMarkdown(msg: ChatMessage) {
 
   try {
     const result = buildAiAnalysisExport({
-      connectionName: props.connection?.name,
+      connectionName: msg.sourceConnectionName ?? props.connection?.name,
       content: msg.content,
       analysisLabel: t("ai.analysis"),
       dateLabel: new Date().toLocaleString(),
@@ -1962,6 +1964,7 @@ function selectConversation(conv: AiConversation) {
   messages.value = conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
+    sourceConnectionName: m.role === "assistant" ? conv.connectionName : undefined,
     mentions: Array.isArray(m.mentions) ? (m.mentions as AiMessageMention[]) : undefined,
     reasoning: m.reasoning,
     kind: m.kind,

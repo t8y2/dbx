@@ -62,3 +62,10 @@ test("assistant messages keep metadata aligned with the bubble and wrap long tex
 test("AI request failures use localized backend diagnostics", () => {
   assert.match(source, /messages\.value\[assistantIdx\]\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`/);
 });
+
+test("AI analysis export keeps the connection that produced each assistant response", () => {
+  assert.match(source, /sourceConnectionName\?: string/);
+  assert.match(source, /messages\.value\.push\(\{ role: "assistant", content: "", sourceConnectionName: connection\.name \}\)/);
+  assert.match(source, /connectionName: msg\.sourceConnectionName \?\? props\.connection\?\.name/);
+  assert.match(source, /sourceConnectionName: m\.role === "assistant" \? conv\.connectionName : undefined/);
+});

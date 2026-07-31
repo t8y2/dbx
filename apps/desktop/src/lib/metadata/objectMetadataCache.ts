@@ -51,7 +51,7 @@ function cacheSegment(value: string | undefined): string {
 }
 
 function facetKey(request: ObjectDdlRequest, facet: ObjectMetadataFacet): string {
-  return `${[OBJECT_METADATA_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.catalog), cacheSegment(request.tableName), facet].join(":")}:`;
+  return `${[OBJECT_METADATA_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), facet].join(":")}:`;
 }
 
 function invalidationPrefix(match: MetadataCacheInvalidation): string {

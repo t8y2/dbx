@@ -27,7 +27,7 @@ import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFor
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { invalidateObjectDdl, loadObjectDdl } from "@/lib/metadata/objectDdlCache";
-import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { loadObjectMetadataFacet, type ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
@@ -141,7 +141,8 @@ const foreignKeysLoading = ref(false);
 const triggersLoading = ref(false);
 const ddlContent = ref("");
 const ddlLoading = ref(false);
-const structureMetadataLoaded = ref(false);
+const loadedMetadataFacets = new Set<ObjectMetadataFacet>();
+let structureEditorReady = false;
 const ddlPreRef = ref<HTMLPreElement | null>(null);
 function onDdlKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key === "a") {
@@ -1204,7 +1205,7 @@ function resetState() {
   selectedColumnId.value = null;
   ddlContent.value = "";
   ddlFetched.value = false;
-  structureMetadataLoaded.value = false;
+  loadedMetadataFacets.clear();
   newTableName.value = "";
   tableComment.value = "";
   originalTableComment.value = "";
@@ -1228,7 +1229,7 @@ async function reloadStructureFromDatabase() {
   const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
   invalidateTableMetadataCache(metadataMatch);
   await invalidateObjectDdl(ddlRequest());
-  structureMetadataLoaded.value = false;
+  loadedMetadataFacets.clear();
   if (refreshDdl) {
     ddlFetched.value = false;
     await fetchDdl(true);
@@ -1241,6 +1242,15 @@ function setSecondaryMetadataLoading(scope: TableStructureRefreshScope, value: b
   if (scope.indexes && tableMetadataCapabilities.value.indexes) indexesLoading.value = value;
   if (scope.foreignKeys && tableMetadataCapabilities.value.foreignKeys) foreignKeysLoading.value = value;
   if (scope.triggers && tableMetadataCapabilities.value.triggers) triggersLoading.value = value;
+}
+
+function hasLoadedMetadataScope(scope: TableStructureRefreshScope): boolean {
+  if (scope.columns && !loadedMetadataFacets.has("columns")) return false;
+  if (scope.indexes && !loadedMetadataFacets.has("indexes")) return false;
+  if (scope.foreignKeys && !loadedMetadataFacets.has("foreign-keys")) return false;
+  if (scope.triggers && !loadedMetadataFacets.has("triggers")) return false;
+  if (scope.tableComment && !loadedMetadataFacets.has("comment")) return false;
+  return true;
 }
 
 async function fetchTableCommentValue(connectionId: string, database: string, schema: string, tableName: string, catalog?: string): Promise<string | undefined> {
@@ -1320,6 +1330,7 @@ async function loadStructure(
       const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
       const hydratedColumnDrafts = databaseType.value === "dameng" && options.damengLengthUnitsAfterSave ? restoreDamengLengthUnitsAfterSave(nextColumnDrafts, options.damengLengthUnitsAfterSave) : nextColumnDrafts;
       columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
+      loadedMetadataFacets.add("columns");
       if (!options.preserveDraft) selectedColumnId.value = null;
     }
 
@@ -1327,15 +1338,23 @@ async function loadStructure(
     if (nextTableComment !== undefined) {
       originalTableComment.value = nextTableComment;
       tableComment.value = nextTableComment;
+      loadedMetadataFacets.add("comment");
     }
     const applySecondaryMetadata = async () => {
       const [nextIndexes, nextForeignKeys, nextTriggers] = await Promise.all([indexesPromise, foreignKeysPromise, triggersPromise]);
       if (requestId !== structureLoadRequestId) return;
-      if (nextIndexes) indexes.value = createIndexDrafts(nextIndexes);
-      if (nextForeignKeys) foreignKeys.value = createForeignKeyDrafts(nextForeignKeys);
+      if (nextIndexes) {
+        indexes.value = createIndexDrafts(nextIndexes);
+        loadedMetadataFacets.add("indexes");
+      }
+      if (nextForeignKeys) {
+        foreignKeys.value = createForeignKeyDrafts(nextForeignKeys);
+        loadedMetadataFacets.add("foreign-keys");
+      }
       if (nextTriggers) {
         triggers.value = createTriggerDrafts(nextTriggers);
         triggersLoaded.value = true;
+        loadedMetadataFacets.add("triggers");
       }
     };
 
@@ -1351,7 +1370,6 @@ async function loadStructure(
       await secondaryMetadataPromise;
     }
     loadedSuccessfully = true;
-    structureMetadataLoaded.value = true;
   } catch (e: any) {
     if (showErrors) {
       errorMessage.value = e?.message || String(e);
@@ -2301,6 +2319,7 @@ async function applyChanges() {
     if (!isCreateMode.value && props.tableName) {
       invalidateTableMetadataCache({ connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName });
       await invalidateObjectDdl(ddlRequest());
+      loadedMetadataFacets.clear();
     }
     toast(t("structureEditor.saved"), 2500);
     pendingStatements.value = [];
@@ -2398,10 +2417,15 @@ onMounted(() => {
     // A restored draft owns its saved tab unless navigation explicitly requested another one.
     applyInitialStructureTab(false);
     applyInitialStructureTarget();
+  }
+  structureEditorReady = true;
+  if (props.draft?.initialized) {
     void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
-  } else if (activeTab.value !== "ddl") {
+  } else if (activeTab.value === "ddl") {
+    void fetchDdl();
+  } else {
     void loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
   }
 });
@@ -2574,13 +2598,17 @@ watch(refreshVersion, (version, previous) => {
 watch(
   activeTab,
   (tab) => {
+    if (!structureEditorReady) return;
     if (tab === "ddl") {
       void fetchDdl();
-    } else if (!isCreateMode.value && !props.draft?.initialized && !structureMetadataLoaded.value && !loading.value) {
-      void loadStructure(false, visibleTableStructureRefreshScope(tab), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
+    } else if (!isCreateMode.value && !props.draft?.initialized && !loading.value) {
+      const scope = visibleTableStructureRefreshScope(tab);
+      if (!hasLoadedMetadataScope(scope)) {
+        void loadStructure(false, scope, true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
+      }
     }
   },
-  { immediate: true },
+  { flush: "sync" },
 );
 
 watch([activeTab, ddlLoading], ([tab, loading]) => {

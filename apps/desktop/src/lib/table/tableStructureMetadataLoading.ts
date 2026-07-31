@@ -9,15 +9,18 @@ export interface TableStructureRefreshScope {
 }
 
 export function visibleTableStructureRefreshScope(activeTab: TableInfoTab): TableStructureRefreshScope {
-  return {
-    columns: true,
-    indexes: true,
-    foreignKeys: true,
-    // Trigger definitions can contain large source bodies, so defer them until
-    // the trigger editor is actually visible.
-    triggers: activeTab === "triggers",
-    tableComment: true,
-  };
+  switch (activeTab) {
+    case "columns":
+      return { columns: true, indexes: false, foreignKeys: false, triggers: false, tableComment: true };
+    case "indexes":
+      return { columns: true, indexes: true, foreignKeys: false, triggers: false, tableComment: true };
+    case "foreignKeys":
+      return { columns: true, indexes: false, foreignKeys: true, triggers: false, tableComment: true };
+    case "triggers":
+      return { columns: false, indexes: false, foreignKeys: false, triggers: true, tableComment: true };
+    case "ddl":
+      return { columns: false, indexes: false, foreignKeys: false, triggers: false, tableComment: false };
+  }
 }
 
 export const TRIGGERS_ONLY_REFRESH_SCOPE: TableStructureRefreshScope = {

@@ -64,7 +64,7 @@ function cacheSegment(value: string | undefined): string {
 }
 
 export function objectDdlCacheKey(request: ObjectDdlRequest): string {
-  return `${[OBJECT_DDL_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE"), cacheSegment(request.tableName)].join(":")}:`;
+  return `${[OBJECT_DDL_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE")].join(":")}:`;
 }
 
 function invalidationPrefix(match: MetadataCacheInvalidation): string {
@@ -75,6 +75,8 @@ function invalidationPrefix(match: MetadataCacheInvalidation): string {
   parts.push(cacheSegment(match.database ?? undefined));
   if (!match.schema) return `${parts.join(":")}:`;
   parts.push(cacheSegment(match.schema ?? undefined));
+  if (!match.tableName) return `${parts.join(":")}:`;
+  parts.push(cacheSegment(match.tableName));
   return `${parts.join(":")}:`;
 }
 

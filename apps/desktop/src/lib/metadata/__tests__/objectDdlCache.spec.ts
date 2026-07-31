@@ -5,20 +5,28 @@ const mocks = vi.hoisted(() => ({
   saveSchemaCache: vi.fn(),
   loadSchemaCache: vi.fn(),
   deleteSchemaCachePrefix: vi.fn(),
+  persisted: new Map<string, unknown>(),
 }));
 
 vi.mock("@/lib/backend/api", () => mocks);
 
 import { invalidateObjectDdl, invalidateObjectDdlCache, loadObjectDdl, objectDdlCacheKey } from "@/lib/metadata/objectDdlCache";
 
-const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users" } as const;
+const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
 
 describe("objectDdlCache", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.loadSchemaCache.mockResolvedValue(null);
-    mocks.saveSchemaCache.mockResolvedValue(undefined);
-    mocks.deleteSchemaCachePrefix.mockResolvedValue(undefined);
+    mocks.persisted.clear();
+    mocks.loadSchemaCache.mockImplementation(async (cacheKey: string) => mocks.persisted.get(cacheKey) ?? null);
+    mocks.saveSchemaCache.mockImplementation(async (cacheKey: string, payload: unknown) => {
+      mocks.persisted.set(cacheKey, payload);
+    });
+    mocks.deleteSchemaCachePrefix.mockImplementation(async (prefix: string) => {
+      for (const cacheKey of mocks.persisted.keys()) {
+        if (cacheKey === prefix || cacheKey.startsWith(prefix)) mocks.persisted.delete(cacheKey);
+      }
+    });
   });
 
   it("returns persisted DDL without querying the database", async () => {
@@ -63,6 +71,15 @@ describe("objectDdlCache", () => {
   it("deletes the exact persisted entry", async () => {
     await invalidateObjectDdl(request);
     expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith(objectDdlCacheKey(request));
+  });
+
+  it("reloads from the database after table-level persisted cache invalidation", async () => {
+    mocks.getTableDisplayDdl.mockResolvedValueOnce("old ddl").mockResolvedValueOnce("new ddl");
+
+    await expect(loadObjectDdl(request)).resolves.toEqual({ ddl: "old ddl", cacheStatus: "remote" });
+    await invalidateObjectDdlCache({ connectionId: request.connectionId, database: request.database, schema: request.schema, tableName: request.tableName });
+    await expect(loadObjectDdl(request)).resolves.toEqual({ ddl: "new ddl", cacheStatus: "remote" });
+    expect(mocks.getTableDisplayDdl).toHaveBeenCalledTimes(2);
   });
 
   it("does not persist an in-flight result across invalidation", async () => {

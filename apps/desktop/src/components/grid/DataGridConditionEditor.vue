@@ -218,7 +218,6 @@ function resizeEditor(forceExpand = false) {
       void nextTick(() => {
         const start = selectionStart.value;
         const end = selectionEnd.value;
-        input.setSelectionRange(start, end);
         input.focus({ preventScroll: true });
         input.setSelectionRange(start, end);
         selectionStart.value = start;

@@ -205,7 +205,49 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(collapseTransferBody).toContain("const start = selectionStart.value");
     expect(collapseTransferBody).toContain("input.setSelectionRange(start, end)");
     expect(collapseTransferBody).toContain("input.focus({ preventScroll: true })");
+    expect(collapseTransferBody!.indexOf("input.focus({ preventScroll: true })")).toBeLessThan(collapseTransferBody!.indexOf("input.setSelectionRange(start, end)"));
     expect(collapseTransferBody).toContain("scheduleCaretIntoView()");
+  });
+
+  it("preserves continuous input when the expanded editor collapses", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { value, input } = mountEditor("where", "abcdefghijklmnopqrstuvwxyz0123456789");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    expect(overlay).toBeTruthy();
+
+    overlay!.value = "i";
+    overlay!.setSelectionRange(1, 1);
+    overlay!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    await nextTick();
+
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(1);
+    input.value = "id";
+    input.setSelectionRange(2, 2);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    expect(value.value).toBe("id");
+    expect(input.selectionStart).toBe(2);
+    vi.unstubAllGlobals();
   });
 
   it("preserves the caret offset when focus moves into the expanded textarea", async () => {

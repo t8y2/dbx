@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 dbx-core = { path = "../dbx-core", default-features = false }
+dirs = "6"
 rmcp = { version = "2.2.0", features = ["client", "transport-io"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 schemars = "1"

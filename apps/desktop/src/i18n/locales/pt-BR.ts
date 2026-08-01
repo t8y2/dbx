@@ -35,6 +35,7 @@ export default withEnglishFallback({
     stopExplain: "Parar explicação",
     formatSql: "Formatar SQL",
     formatSqlFailed: "Falha ao formatar SQL",
+    formatAutoDetectFailed: "Não foi possível reconhecer ou formatar o conteúdo selecionado",
     compressSql: "Comprimir SQL",
     keywordCaseLower: "Usar palavras-chave SQL em minúsculas",
     keywordCaseUpper: "Usar palavras-chave SQL em maiúsculas",

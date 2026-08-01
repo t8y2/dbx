@@ -35,6 +35,7 @@ export default withEnglishFallback({
     stopExplain: "停止執行計畫",
     formatSql: "格式化 SQL",
     formatSqlFailed: "SQL 格式化失敗",
+    formatAutoDetectFailed: "無法識別或格式化所選內容",
     compressSql: "壓縮 SQL",
     keywordCaseLower: "使用小寫 SQL 關鍵字",
     keywordCaseUpper: "使用大寫 SQL 關鍵字",

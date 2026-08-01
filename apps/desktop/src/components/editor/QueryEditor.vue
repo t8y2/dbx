@@ -18,6 +18,7 @@ import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@
 import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlText, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
@@ -2346,7 +2347,25 @@ async function formatCurrentSql() {
   if (!source.trim()) return;
 
   try {
-    const formatted = props.databaseType === "mongodb" ? formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter) : await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+    let formatted: string;
+    if (props.databaseType === "mongodb") {
+      formatted = formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter);
+    } else {
+      const structured = detectAndFormatStructured(source, {
+        indentSize: settingsStore.editorSettings.sqlFormatter.tabWidth,
+        useTabs: settingsStore.editorSettings.sqlFormatter.useTabs,
+      });
+      if (structured.kind === "json" || structured.kind === "xml") {
+        formatted = structured.formatted;
+      } else if (structured.kind === "unsupported") {
+        // Keep invalid structured text untouched — the SQL formatter would
+        // silently corrupt XML-looking content.
+        toast(t("toolbar.formatAutoDetectFailed"), 3000);
+        return;
+      } else {
+        formatted = await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+      }
+    }
     if (view.value !== currentView || currentView.state !== originalState || currentView.state.sliceDoc(from, to) !== source) {
       return;
     }

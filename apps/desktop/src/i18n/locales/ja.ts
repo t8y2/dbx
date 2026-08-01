@@ -35,6 +35,7 @@ export default withEnglishFallback({
     stopExplain: "実行計画の表示を停止",
     formatSql: "SQLをフォーマット",
     formatSqlFailed: "SQLのフォーマットに失敗しました",
+    formatAutoDetectFailed: "選択内容を認識またはフォーマットできません",
     compressSql: "SQLを圧縮",
     keywordCaseLower: "SQLキーワードを小文字にする",
     keywordCaseUpper: "SQLキーワードを大文字にする",

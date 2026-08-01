@@ -35,6 +35,7 @@ export default withEnglishFallback({
     stopExplain: "실행 계획 중지",
     formatSql: "SQL 정렬",
     formatSqlFailed: "SQL 정렬에 실패했습니다",
+    formatAutoDetectFailed: "선택한 내용을 인식하거나 포맷할 수 없습니다",
     compressSql: "SQL 압축",
     keywordCaseLower: "SQL 키워드 소문자 사용",
     keywordCaseUpper: "SQL 키워드 대문자 사용",

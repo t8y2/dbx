@@ -1277,7 +1277,7 @@ function executableStatementRangeStartingAt(currentView: EditorViewType, lineFro
 }
 
 function currentExecutableStatementRange(currentView: EditorViewType): SqlTextRange | null {
-  if (!supportsExecutionTargetPicker(props.databaseType)) return null;
+  if (!supportsExecutionTargetPicker(props.databaseType) && props.databaseType !== "mongodb") return null;
   executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
   return executableStatementRangeAtCursor(executableStatementRangeCache, currentView.state.selection.main.head);
 }
@@ -2532,14 +2532,21 @@ function completionOptionForItem(item: QueryCompletionItem) {
       apply(view: EditorViewType, completionItem: unknown, from: number, to: number) {
         record();
         markCompletionAccepted(item);
+        const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
         if (typeof originalApply === "function") {
-          originalApply(view, completionItem as never, from, to);
+          originalApply(view, completionItem as never, from, replaceTo);
         } else {
           const insert = String(originalApply ?? item.label);
           view.dispatch({
-            changes: { from, to, insert },
+            changes: { from, to: replaceTo, insert },
             selection: { anchor: from + insert.length },
           });
+        }
+        if (props.databaseType === "mongodb") {
+          const position = view.state.selection.main.head;
+          if (getMongoCompletionContext(view.state.doc.toString(), position).mode === "collectionRef") {
+            scheduleSqlCompletionStart(view, 50);
+          }
         }
       },
     };
@@ -2553,16 +2560,17 @@ function completionOptionForItem(item: QueryCompletionItem) {
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
       markCompletionAccepted(item);
+      const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
       const insert = appendSqlCompletionSpace(item.apply ?? item.label, {
         enabled: shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion,
         itemType: item.type,
-        nextCharacter: view.state.sliceDoc(to, to + 1),
+        nextCharacter: view.state.sliceDoc(replaceTo, replaceTo + 1),
       });
       if (codeMirrorInsertCompletionText) {
-        view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
+        view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, replaceTo));
       } else {
         view.dispatch({
-          changes: { from, to, insert },
+          changes: { from, to: replaceTo, insert },
           selection: { anchor: from + insert.length },
         });
       }
@@ -2855,12 +2863,12 @@ function isEditorComposing(currentView: EditorViewType): boolean {
   return imeCompositionActive || currentView.compositionStarted || currentView.composing;
 }
 
-function scheduleSqlCompletionStart(currentView: EditorViewType) {
+function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
   window.setTimeout(() => {
     if (!codeMirrorStartCompletion || isEditorComposing(currentView)) return;
     markTypedCompletionActivation();
     codeMirrorStartCompletion(currentView);
-  }, 0);
+  }, delayMs);
 }
 
 function flushImeComposition() {
@@ -2886,6 +2894,9 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   const position = currentView.state.selection.main.head;
   const fullDoc = currentView.state.doc.toString();
   if (resolveSqlServerUseDatabaseCompletion({ sql: fullDoc, cursor: position, databaseType: props.databaseType })) return true;
+  if (props.databaseType === "mongodb") {
+    return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
+  }
   if (!insertedText && removedText) {
     const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
     return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());

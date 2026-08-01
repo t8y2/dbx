@@ -5303,6 +5303,7 @@ export default withEnglishFallback({
     schedules: "备份计划",
     runtimeRequirement: "DBX 处于打开状态时会执行定时备份，包括最小化到托盘时。",
     addSchedule: "新建计划",
+    noSupportedConnections: "请先创建 MySQL 或 PostgreSQL 连接，再新建备份计划。",
     editSchedule: "编辑计划",
     defaultScheduleName: "数据库备份",
     noSchedules: "暂无备份计划",

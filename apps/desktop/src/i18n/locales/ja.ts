@@ -6287,6 +6287,7 @@ export default withEnglishFallback({
     schedules: "バックアップスケジュール",
     runtimeRequirement: "DBXが開いている状態（トレイに最小化したときも含む）で、定期バックアップが実行されます。",
     addSchedule: "新規スケジュール",
+    noSupportedConnections: "バックアップスケジュールを追加するには、先に MySQL または PostgreSQL 接続を作成してください。",
     editSchedule: "スケジュール編集",
     defaultScheduleName: "データベースバックアップ",
     noSchedules: "バックアップスケジュールがありません",

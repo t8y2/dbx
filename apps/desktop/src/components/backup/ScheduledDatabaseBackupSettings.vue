@@ -37,6 +37,7 @@ const tablePatternsInput = ref("");
 const expandedRunIds = reactive(new Set<string>());
 
 const sqlConnections = computed(() => connectionStore.connections.filter((connection) => supportsScheduledDatabaseBackup(connection.db_type)));
+const canCreateSchedule = computed(() => sqlConnections.value.length > 0);
 const sortedRuns = computed(() => [...runs.value].sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt)));
 const weekdays = computed(() => [
   { value: 0, label: t("databaseBackup.weekdays.sunday") },
@@ -281,8 +282,9 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       <div class="min-w-0">
         <h3 class="text-base font-semibold">{{ t("databaseBackup.schedules") }}</h3>
         <p class="mt-1 text-sm text-muted-foreground">{{ t("databaseBackup.runtimeRequirement") }}</p>
+        <p v-if="!canCreateSchedule" class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.noSupportedConnections") }}</p>
       </div>
-      <Button size="sm" :disabled="sqlConnections.length === 0" @click="openCreateSchedule">
+      <Button size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.addSchedule') : t('databaseBackup.noSupportedConnections')" @click="openCreateSchedule">
         <Plus class="mr-2 h-4 w-4" />
         {{ t("databaseBackup.addSchedule") }}
       </Button>

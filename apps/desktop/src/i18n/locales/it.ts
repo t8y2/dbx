@@ -6232,6 +6232,7 @@ export default withEnglishFallback({
     schedules: "Pianificazioni di backup",
     runtimeRequirement: "I backup programmati vengono eseguiti quando DBX è aperto, anche se ridotto a icona nella barra delle applicazioni.",
     addSchedule: "Nuova pianificazione",
+    noSupportedConnections: "Crea una connessione MySQL o PostgreSQL prima di aggiungere una pianificazione di backup.",
     editSchedule: "Modifica pianificazione",
     defaultScheduleName: "Backup del database",
     noSchedules: "Nessuna pianificazione di backup",

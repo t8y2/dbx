@@ -6232,6 +6232,7 @@ export default withEnglishFallback({
     schedules: "Planes de copia de seguridad",
     runtimeRequirement: "DBX ejecutará copias de seguridad programadas cuando esté abierto, incluso cuando esté minimizado en la bandeja.",
     addSchedule: "Nuevo plan",
+    noSupportedConnections: "Crea una conexión MySQL o PostgreSQL antes de añadir un plan de copia de seguridad.",
     editSchedule: "Editar plan",
     defaultScheduleName: "Copia de seguridad de la base de datos",
     noSchedules: "No hay planes de copia de seguridad",

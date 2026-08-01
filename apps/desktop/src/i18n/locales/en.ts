@@ -5304,6 +5304,7 @@ export default {
     schedules: "Backup schedules",
     runtimeRequirement: "Scheduled backups run while DBX is open, including when it is minimized to the tray.",
     addSchedule: "Add schedule",
+    noSupportedConnections: "Create a MySQL or PostgreSQL connection before adding a backup schedule.",
     editSchedule: "Edit schedule",
     defaultScheduleName: "Database backup",
     noSchedules: "No backup schedules",

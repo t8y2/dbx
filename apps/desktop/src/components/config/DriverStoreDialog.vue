@@ -1532,7 +1532,7 @@ watch(driverStoreTab, (tab) => {
               </nav>
 
               <!-- Driver list area -->
-              <div class="min-w-0 flex-1 overflow-y-auto sm:pl-4">
+              <div class="driver-store-agent-results min-w-0 flex-1 overflow-y-auto sm:pl-4">
                 <!-- Empty: still loading -->
                 <div v-if="drivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("common.loading") }}
@@ -2137,6 +2137,86 @@ watch(driverStoreTab, (tab) => {
 .driver-store-jdbc-row > button {
   width: 2rem !important;
   height: 2rem !important;
+}
+
+@supports not (color: oklch(0.5 0.1 180)) {
+  .driver-store-tab {
+    margin-top: 1.25rem !important;
+  }
+
+  .driver-store-agent-tab:not([hidden]),
+  .driver-store-jdbc-tab:not([hidden]),
+  .driver-store-storage-tab:not([hidden]) {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 1.25rem !important;
+  }
+
+  .driver-store-agent-tab > :not([hidden]) ~ :not([hidden]),
+  .driver-store-jdbc-tab > :not([hidden]) ~ :not([hidden]),
+  .driver-store-storage-tab > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0 !important;
+  }
+
+  .driver-store-tab .space-y-1 > * + * {
+    margin-top: 0.25rem !important;
+  }
+
+  .driver-store-tab .space-y-2 > * + * {
+    margin-top: 0.5rem !important;
+  }
+
+  .driver-store-tab .space-y-2\.5 > * + * {
+    margin-top: 0.625rem !important;
+  }
+
+  .driver-store-tab .space-y-3 > * + * {
+    margin-top: 0.75rem !important;
+  }
+
+  .driver-store-tab .space-y-4 > * + * {
+    margin-top: 1rem !important;
+  }
+
+  .driver-store-tab .space-y-5 > * + * {
+    margin-top: 1.25rem !important;
+  }
+
+  @media (min-width: 640px) {
+    [data-driver-category-nav] {
+      width: 10rem !important;
+      flex-direction: column !important;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      border-right-width: 1px !important;
+      border-bottom-width: 0 !important;
+      padding-top: 0.125rem !important;
+      padding-right: 0.875rem !important;
+      padding-bottom: 0.125rem !important;
+    }
+
+    [data-driver-category-nav] > button {
+      width: 100% !important;
+      align-self: stretch !important;
+    }
+
+    [data-driver-category-nav] > button[aria-current="page"] {
+      background-color: rgba(23, 23, 23, 0.08) !important;
+      color: rgb(23, 23, 23) !important;
+    }
+
+    .dark [data-driver-category-nav] > button[aria-current="page"] {
+      background-color: rgba(255, 255, 255, 0.1) !important;
+      color: rgb(244, 244, 245) !important;
+    }
+
+    .driver-store-agent-results {
+      width: 0 !important;
+      min-width: 0 !important;
+      flex: 1 1 0% !important;
+      padding-left: 1rem !important;
+    }
+  }
 }
 
 @media (max-width: 900px) {

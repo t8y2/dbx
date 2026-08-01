@@ -6234,6 +6234,7 @@ export default withEnglishFallback({
     schedules: "Planos de backup",
     runtimeRequirement: "O DBX executará backups agendados quando estiver aberto, inclusive quando minimizado na bandeja.",
     addSchedule: "Novo plano",
+    noSupportedConnections: "Crie uma conexão MySQL ou PostgreSQL antes de adicionar um plano de backup.",
     editSchedule: "Editar plano",
     defaultScheduleName: "Backup de banco de dados",
     noSchedules: "Nenhum plano de backup",

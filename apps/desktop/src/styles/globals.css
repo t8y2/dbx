@@ -264,6 +264,78 @@
   background-color: color-mix(in srgb, var(--primary) 14%, transparent) !important;
 }
 
+input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: inner-spin-button !important;
+  appearance: auto !important;
+  opacity: 1 !important;
+  cursor: pointer;
+}
+
+input[type="number"]:disabled::-webkit-inner-spin-button,
+input[type="number"]:disabled::-webkit-outer-spin-button {
+  cursor: not-allowed;
+  opacity: 0.5 !important;
+}
+
+@supports not (background-color: color-mix(in srgb, black 10%, transparent)) {
+  .dbx-choice-selected {
+    border-color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.08) !important;
+    color: rgb(23, 23, 23) !important;
+    box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.28) !important;
+  }
+
+  .dbx-choice-selected:hover {
+    background-color: rgba(23, 23, 23, 0.12) !important;
+  }
+
+  .dbx-choice-selected .text-muted-foreground {
+    color: rgb(82, 82, 82) !important;
+  }
+
+  .dark .dbx-choice-selected {
+    border-color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    color: rgb(244, 244, 245) !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28) !important;
+  }
+
+  .dark .dbx-choice-selected:hover {
+    background-color: rgba(255, 255, 255, 0.14) !important;
+  }
+
+  .dark .dbx-choice-selected .text-muted-foreground {
+    color: rgb(212, 212, 216) !important;
+  }
+
+  .dbx-tile-selected {
+    border-color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.08) !important;
+    color: rgb(23, 23, 23) !important;
+    box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.28);
+  }
+
+  .dbx-tile-selected:hover {
+    background-color: rgba(23, 23, 23, 0.12) !important;
+  }
+
+  .dark .dbx-tile-selected {
+    border-color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    color: rgb(244, 244, 245) !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28);
+  }
+
+  .dark .dbx-tile-selected:hover {
+    background-color: rgba(255, 255, 255, 0.14) !important;
+  }
+}
+
 @supports (height: 100dvh) {
   :root {
     --dbx-viewport-height: min(100vh, 100dvh);

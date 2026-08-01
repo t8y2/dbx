@@ -6,6 +6,10 @@ const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/Dia
 const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
 const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/DialogOverlay.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
+const driverStoreDialogSource = readFileSync(new URL("../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
+const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
+const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
+const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
 
@@ -62,10 +66,154 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(desktopIndexSource).toContain('href="/connection-dialog-legacy.css"');
     expect(connectionDialogLegacyCss).toContain("@media (min-width: 640px)");
     expect(connectionDialogLegacyCss).toContain("@media (min-width: 1024px)");
+    expect(connectionDialogLegacyCss).toContain("@supports (color: oklch(0.5 0.1 180))");
+    expect(connectionDialogLegacyCss).toContain("@supports not (color: oklch(0.5 0.1 180))");
     expect(connectionDialogLegacyCss).toContain("min-width: 38rem !important;");
     expect(connectionDialogLegacyCss).toContain("width: 0 !important;");
+    expect(connectionDialogLegacyCss).toContain("grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)) !important;");
+    expect(connectionDialogLegacyCss).toContain('[data-slot="dialog-content"].connection-dialog-content--config');
+    expect(connectionDialogLegacyCss).toMatch(/\[data-slot="dialog-content"\]\.connection-dialog-content--config\s*\{[\s\S]*?width: calc\(100vw - 2rem\) !important;[\s\S]*?min-width: 38rem !important;[\s\S]*?height: 720px !important;[\s\S]*?max-width: 880px !important;[\s\S]*?\}/);
+    expect(connectionDialogLegacyCss).toContain("height: 720px !important;");
+    expect(connectionDialogLegacyCss).toContain('[data-slot="dialog-content"].connection-dialog-content--config .connection-form-body');
+    expect(connectionDialogLegacyCss).toContain("align-content: start !important;");
+    expect(connectionDialogSource).toContain("connection-url-params-row--compact");
+    expect(connectionDialogSource).toContain("connection-url-params-row--with-hint");
+    expect(connectionDialogSource).toContain("connection-url-params-label");
+    expect(connectionDialogLegacyCss).toContain('[data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row--compact');
+    expect(connectionDialogLegacyCss).toContain("align-items: center !important;");
+    expect(connectionDialogLegacyCss).toContain('[data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row--with-hint .connection-url-params-label');
+    expect(connectionDialogLegacyCss).toContain("margin-top: 0.5rem !important;");
+    expect(connectionDialogLegacyCss).not.toContain("minmax(8rem, 1fr)");
     expect(connectionDialogLegacyCss).toContain(".connection-db-picker-option");
     expect(connectionDialogLegacyCss).not.toContain("width >=");
     expect(connectionDialogSource).not.toContain("@media (min-width: 640px)");
+  });
+
+  it("keeps selected tiles readable in WebViews without color-mix support", () => {
+    const fallbackStart = globalsCss.indexOf("@supports not (background-color: color-mix(in srgb, black 10%, transparent))");
+    const choiceFallback = globalsCss.indexOf(".dbx-choice-selected", fallbackStart);
+    const tileFallback = globalsCss.indexOf(".dbx-tile-selected", fallbackStart);
+    const nextSupports = globalsCss.indexOf("@supports (height: 100dvh)", fallbackStart);
+
+    expect(fallbackStart).toBeGreaterThan(-1);
+    expect(choiceFallback).toBeGreaterThan(fallbackStart);
+    expect(tileFallback).toBeGreaterThan(fallbackStart);
+    expect(choiceFallback).toBeLessThan(tileFallback);
+    expect(tileFallback).toBeLessThan(nextSupports);
+    expect(globalsCss.slice(fallbackStart, tileFallback)).toContain("background-color: rgba(23, 23, 23, 0.08) !important;");
+    expect(globalsCss.slice(fallbackStart, tileFallback)).toContain("color: rgb(23, 23, 23) !important;");
+    expect(globalsCss.slice(fallbackStart, tileFallback)).toContain(".dbx-choice-selected .text-muted-foreground");
+    expect(globalsCss.slice(fallbackStart, tileFallback)).toContain(".dark .dbx-choice-selected");
+    expect(globalsCss.slice(fallbackStart, nextSupports)).toContain("background-color: rgba(23, 23, 23, 0.08) !important;");
+    expect(globalsCss.slice(fallbackStart, nextSupports)).toContain("color: rgb(23, 23, 23) !important;");
+    expect(globalsCss.slice(fallbackStart, nextSupports)).toContain(".dark .dbx-tile-selected");
+  });
+
+  it("keeps the driver manager category navigation scoped to legacy WebViews", () => {
+    const fallbackStart = driverStoreDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackEnd = driverStoreDialogSource.indexOf("@media (max-width: 900px)", fallbackStart);
+    const fallback = driverStoreDialogSource.slice(fallbackStart, fallbackEnd);
+
+    expect(driverStoreDialogSource).toContain("data-driver-category-nav");
+    expect(driverStoreDialogSource).toContain("driver-store-agent-results min-w-0 flex-1 overflow-y-auto sm:pl-4");
+    expect(fallbackStart).toBeGreaterThan(-1);
+    expect(fallbackEnd).toBeGreaterThan(fallbackStart);
+    expect(fallback).toContain(".driver-store-tab");
+    expect(fallback).toContain("margin-top: 1.25rem !important;");
+    expect(fallback).toContain(".driver-store-agent-tab:not([hidden])");
+    expect(fallback).toContain(".driver-store-jdbc-tab:not([hidden])");
+    expect(fallback).toContain(".driver-store-storage-tab:not([hidden])");
+    expect(fallback).toContain("gap: 1.25rem !important;");
+    expect(fallback).toContain(".driver-store-tab .space-y-1 > * + *");
+    expect(fallback).toContain(".driver-store-tab .space-y-2 > * + *");
+    expect(fallback).toContain(".driver-store-tab .space-y-2\\.5 > * + *");
+    expect(fallback).toContain(".driver-store-tab .space-y-3 > * + *");
+    expect(fallback).toContain(".driver-store-tab .space-y-4 > * + *");
+    expect(fallback).toContain(".driver-store-tab .space-y-5 > * + *");
+    expect(fallback).toContain("[data-driver-category-nav]");
+    expect(fallback).toContain("width: 10rem !important;");
+    expect(fallback).toContain("flex-direction: column !important;");
+    expect(fallback).toContain("overflow-y: auto !important;");
+    expect(fallback).toContain('[data-driver-category-nav] > button[aria-current="page"]');
+    expect(fallback).toContain(".driver-store-agent-results");
+    expect(fallback).toContain("width: 0 !important;");
+    expect(fallback).toContain("flex: 1 1 0% !important;");
+  });
+
+  it("keeps tunnel profile selection readable in legacy WebViews", () => {
+    expect(tunnelProfileManagerSource).toContain("profile.id === selectedId ? 'tunnel-profile-option--selected'");
+    expect(tunnelProfileManagerSource).not.toContain("tunnel-profile-option--selected border-primary bg-primary/5");
+    expect(tunnelProfileManagerSource).toContain(".tunnel-profile-option--selected");
+    expect(tunnelProfileManagerSource).toContain("background-color: var(--muted) !important;");
+    expect(tunnelProfileManagerSource).toContain("color: var(--foreground) !important;");
+    expect(tunnelProfileManagerSource).toContain(".tunnel-profile-option--selected .text-muted-foreground");
+  });
+
+  it("keeps transport layer selection readable in legacy WebViews", () => {
+    const fallbackStart = connectionDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackEnd = connectionDialogSource.indexOf(".connection-db-picker-option", fallbackStart);
+    const fallback = connectionDialogSource.slice(fallbackStart, fallbackEnd);
+
+    expect(connectionDialogSource).toContain("connection-transport-layer-option--selected border-primary bg-primary/5");
+    expect(fallback).toContain(".connection-transport-layer-option--selected");
+    expect(fallback).toContain("background-color: rgba(23, 23, 23, 0.08) !important;");
+    expect(fallback).toContain(".dark .connection-transport-layer-option--selected");
+  });
+
+  it("keeps number input steppers visible and usable globally", () => {
+    expect(globalsCss).toContain('input[type="number"]');
+    expect(globalsCss).toContain('input[type="number"]::-webkit-inner-spin-button');
+    expect(globalsCss).toContain("-webkit-appearance: inner-spin-button !important;");
+    expect(globalsCss).not.toContain("width: 1.25rem !important;");
+    expect(globalsCss).not.toContain("min-height: 1.4rem !important;");
+    expect(globalsCss).not.toContain("-webkit-transform: scale(1.45);");
+    expect(globalsCss).not.toContain("transform: scale(1.45);");
+    expect(globalsCss).toContain('input[type="number"]:disabled::-webkit-inner-spin-button');
+  });
+
+  it("keeps settings field stacks spaced in legacy WebViews", () => {
+    const fallbackStart = editorSettingsDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackEnd = editorSettingsDialogSource.indexOf("@media (max-width: 760px)", fallbackStart);
+    const fallback = editorSettingsDialogSource.slice(fallbackStart, fallbackEnd);
+
+    expect(fallbackStart).toBeGreaterThan(-1);
+    expect(fallbackEnd).toBeGreaterThan(fallbackStart);
+    expect(fallback).toContain(".settings-layout .space-y-1 > * + *");
+    expect(fallback).toContain("margin-top: 0.25rem !important;");
+    expect(fallback).toContain(".settings-layout .space-y-2 > * + *");
+    expect(fallback).toContain("margin-top: 0.5rem !important;");
+    expect(fallback).toContain(".settings-layout .space-y-3 > * + *");
+    expect(fallback).toContain("margin-top: 0.75rem !important;");
+    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7):not(.h-8):not(.h-9)');
+    expect(fallback).toContain("height: 2rem !important;");
+    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"][data-size="sm"]:not(.h-7):not(.h-8):not(.h-9)');
+    expect(fallback).toContain("height: 1.75rem !important;");
+    expect(fallback).toContain(".settings-layout .settings-shortcut-row");
+    expect(fallback).toContain("grid-template-columns: minmax(0, 1fr) auto !important;");
+    expect(fallback).toContain(".settings-layout .settings-shortcut-actions");
+    expect(fallback).toContain("justify-self: end !important;");
+    expect(editorSettingsDialogSource).toContain("settings-shortcut-controls flex items-center justify-end gap-1.5");
+    expect(editorSettingsDialogSource).toContain("settings-shortcut-action-button h-7 w-7");
+    expect(editorSettingsDialogSource).toContain(".settings-shortcut-row:hover .settings-shortcut-action-button");
+    expect(editorSettingsDialogSource).toContain("opacity: 1 !important;");
+    expect(fallback).toContain(".settings-layout .settings-shortcut-controls");
+    expect(fallback).toContain("flex-direction: row !important;");
+    expect(fallback).toContain("justify-content: flex-end !important;");
+    expect(editorSettingsDialogSource).toContain("settings-export-number-input w-28");
+    expect(editorSettingsDialogSource).toContain("settings-export-number-input w-32");
+    expect(editorSettingsDialogSource).not.toContain("h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none");
+    expect(editorSettingsDialogSource).not.toContain("h-9 w-32 [&::-webkit-inner-spin-button]:appearance-none");
+    expect(editorSettingsDialogSource).toContain(".settings-export-number-input");
+    expect(fallback).toContain(".settings-layout .settings-export-number-input");
+    expect(fallback).toContain("line-height: 1.25rem !important;");
+    expect(fallback).toContain("::-webkit-inner-spin-button");
+    expect(editorSettingsDialogSource).toContain("settings-about-section-header flex flex-col gap-3");
+    expect(editorSettingsDialogSource).toContain("settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2");
+    expect(changelogPanelSource).toContain("settings-about-section-header flex flex-col gap-3");
+    expect(changelogPanelSource).toContain("settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2");
+    expect(fallback).toContain(".settings-about-section-header");
+    expect(fallback).toContain("justify-content: space-between !important;");
+    expect(fallback).toContain(".settings-about-section-actions");
+    expect(fallback).toContain("margin-left: auto !important;");
   });
 });

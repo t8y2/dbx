@@ -6227,6 +6227,7 @@ export default withEnglishFallback({
     schedules: "備份計畫",
     runtimeRequirement: "DBX 處於開啟狀態時會執行定時備份，包含最小化到托盤時。",
     addSchedule: "新建計畫",
+    noSupportedConnections: "請先建立 MySQL 或 PostgreSQL 連線，再新增備份計畫。",
     editSchedule: "編輯計畫",
     defaultScheduleName: "資料庫備份",
     noSchedules: "暫無備份計畫",

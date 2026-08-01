@@ -5045,6 +5045,7 @@ export default withEnglishFallback({
     schedules: "백업 일정",
     runtimeRequirement: "예약된 백업은 DBX가 열려 있는 동안(트레이에 최소화된 경우 포함) 실행됩니다.",
     addSchedule: "일정 추가",
+    noSupportedConnections: "백업 일정을 추가하려면 먼저 MySQL 또는 PostgreSQL 연결을 만들어 주세요.",
     editSchedule: "일정 편집",
     defaultScheduleName: "데이터베이스 백업",
     noSchedules: "백업 일정이 없습니다",

@@ -27,6 +27,13 @@ interface ParameterOccurrence extends SqlParameterDescriptor {
   replacement?: "string-fragment";
 }
 
+interface DuckDbStructLiteralContext {
+  bracketDepth: number;
+  parenthesisDepth: number;
+  separators: Set<number>;
+  valid: boolean;
+}
+
 type ComplexTypeDeclarationKind = "struct" | "variant";
 type TriggerPseudoRecordName = "new" | "old" | "parent" | "eventinfo";
 
@@ -108,6 +115,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql) : new Set<number>();
+  const duckDbStructFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") && options?.databaseType === "duckdb" ? collectDuckDbStructFieldSeparators(sql) : new Set<number>();
   const triggerPseudoRecordFieldStarts = supportsNamedParameters && isSyntaxEnabled("named") ? collectTriggerPseudoRecordFieldStarts(sql, options?.databaseType) : new Set<number>();
   let i = 0;
   let dollarQuoteEnd = "";
@@ -168,7 +176,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === ":" && supportsNamedParameters && isSyntaxEnabled("named")) {
       const name = readParameterName(sql, i + 1);
-      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i) && !triggerPseudoRecordFieldStarts.has(i)) {
+      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i) && !duckDbStructFieldSeparators.has(i) && !triggerPseudoRecordFieldStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -220,6 +228,104 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+function collectDuckDbStructFieldSeparators(sql: string): Set<number> {
+  const separators = new Set<number>();
+  const contexts: DuckDbStructLiteralContext[] = [];
+  let cursor = 0;
+  let dollarQuoteEnd = "";
+
+  while (cursor < sql.length) {
+    if (dollarQuoteEnd) {
+      const end = sql.indexOf(dollarQuoteEnd, cursor);
+      if (end === -1) break;
+      cursor = end + dollarQuoteEnd.length;
+      dollarQuoteEnd = "";
+      continue;
+    }
+
+    const ch = sql[cursor];
+    const next = sql[cursor + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      cursor = skipQuoted(sql, cursor, ch);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      cursor = skipLine(sql, cursor + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      cursor = skipBlockComment(sql, cursor + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, cursor)) {
+      cursor = skipLine(sql, cursor + 1);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, cursor);
+      if (marker) {
+        dollarQuoteEnd = marker;
+        cursor += marker.length;
+        continue;
+      }
+    }
+    if (ch === "{") {
+      const separator = readDuckDbStructFieldSeparator(sql, cursor + 1);
+      contexts.push({
+        bracketDepth: 0,
+        parenthesisDepth: 0,
+        separators: new Set(separator === null ? [] : [separator]),
+        valid: separator !== null,
+      });
+      cursor += 1;
+      continue;
+    }
+    if (ch === "}") {
+      const context = contexts.pop();
+      if (context?.valid) {
+        const parent = contexts[contexts.length - 1];
+        const destination = parent ? parent.separators : separators;
+        for (const separator of context.separators) destination.add(separator);
+      }
+      cursor += 1;
+      continue;
+    }
+
+    const context = contexts[contexts.length - 1];
+    if (!context) {
+      cursor += 1;
+      continue;
+    }
+    if (ch === "(") context.parenthesisDepth += 1;
+    else if (ch === ")" && context.parenthesisDepth > 0) context.parenthesisDepth -= 1;
+    else if (ch === "[") context.bracketDepth += 1;
+    else if (ch === "]" && context.bracketDepth > 0) context.bracketDepth -= 1;
+    else if (ch === "," && context.valid && context.parenthesisDepth === 0 && context.bracketDepth === 0) {
+      const separator = readDuckDbStructFieldSeparator(sql, cursor + 1);
+      if (separator !== null) context.separators.add(separator);
+    }
+    cursor += 1;
+  }
+
+  return separators;
+}
+
+function readDuckDbStructFieldSeparator(sql: string, start: number): number | null {
+  const fieldStart = skipSqlWhitespaceAndComments(sql, start);
+  const ch = sql[fieldStart];
+  let fieldNameEnd = fieldStart;
+
+  if (ch === "'" || ch === '"' || ch === "`") fieldNameEnd = skipQuoted(sql, fieldStart, ch);
+  else {
+    const fieldName = readParameterName(sql, fieldStart);
+    if (!fieldName) return null;
+    fieldNameEnd += fieldName.length;
+  }
+
+  const separator = skipSqlWhitespaceAndComments(sql, fieldNameEnd);
+  return sql[separator] === ":" ? separator : null;
 }
 
 // Oracle and Dameng expose trigger rows through colon-prefixed pseudo-records,

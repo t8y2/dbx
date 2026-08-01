@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   averageTransposeRecordWidth,
+  buildVisibleTransposeRows,
   calculateTransposeRecordWidth,
   defaultTransposeRecordWidth,
   minTransposeFieldWidth,
@@ -145,5 +146,24 @@ describe("transpose record scrolling", () => {
         currentScrollLeft: 450,
       }),
     ).toBe(450);
+  });
+});
+
+describe("dataGridTranspose field metadata", () => {
+  it("keeps type and comment metadata aligned with visible columns", () => {
+    const rows = buildVisibleTransposeRows({
+      columns: ["display_name", "status"],
+      records: [["Ada", 1]],
+      recordIndexes: [0],
+      valueIndexes: [0, 1],
+      types: ["varchar", "int"],
+      comments: ["User name", "Current status"],
+      displayValue: String,
+    });
+
+    expect(rows.map(({ column, type, comment }) => ({ column, type, comment }))).toEqual([
+      { column: "display_name", type: "varchar", comment: "User name" },
+      { column: "status", type: "int", comment: "Current status" },
+    ]);
   });
 });

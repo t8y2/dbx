@@ -198,8 +198,17 @@ function onPointerDown(e: PointerEvent) {
   close();
 }
 
+function onScroll(e: Event) {
+  const target = e.target;
+  if (target instanceof Node && tooltipRef.value?.contains(target)) {
+    clearCloseTimer();
+    return;
+  }
+  close();
+}
+
 function addGlobalListeners() {
-  window.addEventListener("scroll", close, true);
+  window.addEventListener("scroll", onScroll, true);
   window.addEventListener("resize", close);
   window.addEventListener("blur", close);
   document.addEventListener("visibilitychange", close);
@@ -209,7 +218,7 @@ function addGlobalListeners() {
 }
 
 function removeGlobalListeners() {
-  window.removeEventListener("scroll", close, true);
+  window.removeEventListener("scroll", onScroll, true);
   window.removeEventListener("resize", close);
   window.removeEventListener("blur", close);
   document.removeEventListener("visibilitychange", close);

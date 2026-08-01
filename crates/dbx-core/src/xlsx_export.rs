@@ -4,6 +4,7 @@ use std::io::{Cursor, Seek, Write};
 
 use crate::temporal_format::{excel_temporal_serial, ExcelTemporalKind};
 
+pub(crate) const XLSX_MAX_DATA_ROWS: usize = 1_048_575;
 const XLSX_DATE_STYLE: usize = 2;
 const XLSX_DATETIME_STYLE: usize = 3;
 const NUMERIC_RIGHT_ALIGN_STYLE: usize = 4;
@@ -23,15 +24,110 @@ pub struct XlsxWorksheetData {
     pub numeric_column_right_align: bool,
 }
 
+fn normalize_sheet_name(input: Option<&str>) -> String {
+    let base = input.unwrap_or("Sheet1");
+    let name: String = base
+        .chars()
+        .map(|ch| match ch {
+            '[' | ']' | ':' | '*' | '?' | '/' | '\\' => ' ',
+            _ => ch,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let fallback = if name.is_empty() { "Sheet1" } else { &name };
+    fallback.chars().take(31).collect()
+}
+
+/// Allocates unique sheet names for data sheets, avoiding conflicts with
+/// pre-reserved trailing sheet names. Data sheets are named sequentially:
+/// "Result", "Result (2)", "Result (3)", etc.
+struct SheetNameAllocator {
+    /// The original unsuffixed base name (e.g. "Result"), stored so that
+    /// [`allocate_next`] always derives continuation names from the original
+    /// name rather than from an already-de-duplicated first name.
+    base: String,
+    data_names: Vec<String>,
+    trailing_names: Vec<String>,
+}
+
+impl SheetNameAllocator {
+    fn new(data_sheet_name: Option<&str>, trailing_sheets: &[XlsxWorksheetData]) -> Self {
+        // Pre-reserve trailing sheet names (normalized, deduplicated) so data
+        // sheet names never collide with them, and no two trailing sheets share
+        // the same name.
+        let mut trailing_names: Vec<String> = Vec::with_capacity(trailing_sheets.len());
+        for (index, sheet) in trailing_sheets.iter().enumerate() {
+            let base = normalize_sheet_name(sheet.sheet_name.as_deref().or(Some(&format!("Sheet{}", index + 1))));
+            trailing_names.push(make_unique_name(&base, &trailing_names));
+        }
+
+        let base = normalize_sheet_name(data_sheet_name);
+        // Allocate the first data sheet name, avoiding trailing names.
+        let reserved: Vec<String> = trailing_names.clone();
+        let first = make_unique_name(&base, &reserved);
+        let data_names = vec![first];
+
+        Self { base, data_names, trailing_names }
+    }
+
+    /// Allocate the next data sheet name, avoiding all previously allocated
+    /// names (both data and trailing). Uses the stored original base name so
+    /// that continuation names are always "base (2)", "base (3)", ... even
+    /// when the first data name was de-duplicated.
+    fn allocate_next(&mut self) {
+        let mut reserved: Vec<String> = self.trailing_names.clone();
+        reserved.extend(self.data_names.iter().cloned());
+        let next = make_unique_name(&self.base, &reserved);
+        self.data_names.push(next);
+    }
+
+    /// Ordered list: data sheet names first, then trailing sheet names.
+    fn all_names(&self) -> Vec<String> {
+        let mut names = self.data_names.clone();
+        names.extend(self.trailing_names.clone());
+        names
+    }
+}
+
+fn make_unique_name(base: &str, reserved: &[String]) -> String {
+    let mut candidate = base.to_string();
+    let mut suffix = 2;
+    while reserved.iter().any(|name| name == &candidate) {
+        let suffix_text = format!(" ({suffix})");
+        let max_base_len = 31usize.saturating_sub(suffix_text.chars().count());
+        if max_base_len > 0 {
+            candidate = format!("{}{}", base.chars().take(max_base_len).collect::<String>(), suffix_text);
+        } else {
+            candidate = suffix_text.clone();
+        }
+        suffix += 1;
+    }
+    candidate
+}
+
 /// Streaming XLSX writer that incrementally writes rows to a ZIP-backed
 /// workbook.  This avoids accumulating all rows in memory before building the
 /// final file, drastically reducing peak memory for large exports.
+///
+/// When the per-sheet data row count reaches [`XLSX_MAX_DATA_ROWS`], the writer
+/// automatically closes the current sheet and starts a new one, repeating
+/// column headers, frozen panes, and column widths. Trailing sheets (e.g. SQL)
+/// are written after all data sheets in [`finish`].
 pub struct StreamingXlsxWriter<W: Write + Seek> {
     zip: zip::ZipWriter<W>,
     columns: Vec<String>,
     column_types: Vec<String>,
     next_row_number: usize,
+    current_data_rows: usize,
+    max_data_rows_per_sheet: usize,
+    /// Track the sheet number within the ZIP (1-based). Increments when a new
+    /// data sheet or trailing sheet is started.
+    current_sheet_number: usize,
+    sheet_name_allocator: SheetNameAllocator,
     trailing_sheets: Vec<XlsxWorksheetData>,
+    width_cache: Vec<usize>,
+    column_comments: Vec<Option<String>>,
     date_time_format: Option<String>,
     numeric_right_align: bool,
 }
@@ -148,7 +244,11 @@ pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek
     )
 }
 
-pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
+/// Start a new streaming XLSX workbook with full options. Metadata files
+/// ([Content_Types].xml, workbook.xml, styles.xml, etc.) are deferred to
+/// [`StreamingXlsxWriter::finish`] so that the final sheet count is known
+/// — this supports automatic multi-sheet splitting.
+fn start_xlsx_writer_inner<W: Write + Seek>(
     writer: W,
     sheet_name: Option<&str>,
     columns: &[String],
@@ -157,29 +257,14 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
     trailing_sheets: &[XlsxWorksheetData],
     date_time_format: Option<&str>,
     numeric_right_align: bool,
+    max_data_rows_per_sheet: usize,
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    let primary_sheet = XlsxWorksheetData {
-        sheet_name: sheet_name.map(str::to_string),
-        columns: columns.to_vec(),
-        column_types: column_types.to_vec(),
-        column_comments: column_comments.to_vec(),
-        rows: Vec::new(),
-        numeric_column_right_align: numeric_right_align,
-    };
-    let all_sheets = std::iter::once(primary_sheet).chain(trailing_sheets.iter().cloned()).collect::<Vec<_>>();
-    let sheet_names = normalize_unique_sheet_names(&all_sheets);
-    let sheet_count = sheet_names.len();
-    let widths = estimate_header_widths(columns, column_comments);
+    let width_cache = estimate_header_widths(columns, column_comments);
+    let sheet_name_allocator = SheetNameAllocator::new(sheet_name, trailing_sheets);
 
     let mut zip = zip::ZipWriter::new(writer);
-    write_zip_entry(&mut zip, "[Content_Types].xml", &content_types_xml_for_sheet_count(sheet_count))?;
-    write_zip_entry(&mut zip, "_rels/.rels", root_rels_xml())?;
-    write_zip_entry(&mut zip, "xl/workbook.xml", &workbook_xml_for_sheets(&sheet_names))?;
-    write_zip_entry(&mut zip, "xl/_rels/workbook.xml.rels", &workbook_rels_xml_for_sheet_count(sheet_count))?;
-    write_zip_entry(&mut zip, "xl/styles.xml", &styles_xml(date_time_format))?;
 
-    // Begin the sheet1.xml entry with header, frozen pane, column widths and
-    // the header row.
+    // Start sheet1 immediately. Metadata files are written in finish().
     let options = xlsx_zip_options();
     zip.start_file("xl/worksheets/sheet1.xml", options).map_err(|err| err.to_string())?;
 
@@ -194,7 +279,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
             "<cols>{cols}</cols>",
             "<sheetData>"
         ),
-        cols = cols_xml(&widths),
+        cols = cols_xml(&width_cache),
     );
     zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
     zip.write_all(header_row_xml(columns, column_comments).as_bytes()).map_err(|err| err.to_string())?;
@@ -204,15 +289,72 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
         columns: columns.to_vec(),
         column_types: column_types.to_vec(),
         next_row_number: 2,
+        current_data_rows: 0,
+        max_data_rows_per_sheet,
+        current_sheet_number: 1,
+        sheet_name_allocator,
         trailing_sheets: trailing_sheets.to_vec(),
+        width_cache,
+        column_comments: column_comments.to_vec(),
         date_time_format: date_time_format.map(str::to_string),
         numeric_right_align,
     })
 }
 
+pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
+    writer: W,
+    sheet_name: Option<&str>,
+    columns: &[String],
+    column_types: &[String],
+    column_comments: &[Option<String>],
+    trailing_sheets: &[XlsxWorksheetData],
+    date_time_format: Option<&str>,
+    numeric_right_align: bool,
+) -> Result<StreamingXlsxWriter<W>, String> {
+    start_xlsx_writer_inner(
+        writer,
+        sheet_name,
+        columns,
+        column_types,
+        column_comments,
+        trailing_sheets,
+        date_time_format,
+        numeric_right_align,
+        XLSX_MAX_DATA_ROWS,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn start_streaming_xlsx_workbook_with_max_rows<W: Write + Seek>(
+    writer: W,
+    sheet_name: Option<&str>,
+    columns: &[String],
+    column_types: &[String],
+    trailing_sheets: &[XlsxWorksheetData],
+    max_data_rows_per_sheet: usize,
+) -> Result<StreamingXlsxWriter<W>, String> {
+    start_xlsx_writer_inner(
+        writer,
+        sheet_name,
+        columns,
+        column_types,
+        &[],
+        trailing_sheets,
+        None,
+        false,
+        max_data_rows_per_sheet,
+    )
+}
+
 impl<W: Write + Seek> StreamingXlsxWriter<W> {
-    /// Append a single data row to the worksheet.
+    /// Append a single data row to the current worksheet. If the current sheet
+    /// has reached [`self.max_data_rows_per_sheet`] data rows, this method
+    /// automatically closes the sheet and opens a new one before writing the row.
     pub fn write_row(&mut self, row: &[Value]) -> Result<(), String> {
+        if self.current_data_rows >= self.max_data_rows_per_sheet {
+            self.finish_current_sheet()?;
+            self.start_next_data_sheet()?;
+        }
         self.zip
             .write_all(
                 data_row_xml_with_date_time_format(
@@ -227,23 +369,95 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
             )
             .map_err(|err| err.to_string())?;
         self.next_row_number += 1;
+        self.current_data_rows += 1;
         Ok(())
     }
 
-    /// Finalize the worksheet and close the ZIP archive.  Returns the
-    /// underlying writer so callers can flush / close it as needed.
-    pub fn finish(mut self) -> Result<W, String> {
+    /// Close the currently open data sheet XML: writes `</sheetData>`,
+    /// `<autoFilter>` and `</worksheet>`.
+    fn finish_current_sheet(&mut self) -> Result<(), String> {
         let row_count = self.next_row_number.saturating_sub(1);
         let range = sheet_range(self.columns.len(), row_count);
         self.zip
             .write_all(format!("</sheetData><autoFilter ref=\"{range}\"/></worksheet>").as_bytes())
+            .map_err(|err| err.to_string())
+    }
+
+    /// Start a new data sheet, reusing the same header row, column widths and
+    /// frozen pane from the first sheet.
+    fn start_next_data_sheet(&mut self) -> Result<(), String> {
+        self.sheet_name_allocator.allocate_next();
+        self.current_sheet_number += 1;
+
+        let options = xlsx_zip_options();
+        self.zip
+            .start_file(format!("xl/worksheets/sheet{}.xml", self.current_sheet_number), options)
             .map_err(|err| err.to_string())?;
-        for (index, sheet) in self.trailing_sheets.iter().enumerate() {
+
+        let sheet_header = format!(
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+                "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
+                "<sheetViews><sheetView workbookViewId=\"0\">",
+                "<pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>",
+                "</sheetView></sheetViews>",
+                "<sheetFormatPr defaultRowHeight=\"15\"/>",
+                "<cols>{cols}</cols>",
+                "<sheetData>"
+            ),
+            cols = cols_xml(&self.width_cache),
+        );
+        self.zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
+        self.zip
+            .write_all(header_row_xml(&self.columns, &self.column_comments).as_bytes())
+            .map_err(|err| err.to_string())?;
+
+        // Reset row counters for the new sheet.
+        self.next_row_number = 2;
+        self.current_data_rows = 0;
+        Ok(())
+    }
+
+    /// Finalize the workbook: close the current data sheet, write trailing
+    /// sheets, write metadata files, and close the ZIP archive. Returns the
+    /// underlying writer so callers can flush / close it as needed.
+    pub fn finish(mut self) -> Result<W, String> {
+        // 1. Close the current data sheet.
+        self.finish_current_sheet()?;
+
+        // 2. Write trailing sheets (e.g. SQL) after all data sheets.
+        for sheet in &self.trailing_sheets {
+            self.current_sheet_number += 1;
             self.zip
-                .start_file(format!("xl/worksheets/sheet{}.xml", index + 2), xlsx_zip_options())
+                .start_file(format!("xl/worksheets/sheet{}.xml", self.current_sheet_number), xlsx_zip_options())
                 .map_err(|err| err.to_string())?;
-            self.zip.write_all(worksheet_xml(sheet).as_bytes()).map_err(|err| err.to_string())?;
+            let segment = WorksheetSegment {
+                name: sheet.sheet_name.clone(),
+                columns: &sheet.columns,
+                column_types: &sheet.column_types,
+                column_comments: &sheet.column_comments,
+                rows: &sheet.rows,
+                numeric_column_right_align: sheet.numeric_column_right_align,
+            };
+            write_worksheet_xml(&mut self.zip, &segment)?;
         }
+
+        // 3. Write metadata files. These appear AFTER sheet data in the ZIP
+        //    stream, but ZIP readers use the central directory to locate entries
+        //    by name, so the physical ordering is irrelevant.
+        let sheet_names = self.sheet_name_allocator.all_names();
+        let total_sheet_count = sheet_names.len();
+        write_zip_entry(&mut self.zip, "[Content_Types].xml", &content_types_xml_for_sheet_count(total_sheet_count))?;
+        write_zip_entry(&mut self.zip, "_rels/.rels", root_rels_xml())?;
+        write_zip_entry(&mut self.zip, "xl/workbook.xml", &workbook_xml_for_sheets(&sheet_names))?;
+        write_zip_entry(
+            &mut self.zip,
+            "xl/_rels/workbook.xml.rels",
+            &workbook_rels_xml_for_sheet_count(total_sheet_count),
+        )?;
+        write_zip_entry(&mut self.zip, "xl/styles.xml", &styles_xml(self.date_time_format.as_deref()))?;
+
+        // 4. Finalize the ZIP.
         self.zip.finish().map_err(|err| err.to_string())
     }
 }
@@ -291,21 +505,6 @@ fn sheet_range(column_count: usize, row_count: usize) -> String {
         return "A1".to_string();
     }
     format!("A1:{}{}", column_name(column_count - 1), row_count)
-}
-
-fn normalize_sheet_name(input: Option<&str>) -> String {
-    let base = input.unwrap_or("Sheet1");
-    let name: String = base
-        .chars()
-        .map(|ch| match ch {
-            '[' | ']' | ':' | '*' | '?' | '/' | '\\' => ' ',
-            _ => ch,
-        })
-        .collect::<String>()
-        .trim()
-        .to_string();
-    let fallback = if name.is_empty() { "Sheet1" } else { &name };
-    fallback.chars().take(31).collect()
 }
 
 fn value_text(value: Option<&Value>) -> String {
@@ -492,58 +691,53 @@ fn typed_cell_xml(
     cell_xml(value, row_index, col_index, style)
 }
 
-fn worksheet_xml(data: &XlsxWorksheetData) -> String {
-    let total_rows = data.rows.len() + 1;
-    let range = sheet_range(data.columns.len(), total_rows);
-    let widths = estimate_column_widths(&data.columns, &data.column_comments, &data.rows);
+fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment) -> Result<(), String> {
+    let total_rows = segment.rows.len() + 1;
+    let range = sheet_range(segment.columns.len(), total_rows);
+    let widths = estimate_column_widths(segment.columns, segment.column_comments, segment.rows);
 
-    let cols_xml = widths
-        .iter()
-        .enumerate()
-        .map(|(index, width)| {
-            format!("<col min=\"{}\" max=\"{}\" width=\"{}\" customWidth=\"1\"/>", index + 1, index + 1, width)
-        })
-        .collect::<String>();
-
-    let header_xml = header_row_xml(&data.columns, &data.column_comments);
-
-    let body_xml = data
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(row_index, row)| {
-            let excel_row = row_index + 2;
-            let cells = data
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(col_index, _)| {
-                    let col_type = data.column_types.get(col_index);
-                    let align_style = numeric_column_style(col_type, data.numeric_column_right_align);
-                    typed_cell_xml(row.get(col_index), col_type, excel_row - 1, col_index, align_style, None)
-                })
-                .collect::<String>();
-            format!("<row r=\"{excel_row}\">{cells}</row>")
-        })
-        .collect::<String>();
-
-    format!(
+    writer
+        .write_all(
+            format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
             "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
             "<dimension ref=\"{range}\"/>",
             "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews>",
             "<sheetFormatPr defaultRowHeight=\"15\"/>",
-            "<cols>{cols_xml}</cols>",
-            "<sheetData>{header_xml}{body_xml}</sheetData>",
-            "<autoFilter ref=\"{range}\"/>",
-            "</worksheet>"
+            "<cols>{cols}</cols>",
+            "<sheetData>"
         ),
         range = range,
-        cols_xml = cols_xml,
-        header_xml = header_xml,
-        body_xml = body_xml,
+        cols = cols_xml(&widths),
     )
+            .as_bytes(),
+        )
+        .map_err(|err| err.to_string())?;
+    writer
+        .write_all(header_row_xml(segment.columns, segment.column_comments).as_bytes())
+        .map_err(|err| err.to_string())?;
+
+    for (row_index, row) in segment.rows.iter().enumerate() {
+        let excel_row = row_index + 2;
+        writer
+            .write_all(
+                data_row_xml_with_date_time_format(
+                    excel_row,
+                    segment.columns,
+                    segment.column_types,
+                    row,
+                    None,
+                    segment.numeric_column_right_align,
+                )
+                .as_bytes(),
+            )
+            .map_err(|err| err.to_string())?;
+    }
+
+    writer
+        .write_all(format!("</sheetData><autoFilter ref=\"{range}\"/></worksheet>").as_bytes())
+        .map_err(|err| err.to_string())
 }
 
 fn content_types_xml_for_sheet_count(sheet_count: usize) -> String {
@@ -712,10 +906,27 @@ fn styles_xml(date_time_format: Option<&str>) -> String {
     )
 }
 
-fn normalize_unique_sheet_names(sheets: &[XlsxWorksheetData]) -> Vec<String> {
-    let mut names = Vec::with_capacity(sheets.len());
-    for (index, sheet) in sheets.iter().enumerate() {
-        let base = normalize_sheet_name(sheet.sheet_name.as_deref().or(Some(&format!("Sheet{}", index + 1))));
+/// A borrow-only view of a worksheet's schema plus a row range, produced by
+/// [`split_sheets_for_max_rows`] and consumed by [`write_worksheet_xml`]. Rows are
+/// referenced as slices of the original [`XlsxWorksheetData`] rather than
+/// deep-copied, so splitting an oversized worksheet into multiple sheets does
+/// not duplicate cell data in memory.
+struct WorksheetSegment<'a> {
+    /// Sheet name before cross-sheet deduplication. `None` signals a missing
+    /// name, which [`normalize_unique_sheet_names`] falls back on with
+    /// "Sheet{index}" like the original data.
+    name: Option<String>,
+    columns: &'a [String],
+    column_types: &'a [String],
+    column_comments: &'a [Option<String>],
+    rows: &'a [Vec<Value>],
+    numeric_column_right_align: bool,
+}
+
+fn normalize_unique_sheet_names(segments: &[WorksheetSegment]) -> Vec<String> {
+    let mut names = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let base = normalize_sheet_name(segment.name.as_deref().or(Some(&format!("Sheet{}", index + 1))));
         let mut candidate = base.clone();
         let mut suffix = 2;
         while names.iter().any(|name| name == &candidate) {
@@ -729,20 +940,86 @@ fn normalize_unique_sheet_names(sheets: &[XlsxWorksheetData]) -> Vec<String> {
     names
 }
 
+/// Split any worksheet whose `rows.len() > max_data_rows_per_sheet` into
+/// multiple segments, each borrowing the columns / column_types /
+/// column_comments / numeric_column_right_align of the original sheet. The
+/// first chunk keeps the original sheet name; subsequent chunks get
+/// "name (2)", "name (3)", etc. Sheets that do not overflow are passed through
+/// as a single segment. No row data is copied.
+fn split_sheets_for_max_rows<'a>(
+    sheets: &'a [XlsxWorksheetData],
+    max_data_rows_per_sheet: usize,
+) -> Vec<WorksheetSegment<'a>> {
+    // `slice::chunks` panics on a zero chunk size. No caller passes 0 today
+    // (production uses XLSX_MAX_DATA_ROWS), but this is pub(crate)-reachable
+    // through build_xlsx_workbook_multi_with_max_rows, so guard defensively.
+    let max_data_rows_per_sheet = max_data_rows_per_sheet.max(1);
+    let mut expanded = Vec::with_capacity(sheets.len());
+    for sheet in sheets {
+        if sheet.rows.len() <= max_data_rows_per_sheet {
+            expanded.push(WorksheetSegment {
+                name: sheet.sheet_name.clone(),
+                columns: &sheet.columns,
+                column_types: &sheet.column_types,
+                column_comments: &sheet.column_comments,
+                rows: &sheet.rows,
+                numeric_column_right_align: sheet.numeric_column_right_align,
+            });
+            continue;
+        }
+        let base_name = normalize_sheet_name(sheet.sheet_name.as_deref());
+        for (chunk_index, chunk) in sheet.rows.chunks(max_data_rows_per_sheet).enumerate() {
+            let chunk_name = if chunk_index == 0 {
+                base_name.clone()
+            } else {
+                let suffix = chunk_index + 1;
+                let suffix_text = format!(" ({suffix})");
+                let max_base_len = 31usize.saturating_sub(suffix_text.chars().count());
+                if max_base_len > 0 {
+                    format!("{}{}", base_name.chars().take(max_base_len).collect::<String>(), suffix_text)
+                } else {
+                    suffix_text.clone()
+                }
+            };
+            expanded.push(WorksheetSegment {
+                name: Some(chunk_name),
+                columns: &sheet.columns,
+                column_types: &sheet.column_types,
+                column_comments: &sheet.column_comments,
+                rows: chunk,
+                numeric_column_right_align: sheet.numeric_column_right_align,
+            });
+        }
+    }
+    expanded
+}
+
 pub fn build_xlsx_workbook(data: &XlsxWorksheetData) -> Result<Vec<u8>, String> {
     build_xlsx_workbook_multi(std::slice::from_ref(data))
 }
 
 pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>, String> {
+    build_xlsx_workbook_multi_with_max_rows(sheets, XLSX_MAX_DATA_ROWS)
+}
+
+/// Build an in-memory XLSX workbook with an explicit per-sheet data-row limit.
+/// Any worksheet whose data rows exceed `max_data_rows_per_sheet` is split into
+/// multiple worksheets (each with a header row, column widths, frozen pane,
+/// and autoFilter).
+pub(crate) fn build_xlsx_workbook_multi_with_max_rows(
+    sheets: &[XlsxWorksheetData],
+    max_data_rows_per_sheet: usize,
+) -> Result<Vec<u8>, String> {
     if sheets.is_empty() {
         return Err("At least one worksheet is required".to_string());
     }
-    let sheet_names = normalize_unique_sheet_names(sheets);
+    let segments = split_sheets_for_max_rows(sheets, max_data_rows_per_sheet);
+    let sheet_names = normalize_unique_sheet_names(&segments);
     let files = vec![
-        ("[Content_Types].xml", content_types_xml_for_sheet_count(sheets.len())),
+        ("[Content_Types].xml", content_types_xml_for_sheet_count(segments.len())),
         ("_rels/.rels", root_rels_xml().to_string()),
         ("xl/workbook.xml", workbook_xml_for_sheets(&sheet_names)),
-        ("xl/_rels/workbook.xml.rels", workbook_rels_xml_for_sheet_count(sheets.len())),
+        ("xl/_rels/workbook.xml.rels", workbook_rels_xml_for_sheet_count(segments.len())),
         ("xl/styles.xml", styles_xml(None)),
     ];
 
@@ -754,9 +1031,9 @@ pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>
         zip.start_file(path, options).map_err(|err| err.to_string())?;
         zip.write_all(content.as_bytes()).map_err(|err| err.to_string())?;
     }
-    for (index, sheet) in sheets.iter().enumerate() {
+    for (index, segment) in segments.iter().enumerate() {
         zip.start_file(format!("xl/worksheets/sheet{}.xml", index + 1), options).map_err(|err| err.to_string())?;
-        zip.write_all(worksheet_xml(sheet).as_bytes()).map_err(|err| err.to_string())?;
+        write_worksheet_xml(&mut zip, segment)?;
     }
 
     let output = zip.finish().map_err(|err| err.to_string())?;
@@ -766,14 +1043,35 @@ pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::{
-        build_xlsx_workbook, build_xlsx_workbook_multi, is_numeric_column_type, start_streaming_xlsx_workbook,
+        build_xlsx_workbook, build_xlsx_workbook_multi, build_xlsx_workbook_multi_with_max_rows,
+        is_numeric_column_type, start_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_max_rows,
         start_streaming_xlsx_workbook_with_options, start_streaming_xlsx_workbook_with_trailing_sheets,
-        XlsxWorksheetData,
+        write_worksheet_xml, WorksheetSegment, XlsxWorksheetData,
     };
     use calamine::{open_workbook_auto, Reader};
     use serde_json::{json, Value};
     use std::fs;
-    use std::io::Read;
+    use std::io::{Read, Write};
+
+    #[derive(Default)]
+    struct WriteStats {
+        bytes_written: usize,
+        largest_write: usize,
+        write_calls: usize,
+    }
+
+    impl Write for WriteStats {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.bytes_written += buffer.len();
+            self.largest_write = self.largest_write.max(buffer.len());
+            self.write_calls += 1;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     /// Read and decompress a single entry from an in-memory XLSX (ZIP) buffer.
     fn read_zip_entry(bytes: &[u8], path: &str) -> String {
@@ -1206,5 +1504,448 @@ mod tests {
             let column_type = fixture["type"].as_str().expect("non-numeric fixture type").to_string();
             assert!(!is_numeric_column_type(Some(&column_type)), "expected non-numeric backend type: {column_type}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-sheet splitting tests
+    // -----------------------------------------------------------------------
+
+    fn build_multi_sheet_xlsx(rows: &[Vec<Value>], max_rows: usize) -> Vec<u8> {
+        let path = std::env::temp_dir().join(format!("dbx-multi-split-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let mut writer = start_streaming_xlsx_workbook_with_max_rows(
+                file,
+                Some("Result"),
+                &["id".to_string(), "name".to_string()],
+                &[],
+                &[],
+                max_rows,
+            )
+            .expect("start workbook");
+            for row in rows {
+                writer.write_row(row).expect("write row");
+            }
+            drop(writer.finish().expect("finish workbook"));
+        }
+        let data = fs::read(&path).expect("read workbook");
+        let _ = fs::remove_file(&path);
+        data
+    }
+
+    #[test]
+    fn splits_rows_across_multiple_sheets() {
+        // 5 rows, max 2 per sheet -> 3 data sheets
+        let rows: Vec<Vec<Value>> = (1..=5).map(|i| vec![json!(i), json!(format!("row_{i}"))]).collect();
+        let data = build_multi_sheet_xlsx(&rows, 2);
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"Result\""));
+        assert!(workbook_xml.contains("name=\"Result (2)\""));
+        assert!(workbook_xml.contains("name=\"Result (3)\""));
+
+        // Verify three data sheets exist
+        let sheet1 = read_zip_entry(&data, "xl/worksheets/sheet1.xml");
+        let sheet2 = read_zip_entry(&data, "xl/worksheets/sheet2.xml");
+        let sheet3 = read_zip_entry(&data, "xl/worksheets/sheet3.xml");
+
+        // Each sheet has header row; rows are numbered starting at 1
+        assert!(sheet1.contains("row_1") && sheet1.contains("row_2"));
+        assert!(sheet2.contains("row_3") && sheet2.contains("row_4"));
+        assert!(sheet3.contains("row_5"));
+
+        // Each sheet has exactly the header + up to 2 data rows
+        assert_eq!(sheet1.matches("<row r=\"").count(), 3); // header + 2 rows
+        assert_eq!(sheet2.matches("<row r=\"").count(), 3); // header + 2 rows
+        assert_eq!(sheet3.matches("<row r=\"").count(), 2); // header + 1 row
+    }
+
+    #[test]
+    fn single_sheet_when_under_limit() {
+        let rows: Vec<Vec<Value>> = vec![vec![json!(1), json!("Ada")]];
+        let data = build_multi_sheet_xlsx(&rows, 2);
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"Result\""));
+        assert!(!workbook_xml.contains("Result (2)"));
+
+        // Only one sheet exists.
+        assert!(read_zip_entry(&data, "xl/worksheets/sheet1.xml").contains("Ada"));
+        // sheet2 should not exist.
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data)).expect("open xlsx");
+        assert!(archive.by_name("xl/worksheets/sheet2.xml").is_err());
+    }
+
+    #[test]
+    fn trailing_sheet_placed_after_data_sheets() {
+        let path = std::env::temp_dir().join(format!("dbx-trailing-split-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let sql_sheet = XlsxWorksheetData {
+                sheet_name: Some("SQL".to_string()),
+                columns: vec!["SQL".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows: vec![vec![json!("SELECT 1")]],
+                numeric_column_right_align: false,
+            };
+            let mut writer = start_streaming_xlsx_workbook_with_max_rows(
+                file,
+                Some("Result"),
+                &["id".to_string(), "name".to_string()],
+                &[],
+                &[sql_sheet],
+                2,
+            )
+            .expect("start workbook");
+            // Write 5 rows -> 3 data sheets + 1 trailing = 4 total sheets
+            for i in 1..=5 {
+                writer.write_row(&[json!(i), json!(format!("row_{i}"))]).expect("write row");
+            }
+            drop(writer.finish().expect("finish workbook"));
+        }
+        let data = fs::read(&path).expect("read workbook");
+        let _ = fs::remove_file(&path);
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        // SQL sheet should appear last
+        assert!(workbook_xml.contains("name=\"Result\""));
+        assert!(workbook_xml.contains("name=\"Result (2)\""));
+        assert!(workbook_xml.contains("name=\"Result (3)\""));
+        assert!(workbook_xml.contains("name=\"SQL\""));
+
+        // SQL is the 4th sheet (sheet4.xml)
+        let sql_sheet = read_zip_entry(&data, "xl/worksheets/sheet4.xml");
+        assert!(sql_sheet.contains("SELECT 1"));
+
+        // All ZIP entries should be Deflate-compressed.
+        assert_all_entries_deflated(&data);
+    }
+
+    #[test]
+    fn varchar_leading_zeros_preserved_across_sheets() {
+        let path = std::env::temp_dir().join(format!("dbx-leading-zeros-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let mut writer = start_streaming_xlsx_workbook_with_max_rows(
+                file,
+                Some("Codes"),
+                &["code".to_string()],
+                &["varchar".to_string()],
+                &[],
+                1,
+            )
+            .expect("start workbook");
+            writer.write_row(&[json!("00123")]).expect("write row on sheet 1");
+            writer.write_row(&[json!("04567")]).expect("write row on sheet 2");
+            drop(writer.finish().expect("finish workbook"));
+        }
+        let data = fs::read(&path).expect("read workbook");
+        let _ = fs::remove_file(&path);
+
+        // Both values must use inlineStr (not numeric `<v>`) to preserve leading zeros.
+        let sheet2 = read_zip_entry(&data, "xl/worksheets/sheet2.xml");
+        assert!(sheet2.contains("t=\"inlineStr\""), "sheet2 should use inlineStr for varchar: {sheet2}");
+        assert!(sheet2.contains("04567"), "sheet2 should contain 04567: {sheet2}");
+    }
+
+    #[test]
+    fn exactly_at_limit_does_not_create_extra_sheet() {
+        // max 2 rows, write exactly 2 rows -> 1 data sheet
+        let rows: Vec<Vec<Value>> = vec![vec![json!(1), json!("A")], vec![json!(2), json!("B")]];
+        let data = build_multi_sheet_xlsx(&rows, 2);
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(!workbook_xml.contains("Result (2)"));
+        assert!(read_zip_entry(&data, "xl/worksheets/sheet1.xml").contains("A"));
+    }
+
+    #[test]
+    fn deduplicates_identically_named_trailing_sheets() {
+        let path = std::env::temp_dir().join(format!("dbx-trailing-dedup-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let sql_sheet_a = XlsxWorksheetData {
+                sheet_name: Some("SQL".to_string()),
+                columns: vec!["SQL".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows: vec![vec![json!("SELECT 1")]],
+                numeric_column_right_align: false,
+            };
+            let sql_sheet_b = XlsxWorksheetData {
+                sheet_name: Some("SQL".to_string()),
+                columns: vec!["SQL".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows: vec![vec![json!("SELECT 2")]],
+                numeric_column_right_align: false,
+            };
+            let mut writer = start_streaming_xlsx_workbook_with_max_rows(
+                file,
+                Some("Result"),
+                &["id".to_string()],
+                &[],
+                &[sql_sheet_a, sql_sheet_b],
+                100,
+            )
+            .expect("start workbook");
+            writer.write_row(&[json!(42)]).expect("write row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+        let data = fs::read(&path).expect("read workbook");
+        let _ = fs::remove_file(&path);
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"SQL\""), "workbook: {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"SQL (2)\""), "workbook: {workbook_xml}");
+        // No duplicate names — each appears exactly once.
+        assert_eq!(workbook_xml.matches("name=\"SQL\"").count(), 1, "only one sheet named \"SQL\": {workbook_xml}");
+    }
+
+    #[test]
+    fn streaming_continuation_names_use_original_base_when_first_data_name_collides_with_trailing() {
+        // Regression: allocate_next used to derive the base from the first
+        // *allocated* data name, which could already carry a de-dup suffix.
+        // When the data sheet name ("SQL") collides with a trailing sheet
+        // named "SQL", the first data name becomes "SQL (2)".  The second
+        // data name should be "SQL (3)" — NOT "SQL (2) (2)".
+        let path = std::env::temp_dir().join(format!("dbx-collision-base-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let sql_sheet = XlsxWorksheetData {
+                sheet_name: Some("SQL".to_string()),
+                columns: vec!["SQL".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows: vec![vec![json!("SELECT 1")]],
+                numeric_column_right_align: false,
+            };
+            let mut writer = start_streaming_xlsx_workbook_with_max_rows(
+                file,
+                Some("SQL"),
+                &["id".to_string()],
+                &[],
+                &[sql_sheet],
+                1, // force split: 2 data rows → 2 data sheets
+            )
+            .expect("start workbook");
+            writer.write_row(&[json!(1)]).expect("write row 1");
+            writer.write_row(&[json!(2)]).expect("write row 2");
+            drop(writer.finish().expect("finish workbook"));
+        }
+        let data = fs::read(&path).expect("read workbook");
+        let _ = fs::remove_file(&path);
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        // Trailing "SQL" stays; data sheets: "SQL (2)", "SQL (3)" (NOT "SQL (2) (2)").
+        assert!(workbook_xml.contains("name=\"SQL\""), "trailing SQL sheet must exist: {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"SQL (2)\""), "first data sheet must be SQL (2): {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"SQL (3)\""), "second data sheet must be SQL (3): {workbook_xml}");
+        assert!(!workbook_xml.contains("SQL (2) (2)"), "must not have nested de-dup suffix: {workbook_xml}");
+        // Exactly 3 sheets total: tail, data1, data2.
+        assert_eq!(workbook_xml.matches("name=\"").count(), 3, "expected exactly 3 sheets: {workbook_xml}");
+    }
+
+    #[test]
+    fn build_xlsx_workbook_splits_rows_over_limit() {
+        // 5 data rows, max 2 per sheet → 3 sheets: "Result", "Result (2)", "Result (3)".
+        let rows: Vec<Vec<Value>> = (1..=5).map(|i| vec![json!(i), json!(format!("row_{i}"))]).collect();
+        let data = build_xlsx_workbook_multi_with_max_rows(
+            &[XlsxWorksheetData {
+                sheet_name: Some("Result".to_string()),
+                columns: vec!["id".to_string(), "name".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows,
+                numeric_column_right_align: false,
+            }],
+            2,
+        )
+        .expect("build workbook");
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"Result\""), "workbook: {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"Result (2)\""), "workbook: {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"Result (3)\""), "workbook: {workbook_xml}");
+        // Exactly 3 sheet entries.
+        assert_eq!(workbook_xml.matches("name=\"").count(), 3, "expected 3 sheets: {workbook_xml}");
+
+        let sheet1 = read_zip_entry(&data, "xl/worksheets/sheet1.xml");
+        let sheet2 = read_zip_entry(&data, "xl/worksheets/sheet2.xml");
+        let sheet3 = read_zip_entry(&data, "xl/worksheets/sheet3.xml");
+
+        // Each sheet has header row; data rows are split consecutively.
+        assert!(sheet1.contains("row_1") && sheet1.contains("row_2"));
+        assert!(!sheet1.contains("row_3"));
+        assert!(sheet2.contains("row_3") && sheet2.contains("row_4"));
+        assert!(!sheet2.contains("row_1") && !sheet2.contains("row_5"));
+        assert!(sheet3.contains("row_5"));
+        assert!(!sheet3.contains("row_1"));
+        // 1 header + up to 2 data rows per sheet.
+        let row_elems = |xml: &str| xml.matches("<row r=\"").count();
+        assert_eq!(row_elems(&sheet1), 3, "sheet1: {sheet1}");
+        assert_eq!(row_elems(&sheet2), 3, "sheet2: {sheet2}");
+        assert_eq!(row_elems(&sheet3), 2, "sheet3: {sheet3}");
+    }
+
+    #[test]
+    fn large_in_memory_worksheet_is_written_in_bounded_chunks() {
+        let rows: Vec<Vec<Value>> = (1..=25_000)
+            .map(|index| {
+                vec![
+                    json!(index),
+                    json!(format!("user_{index}")),
+                    json!(format!("user_{index}@example.com")),
+                    json!(index % 2 == 0),
+                    json!(format!("note-{index:06}-{}", "x".repeat(128))),
+                ]
+            })
+            .collect();
+        let worksheet = XlsxWorksheetData {
+            sheet_name: Some("Users".to_string()),
+            columns: vec![
+                "id".to_string(),
+                "name".to_string(),
+                "email".to_string(),
+                "active".to_string(),
+                "notes".to_string(),
+            ],
+            column_types: vec![
+                "integer".to_string(),
+                "text".to_string(),
+                "text".to_string(),
+                "boolean".to_string(),
+                "text".to_string(),
+            ],
+            column_comments: vec![],
+            rows,
+            numeric_column_right_align: true,
+        };
+        let segment = WorksheetSegment {
+            name: worksheet.sheet_name.clone(),
+            columns: &worksheet.columns,
+            column_types: &worksheet.column_types,
+            column_comments: &worksheet.column_comments,
+            rows: &worksheet.rows,
+            numeric_column_right_align: worksheet.numeric_column_right_align,
+        };
+        let mut stats = WriteStats::default();
+
+        write_worksheet_xml(&mut stats, &segment).expect("write large worksheet");
+
+        assert!(stats.bytes_written > 10_000_000, "expected realistic worksheet size, got {}", stats.bytes_written);
+        assert!(
+            stats.largest_write < 16 * 1024,
+            "worksheet should be streamed row-by-row, largest write was {}",
+            stats.largest_write
+        );
+        assert!(stats.write_calls >= worksheet.rows.len(), "expected at least one bounded write per row");
+    }
+
+    #[test]
+    fn build_xlsx_workbook_multi_splits_only_overflowing_sheets() {
+        // Sheet A: 7 rows, max 3 → "A", "A (2)", "A (3)".
+        // Sheet B: 2 rows, max 3 → stays "B". Total 4 sheets.
+        let sheet_a = XlsxWorksheetData {
+            sheet_name: Some("A".to_string()),
+            columns: vec!["val".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: (0..7).map(|i| vec![json!(i)]).collect(),
+            numeric_column_right_align: false,
+        };
+        let sheet_b = XlsxWorksheetData {
+            sheet_name: Some("B".to_string()),
+            columns: vec!["val".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: (100..102).map(|i| vec![json!(i)]).collect(),
+            numeric_column_right_align: false,
+        };
+        let data = build_xlsx_workbook_multi_with_max_rows(&[sheet_a, sheet_b], 3).expect("build workbook");
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"A\""), "workbook: {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"A (2)\""), "workbook: {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"A (3)\""), "workbook: {workbook_xml}");
+        assert!(workbook_xml.contains("name=\"B\""), "workbook: {workbook_xml}");
+        assert_eq!(workbook_xml.matches("name=\"").count(), 4, "expected 4 sheets: {workbook_xml}");
+
+        // Sheet B should be the 4th entry (after A's 3 chunks).
+        let sheet_b_xml = read_zip_entry(&data, "xl/worksheets/sheet4.xml");
+        assert!(sheet_b_xml.contains(">100<"), "sheet B must contain 100: {sheet_b_xml}");
+        assert!(sheet_b_xml.contains(">101<"), "sheet B must contain 101: {sheet_b_xml}");
+
+        // A's chunks: sheet1 (rows 0-2), sheet2 (rows 3-5), sheet3 (row 6).
+        let sheet1 = read_zip_entry(&data, "xl/worksheets/sheet1.xml");
+        assert_eq!(sheet1.matches("<row r=\"").count(), 4); // header + 3 rows
+        let sheet3 = read_zip_entry(&data, "xl/worksheets/sheet3.xml");
+        assert_eq!(sheet3.matches("<row r=\"").count(), 2); // header + 1 row
+    }
+
+    #[test]
+    fn build_xlsx_workbook_under_limit_single_sheet() {
+        let rows: Vec<Vec<Value>> = vec![vec![json!(1), json!("Ada")]];
+        let data = build_xlsx_workbook_multi_with_max_rows(
+            &[XlsxWorksheetData {
+                sheet_name: Some("MySheet".to_string()),
+                columns: vec!["id".to_string(), "name".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows,
+                numeric_column_right_align: false,
+            }],
+            100,
+        )
+        .expect("build workbook");
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"MySheet\""), "workbook: {workbook_xml}");
+        assert!(!workbook_xml.contains("MySheet (2)"), "should not split: {workbook_xml}");
+        assert_eq!(workbook_xml.matches("name=\"").count(), 1, "expected exactly 1 sheet: {workbook_xml}");
+
+        let sheet = read_zip_entry(&data, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("Ada"), "sheet should contain data: {sheet}");
+        // sheet2 must not exist.
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data)).expect("open xlsx");
+        assert!(archive.by_name("xl/worksheets/sheet2.xml").is_err(), "sheet2 must not exist");
+    }
+
+    #[test]
+    fn build_xlsx_workbook_zero_rows_produces_header_only_sheet() {
+        let data = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Empty".to_string()),
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"Empty\""), "workbook: {workbook_xml}");
+        let sheet = read_zip_entry(&data, "xl/worksheets/sheet1.xml");
+        // Header row present, no data rows.
+        assert!(sheet.contains("id"), "header must contain 'id': {sheet}");
+        assert!(sheet.contains("name"), "header must contain 'name': {sheet}");
+        // Exactly one <row> element (header row).
+        let row_count = sheet.matches("<row r=\"").count();
+        assert_eq!(row_count, 1, "expected 1 row (header only), got {row_count}: {sheet}");
+    }
+
+    #[test]
+    fn one_over_limit_creates_new_sheet() {
+        // max 2 rows, write 3 rows -> 2 data sheets
+        let rows: Vec<Vec<Value>> = (1..=3).map(|i| vec![json!(i), json!(format!("row_{i}"))]).collect();
+        let data = build_multi_sheet_xlsx(&rows, 2);
+
+        let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"Result\""));
+        assert!(workbook_xml.contains("name=\"Result (2)\""));
+
+        let sheet2 = read_zip_entry(&data, "xl/worksheets/sheet2.xml");
+        assert!(sheet2.contains("row_3"), "row 3 should be on sheet 2: {sheet2}");
     }
 }

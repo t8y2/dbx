@@ -1,6 +1,12 @@
-type Coord = [number, number];
+export type Coord = [number, number];
 
-interface GeometryGroup {
+export interface ParsedWktGeometry {
+  type: string;
+  groups: GeometryGroup[];
+  coordinates: Coord[];
+}
+
+export interface GeometryGroup {
   coords: Coord[];
   children: GeometryGroup[];
 }
@@ -112,20 +118,18 @@ function extractCoords(g: GeometryGroup): Coord[] {
 function drawPolygonRings(ctx: CanvasRenderingContext2D, group: GeometryGroup, mapX: (v: number) => number, mapY: (v: number) => number) {
   // group.children contains ring groups
   const rings = group.children.length > 0 ? group.children : [group];
-  let ringIndex = 0;
+  ctx.beginPath();
   for (const ringGroup of rings) {
     const coords = extractCoords(ringGroup);
     if (coords.length < 2) continue;
-    ctx.beginPath();
     ctx.moveTo(mapX(coords[0][0]), mapY(coords[0][1]));
     for (let j = 1; j < coords.length; j++) {
       ctx.lineTo(mapX(coords[j][0]), mapY(coords[j][1]));
     }
     ctx.closePath();
-    if (ringIndex === 0) ctx.fill();
-    ctx.stroke();
-    ringIndex++;
   }
+  ctx.fill("evenodd");
+  ctx.stroke();
 }
 
 function drawGroups(ctx: CanvasRenderingContext2D, groups: GeometryGroup[], type: string, mapX: (v: number) => number, mapY: (v: number) => number) {
@@ -201,10 +205,70 @@ function detectWktType(wkt: string): string {
   return m ? m[1].toUpperCase() : "GEOMETRYCOLLECTION";
 }
 
+function cleanWktInput(wkt: string): string {
+  const trimmed = wkt.trim();
+  const ewkt = trimmed.match(/^SRID=\d+\s*;\s*/i);
+  return ewkt ? trimmed.slice(ewkt[0].length).trim() : trimmed;
+}
+
 // EWKB parsing on the backend can fall back to hex for unsupported geometry types
 // (e.g. TIN, Triangle, CircularString). Don't attempt to render hex as WKT.
 export function isHexGeometry(value: string): boolean {
   return value.startsWith("0x");
+}
+
+export function parseWktGeometry(wkt: string): ParsedWktGeometry | null {
+  const cleaned = cleanWktInput(wkt);
+  if (!cleaned || isHexGeometry(cleaned)) return null;
+  const type = detectWktType(cleaned);
+  const tokens = tokenize(cleaned);
+  const { groups } = parseGroups(tokens, 0);
+  const coordinates = flattenCoords(groups).filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+  return groups.length > 0 || /\bEMPTY\b/i.test(cleaned) ? { type, groups, coordinates } : null;
+}
+
+export function renderGeometryOnCanvas(canvas: HTMLCanvasElement, geometry: ParsedWktGeometry): void {
+  const allCoords = geometry.coordinates;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const W = canvas.width;
+  const H = canvas.height;
+  const pad = 20;
+  ctx.clearRect(0, 0, W, H);
+  if (allCoords.length === 0) {
+    ctx.fillStyle = "#888";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Empty geometry", W / 2, H / 2);
+    return;
+  }
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
+  for (const [x, y] of allCoords) {
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  if (minX === maxX && minY === maxY) {
+    minX -= 1;
+    maxX += 1;
+    minY -= 1;
+    maxY += 1;
+  }
+  const scale = Math.min((W - pad * 2) / (maxX - minX || 1), (H - pad * 2) / (maxY - minY || 1));
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+  const mapX = (x: number) => (x - midX) * scale + W / 2;
+  const mapY = (y: number) => -(y - midY) * scale + H / 2;
+  ctx.strokeStyle = "#3b82f6";
+  ctx.fillStyle = "rgba(59, 130, 246, 0.15)";
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  drawGroups(ctx, geometry.groups, geometry.type, mapX, mapY);
 }
 
 export function renderWktOnCanvas(canvas: HTMLCanvasElement, wkt: string): void {
@@ -219,70 +283,15 @@ export function renderWktOnCanvas(canvas: HTMLCanvasElement, wkt: string): void 
     return;
   }
 
-  const type = detectWktType(wkt);
-  const tokens = tokenize(wkt);
-  const { groups } = parseGroups(tokens, 0);
-  const allCoords = flattenCoords(groups);
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const W = canvas.width;
-  const H = canvas.height;
-  const pad = 20;
-
-  ctx.clearRect(0, 0, W, H);
-
-  if (allCoords.length === 0) {
-    ctx.fillStyle = "#888";
-    ctx.font = "12px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("Empty geometry", W / 2, H / 2);
-    return;
-  }
-
-  let minX = Infinity,
-    maxX = -Infinity,
-    minY = Infinity,
-    maxY = -Infinity;
-  for (const [x, y] of allCoords) {
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  }
-
-  if (minX === maxX && minY === maxY) {
-    minX -= 1;
-    maxX += 1;
-    minY -= 1;
-    maxY += 1;
-  }
-
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-  const scale = Math.min((W - pad * 2) / rangeX, (H - pad * 2) / rangeY);
-
-  const midX = (minX + maxX) / 2;
-  const midY = (minY + maxY) / 2;
-
-  const mapX = (x: number) => (x - midX) * scale + W / 2;
-  const mapY = (y: number) => -(y - midY) * scale + H / 2;
-
-  ctx.strokeStyle = "#3b82f6";
-  ctx.fillStyle = "rgba(59, 130, 246, 0.15)";
-  ctx.lineWidth = 1.5;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-
-  drawGroups(ctx, groups, type, mapX, mapY);
+  const geometry = parseWktGeometry(wkt);
+  if (geometry) renderGeometryOnCanvas(canvas, geometry);
 }
 
 /** GeoJSON geometry type. */
 export interface GeoJsonGeometry {
   type: string;
   coordinates?: any;
-  geometries?: (GeoJsonGeometry | null)[];
+  geometries?: GeoJsonGeometry[];
 }
 
 /**
@@ -290,10 +299,11 @@ export interface GeoJsonGeometry {
  * Returns `null` for binary (hex) geometries or parse failures.
  */
 export function wktToGeoJson(wkt: string): GeoJsonGeometry | null {
-  if (isHexGeometry(wkt)) return null;
-  const type = detectWktType(wkt);
-  if (type === "GEOMETRYCOLLECTION") return geometryCollectionToGeoJson(wkt);
-  const tokens = tokenize(wkt);
+  const cleaned = cleanWktInput(wkt);
+  if (isHexGeometry(cleaned)) return null;
+  const type = detectWktType(cleaned);
+  if (type === "GEOMETRYCOLLECTION") return geometryCollectionToGeoJson(cleaned);
+  const tokens = tokenize(cleaned);
   const { groups } = parseGroups(tokens, 0);
   if (groups.length === 0) return null;
   try {
@@ -369,9 +379,11 @@ function geometryCollectionToGeoJson(wkt: string): GeoJsonGeometry | null {
   const content = inner.slice(1, -1).trim();
   if (!content) return null;
   const parts = splitGeomCollectionMembers(content);
+  const geometries = parts.map((part) => wktToGeoJson(part));
+  if (geometries.some((geometry) => geometry === null)) return null;
   return {
     type: "GeometryCollection",
-    geometries: parts.map((p) => wktToGeoJson(p)),
+    geometries: geometries as GeoJsonGeometry[],
   };
 }
 

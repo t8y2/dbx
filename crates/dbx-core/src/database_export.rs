@@ -880,7 +880,7 @@ fn is_export_insert_column(
 ) -> bool {
     !is_internal_export_column(database_type, column)
         && !is_postgres_tsvector_export_column(database_type, column_type)
-        && !(database_type == Some(DatabaseType::Mysql) && is_mysql_generated_column_extra(column_extra))
+        && (database_type != Some(DatabaseType::Mysql) || !is_mysql_generated_column_extra(column_extra))
 }
 
 fn is_postgres_json_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
@@ -2371,7 +2371,6 @@ mod tests {
     #[test]
     fn concurrent_prefetch_only_allowed_for_multi_connection_pools() {
         use crate::connection::PoolKind;
-        use std::sync::Arc;
 
         // ChClient::new 只构造 HTTP 客户端，不发起连接
         let clickhouse = PoolKind::ClickHouse(crate::db::clickhouse_driver::ChClient::new(
@@ -2383,8 +2382,7 @@ mod tests {
         assert!(concurrent_metadata_prefetch_allowed(Some(&clickhouse)));
 
         // Agent（JDBC sidecar）请求超时覆盖排队时间，必须回退串行
-        let agent =
-            PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(crate::db::agent_driver::AgentDriverClient::test_stub())));
+        let agent = PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub());
         assert!(!concurrent_metadata_prefetch_allowed(Some(&agent)));
 
         assert!(!concurrent_metadata_prefetch_allowed(None));

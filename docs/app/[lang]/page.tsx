@@ -10,12 +10,15 @@ import { InstallTabs } from "@/components/landing/InstallTabs";
 import { LandingLatestUpdates } from "@/components/landing/LandingLatestUpdates";
 import { RevealSection } from "@/components/landing/RevealSection";
 import { ContributorsWallContent } from "@/components/landing/ContributorsWall";
+import { ExpandableDatabaseGrid } from "@/components/landing/ExpandableDatabaseGrid";
 import contributorSnapshot from "@/data/contributors.json";
 import type { ContributorActivityData } from "@/lib/contributorActivity";
 import { contributorsFromActivity } from "@/lib/contributors";
 import { getAppVersion } from "@/lib/appVersion";
 import { fetchChangelog } from "@/lib/changelog";
 import { fetchLatestReleaseInfo } from "@/lib/latestRelease";
+import { buildMetadata, getHtmlLang } from "@/lib/metadata";
+import { buildSoftwareApplicationStructuredData } from "@/lib/structuredData";
 import { ArrowRight, Bot, Database, FileCode, GitCompare, Network, Search, Shield, Table, Terminal, Zap } from "lucide-react";
 
 function formatStars(count: number) {
@@ -427,8 +430,6 @@ const i18nText = {
   },
 };
 
-import { buildMetadata } from "@/lib/metadata";
-
 const landingMeta = {
   en: {
     title: "DBX - 20 MB to manage 70+ databases!",
@@ -468,6 +469,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
   const contributors = contributorsFromActivity(contributorData.contributors);
   const initialDownloadVersion = initialLatestRelease?.version ?? appVersion;
   const testimonialItems = testimonials[l];
+  const softwareStructuredData = buildSoftwareApplicationStructuredData(l, initialDownloadVersion);
   const sponsorItems = [
     {
       name: "RainYun",
@@ -496,18 +498,19 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
   ];
 
   return (
-    <main className="landing">
+    <main className="landing" lang={getHtmlLang(l)}>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(softwareStructuredData) }} />
       {/* Nav */}
       <LandingNav lang={l} active="home" />
 
       {/* Hero */}
-      <section className="landing-hero">
+      <section className="landing-hero" aria-labelledby="landing-title">
         <Spotlight />
         <div className="relative z-[1] max-w-[1180px] mx-auto px-7 max-[1040px]:max-w-[920px] max-[760px]:px-[18px]">
           <div className="landing-hero-copy relative z-[6] grid justify-items-center max-w-[900px] mx-auto text-center max-[1040px]:max-w-[760px]">
-            <h1 className="min-w-0 m-0 text-[clamp(36px,4.2vw,56px)] font-[820] leading-[1.06] text-landing-ink whitespace-nowrap max-[760px]:text-[clamp(26px,7vw,38px)]">{t.heroTitle}</h1>
-            <p className="landing-hero-subtitle min-w-0 mt-5 mx-auto text-[17px] font-[460] leading-[1.8] whitespace-nowrap max-[760px]:text-[15px] max-[760px]:leading-[1.68] max-[760px]:whitespace-normal max-[760px]:max-w-[320px]">{t.heroSubtitle}</p>
-            <div className="w-full max-w-[520px] mt-10">
+            <h1 id="landing-title" className="min-w-0 m-0 text-[clamp(36px,4.2vw,56px)] font-[820] leading-[1.06] text-landing-ink whitespace-nowrap max-[760px]:max-w-[12ch] max-[760px]:whitespace-normal max-[760px]:text-balance max-[760px]:text-[clamp(29px,8.7vw,38px)] max-[760px]:leading-[1.08]">{t.heroTitle}</h1>
+            <p className="landing-hero-subtitle min-w-0 mt-5 mx-auto text-[17px] font-[460] leading-[1.8] whitespace-nowrap max-[900px]:max-w-[680px] max-[900px]:whitespace-normal max-[760px]:max-w-[320px] max-[760px]:text-[15px] max-[760px]:leading-[1.68]">{t.heroSubtitle}</p>
+            <div className="w-full max-w-[520px] mt-10 max-[760px]:mt-7">
               <InstallTabs lang={l} version={initialDownloadVersion} />
             </div>
           </div>
@@ -516,9 +519,9 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       </section>
 
       {/* Metrics */}
-      <RevealSection className="grid grid-cols-4 gap-3 max-w-[1180px] mx-auto px-7 pt-6 pb-11 [animation:landing-rise_0.72s_ease-out_0.1s_both] max-[760px]:grid-cols-1 max-[760px]:px-[18px] max-[760px]:pb-8">
+      <RevealSection className="grid grid-cols-4 gap-3 max-w-[1180px] mx-auto px-7 pt-6 pb-11 [animation:landing-rise_0.72s_ease-out_0.1s_both] max-[760px]:grid-cols-2 max-[760px]:gap-2.5 max-[760px]:px-[18px] max-[760px]:pb-7" aria-label={l === "cn" ? "DBX 核心指标" : "DBX key metrics"}>
         {metricItems.map((item) => (
-          <div key={item.label} data-stagger className="landing-glass-card min-h-[118px] rounded-[10px] p-[22px] max-[760px]:min-h-[96px] max-[760px]:p-[18px]">
+          <div key={item.label} data-stagger className="landing-glass-card min-h-[118px] rounded-[10px] p-[22px] max-[760px]:min-h-[88px] max-[760px]:p-4">
             <strong className="block text-landing-ink text-2xl font-[720]">{item.value}</strong>
             <span className="block mt-1 text-landing-muted text-[13px]">{item.label}</span>
           </div>
@@ -526,7 +529,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       </RevealSection>
 
       {/* Doc start */}
-      <RevealSection className="landing-glass-card-green flex items-center justify-between gap-[22px] max-w-[calc(1180px-56px)] mx-auto px-7 py-7 rounded-[10px] max-[760px]:block max-[760px]:px-[18px]">
+      <RevealSection className="landing-glass-card-green flex items-center justify-between gap-[22px] max-w-[calc(1180px-56px)] mx-auto px-7 py-7 rounded-[10px] max-[760px]:block max-[760px]:mx-[18px] max-[760px]:px-[18px] max-[760px]:py-5">
         <div>
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.docsStart}</h2>
           <p className="mt-2 text-landing-muted text-sm leading-[1.65]">{t.docsStartDesc}</p>
@@ -543,12 +546,12 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.workflowsTitle}</h2>
           <p className="mt-2 max-w-[650px] text-landing-muted text-sm leading-[1.65] justify-self-end text-right max-[760px]:max-w-none max-[760px]:text-left">{t.workflowsDesc}</p>
         </div>
-        <div className="landing-workflow-grid grid grid-cols-4 rounded-[10px] overflow-hidden max-[1040px]:grid-cols-2 max-[760px]:grid-cols-1">
+        <div className="landing-workflow-grid grid grid-cols-4 rounded-[10px] overflow-hidden max-[1040px]:grid-cols-2 max-[760px]:grid-cols-2 max-[360px]:grid-cols-1">
           {workflowItems.map((item, i) => (
             <Link
               key={item.title}
               href={item.href}
-              className={`landing-workflow-card min-h-[250px] p-6 border-r border-r-landing-line max-[760px]:min-h-0 max-[760px]:border-r-0 max-[760px]:border-b max-[760px]:border-b-landing-line max-[760px]:last:border-b-0 ${i === workflowItems.length - 1 ? "border-r-0" : ""}`}
+              className={`landing-workflow-card min-h-[250px] p-6 border-r border-r-landing-line max-[760px]:min-h-0 max-[760px]:p-[18px] ${i === workflowItems.length - 1 ? "border-r-0" : ""}`}
               target="_blank"
               data-stagger
             >
@@ -576,30 +579,30 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
             </Link>
           </div>
         </div>
-        <div className="grid grid-cols-9 gap-3 max-[1240px]:grid-cols-7 max-[960px]:grid-cols-5 max-[640px]:grid-cols-3 max-[440px]:grid-cols-2 max-[760px]:gap-2.5">
+        <ExpandableDatabaseGrid lang={l}>
           {databaseSupport.map((db) => {
             const isCta = "href" in db && db.href;
             const CardTag = isCta ? "a" : "div";
             return (
             <CardTag
-              className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:py-4 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
+              className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:px-1.5 max-[760px]:py-2.5 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
               key={db.name}
               {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
               style={{ "--db-tone": db.tone } as CSSProperties}
               data-stagger
             >
-              <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px]">
+              <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px] max-[760px]:size-8 max-[760px]:mb-2">
                 {isCta ? (
                   <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
                 ) : (
-                  <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
+                  <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
                 )}
               </div>
-              <strong className={`text-sm font-[650] leading-[1.2] text-center ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
+              <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
             </CardTag>
             );
           })}
-        </div>
+        </ExpandableDatabaseGrid>
       </RevealSection>
 
       {/* Testimonials */}
@@ -619,9 +622,9 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
         <div className="grid grid-cols-[minmax(220px,0.42fr)_minmax(0,0.58fr)] gap-9 items-end mb-[22px] max-[760px]:block">
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.capabilitiesTitle}</h2>
         </div>
-        <div className="grid grid-cols-3 gap-2.5 max-[1040px]:grid-cols-2 max-[760px]:grid-cols-1 max-[760px]:mt-[18px]">
+        <div className="grid grid-cols-3 gap-2.5 max-[1040px]:grid-cols-2 max-[760px]:grid-cols-2 max-[760px]:mt-[18px] max-[360px]:grid-cols-1">
           {capabilityItems.map((item) => (
-            <div key={item.label} className="landing-capability flex items-center gap-2.5 min-h-[72px] rounded-lg px-[15px] py-3.5" data-stagger>
+            <div key={item.label} className="landing-capability flex items-center gap-2.5 min-h-[72px] rounded-lg px-[15px] py-3.5 max-[760px]:min-h-[62px] max-[760px]:px-3" data-stagger>
               <item.icon size={18} className="shrink-0 text-landing-blue" />
               <span className="text-landing-ink text-[13px] font-[560] leading-[1.45]">{item.label}</span>
             </div>
@@ -637,16 +640,16 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       {/* Sponsor */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 mt-10 max-[760px]:px-[18px]">
         <p className="m-0 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorLabel}</p>
-        <div className="mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
+        <div className="landing-sponsor-grid mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
           {sponsorItems.map((sponsor) => (
-            <div key={sponsor.name} className="flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[560px]:block">
-              <Link href={sponsor.href} target="_blank" className="flex h-20 w-28 shrink-0 items-center justify-center rounded-lg bg-white px-4 py-3 shadow-[0_10px_30px_rgba(15,23,42,0.08)]">
-                <img src={sponsor.logo} alt={sponsor.name} className={sponsor.logoClass} />
+            <div key={sponsor.name} className="landing-sponsor-card flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[560px]:block">
+              <Link href={sponsor.href} target="_blank" rel="noopener noreferrer" className="flex h-20 w-28 shrink-0 items-center justify-center rounded-lg bg-white px-4 py-3 shadow-[0_10px_30px_rgba(15,23,42,0.08)]">
+                <img src={sponsor.logo} alt={sponsor.name} width={112} height={56} loading="lazy" decoding="async" className={sponsor.logoClass} />
               </Link>
               <div className="min-w-0 flex-1 max-[560px]:mt-4">
                 <h2 className="text-lg font-[720] text-landing-ink">{sponsor.name}</h2>
                 <p className="mt-1.5 text-sm leading-[1.65] text-landing-muted">{sponsor.description}</p>
-                <Link href={sponsor.href} target="_blank" className="landing-inline-link mt-3 inline-flex items-center gap-[7px] text-sm font-[650]">
+                <Link href={sponsor.href} target="_blank" rel="noopener noreferrer" className="landing-inline-link mt-3 inline-flex items-center gap-[7px] text-sm font-[650]">
                   {sponsor.action}
                   <span aria-hidden="true">→</span>
                 </Link>

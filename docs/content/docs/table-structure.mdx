@@ -1,77 +1,144 @@
 ---
 title: Table Structure Editor
-description: Edit table columns and indexes visually, then preview DDL before applying changes.
+description: Inspect and edit columns, indexes, foreign keys, and triggers and review dialect-specific DDL before execution.
 ---
 
-The table structure editor modifies columns, indexes, and constraints for a single table. Use it for focused structure changes or to generate reviewable DDL without writing it by hand.
+The table structure editor keeps single-table metadata and a change draft in a persistent tab. DBX enables only operations that the active database capability can generate reliably and shows the final DDL before save.
 
-<Callout type="info">The structure editor is enabled for MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse. Other databases may still expose DDL through the schema browser, but DBX does not show the visual editor when it cannot generate safe changes.</Callout>
+## Open the Editor
 
-## What You Can Edit
+- Right-click a table and choose **View structure** or **Edit structure**
+- Open from a column node and focus that column
+- Open from an index node and focus that index
+- Open from table information in the data grid
+- Open the same table from Object Browser or a DDL action
 
-| Object       | Supported Actions                                                                                    |
-| ------------ | ---------------------------------------------------------------------------------------------------- |
-| Columns      | Add, delete, rename, and modify columns; change type, length, default, nullable, and comments        |
-| Primary Key  | Add, modify, or remove primary key columns                                                           |
-| Indexes      | Add, delete, and rebuild indexes; configure index type, included columns, WHERE filter, and comments |
-| Comments     | MySQL/PostgreSQL can write column and index comments                                                 |
-| Column Order | Reorder columns visually; DBX generates the appropriate ALTER statements                             |
+The editor retains the active tab, scroll position, column widths, and local column order while you move between structure and data.
 
-## Editor Interface
+## Structure Tabs
 
-The table structure editor opens as a persistent tab, not a modal dialog:
+| Tab | Main contents |
+| --- | --- |
+| Columns | Name, type, length/precision, nullability, default, primary key, identity, charset, collation, comment |
+| Indexes | Name, columns, type, unique state, included columns, filter, comment, and rebuild action |
+| Foreign keys | Local columns, target table/columns, `ON DELETE`, and `ON UPDATE` |
+| Triggers | Trigger metadata, source, and supported create/edit/drop actions |
+| DDL | Current table definition or driver-generated structure SQL |
 
-- **Type + Length columns**: Data type and length/precision are split into separate columns with searchable select dropdowns
-- **Resizable columns**: Drag column borders to adjust the editor layout
-- **Syntax highlighting**: SQL preview uses Shiki syntax highlighting
-- **DDL capability matrix**: The editor knows which DDL operations each database supports and only enables relevant controls
+When the database does not provide a metadata class, the related tab is hidden, read-only, or displays a capability explanation.
 
-Database engines differ in DDL capabilities. DBX generates SQL for the active connection type.
+## Column Editing
 
-## Workflow
+Depending on database capability, you can:
+
+- Add a column or insert after the current selection
+- Drop, rename, and alter columns
+- Change type, length, precision, scale, and database-specific length units
+- Change `NULL`, default, primary key, identity, charset, collation, and comment
+- Use quick picks for common default values
+- Drag columns to change order
+
+Column reorder has two meanings:
+
+- MySQL and other databases with physical column-order DDL generate a real reorder
+- Some databases save only the local display order in DBX without changing physical structure
+
+New-table creation can use preset fields from settings for common primary keys, timestamps, or audit columns.
+
+## Indexes, Foreign Keys, and Triggers
+
+Index capabilities vary by dialect and can include:
+
+- Create, drop, or rebuild an index
+- Standard, unique, and database-specific index types
+- Included columns or filters on PostgreSQL, SQL Server, and similar databases
+- Index comments where supported
+- Automatic names for new indexes with editable values
+
+Foreign-key editing covers column mappings and update/delete actions. Trigger editing depends on source retrieval and safe DDL generation; unsupported databases can still expose source or copyable DDL.
+
+## DDL Preview
+
+Edits do not immediately change the database. Before save, DBX generates highlighted dialect-specific SQL such as:
+
+- `ALTER TABLE ... ADD/DROP/RENAME/MODIFY COLUMN`
+- Default, `NULL`, primary-key, and comment changes
+- `CREATE INDEX`, `DROP INDEX`, and rebuild operations
+- Foreign-key and trigger DDL
+- Table-rebuild steps when SQLite requires them
+
+Copy the complete DDL for code review or execution through a migration tool.
+
+<Callout type="warn">Dropping columns, converting types, tightening `NULL`, changing primary keys, physical reorder, and table rebuilds can lock tables or lose data. Review execution impact, backups, and rollback plans in production.</Callout>
+
+## Save Workflow
 
 <Steps>
   <Step>
-    ### Open Table Structure
+    ### Read the latest structure
 
-    Right-click a table in the sidebar and open its structure view.
-
-  </Step>
-  <Step>
-    ### Edit Columns or Indexes
-
-    Add, modify, or remove columns and indexes in the visual editor. Changes are staged locally first.
+    Confirm that columns, indexes, foreign keys, and triggers are loaded. Refresh first if another client recently changed the table.
 
   </Step>
   <Step>
-    ### Review SQL Preview
+    ### Build a local draft
 
-    Before saving, review generated statements such as `ALTER TABLE`, `CREATE INDEX`, and `DROP INDEX`.
+    Add, edit, remove, or reorder objects. Deletions remain pending and are not executed yet.
 
   </Step>
   <Step>
-    ### Apply Changes
+    ### Review DDL
 
-    Execute the SQL only after confirming it matches your intent.
+    Verify qualification, types, defaults, constraints, indexes, and statement order.
+
+  </Step>
+  <Step>
+    ### Execute and refresh
+
+    Execute after review. Production scope enters production-write confirmation again, and DBX reloads structure after success.
 
   </Step>
 </Steps>
 
-<Callout type="warn">Dropping columns, changing column types, and changing nullable constraints can affect existing data. Back up production databases first and confirm application code does not depend on the old structure.</Callout>
+## Dialect and Capability Differences
 
-## Engine Differences
+| Dialect/database | Typical behavior |
+| --- | --- |
+| MySQL / MariaDB compatible | Broad column properties, physical reorder, primary key, index, foreign key, and comment coverage |
+| PostgreSQL / Gauss-compatible | Dialect-aware type/default/null/comment, included/filtered indexes, foreign keys, and related DDL |
+| SQLite | Some complex column changes use a safe table-rebuild strategy |
+| DuckDB | Supports common column and index operations with behavior distinct from SQLite |
+| SQL Server | Column and index changes with dedicated syntax for defaults, included columns, and filtered indexes |
+| Oracle / Dameng and similar | Oracle-style column, comment, and index DDL; irrelevant integer-length controls are disabled |
+| ClickHouse / Manticore / InfluxDB and others | Only the verified implemented subset is enabled |
+| JDBC/Agent | Maps through a recognized dialect and stays read-only when the dialect cannot be identified reliably |
 
-| Engine          | Notes                                                                                          |
-| --------------- | ---------------------------------------------------------------------------------------------- |
-| MySQL / MariaDB | Add, delete, and modify columns; add and delete indexes                                        |
-| PostgreSQL      | Rename columns, change type/default/nullability/comments, and add/delete indexes               |
-| SQLite          | Add, delete, and rename columns; more complex existing-column edits are blocked with a warning |
-| SQL Server      | Focused editor support for common table structure operations                                   |
-| Other engines   | Use generated DDL, Schema Diff, or manual SQL when DBX does not expose the visual editor       |
+Do not assume that every DDL feature is editable because a database can connect. Use [Database Support](/en/docs/databases) and the actual editor controls as the current source of truth.
+
+## Concurrency and Recovery
+
+- Drafts are based on metadata read when the editor opened and do not merge external schema changes automatically
+- If execution fails, earlier statements may already have succeeded
+- Atomicity of SQLite rebuilds and multi-statement DDL depends on database and driver behavior
+- Refresh reloads structure and may require discarding an unsaved draft
+- Read-only connections block save, and production writes require explicit confirmation every time
 
 ## Recommendations
 
-- Use the editor for small, focused changes
-- For large migrations, generate SQL and review it in your code repository
-- For environment sync, use [Schema Diff](/en/docs/schema-diff)
-- When impact is uncertain, back up first with [Database Export](/en/docs/database-export)
+- Use the editor for focused, single-table changes
+- Put copied DDL into version control and review for larger migrations
+- Use [Schema Diff](/en/docs/schema-diff) to align environments
+- Use [Database Export](/en/docs/database-export) or [Scheduled Database Backups](/en/docs/database-backup) before risky changes
+- Combine [Field Lineage](/en/docs/field-lineage) with application-code search before changing important columns
+
+<Cards>
+  <Card title="Schema diff" href="/en/docs/schema-diff">
+    Compare environments and generate deployment scripts.
+  </Card>
+  <Card title="Field lineage" href="/en/docs/field-lineage">
+    Inspect relationships from foreign keys, views, and query history.
+  </Card>
+  <Card title="Production safety" href="/en/docs/production-safety">
+    Configure read-only connections and production DDL confirmation.
+  </Card>
+</Cards>

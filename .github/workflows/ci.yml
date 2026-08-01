@@ -557,24 +557,34 @@ jobs:
           set -euo pipefail
           for version in 3.13 4.3; do
             name="dbx-rabbitmq-${version//./-}"
+            cookie="dbx-ci-${GITHUB_RUN_ID:-local}-${version//./-}"
+            # RabbitMQ is disposable in CI. Keep its data on a fresh tmpfs
+            # owned by the image's rabbitmq user so .erlang.cookie is readable.
+            docker rm -fv "$name" >/dev/null 2>&1 || true
             docker run -d --name "$name" \
+              --user 999:999 \
+              --tmpfs /var/lib/rabbitmq:rw,exec,uid=999,gid=999,mode=700 \
               -e RABBITMQ_DEFAULT_USER=dbx \
               -e RABBITMQ_DEFAULT_PASS=dbx-password \
+              -e RABBITMQ_ERLANG_COOKIE="$cookie" \
               -p 5672:5672 -p 15672:15672 \
               "rabbitmq:${version}-management"
             cleanup() {
-              docker rm -f "$name" >/dev/null 2>&1 || true
+              docker rm -fv "$name" >/dev/null 2>&1 || true
             }
             trap cleanup EXIT
             ready=false
             for _ in $(seq 1 60); do
-              if docker exec "$name" rabbitmq-diagnostics -q ping >/dev/null 2>&1; then
+              if docker exec "$name" rabbitmq-diagnostics -q check_running >/dev/null 2>&1 \
+                && curl --fail --silent --noproxy '*' --user dbx:dbx-password \
+                  http://127.0.0.1:15672/api/overview >/dev/null; then
                 ready=true
                 break
               fi
               sleep 2
             done
             if [ "$ready" != "true" ]; then
+              docker inspect "$name" --format 'image={{.Config.Image}} user={{.Config.User}} status={{.State.Status}} exit={{.State.ExitCode}}' || true
               docker logs "$name"
               exit 1
             fi

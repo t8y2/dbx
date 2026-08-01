@@ -5,6 +5,10 @@ description: 使用 1Panel 应用商店安装、访问和更新 DBX Web 版。
 
 1Panel 应用商店提供了 DBX 官方 Docker 镜像，可以直接在服务器上完成安装和更新，不需要手动编写 Docker 命令。
 
+<Callout type="info">
+  1Panel 安装的是 DBX Web 版。数据库查询、对象浏览、数据编辑、导入导出、AI 和驱动管理等核心能力在服务器端运行；本机文件选择、Deep Link、本机 CLI Agent 和桌面版定时数据库备份不属于 Web 运行方式。
+</Callout>
+
 ## 可选的服务器方案
 
 如果你还没有用于部署 DBX 的服务器，可以了解[雨云](https://www.rainyun.com/MTE5Mjc4Ng==_)。雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。当然，任何满足 Docker 和 1Panel 运行要求的服务器都可以部署 DBX。
@@ -50,13 +54,30 @@ http://192.168.1.100:4224
 
 ## 持久化与更新
 
-DBX 的应用数据保存在 1Panel 应用目录的 `data` 目录，并挂载到容器内的 `/app/data`。重启容器或更新 DBX 时，连接配置和其他应用数据会继续保留。
+DBX 的应用数据保存在 1Panel 应用目录的 `data` 目录，并挂载到容器内的 `/app/data`。这里包含 DBX 自身的存储数据库、已保存连接、插件、驱动和其他持久化状态。重启容器或更新 DBX 时，只要挂载目录未被删除，这些数据就会继续保留。
 
 更新时，在 1Panel 的 **已安装** 应用中打开 DBX，选择可用的新版本并执行更新。更新前建议先确认数据目录已经纳入服务器备份。
 
 <Callout type="warn">
   不要直接删除 DBX 的应用数据目录，否则会同时删除已保存的连接配置和其他本地数据。卸载应用前请先完成备份。
 </Callout>
+
+<Callout type="warning">
+  备份 `/app/data` 只保护 DBX 的应用配置和运行数据，不会备份 MySQL、PostgreSQL 等目标数据库中的业务数据。Web 版不提供桌面版的定时数据库备份任务；业务数据库仍应使用数据库原生备份、云服务快照或独立备份系统。
+</Callout>
+
+DuckDB 不嵌入 `dbx-web` 镜像。首次启动后如需使用 DuckDB，请在[驱动管理器](/cn/docs/driver-management)中单独安装；驱动保存在 `/app/data/agents`，因此也依赖同一个持久化目录。
+
+## Web 版路径与文件
+
+在 1Panel 部署中，DBX 后端读取的是服务器或容器文件系统：
+
+- SSH 私钥路径必须是容器可读取的路径，不是浏览器电脑上的路径；
+- JDBC JAR、插件、Agent 和下载的驱动保存在服务器端数据目录；
+- 浏览器上传的导入文件会先进入服务器端受控目录，再由任务读取；
+- 数据库文件连接和服务器端路径都必须从容器视角判断可访问性。
+
+不要因为浏览器运行在个人电脑上，就把本机绝对路径填写到 Web 版配置中。桌面版与 Web 版的完整边界见[什么是 DBX](/cn/docs/what-is-dbx)。
 
 ## 连接数据库
 
@@ -69,3 +90,22 @@ DBX 的应用数据保存在 1Panel 应用目录的 `data` 目录，并挂载到
 <Callout type="info">
   `4224` 是 DBX Web 服务端口，不是目标数据库端口。连接数据库时仍需填写 MySQL、PostgreSQL、Redis 等目标数据库自身的端口。
 </Callout>
+
+## 生产部署建议
+
+- 使用足够长且唯一的访问密码，不要保留示例值；
+- 通过 1Panel 反向代理配置 HTTPS，并限制安全组和主机防火墙暴露范围；
+- 需要受控升级时固定版本，更新前备份 `/app/data` 并阅读[更新日志](/cn/changelog)；
+- 为 DBX 使用独立、最小权限的数据库账号，生产连接优先启用只读保护；
+- 定期检查驱动和插件来源，不要把不受信任的 JAR 或可执行文件放入数据目录。
+
+更多连接、写入、AI 和 API 边界见[生产安全](/cn/docs/production-safety)。
+
+<Cards>
+  <Card title="驱动管理" href="/cn/docs/driver-management">
+    安装 Web 版需要的 DuckDB、JDBC 和 Agent 驱动，并查看运行状态。
+  </Card>
+  <Card title="数据库备份" href="/cn/docs/database-backup">
+    了解桌面版定时备份的支持范围，以及 Web 部署为什么需要外部备份方案。
+  </Card>
+</Cards>

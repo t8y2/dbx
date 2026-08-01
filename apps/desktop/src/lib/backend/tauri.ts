@@ -8,6 +8,7 @@ import type {
   DatabaseConnectionInfo,
   DatabaseInfo,
   DatabaseStorageInfo,
+  SqlServerCompletionContext,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -867,6 +868,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
 
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return invoke("list_database_storage", { connectionId, databases });
+}
+
+export async function getSqlServerCompletionContext(connectionId: string, database: string): Promise<SqlServerCompletionContext> {
+  return invoke("get_sqlserver_completion_context", { connectionId, database });
 }
 
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {

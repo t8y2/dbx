@@ -351,6 +351,31 @@ describe("queryStore multi-statement errors", () => {
     ]);
   });
 
+  it("syncs the executing SQL Server tab after a successful standalone USE", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "sqlserver-1",
+      name: "SQL Server",
+      db_type: "sqlserver",
+      database: "FooDB",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]).mockResolvedValueOnce([{ columns: ["Error"], rows: [["Database does not exist"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabA = store.createTab("sqlserver-1", "FooDB", "Tab A", "query", "dbo");
+    const tabB = store.createTab("sqlserver-1", "FooDB", "Tab B", "query", "dbo");
+
+    await store.executeTabSql(tabA, "/* switch */ USE [BarDB];");
+
+    expect(store.tabs.find((tab) => tab.id === tabA)).toMatchObject({ database: "BarDB", schema: undefined });
+    expect(store.tabs.find((tab) => tab.id === tabB)).toMatchObject({ database: "FooDB", schema: "dbo" });
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("sqlserver-1", "FooDB", tabA);
+
+    await store.executeTabSql(tabA, "USE [MissingDB];");
+
+    expect(store.tabs.find((tab) => tab.id === tabA)?.database).toBe("BarDB");
+  });
+
   it("invalidates Oracle completion metadata when clearing a tab schema resets its session", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "oracle-1",

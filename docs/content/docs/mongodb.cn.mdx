@@ -1,76 +1,130 @@
 ---
-title: MongoDB 浏览器
-description: 浏览 MongoDB 数据库和集合、查看文档，并使用内置 JSON 编辑器编辑数据。
+title: MongoDB 工作台
+description: 浏览、筛选、编辑和复制 MongoDB 文档，并管理集合、索引和 GridFS。
 ---
 
-DBX 支持浏览和编辑 MongoDB 数据库，提供专为 MongoDB 灵活 schema 模型设计的文档导向界面。
+MongoDB 工作台围绕数据库、Collection、文档、索引和 GridFS 组织，不把文档强制转换成关系型表。它提供表格视图和完整 JSON 视图，并保留 `ObjectId`、日期、长整数等 Extended JSON 类型。
 
-## 集合浏览器
+## 连接与驱动
 
-MongoDB 数据库和集合与关系型数据库一同显示在侧边栏中。浏览器支持：
+推荐使用标准 `mongodb://` 或 `mongodb+srv://` 连接字符串，并在 URL 中包含副本集、认证库、TLS 和其他参数。Atlas、Replica Set 和直连部署都使用同一个连接入口。
 
-- 列出服务器上的所有数据库
-- 列出每个数据库中的集合
-- 集合文档的分页浏览
-- 文档查询的过滤和排序支持
-- **数据库和集合删除**：右键点击数据库或集合即可删除
-- **集合元数据**：查看集合统计信息，包括文档数、大小和索引
+DBX 优先使用原生 MongoDB 路径。当服务端或认证协议需要旧驱动时，可以选择或自动回退到 `mongodb-legacy` Agent。旧驱动的管理和修改能力可能少于原生驱动。
 
-<Callout type="info">MongoDB 连接同时支持标准连接字符串和旧版连接格式。对于副本集，请使用标准的 `mongodb://` 连接 URL 并指定副本集名称。</Callout>
+## 数据库与 Collection
 
-## 切换数据库
+对象树可以：
 
-在 MongoDB 命令运行器中使用 `use <database>` 命令切换活动数据库。这相当于 MongoDB shell 的 `use` 命令，会更新后续操作的当前数据库上下文。
+- 列出数据库、Collection、索引和 GridFS Bucket
+- 显示 Collection 文档数、大小和其他可获取统计
+- 创建、重命名或删除 Collection（原生驱动且连接可写时）
+- 删除数据库、单个索引或除 `_id_` 外的可删除索引
+- 从 Collection 打开文档浏览器或查询编辑器
 
-## 表格视图
+删除和重命名会显示目标和请求预览，并受只读与生产保护约束。
 
-集合以表格视图展示，将文档结构扁平化：
+## 文档浏览与分页
 
-- 顶层字段显示为列
-- 嵌套字段以点号表示（如 `address.city`）
-- 各文档之间缺失的字段会被妥善处理
-- 列宽自动适应内容
+文档浏览器支持：
 
-## 文档查看器
+- 分页读取和估算总数
+- 表格视图与完整文档视图
+- 顶层和嵌套字段列，例如 `address.city`
+- 可搜索字段选择器、隐藏列和持久化列布局
+- 快速过滤器以及多个字段条件
+- 数据库侧排序和 Collection 查询
 
-点击任意文档可在详情面板中打开。JSON 查看器提供：
+MongoDB 的总数可能使用估算值。数据持续写入时，翻页过程中的总数和最后一页可能变化。
 
-- 语法高亮的 JSON 显示
-- 可折叠的嵌套对象和数组
-- 复制单个字段或整个文档
+## 过滤与命令
 
-## 内联编辑
+可以在文档浏览器中构建字段过滤，也可以在 MongoDB 查询标签中输入 shell 风格命令。编辑器会根据 Collection、字段、查询运算符、更新运算符、聚合阶段和游标方法提供补全。
 
-直接从表格视图编辑文档：
+常见命令包括：
 
-- 双击单元格编辑其值
-- 更改会在本地暂存，保存前可预览
-- 应用前检查生成的更新命令
+```javascript
+db.users.find({ status: "active" }).sort({ createdAt: -1 })
+```
 
-## JSON 编辑器
+```javascript
+db.orders.aggregate([
+  { $match: { status: "paid" } },
+  { $group: { _id: "$customerId", total: { $sum: "$amount" } } }
+])
+```
 
-在文档视图中，可在字段树编辑与整段 JSON 编辑之间切换：
+`use <database>` 会切换当前 MongoDB 查询上下文。
 
-- 以完整 JSON 对象编辑或新建文档
-- 保存前对整段 JSON 做语法与结构校验
-- 新增文档时可直接粘贴整段 JSON
-- 需要改单个字段时仍可使用字段编辑器
-- **更新时整文档替换**：JSON 保存会替换文档正文
-- **修改标识**：编辑 `_id` 会按新 id 新建文档，并删除旧文档
-- **日期与 Extended JSON 保留**：编辑过程中正确保留 `$date`、`$oid`、`$numberLong` 等值
+## 表格编辑
 
-## MongoDB 版本
+表格视图把常见字段展开成列。支持：
 
-DBX 通过内置驱动支持 MongoDB 4.2 及以上版本。对于 4.2 之前版本的 MongoDB 实例，DBX 可以回退到 JDBC Agent 驱动。有关配置 Agent 驱动的详细信息，请参阅[驱动管理](/cn/docs/driver-management)。
+- 编辑顶层或嵌套字段
+- 新增和删除字段
+- 新建、克隆和删除文档
+- 复制选中文档为 JSON、Markdown 或 MongoDB Shell 语句
+- 排除 `_id` 后复制为新文档模板
+- 在保存前查看待执行更新或删除目标
 
-## 功能覆盖
+字段结构差异很大的 Collection 更适合使用完整文档视图，避免隐藏字段在表格列中被忽略。
 
-| 功能               | 支持情况     |
-| ------------------ | ------------ |
-| 列出数据库和集合   | 所有版本     |
-| 分页文档浏览       | 所有版本     |
-| 扁平化字段表格视图 | 所有版本     |
-| 过滤和排序         | MongoDB 4.2+ |
-| 内联编辑           | 所有版本     |
-| JSON 文档编辑器    | 所有版本     |
-| SSH 隧道           | 标准连接     |
+## JSON 文档编辑
+
+文档详情可以在字段树和完整 JSON 源码之间切换：
+
+- 新建文档时粘贴完整 JSON
+- 保存前校验 JSON 语法和根对象结构
+- 格式化、折叠和复制嵌套对象/数组
+- 保留 `$oid`、`$date`、`$numberLong` 等 Extended JSON
+- 修改 `_id` 时按新标识创建文档，并删除旧文档
+- 完整 JSON 保存按整文档替换语义处理
+
+<Callout type="warn">整文档替换会写回完整对象。编辑前确认当前 JSON 包含需要保留的所有字段，尤其是并发修改频繁的 Collection。</Callout>
+
+## 索引
+
+在对象树或 Collection 结构中可以查看索引名称、字段、唯一性和其他元数据。原生驱动支持时，可以删除单个索引、批量删除可删除索引，或从结构入口管理索引。
+
+MongoDB 会保留 `_id_` 索引；分片键等服务端规则也可能阻止删除其他索引。最终结果以服务端响应为准。
+
+## GridFS
+
+GridFS 工作台用于管理 Bucket 和文件：
+
+- 浏览、创建和删除 Bucket
+- 上传、下载、预览和删除文件
+- 查看文件名、大小、上传时间、Chunk 和 Metadata
+- 按字段过滤和排序文件
+- 导出文件列表或 Metadata
+
+删除 Bucket 会删除其中的文件和 Chunk。生产环境执行前先确认 Bucket 名称和备份。
+
+## 复制与导出
+
+- 复制当前文档、选中文档或字段值
+- 复制为普通 JSON 或保留类型信息的 Extended JSON
+- 从表格结果使用多格式复制和导出
+- MongoDB `find` 查询结果导出会继续读取完整结果范围，而不是只导出当前已显示页（受查询和导出限制约束）
+
+导出大型 Collection 前先缩小过滤范围，并关注服务端游标、网络和本地文件大小。
+
+## 安全与兼容边界
+
+- 只读连接会阻止文档、字段、索引、Collection、数据库和 GridFS 修改
+- 生产环境保护会在可识别写入前要求确认
+- MCP“数据读写”只允许范围明确的 MongoDB 修改；不透明或近似全量过滤按高风险处理
+- 旧版 Agent 可能不支持 Collection/索引管理等原生能力
+- Atlas 权限、认证库、TLS 和 IP allowlist 都由 MongoDB 服务端决定
+- 分页总数可能为估算值，不能作为强一致统计
+
+<Cards>
+  <Card title="生产写入保护" href="/cn/docs/production-safety">
+    了解 MongoDB 过滤范围、只读连接和 MCP 策略。
+  </Card>
+  <Card title="连接与驱动" href="/cn/docs/driver-management">
+    管理原生与 legacy Agent，并排查驱动启动问题。
+  </Card>
+  <Card title="专项工作台" href="/cn/docs/specialized-workspaces">
+    查看 Redis、搜索、向量、HBase、消息队列和配置中心。
+  </Card>
+</Cards>

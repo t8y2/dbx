@@ -4,7 +4,7 @@ Protocol v2 allows one Agent process to serve multiple isolated database session
 
 ## Session lifecycle
 
-- `open_session` creates one logical database session. Parameters contain the normal connection fields plus `agentSessionId`.
+- `open_session` creates one logical database session. Parameters contain the normal connection fields plus `agentSessionId` and an optional `sessionRole`.
 - Every connection-scoped RPC contains `agentSessionId`.
 - `validate_session` validates and, where supported, reconnects only that session.
 - `cancel_session` cancels active statements and cursor fetches for only that session; other sessions in the runtime continue normally.
@@ -12,6 +12,8 @@ Protocol v2 allows one Agent process to serve multiple isolated database session
 - `shutdown` closes all sessions and terminates the runtime.
 
 `agentSessionId` identifies a logical database connection. Existing `sessionId` fields remain pagination cursor identifiers and must not be used as logical connection identifiers.
+
+`sessionRole` is `workload` by default. DBX sends `metadata` for object-tree, completion, and other read-only metadata sessions. New runtimes use this role to preserve metadata checkout capacity; older runtimes may ignore the field.
 
 ## Concurrency
 
@@ -30,6 +32,22 @@ Etcd and ZooKeeper retain the legacy path because they use the key-value Agent p
 ## Resource limits and recovery
 
 A runtime accepts at most 256 logical sessions. Closing the final session starts a 30-second grace period before the process exits, preventing rapid tab open/close cycles from repeatedly starting a runtime. Process EOF fails all pending requests; the failed runtime is removed from reuse and recreated on demand. Connection validation and reconnect operate on a single logical session.
+
+JSON-RPC failures may include structured recovery data:
+
+```json
+{
+  "category": "timeout|canceled|connection|protocol|resource|sql",
+  "retryable": false,
+  "sessionDisposition": "keep|quarantine|replace_runtime",
+  "agentSessionId": "optional-session-id",
+  "stage": "checkout|connect|validate|execute|fetch|cancel|close"
+}
+```
+
+`keep` preserves the logical session, `quarantine` removes only that session from routing, and `replace_runtime` requires DBX to atomically remove every pool sharing the runtime before terminating it. Agent code reports the disposition but must not independently terminate a shared runtime because it does not own DBX routing state. Temporary workload checkout backpressure uses `category=resource`, `retryable=true`, and `sessionDisposition=keep`; only unrecoverable runtime or cleanup saturation requests `replace_runtime`.
+
+The complete JDBC pool checkout runs under a bounded runtime executor, including HikariCP idle-connection validation, physical connection creation, and driver setup. Workload admission, the runtime-wide physical connection budget, physical creation, and checkout consume one absolute deadline rather than restarting the timeout at each stage. Connection return, eviction, and physical close use separate bounded executors so they cannot deadlock checkout or creation. If a driver call outlives its boundary, or cleanup cannot confirm the physical connection state, the connection identity is poisoned and returns `category=resource` with `sessionDisposition=replace_runtime` on the current or next checkout. A late connection must be evicted and closed instead of published, and DBX must not replay the timed-out user operation automatically.
 
 ## Driver author guidance
 

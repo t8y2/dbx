@@ -208,6 +208,7 @@ export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloa
       <section className="pt-[100px] pb-8 max-[760px]:pt-[80px] max-[760px]:pb-6">
         <div className="max-w-[1180px] mx-auto px-7 max-[760px]:px-[18px]">
           <div className="grid justify-items-center max-w-[900px] mx-auto text-center">
+            <h1 className="text-[clamp(30px,4vw,46px)] font-[820] leading-[1.08] tracking-tight text-landing-ink">{t.title}</h1>
             <p className="min-w-0 mx-auto text-[15px] font-[460] leading-[1.7] text-landing-muted max-w-[760px] max-[760px]:text-[13px] max-[760px]:whitespace-normal max-[760px]:max-w-[300px]">{t.subtitle}</p>
           </div>
         </div>

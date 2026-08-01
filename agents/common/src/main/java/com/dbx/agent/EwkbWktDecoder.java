@@ -81,6 +81,85 @@ public final class EwkbWktDecoder {
         return value.toString();
     }
 
+    /** Decode a geometry value while retaining SRID outside the display WKT. */
+    public static SpatialValue decodeSpatial(Object value) {
+        if (value == null) {
+            return new SpatialValue(null, null);
+        }
+        if (value instanceof byte[]) {
+            byte[] raw = (byte[]) value;
+            String wkt = decodeBytes(raw);
+            return new SpatialValue(wkt, wkt.startsWith("0x") ? null : topLevelSrid(raw));
+        }
+        String text;
+        if (value instanceof String) {
+            text = (String) value;
+        } else {
+            String pgValue = tryReflectiveGetValue(value);
+            text = pgValue == null ? value.toString() : pgValue;
+        }
+
+        SpatialValue ewkt = decodeEwkt(text);
+        if (ewkt != null) {
+            return ewkt;
+        }
+        byte[] raw = tryParseHex(text);
+        if (raw != null) {
+            String wkt = decodeBytes(raw);
+            return new SpatialValue(wkt, wkt.startsWith("0x") ? null : topLevelSrid(raw));
+        }
+        return new SpatialValue(text, null);
+    }
+
+    private static SpatialValue decodeEwkt(String value) {
+        if (value == null || value.length() < 7 || !value.regionMatches(true, 0, "SRID=", 0, 5)) {
+            return null;
+        }
+        int separator = value.indexOf(';', 5);
+        if (separator < 0) {
+            return null;
+        }
+        try {
+            int srid = Integer.parseInt(value.substring(5, separator));
+            return new SpatialValue(value.substring(separator + 1), srid <= 0 ? null : srid);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private static Integer topLevelSrid(byte[] raw) {
+        if (raw == null || raw.length < 9) {
+            return null;
+        }
+        boolean little;
+        if (raw[0] == 0) {
+            little = false;
+        } else if (raw[0] == 1) {
+            little = true;
+        } else {
+            return null;
+        }
+        long typeWord = readU32(raw, 1, little);
+        if ((typeWord & 0x2000_0000L) == 0) {
+            return null;
+        }
+        long srid = readU32(raw, 5, little);
+        return srid == 0 || srid > Integer.MAX_VALUE ? null : (int) srid;
+    }
+
+    private static long readU32(byte[] raw, int offset, boolean little) {
+        if (little) {
+            return ((long) raw[offset] & 0xFF)
+                | (((long) raw[offset + 1] & 0xFF) << 8)
+                | (((long) raw[offset + 2] & 0xFF) << 16)
+                | (((long) raw[offset + 3] & 0xFF) << 24);
+        }
+        return (((long) raw[offset] & 0xFF) << 24)
+            | (((long) raw[offset + 1] & 0xFF) << 16)
+            | (((long) raw[offset + 2] & 0xFF) << 8)
+            | ((long) raw[offset + 3] & 0xFF);
+    }
+
     /** Decode a raw EWKB byte sequence; returns hex {@code 0x..} on failure. */
     static String decodeBytes(byte[] raw) {
         if (raw == null) {

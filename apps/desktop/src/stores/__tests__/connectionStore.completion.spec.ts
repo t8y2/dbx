@@ -557,9 +557,9 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
-  it("searches default SQL Server schemas without treating the username as a schema", async () => {
+  it("searches the server-reported SQL Server default schema without treating the username as a schema", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
-      candidates: [{ name: "st_area", kind: "function", schema: "dbo", data_type: "float" }],
+      candidates: [{ name: "st_area", kind: "function", schema: "app_user", data_type: "float" }],
       incomplete: false,
       fallback_used: false,
     });
@@ -576,11 +576,11 @@ describe("connectionStore completion assistant", () => {
     store.connections = [sqlServerConnection()];
     store.connectedIds.add("sqlserver-1");
 
-    const objects = await store.listCompletionObjects("sqlserver-1", "app", "st_", 20);
+    const objects = await store.listCompletionObjects("sqlserver-1", "app", "st_", 20, undefined, undefined, false, "app_user");
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(
       expect.objectContaining({
-        schema: null,
+        schema: "app_user",
         parent_schema: null,
         mask: "st_",
       }),
@@ -588,13 +588,98 @@ describe("connectionStore completion assistant", () => {
     expect(objects).toEqual([
       expect.objectContaining({
         name: "st_area",
-        schema: "dbo",
+        schema: "app_user",
         type: "function",
         dataType: "float",
-        applyName: "dbo.st_area",
+        applyName: "app_user.st_area",
         boost: 1000,
       }),
     ]);
+  });
+
+  it("prefers an explicit SQL Server routine schema over the current default schema", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "calculate_tax", kind: "function", schema: "sales", data_type: "decimal" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    await store.listCompletionObjects("sqlserver-1", "BarDB", "calculate_", 20, "sales", undefined, false, "app_user");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        database: "BarDB",
+        schema: "sales",
+        parent_schema: "sales",
+        mask: "calculate_",
+      }),
+    );
+  });
+
+  it("caches SQL Server completion context independently for each database", async () => {
+    const getSqlServerCompletionContext = vi.fn(async (_connectionId: string, database: string) => ({
+      default_schema: database === "BarDB" ? "bar_user" : "foo_user",
+      supports_session_database_switch: true,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      getSqlServerCompletionContext,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const foo = await store.getSqlServerCompletionContext("sqlserver-1", "FooDB");
+    const fooCached = await store.getSqlServerCompletionContext("sqlserver-1", "FooDB");
+    const bar = await store.getSqlServerCompletionContext("sqlserver-1", "BarDB");
+
+    expect(foo).toMatchObject({ default_schema: "foo_user" });
+    expect(fooCached).toEqual(foo);
+    expect(bar).toMatchObject({ default_schema: "bar_user" });
+    expect(getSqlServerCompletionContext).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps SQL Server routine results isolated across databases", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { database: string }) => ({
+      candidates: [{ name: request.database === "BarDB" ? "bar_proc" : "foo_proc", kind: "procedure", schema: "app_user" }],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const foo = await store.listCompletionObjects("sqlserver-1", "FooDB", "", 20, undefined, undefined, false, "app_user");
+    const bar = await store.listCompletionObjects("sqlserver-1", "BarDB", "", 20, undefined, undefined, false, "app_user");
+
+    expect(foo.map((object) => object.name)).toEqual(["foo_proc"]);
+    expect(bar.map((object) => object.name)).toEqual(["bar_proc"]);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
   });
 
   it("limits concurrent completion column metadata requests per connection database", async () => {

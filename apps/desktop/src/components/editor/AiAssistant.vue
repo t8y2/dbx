@@ -16,6 +16,7 @@ import {
   Copy,
   Database,
   FileCode,
+  FileDown,
   FlaskConical,
   GitBranch,
   HelpCircle,
@@ -86,6 +87,8 @@ import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/
 import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
+import { saveTextFile } from "@/lib/export/saveTextFile";
+import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -121,12 +124,16 @@ type AiMessageMention =
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Connection that produced this assistant response; ephemeral export metadata. */
+  sourceConnectionName?: string;
   mentions?: AiMessageMention[];
   reasoning?: string;
   isThinking?: boolean;
   agentSteps?: AiAgentStepItem[];
   /** Hidden system-generated context summary; not rendered in chat UI but included in LLM history. */
   kind?: "contextSummary";
+  /** Per-message token stats from the last agent run; ephemeral, not persisted. */
+  tokens?: { input: number; output: number };
 }
 
 const props = defineProps<{
@@ -229,7 +236,6 @@ const userPausedAutoScroll = ref(false);
 const showScrollToBottom = ref(false);
 const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
-const agentTokens = ref<{ input: number; output: number } | null>(null);
 const promptHistory = ref<string[]>([]);
 const historyIndex = ref(-1);
 const draftBeforeHistory = ref("");
@@ -1741,12 +1747,11 @@ async function send() {
   confirmedWriteSqlText = undefined;
   confirmedConnectionId = undefined;
   confirmedDatabase = undefined;
-  messages.value.push({ role: "assistant", content: "" });
+  messages.value.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
   currentSessionId.value = sessionId;
   const agentEvents: AgentEvent[] = [];
-  agentTokens.value = null;
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
     const context = await buildAiContext(tab, connection, {
@@ -1777,7 +1782,8 @@ async function send() {
         }
         if (event.type === "agent_end") {
           if (event.input_tokens || event.output_tokens) {
-            agentTokens.value = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
+            const msg = messages.value[assistantIdx];
+            if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
           }
         }
         if (event.type === "context_compacted") {
@@ -1899,6 +1905,24 @@ async function copyCode(code: string, key: string) {
   }
 }
 
+async function exportMessageAsMarkdown(msg: ChatMessage) {
+  if (!msg.content) return;
+
+  try {
+    const result = buildAiAnalysisExport({
+      connectionName: msg.sourceConnectionName ?? props.connection?.name,
+      content: msg.content,
+      analysisLabel: t("ai.analysis"),
+      dateLabel: new Date().toLocaleString(),
+    });
+    if (!result) return;
+    await saveTextFile(result.markdown, result.defaultFileName, "Markdown", "md");
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(t("grid.exportFailed", { message }), 5000);
+  }
+}
+
 function clearMessages() {
   messages.value = [];
   conversationId.value = "";
@@ -1940,11 +1964,11 @@ function selectConversation(conv: AiConversation) {
   messages.value = conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
+    sourceConnectionName: m.role === "assistant" ? conv.connectionName : undefined,
     mentions: Array.isArray(m.mentions) ? (m.mentions as AiMessageMention[]) : undefined,
     reasoning: m.reasoning,
     kind: m.kind,
   }));
-  agentTokens.value = null;
   pendingCompaction.value = null;
   showConversationList.value = false;
   scrollToBottom({ force: true });
@@ -2222,8 +2246,9 @@ async function openExternalUrl(url: string) {
               </div>
             </div>
 
-            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
-              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
+            <!-- Keep the metadata row as wide as the reply card so its export action stays right-aligned. -->
+            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex w-full max-w-[95%] min-w-0 flex-col">
+              <div class="w-full rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
                 <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
                   <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
                     <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />
@@ -2310,15 +2335,19 @@ async function openExternalUrl(url: string) {
                   </Button>
                 </div>
               </div>
+              <div v-if="msg.content && !isGenerating" class="mt-1 flex items-center justify-between">
+                <span v-if="msg.tokens" class="text-[10px] text-muted-foreground">&#8593;{{ msg.tokens.input.toLocaleString() }} &#8595;{{ msg.tokens.output.toLocaleString() }} tokens</span>
+                <span v-else />
+                <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">
+                  <FileDown class="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
           </template>
 
           <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
             <span>{{ t("ai.thinking") }}</span>
-          </div>
-          <div v-if="agentTokens && !isGenerating" class="flex items-center gap-1 text-[10px] text-muted-foreground px-2 pb-1">
-            <span>&#8593;{{ agentTokens.input.toLocaleString() }} &#8595;{{ agentTokens.output.toLocaleString() }} tokens</span>
           </div>
         </div>
       </ScrollArea>

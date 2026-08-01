@@ -1,88 +1,134 @@
 ---
-title: Redis Browser
-description: Browse Redis keys, view and edit values, search by pattern, and run commands across all Redis data types.
+title: Redis Workspace
+description: Browse, search, and edit Redis keys and inspect TTLs, Stream consumer groups, Pub/Sub, Slowlog, and instance status.
 ---
 
-DBX provides a full Redis key browser with support for all core Redis data types. It replaces the need to switch between a Redis CLI and a GUI by combining browsing, editing, searching, and command execution in one view.
+The Redis workspace combines key browsing, type-specific editing, command execution, instance inspection, and high-risk command protection in one connection. It uses incremental operations such as `SCAN` instead of loading an entire large keyspace at once.
 
-## Key Browser
+## Databases and Aliases
 
-The Redis key browser displays keys in a table format for easier scanning and filtering:
+Redis connections list available numeric databases. You can assign local aliases to `db0`, `db1`, and others, such as “Order cache” or “Development.” Aliases affect DBX display and search only; Redis commands still use numeric database IDs.
 
-- Keys are paginated to avoid blocking on large keyspaces
-- Click any key to open its value in the detail panel
-- Use the search bar to filter keys by pattern (e.g., `user:*`, `cache:*`)
-- Key type, TTL, and size are shown inline
+The scan page size is stored per connection. Reduce it for very large keyspaces or high-latency networks, and increase it carefully for small instances.
 
-<Callout type="info">For Redis instances with millions of keys, use specific key patterns in the search bar instead of loading the entire keyspace. Set the scan page size in Settings to control how many keys are fetched per batch.</Callout>
+## Key Browsing and Search
 
-## Value Viewer and Editor
+The key list can show name, type, value summary, size, and TTL. It supports:
 
-Each Redis data type has a dedicated viewer and editor:
+- Redis patterns such as `user:*`
+- Fuzzy search that turns a normal keyword into a contains match
+- Hierarchical grouping and flat-list browsing
+- Load more, fetch all, and stopping a long scan
+- Copying key names, selecting multiple keys, or selecting a loaded group
+- Searching by key, value, or both key and value
 
-| Type       | Viewer                                   | Editing                       |
-| ---------- | ---------------------------------------- | ----------------------------- |
-| String     | Plain text or JSON viewer                | Inline text edit              |
-| Hash       | Field/value table with resizable columns | Edit individual fields        |
-| List       | Ordered list with index                  | Add, remove, reorder elements |
-| Set        | Member list with cardinality             | Add and remove members        |
-| Sorted Set | Member list with scores                  | Edit members and scores       |
-| Stream     | Entry list with IDs                      | View stream entries           |
+Value search reads matching content and applies type-aware matching for String, Hash, and other supported structures. Hash details can also search fields and values directly.
 
-## JSON Value Viewer
+<Callout type="warn">Fetch all and value search can touch many keys. In production, narrow the pattern first and monitor Redis latency, CPU, and network traffic.</Callout>
 
-For String keys that contain valid JSON, DBX automatically renders a structured JSON viewer with collapsible nodes, syntax highlighting, and copy support.
+## Data Types
 
-## Value Search
+| Type | Main capabilities |
+| --- | --- |
+| String | Text, JSON, and multiple display formats; binary strings are shown as escaped read-only text |
+| Hash | Field/value table, search, sorting, add, edit, and delete |
+| List | Paged elements with index, add, edit, and delete |
+| Set | Member browsing, add, and delete |
+| Sorted Set | Member and score browsing, editing, and deletion |
+| Stream | Entries, consumer groups, consumers, pending messages, lag, and delivery details |
+| RedisJSON | JSON tree/source editing, formatting, and compact saves; requires the RedisJSON server module |
 
-Search Redis values by content, not just keys:
+Large collection types load in pages and display total and loaded counts where available.
 
-- Scan String values for matching text
-- Find Hash fields by value
-- Results are streamed progressively for large keyspaces
+## Create and Edit Keys
 
-<Callout type="warn">Value search scans all keys that match the current pattern. On large databases this can be resource-intensive. Narrow the key pattern before starting a value search.</Callout>
+Choose a data type and initial content when creating a key. Set a positive TTL or choose a persistent key.
 
-## Bulk Operations
+When editing an existing value, DBX can:
 
-Perform batch actions on multiple keys at once:
+- Preserve the existing TTL
+- Make the key persistent
+- Set a relative TTL in seconds
+- Choose a local absolute expiration time
+- Format or compact JSON source before saving
+- Copy a reconstruction command for supported value types
 
-- Delete multiple keys in one operation
-- View key statistics including memory usage and access patterns
+TTL values count down automatically, and the detail view can periodically refresh the complete value. If a key expires before refresh, DBX reports and clears the stale state.
 
-## Command Runner
+<Callout type="info">Preserving TTL while changing a value prevents a temporary cache entry from becoming permanent accidentally. Review expiration behavior before saving.</Callout>
 
-Execute arbitrary Redis commands directly from the UI:
+## Stream Consumer Groups
 
-- Type commands in Redis CLI syntax
-- Results are displayed in a structured table
-- Useful for `INFO`, `CONFIG GET`, `CLIENT LIST`, and other admin commands
-- **Command history navigation**: Use arrow keys (↑/↓) to navigate through previously executed commands
-- **Text selection and copy**: Select and copy command output directly from the terminal
+Stream details can also show:
 
-The command history is preserved per connection and helps you quickly rerun frequently used commands without retyping them.
+- Consumer groups and last-delivered ID
+- Entries read and lag
+- Consumers, idle time, and inactive state
+- Pending entries, delivery count, and owning consumer
 
-## Flush Database
+These values come from Redis consumer-group commands and help troubleshoot backlog or unacknowledged messages. They are not a continuous monitoring or alerting system.
 
-The **Flush DB** button removes all keys from the current Redis database. This action cannot be undone. Confirm the active connection and database number before flushing.
+## Command Line
 
-## Key Statistics
+The command line accepts Redis CLI-style commands and renders structured results:
 
-Enable key statistics tracking in Settings to monitor:
+- Use ↑/↓ to navigate history saved per connection
+- Clear the current command history
+- Select and copy text output
+- Run commands such as `INFO`, `CLIENT LIST`, and `CONFIG GET`
+- View table or JSON output where the response supports it
 
-- Memory usage per key
-- Access frequency
-- Idle time
+The command-safety control classifies Redis commands. Some risky commands require confirmation and some are blocked by default. Disabling that control cannot bypass connection read-only state, production protection, or MCP policy.
 
-This data helps identify large or infrequently used keys that may need attention.
+## Pub/Sub
 
-## Slowlog Panel
+The Pub/Sub panel can:
 
-The **Slowlog** panel helps identify slow Redis commands:
+- Connect or disconnect a subscription session
+- Subscribe to channels or patterns
+- Display incoming messages in real time
+- Publish a message to a channel
+- Clear messages from the current UI session
 
-- View recent slow commands with execution time
-- Analyze query patterns that may need optimization
-- Useful for performance tuning and debugging production issues
-- Access slowlog from the Redis connection's tools menu
+Web/Docker uses WebSocket for the subscription. Reverse proxies must allow the related WebSocket upgrade.
 
-Slowlog entries show the command, execution time, and timestamp, helping you identify performance bottlenecks in your Redis workload.
+## Dashboard, Key Statistics, and Slowlog
+
+The Redis dashboard groups server and instance information into collapsible areas. Depending on server support, it can show:
+
+- Version, uptime, memory, clients, and connection state
+- Keyspace, commands, persistence, replication, and cluster summaries
+- Per-key memory usage, idle time, or access-related statistics
+- Slowlog entries, duration, timestamp, and cluster node
+
+Key statistics and Slowlog require additional Redis commands. Limit scope and entry counts on large instances or clusters.
+
+## Bulk and Destructive Operations
+
+- Delete selected keys
+- Delete keys loaded under the current group
+- Flush the active Redis database
+- Run supported bulk field/member operations
+
+Flush, bulk delete, and `FLUSH*` operations cannot be undone. Read-only connections reject writes, while production and dangerous-command checks remain active.
+
+## Safety and Performance Guidance
+
+- Use a read-only account or ACL for production and enable DBX read-only/production protection
+- Do not replace incremental browsing with `KEYS *`; prefer patterns and `SCAN`
+- Value search, memory statistics, and Slowlog can increase server load
+- Stream consumer-group details read pending and consumer state; avoid unbounded high-frequency refresh
+- Binary values, module commands, and vendor extensions may require the command line
+- MCP applies different permission levels to ordinary Redis writes and destructive `FLUSH*` commands
+
+<Cards>
+  <Card title="Protect production writes" href="/en/docs/production-safety">
+    Configure read-only connections, production protection, and MCP Redis permissions.
+  </Card>
+  <Card title="Specialized workspaces" href="/en/docs/specialized-workspaces">
+    Review MongoDB, vector, message queue, etcd, ZooKeeper, and Nacos tools.
+  </Card>
+  <Card title="Configure connectivity" href="/en/docs/ssh-tunnel">
+    Configure TLS, SSH, SOCKS5, or HTTP proxying for Redis.
+  </Card>
+</Cards>

@@ -13,6 +13,8 @@ import { requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
+const SQLSERVER_DEFAULT_SCHEMA = "dbo";
+
 const SQL_KEYWORDS = [
   "SELECT",
   "FROM",
@@ -1786,7 +1788,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // Content before cursor within the current statement
   const beforeCursor = sql.slice(statementSpan.start, cursor);
 
-  const trailingIdentifier = parseTrailingIdentifierContext(beforeCursor);
+  const trailingIdentifier = parseTrailingIdentifierContext(beforeCursor, options.databaseType);
   const prefix = trailingIdentifier?.prefix ?? "";
   const qualifier = trailingIdentifier?.qualifier;
   const qualifierParts = trailingIdentifier?.qualifierParts;
@@ -1794,7 +1796,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const beforeToken = beforeCursor.slice(0, Math.max(0, bareStart)).trimEnd();
   const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
 
-  let referencedTables = extractReferencedTables(fullStatement);
+  let referencedTables = extractReferencedTables(fullStatement, options.databaseType);
 
   // Merge CTE definitions into referenced tables
   const cteDefs = extractCteDefinitions(fullStatement);
@@ -1956,7 +1958,7 @@ function detectCompletionContextKind(options: {
   return "keyword";
 }
 
-function parseTrailingIdentifierContext(input: string): { start: number; prefix: string; qualifier?: string; qualifierParts?: string[] } | null {
+function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseType): { start: number; prefix: string; qualifier?: string; qualifierParts?: string[] } | null {
   if (/\s$/.test(input)) return null;
   let i = input.length - 1;
   while (i >= 0 && /\s/.test(input[i] ?? "")) i--;
@@ -1972,7 +1974,13 @@ function parseTrailingIdentifierContext(input: string): { start: number; prefix:
 
   while (index > 0) {
     const parsed = parseTrailingIdentifierPart(tail, index);
-    if (!parsed) break;
+    if (!parsed) {
+      const omittedSqlServerSchema = databaseType === "sqlserver" && tail[index - 1] === "." && parseTrailingIdentifierPart(tail, index - 1);
+      if (!omittedSqlServerSchema) break;
+      parts.unshift(SQLSERVER_DEFAULT_SCHEMA);
+      index -= 1;
+      continue;
+    }
     parts.unshift(unquoteIdentifier(parsed.raw));
     index = parsed.start;
     if (index <= 0 || tail[index - 1] !== ".") break;
@@ -2394,7 +2402,7 @@ function lastTopLevelKeywordIndex(sql: string, keyword: string): number {
   return lastIndex;
 }
 
-function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
+function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
   // Keywords that should NOT be treated as table aliases
   const ALIAS_BLACKLIST = new Set([
     "where",
@@ -2502,7 +2510,8 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
 
   // STRAIGHT_JOIN is a standalone MySQL table introducer, not a modifier followed by JOIN.
   const identifier = '(?:"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$@#]*)';
-  const pattern = new RegExp(`\\b(?:from|join|straight_join|update|apply)\\s+(${identifier}(?:\\.${identifier}){0,3})(?:\\s+(?:as\\s+)?([A-Za-z_][\\w$]*))?`, "gi");
+  const qualifiedSeparator = databaseType === "sqlserver" ? `\\.(?:${identifier}|\\.${identifier})` : `\\.${identifier}`;
+  const pattern = new RegExp(`\\b(?:from|join|straight_join|update|apply)\\s+(${identifier}(?:${qualifiedSeparator}){0,3})(?:\\s+(?:as\\s+)?([A-Za-z_][\\w$]*))?`, "gi");
   const referenced: SqlCompletionReferencedTable[] = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(sql)) !== null) {
@@ -2520,15 +2529,17 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
       continue;
     }
     const rawParts = splitQualifiedNameRawParts(rawName);
+    const omittedSqlServerSchema = databaseType === "sqlserver" && rawParts.length >= 3 && rawParts[rawParts.length - 2] === "";
+    const unquotedRawParts = rawParts.map((part) => unquoteIdentifier(part));
     const parts = rawParts.map((part) => unquoteIdentifier(part)).filter(Boolean);
-    const name = parts[parts.length - 1];
+    const name = unquotedRawParts[unquotedRawParts.length - 1];
     if (!name) continue;
     const table: SqlCompletionReferencedTable = {
       name,
       nameQuoted: isQuotedIdentifier(rawParts[rawParts.length - 1]),
-      database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
-      schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
-      schemaQuoted: parts.length >= 2 ? isQuotedIdentifier(rawParts[rawParts.length - 2]) : undefined,
+      database: omittedSqlServerSchema ? unquotedRawParts[unquotedRawParts.length - 3] || undefined : parts.length >= 3 ? parts[parts.length - 3] : undefined,
+      schema: omittedSqlServerSchema ? SQLSERVER_DEFAULT_SCHEMA : parts.length >= 2 ? parts[parts.length - 2] : undefined,
+      schemaQuoted: omittedSqlServerSchema ? undefined : parts.length >= 2 ? isQuotedIdentifier(rawParts[rawParts.length - 2]) : undefined,
       alias: cleanAlias,
     };
     referenced.push(table);

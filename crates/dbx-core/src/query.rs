@@ -545,6 +545,9 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 }
 
 pub fn is_connection_error(err: &str) -> bool {
+    if crate::db::agent_driver::agent_rpc_error_category(err).as_deref() == Some("connection") {
+        return true;
+    }
     let lower = err.to_lowercase();
     if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) {
         return false;
@@ -571,6 +574,9 @@ pub fn is_connection_error(err: &str) -> bool {
         || lower.contains("idle")
         || lower.contains("agent stdin not available")
         || lower.contains("agent stdout not available")
+        || lower.contains("agent runtime terminated")
+        || lower.contains("agent runtime is unavailable")
+        || lower.contains("agent runtime unavailable")
         || lower.contains("failed to write to agent stdin")
         || lower.contains("failed to flush agent stdin")
         || lower.contains("communicating with the server")
@@ -590,6 +596,15 @@ fn is_schema_reset_cleanup_error(lower: &str) -> bool {
 }
 
 fn should_discard_agent_pool_after_error(err: &str) -> bool {
+    if matches!(
+        crate::db::agent_driver::agent_session_disposition(err),
+        Some(
+            crate::db::agent_driver::AgentSessionDisposition::Quarantine
+                | crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime
+        )
+    ) {
+        return true;
+    }
     let lower = err.to_lowercase();
     is_dbx_query_timeout_error(&lower)
         || is_agent_rpc_timeout_error(&lower)
@@ -601,6 +616,19 @@ fn should_discard_agent_pool_after_error(err: &str) -> bool {
 }
 
 pub fn pool_error_action(db_type: Option<DatabaseType>, err: &str) -> PoolErrorAction {
+    if db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type))
+        && matches!(
+            crate::db::agent_driver::agent_session_disposition(err),
+            Some(
+                crate::db::agent_driver::AgentSessionDisposition::Quarantine
+                    | crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime
+            )
+        )
+    {
+        // The connection may be replaced, but the result of the user operation is unknown.
+        // Discard the session without replaying SQL, DDL, writes, or transactions.
+        return PoolErrorAction::Discard;
+    }
     let lower = err.to_lowercase();
     if db::sqlserver::is_driver_panic_error(err)
         || (is_dbx_query_timeout_error(&lower) && should_discard_pool_after_query_timeout(db_type))
@@ -678,6 +706,41 @@ fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> boo
 
 pub fn should_discard_pool_after_error(db_type: Option<DatabaseType>, err: &str) -> bool {
     matches!(pool_error_action(db_type, err), PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry)
+}
+
+async fn discard_pool_after_error(state: &AppState, pool_key: &str, db_type: Option<DatabaseType>, error: &str) {
+    let action = pool_error_action(db_type, error);
+    if !matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
+        return;
+    }
+
+    let replace_agent_runtime = matches!(
+        crate::db::agent_driver::agent_session_disposition(error),
+        Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
+    );
+    if replace_agent_runtime {
+        state.detach_pool_by_key(pool_key, true).await;
+    } else {
+        state.remove_pool_by_key(pool_key).await;
+    }
+}
+
+async fn discard_agent_pool_after_error(
+    state: &AppState,
+    pool_key: &str,
+    client: &Arc<crate::db::agent_driver::PooledAgentClient>,
+    db_type: Option<DatabaseType>,
+    error: &str,
+) {
+    let action = pool_error_action(db_type, error);
+    if !matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
+        return;
+    }
+    let replace_agent_runtime = matches!(
+        crate::db::agent_driver::agent_session_disposition(error),
+        Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
+    );
+    state.detach_agent_pool_if_current(pool_key, client, replace_agent_runtime).await;
 }
 
 fn query_pool_error_action(db_type: Option<DatabaseType>, sql: &str, err: &str) -> PoolErrorAction {
@@ -1264,6 +1327,7 @@ pub async fn do_execute(
         }
         PoolKind::Agent(client) => {
             let client = client.clone();
+            let source_client = client.clone();
             let sql = sql_for_execution_context(pool_db_type, sql, schema);
             let database = database.map(|s| s.to_string());
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
@@ -1301,10 +1365,12 @@ pub async fn do_execute(
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
             if matches!(result.as_ref(), Err(err) if err == QUERY_CANCELED) {
-                state.remove_pool_by_key(pool_key).await;
+                state.detach_agent_pool_if_current(pool_key, &source_client, false).await;
             }
-            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
-                state.remove_pool_by_key(pool_key).await;
+            if let Err(err) = result.as_ref() {
+                if err != QUERY_CANCELED {
+                    discard_agent_pool_after_error(state, pool_key, &source_client, pool_db_type, err).await;
+                }
             }
             result
         }
@@ -1493,7 +1559,11 @@ pub async fn execute_sql_statement_with_options(
             )
         }
         Some(PoolErrorAction::Discard) => {
-            state.remove_pool_by_key(&pool_key).await;
+            // Agent execution owns structured quarantine/runtime replacement before
+            // returning. Native drivers retain the existing caller-side cleanup.
+            if !db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type)) {
+                state.remove_pool_by_key(&pool_key).await;
+            }
             with_sql_context(result)
         }
         _ => with_sql_context(result),
@@ -1984,6 +2054,8 @@ fn error_query_result(message: String) -> db::QueryResult {
         columns: vec!["Error".to_string()],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![vec![serde_json::Value::String(message)]],
         affected_rows: 0,
         execution_time_ms: 0,
@@ -1999,6 +2071,8 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
         columns: vec![],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![],
         affected_rows: 0,
         execution_time_ms,
@@ -2031,6 +2105,8 @@ async fn execute_multi_sqlserver(
                 columns: vec!["Error".to_string()],
                 column_types: Vec::new(),
                 column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
                 rows: vec![vec![serde_json::Value::String(canceled_error())]],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -2083,6 +2159,8 @@ async fn execute_multi_sqlserver(
                     columns: vec!["Error".to_string()],
                     column_types: Vec::new(),
                     column_sortables: vec![],
+                    spatial_columns: vec![],
+                    spatial_values: vec![],
                     rows: vec![vec![serde_json::Value::String(e)]],
                     affected_rows: 0,
                     execution_time_ms: 0,
@@ -2106,6 +2184,8 @@ async fn execute_multi_sqlserver(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: 0,
@@ -2159,6 +2239,7 @@ pub async fn execute_statements(
         }
     };
     if let Some(client) = agent_client {
+        let source_client = client.clone();
         check_read_only_for_connection_multi(state, &pool_key, statements).await?;
         let db_type = connection_database_type_for_pool_key(state, &pool_key).await;
         let execution_schema = schema_for_execution_context(db_type, schema);
@@ -2173,6 +2254,7 @@ pub async fn execute_statements(
         let mut client = client.lock().await;
         let database = if database.trim().is_empty() { None } else { Some(database) };
         let result = execute_multi_agent(&mut client, database, statements, execution_schema, timeout_secs).await;
+        drop(client);
         match result {
             Ok(result) => return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result }),
             Err(err) => {
@@ -2181,12 +2263,8 @@ pub async fn execute_statements(
                         "Agent does not support execute_batch; falling back to statement-by-statement execution"
                     );
                 } else {
-                    match pool_error_action(connection_database_type(state, connection_id).await, &err) {
-                        PoolErrorAction::ReconnectAndRetry | PoolErrorAction::Discard => {
-                            let _ = state.remove_pool_by_key(&pool_key).await;
-                        }
-                        PoolErrorAction::Keep => {}
-                    }
+                    let db_type = connection_database_type(state, connection_id).await;
+                    discard_agent_pool_after_error(state, &pool_key, &source_client, db_type, &err).await;
                     return Err(query_error_with_omitted_sql_context(&err, sql_ctx));
                 }
             }
@@ -2210,15 +2288,18 @@ pub async fn execute_statements(
                 total_affected += result.affected_rows;
             }
             Err(e) => {
-                match pool_error_action(connection_database_type(state, connection_id).await, &e) {
+                let db_type = connection_database_type(state, connection_id).await;
+                match pool_error_action(db_type, &e) {
                     PoolErrorAction::ReconnectAndRetry => {
                         let db_opt = if database.is_empty() { None } else { Some(database) };
                         let _ = state.reconnect_pool(connection_id, db_opt).await;
                     }
-                    PoolErrorAction::Discard => {
+                    PoolErrorAction::Discard
+                        if !db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type)) =>
+                    {
                         let _ = state.remove_pool_by_key(&pool_key).await;
                     }
-                    PoolErrorAction::Keep => {}
+                    PoolErrorAction::Discard | PoolErrorAction::Keep => {}
                 }
                 return Err(query_error_with_omitted_sql_context(
                     &format!("Statement {} failed: {}. Previous {} statement(s) may have been committed.", i + 1, e, i),
@@ -2232,6 +2313,8 @@ pub async fn execute_statements(
         columns: vec![],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -2548,11 +2631,10 @@ pub async fn execute_statements_in_transaction_on_pool(
             PoolKind::Mysql(mp, _mode) => TxPath::Mysql(mp.clone(), false),
             PoolKind::Sqlite(sq) => TxPath::Sqlite(sq.clone()),
             PoolKind::CloudflareD1(client) => TxPath::CloudflareD1(client.clone()),
-            PoolKind::ClickHouse(_)
-            | PoolKind::Rqlite(_)
-            | PoolKind::Turso(_)
-            | PoolKind::SqlServer(_)
-            | PoolKind::Agent(_) => TxPath::Explicit,
+            PoolKind::ClickHouse(_) | PoolKind::Rqlite(_) | PoolKind::Turso(_) | PoolKind::SqlServer(_) => {
+                TxPath::Explicit
+            }
+            PoolKind::Agent(client) => TxPath::Agent(client.clone()),
             PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
             PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
@@ -2594,6 +2676,13 @@ pub async fn execute_statements_in_transaction_on_pool(
             )
             .await
         }
+        Some(TxPath::Agent(client)) => {
+            let result = exec_tx_agent_inner(client.clone(), db_type, Some(database), statements, schema, start).await;
+            if let Err(error) = result.as_ref() {
+                discard_agent_pool_after_error(state, pool_key, &client, db_type, error).await;
+            }
+            return result;
+        }
         Some(TxPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
             exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
@@ -2606,9 +2695,7 @@ pub async fn execute_statements_in_transaction_on_pool(
     };
 
     if let Err(err) = result.as_ref() {
-        if matches!(pool_error_action(db_type, err), PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
-            state.remove_pool_by_key(pool_key).await;
-        }
+        discard_pool_after_error(state, pool_key, db_type, err).await;
     }
 
     result
@@ -2620,6 +2707,7 @@ enum TxPath {
     Mysql(mysql_async::Pool, bool),
     Sqlite(db::sqlite::SqliteHandle),
     CloudflareD1(db::cloudflare_d1_driver::CloudflareD1Client),
+    Agent(Arc<crate::db::agent_driver::PooledAgentClient>),
     Explicit,
     None,
 }
@@ -2670,6 +2758,8 @@ async fn exec_tx_pg_inner(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -2754,6 +2844,8 @@ async fn exec_tx_mysql_inner(
         columns: vec![],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -2818,6 +2910,8 @@ async fn exec_tx_sqlite_inner(
                 columns: vec![],
                 column_types: Vec::new(),
                 column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
                 rows: vec![],
                 affected_rows: total_affected,
                 execution_time_ms: start.elapsed().as_millis(),
@@ -2841,24 +2935,6 @@ async fn exec_tx_explicit_inner(
     schema: Option<&str>,
     start: std::time::Instant,
 ) -> Result<db::QueryResult, String> {
-    let conns = state.connections.read().await;
-    if let Some(crate::connection::PoolKind::Agent(client)) = conns.get(pool_key) {
-        let db_type = connection_database_type_for_pool_key(state, pool_key).await;
-        let execution_schema = schema_for_execution_context(db_type, schema);
-        let rewritten_statements;
-        let statements = if qualifies_unqualified_agent_relations(db_type) {
-            rewritten_statements =
-                statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
-            rewritten_statements.as_slice()
-        } else {
-            statements
-        };
-        let mut client = client.lock().await;
-        let result: db::QueryResult = client.execute_transaction(database, statements, execution_schema).await?;
-        return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result });
-    }
-    drop(conns);
-
     do_execute(
         state,
         pool_key,
@@ -2908,6 +2984,8 @@ async fn exec_tx_explicit_inner(
         columns: vec![],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -2916,6 +2994,28 @@ async fn exec_tx_explicit_inner(
         has_more: false,
         elasticsearch_raw_body: None,
     })
+}
+
+async fn exec_tx_agent_inner(
+    client: Arc<crate::db::agent_driver::PooledAgentClient>,
+    db_type: Option<DatabaseType>,
+    database: Option<&str>,
+    statements: &[String],
+    schema: Option<&str>,
+    start: std::time::Instant,
+) -> Result<db::QueryResult, String> {
+    let execution_schema = schema_for_execution_context(db_type, schema);
+    let rewritten_statements;
+    let statements = if qualifies_unqualified_agent_relations(db_type) {
+        rewritten_statements =
+            statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+        rewritten_statements.as_slice()
+    } else {
+        statements
+    };
+    let mut client = client.lock().await;
+    let result: db::QueryResult = client.execute_transaction(database, statements, execution_schema).await?;
+    Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result })
 }
 
 async fn exec_tx_none_inner(
@@ -2951,6 +3051,8 @@ async fn exec_tx_none_inner(
         columns: vec![],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -3416,6 +3518,8 @@ async fn execute_manual_txn_postgres_statement(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: 0,
@@ -3456,6 +3560,8 @@ async fn execute_manual_txn_mysql_statement(
             columns,
             column_types,
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: data,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -3472,6 +3578,8 @@ async fn execute_manual_txn_mysql_statement(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: 0,
@@ -3505,6 +3613,8 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         columns: vec![],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![],
         affected_rows: 0,
         execution_time_ms: 0,
@@ -3530,6 +3640,8 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
         columns: vec![],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![],
         affected_rows: 0,
         execution_time_ms: 0,
@@ -3850,6 +3962,141 @@ for line in sys.stdin:
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    async fn agent_error_state(
+        disposition: &str,
+    ) -> (AppState, std::path::PathBuf, std::sync::Arc<crate::db::agent_driver::AgentRuntimeClient>) {
+        let dir = std::env::temp_dir().join(format!("dbx-query-agent-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("agent.py");
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, sys
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'result': {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}}
+        }}
+    elif req['method'] in ('execute_query', 'execute_batch', 'execute_transaction'):
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'error': {{
+                'code': -1,
+                'message': 'injected Agent failure',
+                'data': {{
+                    'category': 'resource',
+                    'retryable': False,
+                    'sessionDisposition': '{disposition}',
+                    'stage': 'execute'
+                }}
+            }}
+        }}
+    else:
+        response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{}}}}
+    print(json.dumps(response), flush=True)
+"#
+            ),
+        )
+        .unwrap();
+
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::Dameng));
+        state.connections.write().await.insert(
+            "conn-1".to_string(),
+            PoolKind::agent(crate::db::agent_driver::AgentDriverClient::shared_session(
+                runtime.clone(),
+                "session-1".to_string(),
+            )),
+        );
+
+        (state, dir, runtime)
+    }
+
+    #[tokio::test]
+    async fn agent_query_replace_runtime_error_detaches_pool_and_stops_runtime() {
+        let (state, dir, runtime) = agent_error_state("replace_runtime").await;
+
+        let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
+
+        assert!(error.contains("injected Agent failure"));
+        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn agent_transaction_replace_runtime_error_detaches_pool_and_stops_runtime() {
+        let (state, dir, runtime) = agent_error_state("replace_runtime").await;
+
+        let error = execute_statements_in_transaction_on_pool(
+            &state,
+            "conn-1",
+            "conn-1",
+            "",
+            &["UPDATE test_table SET value = 1".to_string()],
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("injected Agent failure"));
+        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn agent_batch_replace_runtime_error_detaches_pool_and_stops_runtime() {
+        let (state, dir, runtime) = agent_error_state("replace_runtime").await;
+
+        let error =
+            execute_statements(&state, "conn-1", "", &["UPDATE test_table SET value = 1".to_string()], None, None)
+                .await
+                .unwrap_err();
+
+        assert!(error.contains("injected Agent failure"));
+        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn agent_quarantine_error_removes_only_target_pool() {
+        let (state, dir, runtime) = agent_error_state("quarantine").await;
+
+        let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
+
+        assert!(error.contains("injected Agent failure"));
+        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(!runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     struct FakeMysqlBatchExecutor {
@@ -4322,6 +4569,8 @@ for line in sys.stdin:
                 columns: vec![],
                 column_types: Vec::new(),
                 column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -4344,6 +4593,8 @@ for line in sys.stdin:
                 columns: vec![],
                 column_types: Vec::new(),
                 column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -4975,13 +5226,35 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn structured_agent_disposition_controls_pool_recovery() {
+        let quarantined = "Agent RPC error (-1): lost\nDBX_AGENT_ERROR_DATA:{\"category\":\"connection\",\"sessionDisposition\":\"quarantine\"}";
+        let replace_runtime = "Agent RPC error (-1): saturated\nDBX_AGENT_ERROR_DATA:{\"category\":\"resource\",\"sessionDisposition\":\"replace_runtime\"}";
+
+        assert!(should_discard_agent_pool_after_error(quarantined));
+        assert!(should_discard_agent_pool_after_error(replace_runtime));
+        assert!(is_connection_error(quarantined));
+        assert_eq!(pool_error_action(Some(DatabaseType::Oracle), quarantined), PoolErrorAction::Discard);
+        assert_eq!(pool_error_action(Some(DatabaseType::Oracle), replace_runtime), PoolErrorAction::Discard);
+    }
+
+    #[test]
     fn unavailable_agent_pipes_are_reconnectable_errors() {
         assert!(should_discard_agent_pool_after_error("Agent stdin not available"));
         assert!(should_discard_agent_pool_after_error("Agent stdout not available"));
         assert!(is_connection_error("Agent stdin not available"));
         assert!(is_connection_error("Agent stdout not available"));
+        assert!(is_connection_error("Agent runtime terminated"));
+        assert!(is_connection_error("Agent runtime is unavailable"));
         assert_eq!(
             pool_error_action(Some(DatabaseType::Oracle), "Agent stdin not available"),
+            PoolErrorAction::ReconnectAndRetry
+        );
+        assert_eq!(
+            pool_error_action(Some(DatabaseType::Oracle), "Agent runtime terminated"),
+            PoolErrorAction::ReconnectAndRetry
+        );
+        assert_eq!(
+            pool_error_action(Some(DatabaseType::Oracle), "Agent runtime is unavailable"),
             PoolErrorAction::ReconnectAndRetry
         );
     }
@@ -4992,6 +5265,8 @@ for line in sys.stdin:
             columns: vec!["id".to_string(), "nested".to_string()],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!(2_041_797_190_226_354_178_i64),
                 serde_json::json!([1, 2_041_797_190_226_354_178_i64]),

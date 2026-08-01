@@ -1,96 +1,127 @@
 ---
 title: Data Transfer
-description: Move table data between connections or database engines.
+description: Copy tables between connections, databases, schemas, or database engines and track the result of each table.
 ---
 
-Data Transfer copies table data from one connection to another. Use it for development, testing, migration, and consolidation workflows. It is not a replacement for a production-grade replication pipeline.
+Data Transfer copies tables or collections from one source into another connection, database, or schema. Use it for environment migration, test data preparation, and one-off consolidation. It is not continuous replication, CDC, or bidirectional synchronization.
 
-## Use Cases
+<Callout type="warn">Cross-engine transfer passes through DBX field and type conversion. Target privileges, constraints, triggers, defaults, and engine semantics still determine the result. Rehearse important migrations and validate row counts and key fields afterward.</Callout>
 
-- Copy part of production data into a development environment
-- Move data between engines such as MySQL, PostgreSQL, SQLite, and SQL Server
-- Consolidate multiple sources into an analysis database
-- Prepare reproducible datasets for testing
+## Two Entry Points
 
-<Callout type="warn">Cross-engine transfer involves type mapping, defaults, constraints, and auto-increment differences. Validate transferred data afterward, and rehearse important migrations in a test environment first.</Callout>
+### Data Transfer Wizard
 
-## Workflow
+The wizard is designed for multiple tables. Select the source and target connection, catalog, database, and schema, then configure table creation, write mode, target-name case, and batch size.
+
+### Sidebar Copy and Paste
+
+After copying one or more tables in the object tree, paste them at a target location:
+
+- Within the same context, choose structure and data, structure only, or data only, and edit each target name
+- Pasting into another connection, database, or schema opens the Data Transfer wizard with the source tables and target prefilled
+- Whole-row copy excludes generated or computed columns and applies path-specific handling for PostgreSQL identity and SQL Server identity columns
+
+## Wizard Workflow
 
 <Steps>
   <Step>
     ### Select the Source
 
-    The source connection is where data is read from. Confirm the account can read the selected tables.
+    Choose the source connection, catalog when applicable, database, and schema. DBX lists transferable base tables; MongoDB paths list collections.
 
   </Step>
   <Step>
     ### Select the Target
 
-    The target connection is where data is written. Confirm write permissions and verify the target environment.
+    Choose another connection, database, or schema. Source and target cannot be the exact same location.
 
   </Step>
   <Step>
     ### Choose Tables
 
-    Transfer all tables or select only the tables you need. For large tables, consider transferring in smaller batches.
+    Select all, search, or choose a subset. A single request can only contain tables from one source context.
 
   </Step>
   <Step>
-    ### Start Transfer
+    ### Configure Options
 
-    DBX reads rows table by table and writes them to the target database using the selected mode. You can also choose whether target tables should be created.
+    Review target-table creation, write mode, target-name case, and batch size.
 
   </Step>
   <Step>
-    ### Check Results
+    ### Run in Background and Review
 
-    After transfer, inspect row counts, errors, and key fields.
+    The task keeps running after the dialog closes. The progress center reports the current table, table index, rows, duration, failed tables, and cancellation state.
 
   </Step>
 </Steps>
 
-## During Transfer
-
-DBX shows:
-
-- Current table
-- Rows transferred
-- Overall progress
-- Errors and the table that caused each error
-
-If a table fails, the current transfer stops and shows the error. Fix the structure, permission, or constraint issue, then start the transfer again.
-
 ## Transfer Options
 
-| Option              | Details                                                                         |
-| ------------------- | ------------------------------------------------------------------------------- |
-| Create target table | Try to create the target table from the source structure when it does not exist |
-| Append              | Insert data after existing target rows                                          |
-| Overwrite           | Clear the target table before writing source rows                               |
-| Upsert              | Use key-aware write behavior where the target database path supports it         |
-| Batch size          | Control how many rows are written per batch                                     |
+| Option | Details |
+| --- | --- |
+| Create target tables | Generates target structure from source metadata when the table does not exist and the path supports it |
+| Append | Keeps existing target rows and inserts source rows |
+| Overwrite | Clears each target table before writing its source rows |
+| Upsert | Updates or inserts by key when the target path supports it and a usable key is available |
+| Target table name case | Preserve, lowercase, or uppercase; transformed target names must remain unique |
+| Batch size | Controls paged reads and batched writes; the UI default is 1000 |
+
+If table creation is disabled, compatible target tables must already exist. Even with table creation enabled, cross-engine DDL may require manual changes when the target does not support a source type, default, constraint, or object.
+
+## PostgreSQL Structure and Ownership
+
+For PostgreSQL-to-PostgreSQL transfers with table creation enabled, DBX handles supported sequences, indexes, foreign keys, and selected schema-level objects and dependencies. If source owners do not exist on the target instance, DBX prompts you to:
+
+- Skip the affected ownership metadata
+- Reassign missing owners to the current target user
+- Cancel and create the required target roles first
+
+This is not a full replacement for `pg_dump` and `pg_restore`. Use native PostgreSQL tooling when extensions, grants, policies, triggers, or dependency graphs are complex.
+
+## Failure Handling
+
+A multi-table task does not discard the entire queue after the first table failure. DBX records the failure, attempts later tables, and finishes either successfully or with a terminal error summary.
+
+- Progress keeps per-table failure details
+- When failures exceed the display limit, the UI reports how many entries were omitted
+- A new task is rejected if another active transfer already targets the same table
+- Cancellation stops later reads and writes, but committed target data is not automatically reverted
+
+As a result, a finished task does not necessarily mean every table succeeded. Check the terminal state, failure list, target row counts, and key fields.
 
 ## Database Coverage
 
-SQL-based transfer is available for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, ClickHouse, DuckDB, DM, and GaussDB. Cross-engine transfers use DBX's type mapping layer, so always verify row counts and important column values after transfer.
+DBX filters source and target connections through the driver capability manifest. The implementation includes SQL-to-SQL, MongoDB-to-MongoDB, and selected MongoDB/SQL conversion paths. Not every connectable database supports Data Transfer.
 
-## Before You Transfer
+Capabilities also vary by combination:
 
-| Check              | Why It Matters                                                          |
-| ------------------ | ----------------------------------------------------------------------- |
-| Target environment | Avoid writing to the wrong database                                     |
-| Table structure    | Field names, types, primary keys, and unique constraints affect inserts |
-| Data volume        | Large tables may take longer or hit timeouts                            |
-| Constraints        | Foreign keys, unique constraints, and NOT NULL fields may fail writes   |
-| Sensitive data     | Production data may need masking before copying into lower environments |
+- Some engines transfer rows but cannot reuse source DDL
+- Upsert depends on the target engine and discoverable keys
+- Catalogs, schemas, identity columns, arrays, JSON, and binary values are engine-specific
+- Specialized search, vector, message queue, and configuration-center connections do not use this generic table-transfer entry point
+
+If a connection is absent from the selector, its current driver has not declared Data Transfer support; it is not merely a hidden UI action.
+
+## Before Transferring
+
+- Check whether the target connection has read-only protection; read-only targets are blocked
+- Confirm source read privileges and target create/write privileges
+- Check for target-name collisions after case conversion
+- Review primary keys, unique constraints, foreign keys, triggers, and required fields
+- Decide whether production data must be masked before entering a lower environment
+- Use native export/import or online migration tools when the dataset is too large for an interactive transfer
 
 ## Related Features
 
 <Cards>
   <Card title="Table Import" href="/en/docs/table-import">
-    Import CSV, TSV, JSON, or Excel into a single table.
+    Import files into an existing table or create new tables in batches.
   </Card>
   <Card title="Database Export" href="/en/docs/database-export">
-    Export a database as SQL for backup or offline migration.
+    Produce reviewable SQL files for offline transfer.
+  </Card>
+  <Card title="Production Safety" href="/en/docs/production-safety">
+    Understand read-only protection, production protection, and privilege boundaries.
   </Card>
 </Cards>

@@ -1597,6 +1597,7 @@ function copySelectedSidebarNames(): boolean {
             database: node.database!,
             schema: connectionObjectTreeNodeSchema(store.getConfig(node.connectionId!), node.database!, node.schema),
             tableName: node.label,
+            tableComment: node.comment,
           })),
         }
       : null;

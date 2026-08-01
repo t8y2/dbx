@@ -1633,6 +1633,7 @@ pub fn run() {
             commands::plugins::uninstall_jdbc_plugin,
             commands::schema::list_databases,
             commands::schema::list_database_storage,
+            commands::schema::get_sqlserver_completion_context,
             commands::schema::list_doris_catalogs,
             commands::schema::list_doris_catalog_databases,
             commands::schema::list_sqlserver_linked_servers,

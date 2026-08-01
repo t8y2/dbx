@@ -1,0 +1,153 @@
+---
+title: Production and Write Safety
+description: Reduce database mistakes with read-only connections, production protection, SQL review, AI limits, and MCP policies.
+---
+
+DBX separates write safety into independent layers: database privileges, connection read-only state, production protection, dangerous-operation confirmation, AI execution rules, and MCP policy. Together they reduce mistakes, but they do not replace database permissions, auditing, backups, or change approval.
+
+<Callout type="warn">No client-side safeguard replaces database permissions. Production systems should still use least-privilege accounts, database auditing, reliable backups, and team approval workflows.</Callout>
+
+## Protection Layers
+
+| Layer | Purpose | Can a higher-level tool bypass it? |
+| --- | --- | --- |
+| Database account privileges | The database server ultimately decides which objects can be read, changed, or administered | No |
+| Connection read-only | Blocks recognizable writes in the DBX core query path and disables multiple mutation entry points | AI, CLI, MCP, and the normal UI cannot widen it |
+| Production protection | Marks an entire connection or selected databases as production and requires a fresh confirmation for writes | Normal confirmation and Agent authorization cannot permanently skip it |
+| Dangerous SQL/command confirmation | Adds prompts or blocks for DDL, unbounded mutations, risky Redis commands, and similar operations | Controlled by its setting, but never widens read-only or production protection |
+| Global MCP policy | Restricts all MCP clients through a connection allowlist and three execution modes | Client environment variables cannot widen the saved central policy |
+
+## Configure a Read-Only Connection
+
+Enable **Read-only connection** when creating or editing a connection. DBX carries the flag into core query execution and database-specific operations.
+
+Read-only connections are useful for:
+
+- Production query accounts and shared troubleshooting connections
+- Workflows that only need to browse schemas, rows, documents, keys, or monitoring data
+- Connections exposed to the CLI, MCP, or AI where no data changes should be possible
+
+Read-only protection is not only a hidden button. DBX rejects recognizable SQL writes in the core execution path, while MCP, MongoDB, Redis, message queues, and multiple specialized workspaces recheck the connection state.
+
+<Callout type="info">Read-only enforcement still depends on classifying SQL or commands. The most reliable boundary is a database account that has no write permission.</Callout>
+
+## Configure Production Protection
+
+<Steps>
+  <Step>
+    ### Open connection settings
+
+    Create or edit a connection and find the **Production** section.
+
+  </Step>
+  <Step>
+    ### Enable protection
+
+    Turn on **Enable production protection**. Single-database connections protect the whole connection; multi-database connections can protect all or selected databases.
+
+  </Step>
+  <Step>
+    ### Review the scope
+
+    If only selected databases are protected, verify that every real production database is included. Recheck the list when databases are added or renamed.
+
+  </Step>
+  <Step>
+    ### Verify the write prompt
+
+    Use a harmless test or a test environment to confirm that the production watermark and write dialog behave as expected before relying on the setting for a real connection.
+
+  </Step>
+</Steps>
+
+When production protection is active, the workbench shows a production indicator. If DBX detects that the active connection, active database, or explicit SQL target belongs to the protected scope and the operation mutates data or schema, it opens the shared confirmation dialog.
+
+Every production write requires a new explicit decision. Confirmation is not persisted and cannot be skipped by disabling the normal dangerous-SQL prompt.
+
+## Behavior Across Entry Points
+
+| Entry point | Read-only connection | Production protection |
+| --- | --- | --- |
+| SQL editor | The core execution path rejects recognizable writes | Shows the target connection, database, source, and SQL for per-operation confirmation |
+| Data grid | Disables or rejects saves, deletes, and other mutations | Row saves and deletes enter the shared production confirmation flow |
+| Table structure and object actions | Hides or disables recognizable mutation entry points | DDL, source saves, and database administration enter the shared confirmation flow |
+| Schema diff, SQL files, and data generation | Cannot write to a read-only target | Generated SQL or scripts require production confirmation before execution |
+| Redis, MongoDB, etcd, message queues, and similar systems | Rechecks read-only state for system-specific commands and actions | Mutation entry points remain subject to production and specialized danger rules |
+| AI Ask | Does not execute SQL | Does not execute SQL |
+| AI Agent | Cannot bypass read-only state | Returns production SQL to the editor for human review and manual execution |
+| MCP | Connection read-only is an upper bound for every mode | Production protection remains an upper bound for MCP policy |
+
+## AI Execution Boundaries
+
+### Ask Mode
+
+Ask mode generates, explains, optimizes, or repairs SQL. Model output is not executed automatically and can be copied or placed into the editor for review.
+
+### Agent Mode
+
+Agent can execute reads based on user intent and can handle limited writes when policy permits. A write confirmation is scoped to the current target and operation.
+
+When the active database is protected as production, Agent does not receive autonomous write permission. DBX places the proposed SQL in the editor and requires manual confirmation through the production-write dialog.
+
+See [AI Assistant](/en/docs/ai-assistant) for SQL classification and mode details.
+
+## MCP Permissions
+
+DBX stores one central policy under **Settings → MCP**, and every MCP request reloads that policy.
+
+| Mode | Representative operations |
+| --- | --- |
+| Read only | Queries, metadata reads, and listing connections or objects |
+| Data read/write | Regular inserts, effectively filtered updates/deletes, scoped MongoDB mutations, ordinary Redis writes, and connection management |
+| Full access | Also allows broad mutations, DDL, `TRUNCATE`, data clearing, and high-risk administrative commands |
+
+Configure **Allowed connections** in addition to the execution mode. Connections outside the allowlist are not exposed to MCP. These limits remain active in every mode:
+
+- Connection read-only state
+- Production protection
+- Database account privileges
+- The saved connection allowlist
+
+See [MCP Integration](/en/docs/mcp) for complete configuration, client examples, and compatibility behavior.
+
+## Dangerous SQL and Specialized Commands
+
+Outside production protection, DBX applies additional rules to selected high-risk operations:
+
+- The query editor can show a confirmation before dangerous SQL runs
+- Redis can block or confirm risky commands
+- The data grid, table structure, schema diff, and data generation flows show SQL first where possible
+- MCP Data read/write rejects unbounded updates/deletes, DDL, `TRUNCATE`, and high-risk requests it cannot classify reliably
+- Cross-engine transfer and bulk import require separate review of type mappings, target tables, and truncate options
+
+## Recommended Configuration
+
+| Scenario | Recommendation |
+| --- | --- |
+| Local development | Use a normal connection, keep dangerous-SQL confirmation, and prefer MCP Data read/write over Full access |
+| Test or staging | Use obvious connection names and colors, keep dangerous-SQL confirmation, and limit the MCP allowlist |
+| Production read-only | Use a database read-only account plus DBX read-only and production protection; keep MCP in Read only |
+| Production changes | Use a separate least-privilege account, enable production protection, review SQL, retain backups and approvals, and avoid MCP Full access |
+| Shared Docker | Set a login password, persist `/app/data`, restrict network access, and use separate database privileges for each target |
+
+## Known Boundaries
+
+- SQL and command classification is conservative but cannot replace server-side privileges.
+- Stored procedures, vendor extensions, and dynamic SQL may have effects that cannot be determined from text alone.
+- Production protection covers operations initiated through DBX; other clients require their own permissions and auditing.
+- Configuration sync and export migrate DBX settings and are not backups of business databases.
+
+<Cards>
+  <Card title="Create a safer connection" href="/en/docs/getting-started">
+    Configure the connection type, network path, read-only state, and production scope.
+  </Card>
+  <Card title="Review data changes" href="/en/docs/data-grid">
+    Understand inline edits, deletes, SQL preview, and the save flow.
+  </Card>
+  <Card title="Configure AI" href="/en/docs/ai-assistant">
+    Review Ask, Agent, SQL classification, and production behavior.
+  </Card>
+  <Card title="Configure MCP" href="/en/docs/mcp">
+    Set the connection allowlist, execution mode, and client integration.
+  </Card>
+</Cards>

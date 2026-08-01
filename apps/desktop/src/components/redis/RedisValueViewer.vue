@@ -4,7 +4,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -25,7 +25,7 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { createShikiJsonHighlighter, type JsonHighlighter } from "@/lib/common/shikiJsonHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
-import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
+import { computeDisplayTtl, computeTtlCountdownTick, computeTtlCountdownValue, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
@@ -164,16 +164,17 @@ const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<JsonHighlighter>();
 
-// Auto-refresh keeps the displayed TTL moving locally and periodically asks
-// Redis for the authoritative value. The two timers stay separate so a short
-// polling interval never causes a full key-value reload.
+// Auto-refresh keeps the displayed TTL moving locally and periodically reloads
+// the complete key detail. The full reload updates changed values as well as
+// the authoritative TTL without rebuilding the parent key tree.
 const autoRefreshEnabled = ref(readRedisAutoRefreshEnabled());
 const autoRefreshIntervalSeconds = ref(readRedisAutoRefreshInterval());
 const countdownTtl = ref(0);
-const refreshingTtl = ref(false);
+const refreshingValue = ref(false);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
-let ttlRefreshRequestId = 0;
+let autoRefreshRequestId = 0;
+let countdownTtlObservedAtMs = Date.now();
 let redisValueViewerIsActive = true;
 
 function canRunAutoRefresh(): boolean {
@@ -200,46 +201,54 @@ function startAutoRefresh() {
   stopAutoRefresh();
   if (!autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
 
-  countdownTtl.value = data.value.ttl;
-  countdownTimer = setInterval(() => {
-    const action = computeAutoRefreshTick(autoRefreshEnabled.value, countdownTtl.value);
-    if (action.type === "decrement") {
-      countdownTtl.value--;
-    }
-  }, 1000);
-
-  autoRefreshTimer = setInterval(() => void refreshTtl(), autoRefreshIntervalSeconds.value * 1000);
+  autoRefreshTimer = setInterval(() => void refreshAutoValue(), autoRefreshIntervalSeconds.value * 1000);
 }
 
-async function refreshTtl() {
-  if (refreshingTtl.value || loading.value || editingTtl.value || savingTtl.value || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
+function startCountdown() {
+  stopCountdown();
+  if (!data.value || !canRunAutoRefresh()) return;
 
-  const requestId = ++ttlRefreshRequestId;
-  refreshingTtl.value = true;
-  try {
-    const ttl = await api.redisGetTtl(props.connectionId, props.db, props.keyRaw);
-    // A draft may be created while the request is in flight. Never apply even
-    // a missing-key response after the user has started editing.
-    if (requestId !== ttlRefreshRequestId || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
-
-    if (ttl === -2) {
-      data.value = null;
-      collectionItems.value = [];
-      scanCursor.value = undefined;
-      resetStreamEntries();
-      resetStreamMonitoring();
-      stopAutoRefresh();
-      emit("deleted", props.keyRaw);
-      return;
+  updateCountdownTtl();
+  countdownTimer = setInterval(() => {
+    const action = computeTtlCountdownTick(countdownTtl.value);
+    if (action.type === "decrement") {
+      updateCountdownTtl();
     }
+  }, 1000);
+}
 
-    const refreshedValue = { ...data.value, ttl };
-    data.value = refreshedValue;
-    countdownTtl.value = ttl;
+function syncCountdownTtl(serverTtl: number) {
+  countdownTtl.value = serverTtl;
+  countdownTtlObservedAtMs = Date.now();
+}
+
+function updateCountdownTtl() {
+  if (!data.value) return;
+  countdownTtl.value = computeTtlCountdownValue(data.value.ttl, countdownTtlObservedAtMs, Date.now());
+}
+
+function startRefreshTimers() {
+  startCountdown();
+  startAutoRefresh();
+}
+
+async function refreshAutoValue() {
+  if (refreshingValue.value || loading.value || editingTtl.value || savingTtl.value || hasUnsavedRedisDraft.value || shouldPauseAutoValueRefresh() || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
+
+  const requestId = ++autoRefreshRequestId;
+  refreshingValue.value = true;
+  try {
+    const applied = await load({
+      background: true,
+      preserveDraft: true,
+      notifyParent: false,
+      shouldApply: () => requestId === autoRefreshRequestId && !hasUnsavedRedisDraft.value && !shouldPauseAutoValueRefresh() && autoRefreshEnabled.value && canRunAutoRefresh(),
+    });
+    if (requestId !== autoRefreshRequestId || !applied || !data.value) return;
   } catch {
     // A failed background read must not retry in a tight loop. Manual refresh
     // remains available and starts a fresh polling lifecycle on success.
-    if (requestId === ttlRefreshRequestId) {
+    if (requestId === autoRefreshRequestId) {
       stopAutoRefresh();
       // The user did not turn the preference off, so do not persist this
       // transient failure. The visible state must still match the stopped
@@ -247,29 +256,37 @@ async function refreshTtl() {
       autoRefreshEnabled.value = false;
     }
   } finally {
-    if (requestId === ttlRefreshRequestId) refreshingTtl.value = false;
+    if (requestId === autoRefreshRequestId) refreshingValue.value = false;
   }
 }
 
 function stopAutoRefresh() {
-  ttlRefreshRequestId++;
-  refreshingTtl.value = false;
+  autoRefreshRequestId++;
+  refreshingValue.value = false;
   if (autoRefreshTimer !== null) {
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
   }
+}
+
+function stopCountdown() {
   if (countdownTimer !== null) {
     clearInterval(countdownTimer);
     countdownTimer = null;
   }
 }
 
+function stopRefreshTimers() {
+  stopAutoRefresh();
+  stopCountdown();
+}
+
 function handleDocumentVisibilityChange() {
   if (document.visibilityState === "hidden") {
-    stopAutoRefresh();
+    stopRefreshTimers();
     return;
   }
-  startAutoRefresh();
+  startRefreshTimers();
 }
 
 const hashSortBy = ref<"field" | "value" | null>(null);
@@ -475,6 +492,12 @@ let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
 let zsetResizeStartX = 0;
 let zsetResizeStartWidth = 0;
+
+function shouldPauseAutoValueRefresh(): boolean {
+  const loadedPageSize = data.value ? redisValueCollectionItems(data.value).length : 0;
+  const hasExpandedCollectionPage = collectionItems.value.length > loadedPageSize;
+  return showMemberDetail.value || valueSearchOpen.value || Boolean(hashSearchQuery.value.trim()) || Boolean(activeHashSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
+}
 
 type PendingDelete = { kind: "key" } | { kind: "hash"; field: string } | { kind: "list"; index: number } | { kind: "set"; member: string } | { kind: "zset"; member: string };
 const pendingDelete = ref<PendingDelete | null>(null);
@@ -1023,23 +1046,29 @@ const deleteDetails = computed(() => {
   return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
 });
 
-async function load(options: { selectDefaultMember?: boolean; preserveDraft?: boolean } = {}): Promise<boolean> {
+async function load(options: { background?: boolean; notifyParent?: boolean; preserveDraft?: boolean; selectDefaultMember?: boolean; shouldApply?: () => boolean } = {}): Promise<boolean> {
+  const background = options.background ?? false;
+  const notifyParent = options.notifyParent ?? true;
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   const requestId = ++loadRequestId;
-  loading.value = true;
+  if (!background) loading.value = true;
   try {
     const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
-    if (requestId !== loadRequestId) return false;
+    if (requestId !== loadRequestId || (options.shouldApply && !options.shouldApply())) return false;
 
     // Redis reports a key that expired between refreshes as a `none` value.
     // Tell the browser to remove it instead of rendering a stale detail shell.
     if (loadedValue.redis_type === "none") {
+      // A background read can finish after the user starts editing. Preserve
+      // the draft and defer even a missing-key update until the user decides
+      // whether to save or discard it.
+      if (background && options.preserveDraft && hasUnsavedRedisDraft.value) return false;
       data.value = null;
       collectionItems.value = [];
       scanCursor.value = undefined;
       resetStreamEntries();
       resetStreamMonitoring();
-      stopAutoRefresh();
+      stopRefreshTimers();
       emit("deleted", props.keyRaw);
       return true;
     }
@@ -1049,7 +1078,8 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
       if (currentValue) {
         const preservedValue = { ...currentValue, ttl: loadedValue.ttl };
         data.value = preservedValue;
-        emit("loaded", preservedValue);
+        syncCountdownTtl(loadedValue.ttl);
+        if (notifyParent) emit("loaded", preservedValue);
       }
       return false;
     }
@@ -1062,7 +1092,8 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
     searchLoading.value = false;
     resetValueSearch();
     data.value = loadedValue;
-    emit("loaded", loadedValue);
+    syncCountdownTtl(loadedValue.ttl);
+    if (notifyParent) emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
     collectionItems.value = redisValueCollectionItems(loadedValue);
     replaceStreamEntries(loadedValue);
@@ -1100,10 +1131,8 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
     throw error;
   } finally {
     if (requestId === loadRequestId) {
-      loading.value = false;
-      if (autoRefreshEnabled.value && data.value) {
-        startAutoRefresh();
-      }
+      if (!background) loading.value = false;
+      if (!background && data.value) startRefreshTimers();
     }
   }
 }
@@ -1613,7 +1642,7 @@ function requestZsetRemove(member: string | null) {
 // TTL
 function currentEditableTtl(): number {
   if (!data.value) return -1;
-  return computeTtlForExpiryEdit(autoRefreshEnabled.value, countdownTtl.value, data.value.ttl);
+  return computeTtlForExpiryEdit(countdownTtl.value, data.value.ttl);
 }
 
 function expiryValidationMessage(reason: "ttl" | "date" | "past"): string {
@@ -1956,17 +1985,17 @@ onMounted(() => {
 });
 onActivated(() => {
   redisValueViewerIsActive = true;
-  startAutoRefresh();
+  startRefreshTimers();
 });
 onDeactivated(() => {
   redisValueViewerIsActive = false;
-  stopAutoRefresh();
+  stopRefreshTimers();
 });
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleValueViewerPointerDown, true);
   document.removeEventListener("visibilitychange", handleDocumentVisibilityChange);
   redisValueViewerIsActive = false;
-  stopAutoRefresh();
+  stopRefreshTimers();
   stopResizeHashColumns();
   stopResizeZsetColumns();
   if (hashSearchTimer) clearTimeout(hashSearchTimer);
@@ -2001,39 +2030,40 @@ defineExpose({ focusSearch });
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <DropdownMenu>
-            <DropdownMenuTrigger as-child>
-              <Button
-                data-redis-value-refresh
-                variant="ghost"
-                size="icon"
-                class="h-7 w-7 shrink-0 animate-none"
-                :class="autoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : ''"
-                :title="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('grid.refresh')"
-                :aria-label="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('grid.refresh')"
-                :aria-pressed="autoRefreshEnabled"
-                ><RefreshCw class="h-3.5 w-3.5 animate-none"
-              /></Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" class="w-40">
-              <DropdownMenuItem class="gap-2" :disabled="hasUnsavedRedisDraft" @select="refreshValueAndStreamGroups">
-                <RefreshCw class="h-3.5 w-3.5" />
-                {{ t("grid.refresh") }}
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>{{ t("redis.autoRefresh") }}</DropdownMenuLabel>
-              <DropdownMenuItem class="gap-2" @select="disableAutoRefresh">
-                <Check v-if="!autoRefreshEnabled" class="h-3.5 w-3.5" />
-                <span v-else class="h-3.5 w-3.5" />
-                {{ t("serverDashboard.off") }}
-              </DropdownMenuItem>
-              <DropdownMenuItem v-for="interval in REDIS_AUTO_REFRESH_INTERVAL_OPTIONS" :key="interval" class="gap-2" @select="selectAutoRefreshInterval(interval)">
-                <Check v-if="autoRefreshEnabled && autoRefreshIntervalSeconds === interval" class="h-3.5 w-3.5" />
-                <span v-else class="h-3.5 w-3.5" />
-                {{ interval }}s
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <div class="flex h-7 shrink-0 overflow-hidden rounded-md border">
+            <Button data-redis-value-refresh variant="ghost" size="icon" class="h-7 w-7 rounded-none animate-none" :disabled="loading || refreshingValue || hasUnsavedRedisDraft" :title="t('grid.refresh')" :aria-label="t('grid.refresh')" @click="refreshValueAndStreamGroups">
+              <RefreshCw class="h-3.5 w-3.5 animate-none" />
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger as-child>
+                <Button
+                  data-redis-auto-refresh-menu
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-5 rounded-none border-l px-0"
+                  :class="autoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : ''"
+                  :title="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
+                  :aria-label="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
+                >
+                  <ChevronDown class="h-3 w-3" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="w-40">
+                <DropdownMenuLabel>{{ t("redis.autoRefresh") }}</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem class="gap-2" @select="disableAutoRefresh">
+                  <Check v-if="!autoRefreshEnabled" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ t("serverDashboard.off") }}
+                </DropdownMenuItem>
+                <DropdownMenuItem v-for="interval in REDIS_AUTO_REFRESH_INTERVAL_OPTIONS" :key="interval" class="gap-2" @select="selectAutoRefreshInterval(interval)">
+                  <Check v-if="autoRefreshEnabled && autoRefreshIntervalSeconds === interval" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ interval }}s
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
@@ -2044,7 +2074,7 @@ defineExpose({ focusSearch });
           <Badge v-if="metadataSizeLabel" variant="outline" class="text-xs text-muted-foreground"> {{ t("redis.columnSize") }}: {{ metadataSizeLabel }} </Badge>
           <template v-if="!editingTtl">
             <Badge v-if="data.ttl > 0" as="button" type="button" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50" :disabled="savingTtl" :aria-label="t('redis.expiry')" @click="startEditTtl">
-              TTL: {{ formatTtl(computeDisplayTtl(autoRefreshEnabled, countdownTtl, data.ttl), t) }}
+              TTL: {{ formatTtl(computeDisplayTtl(countdownTtl, data.ttl), t) }}
             </Badge>
             <Badge v-else-if="data.ttl === -1" as="button" type="button" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50" :disabled="savingTtl" :aria-label="t('redis.expiry')" @click="startEditTtl">
               {{ t("redis.noExpiry") }}

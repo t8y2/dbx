@@ -123,6 +123,26 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(input.selectionEnd).toBe(20);
   });
 
+  it("starts without an active suggestion and selects the first item on ArrowDown", async () => {
+    const { value, input } = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
+    input.focus();
+    input.value = "na";
+    input.setSelectionRange(2, 2);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    expect(document.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
+    expect(value.value).toBe("na");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("name");
+  });
+
   it("keeps expanded input first-line indent and wraps long tokens", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;

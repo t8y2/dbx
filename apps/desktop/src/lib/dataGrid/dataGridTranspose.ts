@@ -11,6 +11,8 @@ export interface BuildTransposeRowsOptions<T> {
   columns: string[];
   records: T[][];
   typeByColumn?: Map<string, string>;
+  types?: readonly (string | undefined)[];
+  comments?: readonly (string | undefined)[];
   displayValue: (value: T, column: string, columnIndex: number, recordIndex: number) => string;
 }
 
@@ -29,6 +31,7 @@ export interface DataGridTransposeRow<T> {
   id: string;
   column: string;
   type: string;
+  comment?: string;
   values: Array<DataGridTransposeCell<T>>;
 }
 
@@ -36,6 +39,7 @@ export interface DataGridVisibleTransposeRow<T> {
   id: string;
   column: string;
   type: string;
+  comment?: string;
   values: Array<DataGridVisibleTransposeCell<T>>;
 }
 
@@ -228,7 +232,8 @@ export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Ar
     return {
       id: `${columnIndex}:${column}`,
       column,
-      type: options.typeByColumn?.get(column) || "",
+      type: options.types?.[columnIndex] || options.typeByColumn?.get(column) || "",
+      ...(options.comments ? { comment: options.comments[columnIndex] || "" } : {}),
       values: options.records.map((record, recordIndex) => {
         const value = record[columnIndex] as T;
         return {
@@ -246,7 +251,8 @@ export function buildVisibleTransposeRows<T>(options: BuildVisibleTransposeRowsO
     return {
       id: `${columnIndex}:${column}`,
       column,
-      type: options.typeByColumn?.get(column) || "",
+      type: options.types?.[columnIndex] || options.typeByColumn?.get(column) || "",
+      ...(options.comments ? { comment: options.comments[columnIndex] || "" } : {}),
       values: options.recordIndexes.flatMap((recordIndex) => {
         const record = options.records[recordIndex];
         if (!record) return [];

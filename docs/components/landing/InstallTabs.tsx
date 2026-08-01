@@ -51,6 +51,17 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
     setPlatformId(detectPlatformId());
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [open]);
+
   const primary = useMemo(() => options.find((o) => o.id === platformId) ?? options[0], [options, platformId]);
   const menuOptions = useMemo(() => options.filter((o) => o.id !== platformId), [options, platformId]);
 
@@ -63,32 +74,35 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
           setOpen(false);
         }
       }}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
     >
-      <a
-        aria-controls="landing-install-menu"
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        className="landing-install-trigger grid grid-cols-[auto_minmax(0,1fr)_auto] gap-4 items-center w-[min(340px,calc(100vw-48px))] min-h-[68px] border-0 rounded-full mx-auto px-6 cursor-pointer"
-        href={primary.href}
-        onFocus={() => setOpen(true)}
-      >
-        <PlatformIcon id={primary.id} size={30} variant="dark" />
-        <span className="grid gap-0.5 min-w-0">
-          <strong className="overflow-hidden text-[15px] font-[780] leading-[1.2] truncate">{downloadLabel[lang]}</strong>
-          <small className="overflow-hidden text-xs font-[520] leading-tight truncate text-[color-mix(in_srgb,#0f172a_48%,#94a3b8)]">{primary.label}</small>
-        </span>
-        <ChevronDown size={18} />
-      </a>
+      <div className="landing-install-trigger grid grid-cols-[minmax(0,1fr)_52px] items-stretch w-[min(340px,calc(100vw-36px))] min-h-[68px] border-0 rounded-full mx-auto overflow-hidden">
+        <a className="landing-install-primary grid grid-cols-[auto_minmax(0,1fr)] gap-4 items-center min-w-0 px-6 max-[360px]:gap-3 max-[360px]:px-5" href={primary.href}>
+          <PlatformIcon id={primary.id} size={30} variant="dark" />
+          <span className="grid gap-0.5 min-w-0 text-left">
+            <strong className="overflow-hidden text-[15px] font-[780] leading-[1.2] truncate">{downloadLabel[lang]}</strong>
+            <small className="overflow-hidden text-xs font-[520] leading-tight truncate text-[color-mix(in_srgb,#0f172a_48%,#94a3b8)]">{primary.label}</small>
+          </span>
+        </a>
+        <button
+          type="button"
+          aria-controls="landing-install-menu"
+          aria-expanded={open}
+          aria-haspopup="menu"
+          aria-label={lang === "cn" ? "显示其他下载选项" : "Show other download options"}
+          className="landing-install-toggle grid place-items-center border-0 border-l border-l-[rgba(15,23,42,0.12)] bg-transparent text-[#5f6876] cursor-pointer"
+          onClick={() => setOpen((current) => !current)}
+        >
+          <ChevronDown size={18} />
+        </button>
+      </div>
       <div
         className="landing-install-menu absolute z-30 top-[calc(100%+12px)] left-1/2 -translate-x-1/2 grid w-[min(300px,calc(100vw-48px))] border border-[rgba(155,176,205,0.17)] rounded-xl py-1.5"
         id="landing-install-menu"
-        role="listbox"
+        role="menu"
         aria-label={lang === "cn" ? "下载选项" : "Download options"}
       >
         {menuOptions.map((item) => (
-          <a aria-selected="false" className="landing-install-option grid grid-cols-[24px_minmax(0,1fr)_18px] gap-3 items-center min-w-0 border-0 px-[18px] py-3 bg-transparent text-left cursor-pointer" href={item.href} key={item.id} role="option">
+          <a className="landing-install-option grid grid-cols-[24px_minmax(0,1fr)_18px] gap-3 items-center min-h-11 min-w-0 border-0 px-[18px] py-3 bg-transparent text-left cursor-pointer" href={item.href} key={item.id} role="menuitem">
             <PlatformIcon id={item.id} size={20} variant="light" />
             <strong className="overflow-hidden text-sm font-[640] leading-[1.2] truncate">{item.label}</strong>
             <Download size={15} aria-hidden="true" />

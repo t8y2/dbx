@@ -1,6 +1,6 @@
 ---
 title: MCP Integration
-description: Let AI coding agents query your databases through the Model Context Protocol.
+description: Let AI coding agents read metadata, query data, and use stateful sessions within DBX-managed Model Context Protocol policy.
 ---
 
 <Callout type="info">Connect your AI assistant to DBX and let it inspect schemas, query data, and open results in DBX.</Callout>
@@ -68,7 +68,7 @@ AI agent → DBX MCP → your database → results
 
 ## Tools
 
-DBX MCP currently provides 10 tools:
+DBX MCP currently provides 12 tools:
 
 | Tool | Description |
 | --- | --- |
@@ -79,17 +79,32 @@ DBX MCP currently provides 10 tools:
 | `dbx_describe_table` | Return columns and table metadata |
 | `dbx_get_schema_context` | Return compact schema context for an AI model |
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
+| `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
 
+## Stateful Query Sessions
+
+Regular `dbx_execute_query` calls are independent. When a workflow must preserve database session state, call `dbx_open_session` first and pass its returned `sessionId` to later `dbx_execute_query` calls. Typical uses include:
+
+- `USE` or database-context changes
+- Temporary tables
+- Session variables and settings
+- Explicit transactions or multi-step diagnostics that require one connection
+
+Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes, and the server allows at most 32 concurrent sessions.
+
+<Callout type="warn">A stateful session does not widen SQL policy. `USE` is meaningful only inside a session, while writes, DDL, production protection, connection read-only state, and database privileges are rechecked for every request.</Callout>
+
 ## Database Access
 
 ### Local connections
 
-MCP uses the connections saved in DBX. DBX does not need to remain open for database queries.
+MCP uses the connections saved in DBX. Connections that execute natively do not require the Desktop app to stay open; bridge-backed or installed Agent/driver paths still depend on their runtime.
 
 Common local paths include:
 
@@ -101,7 +116,7 @@ Common local paths include:
 
 Set `DBX_DATA_DIR` to the directory containing `dbx.db`. Do not set it to the file itself.
 
-PostgreSQL, MySQL, SQLite, compatible SQL databases, standalone Redis, and MongoDB can be queried locally. Some SSH, cluster, vendor-specific, and Agent/JDBC connections require their DBX components to be installed.
+Native SQL, standalone Redis, and MongoDB paths can execute directly through MCP. SSH, cluster, vendor-specific, external-driver, and Agent/JDBC availability depends on the connection configuration and installed DBX components. Do not assume that every database supported by the DBX product is bundled into the standalone MCP binary.
 
 DuckDB uses the standalone DBX DuckDB driver. Install it from **DBX Driver Manager** before querying a DuckDB connection through local MCP. The MCP binary includes the sidecar client but does not bundle the DuckDB engine.
 
@@ -117,7 +132,7 @@ DBX Web and Docker require the same standalone DuckDB driver. Install it from Dr
 
 ### Desktop UI tools
 
-`dbx_open_table` and `dbx_execute_and_show` require the DBX desktop app to be running. Other query tools can run while DBX is closed.
+`dbx_open_table` and `dbx_execute_and_show` require the DBX desktop app and are unavailable in Web mode or when scoped policy hides UI tools. Whether other tools need Desktop depends on whether the connection uses native execution or a bridge/Agent path.
 
 ## Safety and Environment Variables
 

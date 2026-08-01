@@ -9,6 +9,6 @@ describe("DataGrid native clipboard regions", () => {
   });
 
   it("keeps transposed field-name text selection out of grid copy shortcuts", () => {
-    expect(dataGridSource).toMatch(/<div\b(?=[^>]*\bdata-native-clipboard)(?=[^>]*:title="item\.column")[^>]*>/);
+    expect(dataGridSource).toMatch(/<div\b(?=[^>]*\bdata-native-clipboard)(?=[^>]*class="sticky left-0)[^>]*>/);
   });
 });

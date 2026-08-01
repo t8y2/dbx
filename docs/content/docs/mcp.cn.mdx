@@ -1,6 +1,6 @@
 ---
 title: MCP 集成
-description: 通过 Model Context Protocol 让 AI 编程助手查询你的数据库。
+description: 通过 Model Context Protocol 让 AI 编程助手在 DBX 权限策略内读取元数据、查询数据和使用有状态会话。
 ---
 
 <Callout type="info">把 AI 助手连接到 DBX，即可查看数据库结构、查询数据，并在 DBX 中打开结果。</Callout>
@@ -68,7 +68,7 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
 
 ## 工具列表
 
-DBX MCP 当前提供 10 个工具：
+DBX MCP 当前提供 12 个工具：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -79,17 +79,32 @@ DBX MCP 当前提供 10 个工具：
 | `dbx_describe_table` | 返回列定义和表元数据 |
 | `dbx_get_schema_context` | 返回适合 AI 使用的紧凑 Schema 上下文 |
 | `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，最多返回 100 行 |
+| `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
+| `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
 
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
 
+## 有状态查询会话
+
+普通 `dbx_execute_query` 调用彼此独立。需要保持数据库 Session 状态时，先调用 `dbx_open_session`，再把返回的 `sessionId` 传给后续 `dbx_execute_query`：
+
+- `USE` 或数据库上下文切换
+- 临时表
+- Session 变量和设置
+- 需要固定连接的显式事务或多步诊断
+
+会话只支持 SQL 连接，并固定到一个连接和数据库。未知、已关闭或过期的 `sessionId` 会失败，不会静默退化为普通查询。完成后应调用 `dbx_close_session`；空闲 30 分钟的会话会被回收，同时最多允许 32 个并发会话。
+
+<Callout type="warn">有状态会话不会放宽 SQL 策略。`USE` 只有在会话中才有意义，但写入、DDL、生产保护、连接只读和数据库权限仍按每次请求重新检查。</Callout>
+
 ## 数据库访问
 
 ### 本地连接
 
-这是默认模式。MCP 使用 DBX 中保存的连接配置。执行数据库查询时不要求 DBX 桌面端保持运行。
+这是默认模式。MCP 使用 DBX 中保存的连接配置。原生可执行的连接不要求 DBX 桌面端保持运行；需要 Desktop bridge 或已安装 Agent/驱动的连接仍依赖对应运行时。
 
 常见的本地数据库文件路径：
 
@@ -101,7 +116,7 @@ DBX MCP 当前提供 10 个工具：
 
 `DBX_DATA_DIR` 必须指向包含 `dbx.db` 的目录，而不是数据库文件本身。Windows 便携版通常是 `DBX.exe` 同级的 `data` 目录。
 
-PostgreSQL、MySQL、SQLite、兼容 SQL 数据库、独立 Redis 和 MongoDB 可以直接查询。部分 SSH、集群、厂商专用以及 Agent/JDBC 连接需要先安装对应的 DBX 组件。
+原生 SQL、独立 Redis 和 MongoDB 等路径可以由 MCP 直接执行。SSH、集群、厂商专用、外部驱动以及 Agent/JDBC 连接是否可用，取决于连接配置和本机已安装的 DBX 组件；不要从“DBX 支持该数据库”推断 MCP 原生包已经内置全部运行时。
 
 DuckDB 使用独立的 DBX DuckDB 驱动。通过本地 MCP 查询 DuckDB 前，需要先在 **DBX Driver Manager** 中安装该驱动。MCP 二进制只包含 sidecar 客户端，不会内置 DuckDB 引擎。
 
@@ -117,7 +132,7 @@ DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 D
 
 ### 桌面 UI 工具
 
-`dbx_open_table` 和 `dbx_execute_and_show` 要求 DBX 桌面端正在运行。其他查询工具可以在 DBX 关闭时使用。
+`dbx_open_table` 和 `dbx_execute_and_show` 要求 DBX 桌面端正在运行，并且在 Web 模式或连接作用域隐藏 UI 工具时不可用。其他工具是否需要 Desktop 取决于该连接是原生执行还是 bridge/Agent 路径。
 
 ## 安全和环境变量
 

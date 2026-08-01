@@ -67,6 +67,8 @@
 html {
   background: var(--color-fd-background);
   color-scheme: light;
+  overflow-x: clip;
+  scroll-padding-top: 84px;
 }
 
 .dark {
@@ -76,7 +78,13 @@ html {
 body {
   min-height: 100vh;
   background: var(--color-fd-background);
+  overflow-x: clip;
   text-rendering: optimizeLegibility;
+}
+
+a,
+button {
+  -webkit-tap-highlight-color: transparent;
 }
 
 .dark body {
@@ -446,17 +454,95 @@ a {
   opacity: 1;
 }
 
+.landing-nav.is-menu-open {
+  border-bottom-color: var(--color-landing-line);
+  background: rgba(8, 12, 20, 0.94);
+}
+
+.landing-nav.is-menu-open::before {
+  opacity: 1;
+}
+
 .landing-nav-link {
-  transition:
-    background 0.16s ease,
-    color 0.16s ease,
-    transform 0.16s ease;
+  transition: color 0.16s ease;
 }
 
 .landing-nav-link:hover {
+  background: transparent;
+  color: var(--color-landing-ink);
+}
+
+.landing-mobile-menu {
+  position: fixed;
+  inset: 60px 0 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.landing-mobile-menu[data-open="true"] {
+  pointer-events: auto;
+  visibility: visible;
+}
+
+.landing-mobile-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  z-index: 0;
+  background: rgba(2, 6, 12, 0.82);
+  opacity: 0;
+  backdrop-filter: blur(8px);
+  transition: opacity 0.2s ease;
+}
+
+.landing-mobile-menu-panel {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  max-height: calc(100dvh - 76px);
+  margin: 0 12px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--color-landing-line);
+  border-radius: 0 0 16px 16px;
+  z-index: 1;
+  background: #0b1120;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.44);
+  opacity: 0;
+  transform: translateY(-12px);
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+
+.landing-mobile-menu[data-open="true"] .landing-mobile-menu-backdrop,
+.landing-mobile-menu[data-open="true"] .landing-mobile-menu-panel {
+  opacity: 1;
+}
+
+.landing-mobile-menu[data-open="true"] .landing-mobile-menu-panel {
+  transform: translateY(0);
+}
+
+.landing-mobile-menu-link {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border-radius: 9px;
+  padding: 0 14px;
+  color: var(--color-landing-muted);
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.landing-mobile-menu-link:hover,
+.landing-mobile-menu-link:focus-visible,
+.landing-mobile-menu-link[aria-current="page"] {
   background: var(--color-landing-soft);
   color: var(--color-landing-ink);
-  transform: translateY(-1px);
+  outline: none;
 }
 
 /* Hero */
@@ -591,17 +677,22 @@ a {
     0 0 0 1px rgba(255, 255, 255, 0.78) inset;
 }
 
-.landing-install-trigger > svg:first-child {
-  fill: currentColor;
-  stroke-width: 0;
+.landing-install-primary,
+.landing-install-toggle {
+  color: inherit;
 }
 
-.landing-install-trigger > svg:last-child {
-  color: #5f6876;
+.landing-install-primary:focus-visible,
+.landing-install-toggle:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: -3px;
+}
+
+.landing-install-toggle svg {
   transition: transform 0.16s ease;
 }
 
-.landing-install[data-open="true"] .landing-install-trigger > svg:last-child {
+.landing-install[data-open="true"] .landing-install-toggle svg {
   transform: rotate(180deg);
 }
 
@@ -615,12 +706,10 @@ a {
   pointer-events: none;
   transition:
     opacity 0.16s ease,
-    transform 0.16s ease,
-    visibility 0.16s ease;
+    transform 0.16s ease;
   visibility: hidden;
 }
 
-.landing-install:hover .landing-install-menu,
 .landing-install[data-open="true"] .landing-install-menu {
   opacity: 1;
   pointer-events: auto;
@@ -707,18 +796,36 @@ a {
   backdrop-filter: blur(16px);
 }
 
-.landing-product-dots button {
-  background: rgba(226, 232, 240, 0.38);
+.landing-product-dot {
+  position: relative;
+  background: transparent;
   color: transparent;
+}
+
+.landing-product-dot::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.38);
+  transform: translate(-50%, -50%);
   transition:
     width 0.2s ease,
     background 0.2s ease,
     opacity 0.2s ease;
 }
 
-.landing-product-dots button[aria-current="true"] {
-  width: 28px;
+.landing-product-dot[aria-current="true"]::before {
+  width: 22px;
   background: color-mix(in srgb, var(--color-landing-sky) 84%, white);
+}
+
+.landing-product-dot:focus-visible {
+  outline: 2px solid var(--color-landing-sky);
+  outline-offset: -2px;
 }
 
 .landing-product-dots span {
@@ -751,6 +858,7 @@ a {
 /* Inline link */
 
 .landing-inline-link {
+  min-height: 28px;
   color: var(--color-landing-blue);
   transition:
     color 0.16s ease,
@@ -986,6 +1094,14 @@ a {
   transform: translateY(-1px);
 }
 
+.changelog-release-summary {
+  display: none;
+}
+
+.changelog-release > .changelog-release-body {
+  display: block !important;
+}
+
 /* Responsive */
 
 @media (max-width: 1040px) {
@@ -1003,8 +1119,13 @@ a {
 }
 
 @media (max-width: 760px) {
+  .landing-nav-inner {
+    padding-right: max(14px, env(safe-area-inset-right));
+    padding-left: max(14px, env(safe-area-inset-left));
+  }
+
   .landing-hero {
-    padding-top: 104px;
+    padding-top: 96px;
     min-height: 0;
   }
 
@@ -1020,20 +1141,23 @@ a {
 
   .aceternity-spotlight {
     inset: -18% auto auto 50%;
-    width: 96vw;
+    width: min(96vw, 680px);
   }
 
-  .landing-product-dots {
-    right: 12px;
-    bottom: 11px;
+  .landing-product:hover {
+    transform: none;
   }
 
   .landing-workflow-card {
-    border-right: 0;
+    border-right: 1px solid var(--color-landing-line);
     border-bottom: 1px solid var(--color-landing-line);
   }
 
-  .landing-workflow-card:last-child {
+  .landing-workflow-card:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .landing-workflow-card:nth-last-child(-n + 2) {
     border-bottom: 0;
   }
 
@@ -1044,16 +1168,122 @@ a {
 
   .landing-testimonial-wall::before,
   .landing-testimonial-wall::after {
-    width: 46px;
+    width: 22px;
+  }
+
+  .landing-testimonial-marquee {
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scroll-snap-type: inline mandatory;
+    scrollbar-width: none;
+  }
+
+  .landing-testimonial-marquee::-webkit-scrollbar,
+  .landing-sponsor-grid::-webkit-scrollbar {
+    display: none;
+  }
+
+  .landing-testimonial-track {
+    animation: none;
+  }
+
+  .landing-testimonial-card {
+    scroll-snap-align: center;
   }
 
   .landing-contributor-grid {
-    gap: 8px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, 32px);
+    gap: 5px;
+    justify-content: center;
   }
 
   .landing-contributor-avatar {
-    width: 46px;
-    height: 46px;
+    width: 32px;
+    height: 32px;
+    border-width: 1px;
+    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
+  }
+
+  .landing-contributor-avatar:nth-child(n + 73),
+  .landing-database-grid[data-expanded="false"] > :nth-child(n + 25) {
+    display: none;
+  }
+
+  .landing-contributor-tooltip {
+    display: none;
+  }
+
+  .landing-sponsor-grid {
+    display: flex;
+    gap: 12px;
+    margin-right: -18px;
+    margin-left: -18px;
+    padding-right: 18px;
+    padding-left: 18px;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scroll-padding-inline: 18px;
+    scroll-snap-type: inline mandatory;
+    scrollbar-width: none;
+  }
+
+  .landing-sponsor-card {
+    flex: 0 0 min(84vw, 330px);
+    scroll-snap-align: center;
+  }
+
+  .landing-final-link {
+    min-height: 44px;
+  }
+
+  .landing-database-toggle:focus-visible {
+    outline: 2px solid var(--color-landing-sky);
+    outline-offset: 2px;
+  }
+
+  .changelog-release-summary {
+    display: flex;
+  }
+
+  .changelog-release:not([open]) > .changelog-release-body {
+    display: none !important;
+  }
+
+  .changelog-release[open] .changelog-release-chevron {
+    transform: rotate(180deg);
+  }
+
+  .changelog-release-chevron {
+    transition: transform 0.18s ease;
+  }
+}
+
+@media (max-width: 360px) {
+  .landing-workflow-card,
+  .landing-workflow-card:nth-child(2n) {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-landing-line);
+  }
+
+  .landing-workflow-card:nth-last-child(-n + 2) {
+    border-bottom: 1px solid var(--color-landing-line);
+  }
+
+  .landing-workflow-card:last-child {
+    border-bottom: 0;
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .landing-nav-link:hover,
+  .landing-inline-link:hover,
+  .landing-workflow-card:hover,
+  .landing-db-card:hover,
+  .landing-capability:hover,
+  .landing-final-link:hover,
+  .landing-contributor-avatar:hover {
+    transform: none;
   }
 }
 

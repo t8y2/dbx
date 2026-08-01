@@ -1,11 +1,13 @@
 ---
-title: Cloud Sync and Backup
+title: DBX Configuration Cloud Sync
 description: Sync DBX connections, settings, and saved SQL with WebDAV, GitHub Gist, or Gitee snippets.
 ---
 
 <Callout type="info">
 DBX can package connections, application settings, and saved SQL into a snapshot, upload it to WebDAV or a private code snippet, and restore it on another device.
 </Callout>
+
+<Callout type="warn">Cloud Sync backs up DBX configuration. It does not read or back up the business databases behind your connections. Use [Database Export](/en/docs/database-export) for schema and data, or [Database Backup](/en/docs/database-backup) for scheduled Desktop MySQL/PostgreSQL backups.</Callout>
 
 Choose a provider under **Settings → Sync**:
 

@@ -1,56 +1,102 @@
 ---
 title: Object Browser
-description: Browse views, procedures, functions, and other database objects beyond tables and schemas.
+description: Use list or grid views to inspect database objects, statistics, source, and bulk actions.
 ---
 
-The Object Browser extends the sidebar beyond tables and collections. It surfaces database objects that are often hidden or require separate queries to inspect.
+The object browser collects objects from the active database or schema into one searchable list or grid. It is useful when a database contains many objects, when filtering by type or metadata matters, or when several objects need the same operation.
 
-## What the Object Browser Shows
+## When to Use It
 
-| Object Type | Information Shown                          |
-| ----------- | ------------------------------------------ |
-| Views       | View definition (DDL), column list, schema |
-| Procedures  | Source code, parameters, language          |
-| Functions   | Return type, parameters, source code       |
-| Triggers    | Timing, event, table, source               |
-| Routines    | Combined view of procedures and functions  |
+- View many tables, views, procedures, functions, sequences, and other objects on one page
+- Filter by name, type, schema, comment, or available statistics
+- Compare table size, row count, creation/update time, and other driver-provided metadata
+- Multi-select objects for open, copy, export, drop, or other bulk actions
+- Inspect DDL or source without expanding a deep object tree
 
-<Callout type="info">Object Browser availability depends on the database engine and its metadata support. Not all databases expose source code or routine metadata through standard SQL.</Callout>
+## Open the Browser
 
-## Opening the Object Browser
+Open **Object Browser** from a connection, database, or schema context menu. DBX derives the catalog, database, and schema scope from the selected node.
 
-Open the Object Browser from the sidebar:
+The browser can open as a main tab or a side panel. The side panel is useful when you want to inspect objects while keeping the current query or data tab visible.
 
-- **Double-click** a database or schema node to open its Object Browser
-- Right-click and choose **Object Browser** from the context menu
-- Use the **View DDL** action on any object to see its source definition
+## Views and Filters
 
-## View DDL
+| Feature | Behavior |
+| --- | --- |
+| List view | Best for name, type, schema, comment, row count, size, and related columns |
+| Grid view | Best for scanning object cards and key summaries |
+| Object-type filter | Prioritizes tables by default and can switch to views, routines, and other types |
+| Search | Filters by object name, schema, type, and selected metadata |
+| Column controls | Resize and show columns; viewport state can be retained |
 
-The **View DDL** action shows the complete `CREATE` statement for a view, procedure, or function:
+Statistics appear only when the driver can retrieve them reliably. Row counts and sizes can add cost in large databases, so disable unneeded statistics when necessary.
 
-- Displayed in a read-only SQL viewer with syntax highlighting
-- Copy the DDL to use in migration scripts or documentation
-- Compare definitions between environments
+## Object Actions
 
-## Editing Object Source
+Click or double-click an object to open a type-appropriate view:
 
-For databases that support `CREATE OR REPLACE` semantics, you can edit object source directly:
+- Table or view data
+- Table structure, columns, indexes, foreign keys, triggers, and DDL
+- Source for views, procedures, functions, triggers, and other objects
+- Database-specific administration interfaces
 
-- Procedures and functions can be edited and saved
-- DBX generates the appropriate `CREATE OR REPLACE` or `ALTER` statement
-- Review the generated SQL before applying changes
+Context menus can also provide:
 
-<Callout type="warn">Editing database objects in place may affect running applications. Verify the object's usage before saving changes, especially on production databases.</Callout>
+- Copy name, qualified name, or DDL
+- Generate query SQL
+- Import, export, transfer, and schema entry points
+- Open ER diagram, field lineage, or schema diff
+- Rename, truncate, drop, or administer the object
 
-## Object Timestamps
+Available actions depend on database capabilities, connection read-only state, and account privileges.
 
-When the database provides it, the Object Browser shows object metadata timestamps:
+## Multi-Select and Bulk Actions
 
-- Creation time
-- Last modification time
-- Useful for tracking recent changes or finding stale objects
+Use checkboxes to select multiple objects. Depending on the database, bulk actions can include:
 
-## Feature Boundaries
+- Open or copy multiple object names
+- Export or generate SQL in bulk
+- Drop, empty, or truncate selected tables
+- Drop selected indexes
+- Use cascade-aware batch actions for PostgreSQL and similar databases
 
-Object source editing is supported for databases that allow programmatic source replacement. Read-only databases, certain legacy versions, and some cloud database services may not expose editable object source. In those cases, use the Object Browser for inspection and copy the DDL for manual execution.
+<Callout type="warn">Bulk drop, empty, and truncate operations can affect many objects. In production, verify selection, generated SQL, backups, and dependencies first.</Callout>
+
+## DDL and Source
+
+- **View DDL** prefers definitions returned by the database or driver
+- **Object source** covers views, procedures, functions, triggers, and other editable objects
+- Source views support search and can open in the editor when the database and object allow it
+- Saving source or executing DDL passes through read-only, production, and dangerous-operation checks
+
+DBX shows the definition available from the active driver. Formatting, privileges/comments/storage properties, and direct edit support vary by database.
+
+## Object Tree vs. Object Browser
+
+| Object tree | Object browser |
+| --- | --- |
+| Best for hierarchy, pins, and frequent navigation | Best for filtering and comparing many peer objects |
+| Expands columns and child nodes | Uses columns, cards, and a side panel for summaries |
+| Emphasizes context menus and drag-and-drop | Emphasizes search, multi-select, and bulk actions |
+
+Both surfaces share object identity and metadata. Open an object from the browser, then reveal the same node in the object tree when needed.
+
+## Boundaries
+
+- Object types and statistic columns vary by database
+- Row counts and sizes may be estimates or cached values
+- System-object visibility depends on visible-schema and system-schema settings
+- Read-only connections can inspect objects, DDL, and source, but mutation entry points are disabled or rejected
+- Drivers may load large object sets in batches on first access
+
+<Cards>
+  <Card title="Object tree" href="/en/docs/schema-browser">
+    Use hierarchical navigation, pins, drag-and-drop, and database-specific context menus.
+  </Card>
+  <Card title="Table structure" href="/en/docs/table-structure">
+    Edit columns and indexes visually and review DDL.
+  </Card>
+  <Card title="Field lineage" href="/en/docs/field-lineage">
+    Trace relationships from foreign keys, views, and query history.
+  </Card>
+</Cards>

@@ -88,14 +88,16 @@ export default async function Page({ params }: { params: Promise<{ lang: string;
   };
 
   return (
-    <DocsPage toc={toc}>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }} />
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(articleJsonLd) }} />
-      <DocsTitle>{title}</DocsTitle>
-      <DocsBody>
-        <MDX components={mdxComponents} />
-      </DocsBody>
-    </DocsPage>
+    <main className="contents">
+      <DocsPage toc={toc}>
+        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }} />
+        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(articleJsonLd) }} />
+        <DocsTitle>{title}</DocsTitle>
+        <DocsBody>
+          <MDX components={mdxComponents} />
+        </DocsBody>
+      </DocsPage>
+    </main>
   );
 }
 

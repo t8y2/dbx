@@ -29,6 +29,15 @@ pub async fn list_database_storage(
 }
 
 #[tauri::command]
+pub async fn get_sqlserver_completion_context(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<db::sqlserver::SqlServerCompletionContext, String> {
+    dbx_core::schema::get_sqlserver_completion_context_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
 pub async fn list_doris_catalogs(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

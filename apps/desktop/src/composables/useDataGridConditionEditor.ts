@@ -264,7 +264,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       const limit = options.suggestionLimit ?? 8;
       suggestions.value = values ? [...new Set(values)].slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" })) : defaultSuggestions(target).slice(0, limit);
       replacementRange.value = { from: target.from, to: target.to };
-      highlightedIndex.value = suggestions.value.length > 0 ? 0 : -1;
+      highlightedIndex.value = -1;
     } catch (error) {
       if (!controller.signal.aborted && requestId === suggestionRequestId) {
         suggestions.value = [];
@@ -310,7 +310,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     const history = forgetDataGridConditionHistory(options.kind, toValue(options.historyScope), value);
     const query = options.value.value.trim().toLowerCase();
     suggestions.value = history.filter((item) => !query || item.toLowerCase().includes(query)).map((item) => ({ value: item, kind: "history" }));
-    highlightedIndex.value = suggestions.value.length > 0 ? Math.min(Math.max(highlightedIndex.value, 0), suggestions.value.length - 1) : -1;
+    highlightedIndex.value = suggestions.value.length > 0 && highlightedIndex.value >= 0 ? Math.min(highlightedIndex.value, suggestions.value.length - 1) : -1;
     historyOpen.value = true;
   }
 
@@ -328,7 +328,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     return true;
   }
 
-  function accept(index = highlightedIndex.value) {
+  function accept(index = highlightedIndex.value >= 0 ? highlightedIndex.value : 0) {
     const suggestion = suggestions.value[index];
     if (!suggestion) return false;
     let caret: number;

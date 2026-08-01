@@ -1425,7 +1425,6 @@ export default withEnglishFallback({
     truncatedHint: "{count}행 로드 후 결과가 잘렸습니다. 로드된 데이터를 탐색하려면 푸터 페이지 매김을 사용하세요. 전체 결과를 내보내면 데이터베이스 쿼리를 다시 실행합니다.",
   },
   exportProgress: {
-    xlsxRowLimit: "XLSX는 최대 {limit}개의 데이터 행을 지원합니다. 전체 결과는 CSV 내보내기를 사용하세요.",
     streamingUnsupported: "이 쿼리는 스트리밍 내보내기를 지원하지 않습니다. 쿼리를 단순화하거나 지원되는 드라이버를 사용하세요.",
     agentSessionMissing: "스트리밍 내보내기에는 결과 집합 세션이 필요하지, 이 드라이버는 session_id를 반환하지 않았습니다.",
     title: "테이블 데이터 내보내는 중",
@@ -1937,6 +1936,8 @@ export default withEnglishFallback({
     templateSelectorLoading: "불러오는 중...",
     templateSelectorEmpty: "템플릿이 없습니다. 추가하려면 관리를 클릭하세요.",
     templateSelectorTooLong: "선택한 템플릿이 전체 내용 한도를 초과합니다 ({max}자). 계속하려면 일부를 선택 해제하세요.",
+    exportMarkdown: "Markdown으로 내보내기",
+    analysis: "AI 분석",
   },
   contextMenu: {
     openConnection: "연결 열기",
@@ -2212,6 +2213,7 @@ export default withEnglishFallback({
     confirmDropSchemaMessage: '스키마 "{name}"을(를) 삭제하시겠습니까? 스키마와 모든 객체가 영구적으로 삭제됩니다.',
     createSchemaSuccess: '스키마 "{name}" 생성됨',
     dropSchemaSuccess: '스키마 "{name}" 삭제됨',
+    dropDamengSchemaRequiresDifferentDba: "현재 연결에서는 이 스키마를 안전하게 삭제할 수 없습니다. 다른 DBA 사용자로 연결한 후 다시 시도하세요.",
     createSchemaNamePlaceholder: "스키마 이름",
     editSchemaComment: "주석 편집",
     editSchemaCommentTitle: '주석 편집: "{name}"',

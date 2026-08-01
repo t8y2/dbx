@@ -4,6 +4,8 @@
   "license": "Apache-2.0",
   "scripts": {
     "dev": "next dev",
+    "content:check": "node scripts/verify-doc-content.mjs",
+    "prebuild": "node scripts/verify-doc-content.mjs",
     "build": "next build",
     "postbuild": "node scripts/generate-sitemap.mjs && node scripts/verify-static-export.mjs",
     "contributors:update": "node scripts/update-contributors.mjs",

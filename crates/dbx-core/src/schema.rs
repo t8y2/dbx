@@ -5835,7 +5835,7 @@ pub async fn get_table_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, false).await
 }
 
 pub async fn get_table_display_ddl_core(
@@ -5846,7 +5846,25 @@ pub async fn get_table_display_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true, true).await
+}
+
+/// Like [`get_table_ddl_core`] but normalises PostgreSQL type names for
+/// human-friendly display (e.g. `varchar` instead of `character varying`,
+/// `serial` instead of `bigint NOT NULL DEFAULT nextval(...)`).
+///
+/// Use this for **export** and other display-oriented paths.  For data transfer,
+/// use [`get_table_ddl_core`] which preserves raw `nextval()` defaults needed
+/// for sequence dependency management.
+pub async fn get_table_ddl_for_export_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, true).await
 }
 
 async fn get_table_ddl_core_with_options(
@@ -5857,6 +5875,7 @@ async fn get_table_ddl_core_with_options(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
     include_postgres_access: bool,
+    pretty_postgres_types: bool,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -5956,10 +5975,16 @@ async fn get_table_ddl_once(
             if let Some(config) = db_config.as_ref().filter(|config| is_agent_postgres_metadata_fallback_config(config))
             {
                 match native_postgres_metadata_pool(state, connection_id, database, config).await {
-                    Ok(Some(pool)) => match pg_ddl(&pool, schema, table).await {
-                        Ok(ddl) => return Ok(ddl),
-                        Err(error) => {
-                            log::warn!(
+                    Ok(Some(pool)) => {
+                        let result = if pretty_postgres_types {
+                            pg_ddl_pretty(&pool, schema, table).await
+                        } else {
+                            pg_ddl(&pool, schema, table).await
+                        };
+                        match result {
+                            Ok(ddl) => return Ok(ddl),
+                            Err(error) => {
+                                log::warn!(
                                 "[schema][agent:get_table_ddl:postgres-compatible-native-fallback-failed] connection_id={} database={} schema={} table={} error={}",
                                 connection_id,
                                 database,
@@ -5967,8 +5992,9 @@ async fn get_table_ddl_once(
                                 table,
                                 error
                             );
+                            }
                         }
-                    },
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         log::warn!(
@@ -6015,13 +6041,25 @@ async fn get_table_ddl_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_family_config) => {
             match opengauss_table_ddl(p, schema, table).await {
                 Ok(ddl) => Ok(ddl),
-                Err(_) => pg_ddl(p, schema, table).await,
+                Err(_) => {
+                    if pretty_postgres_types {
+                        pg_ddl_pretty(p, schema, table).await
+                    } else {
+                        pg_ddl(p, schema, table).await
+                    }
+                }
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
             match db::questdb::questdb_table_or_view_ddl(p, table).await {
                 Ok(ddl) => Ok(ddl),
-                Err(_) => pg_ddl(p, schema, table).await,
+                Err(_) => {
+                    if pretty_postgres_types {
+                        pg_ddl_pretty(p, schema, table).await
+                    } else {
+                        pg_ddl(p, schema, table).await
+                    }
+                }
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
@@ -6032,7 +6070,13 @@ async fn get_table_ddl_once(
         {
             pg_display_ddl(p, schema, table).await
         }
-        PoolKind::Postgres(p) => pg_ddl(p, schema, table).await,
+        PoolKind::Postgres(p) => {
+            if pretty_postgres_types {
+                pg_ddl_pretty(p, schema, table).await
+            } else {
+                pg_ddl(p, schema, table).await
+            }
+        }
         PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
         PoolKind::Turso(client) => db::turso_driver::table_ddl(client, table).await,
@@ -7853,6 +7897,105 @@ mod ddl_tests {
 
         assert_eq!(ensure_display_ddl_terminated(ddl.to_string()), ddl);
     }
+
+    #[test]
+    fn pg_pretty_type_normalises_canonical_names() {
+        assert_eq!(pg_pretty_type("character varying"), "varchar");
+        assert_eq!(pg_pretty_type("character varying(255)"), "varchar(255)");
+        assert_eq!(pg_pretty_type("character"), "char");
+        assert_eq!(pg_pretty_type("character(10)"), "char(10)");
+        assert_eq!(pg_pretty_type("timestamp without time zone"), "timestamp");
+        assert_eq!(pg_pretty_type("timestamp with time zone"), "timestamptz");
+        assert_eq!(pg_pretty_type("time without time zone"), "time");
+        assert_eq!(pg_pretty_type("time with time zone"), "timetz");
+        assert_eq!(pg_pretty_type("bit varying"), "varbit");
+        assert_eq!(pg_pretty_type("bit varying(5)"), "varbit(5)");
+        // Non-alias types are returned unchanged
+        assert_eq!(pg_pretty_type("integer"), "integer");
+        assert_eq!(pg_pretty_type("text"), "text");
+        assert_eq!(pg_pretty_type("numeric(10,2)"), "numeric(10,2)");
+    }
+
+    #[test]
+    fn pg_serial_type_detects_serial_columns() {
+        let mut col = column("id", "integer");
+        col.is_nullable = false;
+        col.column_default = Some("nextval('users_id_seq'::regclass)".to_string());
+        assert_eq!(pg_serial_type(&col), Some("serial"));
+
+        col.data_type = "bigint".to_string();
+        assert_eq!(pg_serial_type(&col), Some("bigserial"));
+
+        col.data_type = "smallint".to_string();
+        assert_eq!(pg_serial_type(&col), Some("smallserial"));
+
+        // Nullable column with nextval default is not a serial
+        col.is_nullable = true;
+        assert_eq!(pg_serial_type(&col), None);
+
+        // Non-nextval default is not a serial
+        col.is_nullable = false;
+        col.column_default = Some("'0'::integer".to_string());
+        assert_eq!(pg_serial_type(&col), None);
+
+        // No default is not a serial
+        col.column_default = None;
+        assert_eq!(pg_serial_type(&col), None);
+
+        // Non-integer type with nextval is not a serial
+        col.column_default = Some("nextval('s'::regclass)".to_string());
+        col.data_type = "text".to_string();
+        assert_eq!(pg_serial_type(&col), None);
+    }
+
+    #[test]
+    fn pg_pretty_default_normalises_type_casts() {
+        assert_eq!(pg_pretty_default("'guest'::character varying"), "'guest'::varchar");
+        assert_eq!(pg_pretty_default("'guest'::character varying(120)"), "'guest'::varchar(120)");
+        assert_eq!(pg_pretty_default("NULL::character varying"), "NULL::varchar");
+        // Non-cast defaults are unchanged
+        assert_eq!(pg_pretty_default("now()"), "now()");
+        assert_eq!(pg_pretty_default("true"), "true");
+    }
+
+    #[test]
+    fn pg_pretty_columns_collapses_serial_and_normalises_varchar() {
+        let mut id = column("id", "integer");
+        id.is_nullable = false;
+        id.column_default = Some("nextval('users_id_seq'::regclass)".to_string());
+
+        let mut name = column("name", "character varying(100)");
+        name.column_default = Some("'guest'::character varying".to_string());
+
+        let pretty = pg_pretty_columns(vec![id, name]);
+
+        assert_eq!(pretty[0].data_type, "serial");
+        assert_eq!(pretty[0].column_default, None);
+        assert!(pretty[0].is_nullable); // suppress NOT NULL in output
+
+        assert_eq!(pretty[1].data_type, "varchar(100)");
+        assert_eq!(pretty[1].column_default, Some("'guest'::varchar".to_string()));
+    }
+
+    #[test]
+    fn postgres_ddl_with_pretty_columns_shows_varchar_and_serial() {
+        let mut id = column("id", "integer");
+        id.is_nullable = false;
+        id.is_primary_key = true;
+        id.column_default = Some("nextval('users_id_seq'::regclass)".to_string());
+
+        let mut name = column("name", "character varying(255)");
+        name.is_nullable = false;
+
+        let pretty = pg_pretty_columns(vec![id, name]);
+        let ddl = render_postgres_table_ddl("public", "users", &pretty, &[], &[], None);
+
+        assert!(ddl.contains("\"id\" serial"), "expected serial in ddl: {ddl}");
+        assert!(!ddl.contains("nextval"), "nextval should be collapsed: {ddl}");
+        assert!(!ddl.contains("\"id\" serial NOT NULL"), "serial should not have explicit NOT NULL: {ddl}");
+        assert!(ddl.contains("\"name\" varchar(255)"), "expected varchar in ddl: {ddl}");
+        assert!(!ddl.contains("character varying"), "character varying should be normalised: {ddl}");
+    }
 }
 
 pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, database: &str, table: &str) -> Result<String, String> {
@@ -7929,6 +8072,24 @@ pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &s
 }
 
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    pg_ddl_with_options(pool, schema, table, false).await
+}
+
+/// Like [`pg_ddl`] but normalises canonical PostgreSQL type names to friendly
+/// aliases (e.g. `character varying` → `varchar`) and collapses serial columns
+/// back to `serial`/`bigserial`/`smallserial`.  Use this for **display and
+/// export** paths — NOT for data transfer, which depends on the raw `nextval()`
+/// defaults to manage sequence dependencies.
+pub async fn pg_ddl_pretty(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    pg_ddl_with_options(pool, schema, table, true).await
+}
+
+async fn pg_ddl_with_options(
+    pool: &deadpool_postgres::Pool,
+    schema: &str,
+    table: &str,
+    pretty: bool,
+) -> Result<String, String> {
     let (columns, indexes, fkeys, table_comment, partition_key, trigger_definitions) = tokio::try_join!(
         db::postgres::get_columns(pool, schema, table),
         db::postgres::list_indexes(pool, schema, table),
@@ -7937,6 +8098,8 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
         db::postgres::get_table_partition_key(pool, schema, table),
         db::postgres::list_trigger_definitions(pool, schema, table),
     )?;
+
+    let columns = if pretty { pg_pretty_columns(columns) } else { columns };
 
     Ok(append_postgres_trigger_definitions(
         render_postgres_table_ddl_with_partition_key(
@@ -7953,7 +8116,8 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
 }
 
 async fn pg_display_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (ddl, access) = tokio::join!(pg_ddl(pool, schema, table), db::postgres::get_table_access(pool, schema, table));
+    let (ddl, access) =
+        tokio::join!(pg_ddl_pretty(pool, schema, table), db::postgres::get_table_access(pool, schema, table));
     let ddl = ddl?;
     match access {
         Ok(access) => Ok(append_postgres_access_ddl(ddl, schema, table, &access)),
@@ -8228,6 +8392,98 @@ pub async fn cloudberry_ddl(pool: &deadpool_postgres::Pool, schema: &str, table:
             })
         }
     }
+}
+
+/// Normalise a single canonical PostgreSQL type base name to its friendly alias.
+fn pg_pretty_type_base(base: &str) -> &str {
+    let lower: String = base.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    match lower.as_str() {
+        "character varying" => "varchar",
+        "character" => "char",
+        "timestamp without time zone" => "timestamp",
+        "timestamp with time zone" => "timestamptz",
+        "time without time zone" => "time",
+        "time with time zone" => "timetz",
+        "bit varying" => "varbit",
+        _ => base,
+    }
+}
+
+/// Normalise canonical PostgreSQL type names to friendly aliases for DDL display.
+///
+/// PostgreSQL's `format_type()` returns canonical names like `character varying`
+/// instead of the familiar `varchar`.  This converts them back to the short forms
+/// that users typically write, preserving any parenthesised parameters.
+fn pg_pretty_type(data_type: &str) -> String {
+    let trimmed = data_type.trim();
+    let (base, rest) = match trimmed.find('(') {
+        Some(pos) => (&trimmed[..pos], &trimmed[pos..]),
+        None => (trimmed, ""),
+    };
+    let pretty_base = pg_pretty_type_base(base.trim());
+    format!("{pretty_base}{rest}")
+}
+
+/// Detect PostgreSQL serial pseudo-types from column metadata.
+///
+/// `serial`/`bigserial`/`smallserial` are syntactic sugar: the column is stored
+/// as `integer`/`bigint`/`smallint` with `NOT NULL` and a `nextval(...)` default.
+/// Returns the friendly serial type name when that pattern is detected.
+fn pg_serial_type(col: &db::ColumnInfo) -> Option<&'static str> {
+    let default = col.column_default.as_deref()?;
+    if !default.trim().to_ascii_lowercase().starts_with("nextval(") {
+        return None;
+    }
+    if col.is_nullable {
+        return None;
+    }
+    let base = col.data_type.split('(').next().unwrap_or(&col.data_type).trim().to_ascii_lowercase();
+    let base = base.split_whitespace().collect::<Vec<_>>().join(" ");
+    match base.as_str() {
+        "integer" | "int" | "int4" => Some("serial"),
+        "bigint" | "int8" => Some("bigserial"),
+        "smallint" | "int2" => Some("smallserial"),
+        _ => None,
+    }
+}
+
+/// Normalise type casts in PostgreSQL default values for display.
+///
+/// e.g. `'guest'::character varying` → `'guest'::varchar`
+fn pg_pretty_default(default: &str) -> String {
+    if let Some(pos) = default.rfind("::") {
+        let prefix = &default[..pos + 2];
+        let type_part = &default[pos + 2..];
+        let trimmed_type = type_part.trim();
+        let leading_space = &type_part[..type_part.len() - trimmed_type.len()];
+        let pretty = pg_pretty_type(trimmed_type);
+        format!("{prefix}{leading_space}{pretty}")
+    } else {
+        default.to_string()
+    }
+}
+
+/// Normalise column metadata for PostgreSQL DDL display:
+/// convert canonical type names to friendly aliases and collapse serial columns
+/// back to `serial`/`bigserial`/`smallserial`.
+fn pg_pretty_columns(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo> {
+    columns
+        .into_iter()
+        .map(|mut col| {
+            if let Some(serial) = pg_serial_type(&col) {
+                col.data_type = serial.to_string();
+                col.column_default = None;
+                // serial implies NOT NULL — suppress the explicit NOT NULL in output
+                col.is_nullable = true;
+            } else {
+                col.data_type = pg_pretty_type(&col.data_type);
+                if let Some(ref def) = col.column_default {
+                    col.column_default = Some(pg_pretty_default(def));
+                }
+            }
+            col
+        })
+        .collect()
 }
 
 pub fn render_postgres_table_ddl(

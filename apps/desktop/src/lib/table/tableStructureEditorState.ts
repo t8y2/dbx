@@ -585,6 +585,46 @@ function stripPostgresStringDefaultCast(defaultValue: string, dataType: string):
   return match?.[1] ?? defaultValue;
 }
 
+const POSTGRES_TYPE_ALIASES: Record<string, string> = {
+  "character varying": "varchar",
+  character: "char",
+  "timestamp without time zone": "timestamp",
+  "timestamp with time zone": "timestamptz",
+  "time without time zone": "time",
+  "time with time zone": "timetz",
+  "bit varying": "varbit",
+};
+
+function normalizePostgresTypeAlias(dataType: string): string {
+  const trimmed = dataType.trim();
+  const parenIdx = trimmed.indexOf("(");
+  const base = (parenIdx === -1 ? trimmed : trimmed.slice(0, parenIdx)).trim().replace(/\s+/g, " ");
+  const rest = parenIdx === -1 ? "" : trimmed.slice(parenIdx);
+  const alias = POSTGRES_TYPE_ALIASES[base.toLowerCase()];
+  return alias ? `${alias}${rest}` : dataType;
+}
+
+function detectPostgresSerialType(column: ColumnInfo): string | null {
+  const defaultValue = column.column_default;
+  if (!defaultValue || !defaultValue.trim().toLowerCase().startsWith("nextval(")) return null;
+  if (column.is_nullable) return null;
+  const baseType = splitDataType(column.data_type).baseType.trim().replace(/\s+/g, " ").toLowerCase();
+  switch (baseType) {
+    case "integer":
+    case "int":
+    case "int4":
+      return "serial";
+    case "bigint":
+    case "int8":
+      return "bigserial";
+    case "smallint":
+    case "int2":
+      return "smallserial";
+    default:
+      return null;
+  }
+}
+
 function isWrappedByOuterParens(value: string): boolean {
   if (value.length < 2 || value[0] !== "(" || value[value.length - 1] !== ")") return false;
 
@@ -634,6 +674,7 @@ function stripSqlServerDefaultOuterParens(defaultValue: string): string {
 
 function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
   if (column.column_default === null) return "";
+  if (databaseType === "postgres" && detectPostgresSerialType(column)) return "";
   const defaultValue = column.column_default;
   if (databaseType === "mysql" && defaultValue === "" && isMysqlCharacterDataType(column.data_type)) {
     // MySQL metadata uses an empty string for DEFAULT '', so keep it distinct from no default.
@@ -648,19 +689,27 @@ const CHARACTER_LENGTH_METADATA_TYPES = new Set(["binary", "char", "character", 
 const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"]);
 
 function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+  if (databaseType === "postgres") {
+    const serialType = detectPostgresSerialType(column);
+    if (serialType) return serialType;
+  }
+
   const parsed = splitDataType(column.data_type);
-  if (parsed.params) return column.data_type;
+  if (parsed.params) {
+    return databaseType === "postgres" ? normalizePostgresTypeAlias(column.data_type) : column.data_type;
+  }
 
   const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
   const normalized = baseType.toLowerCase();
   if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
-    return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
+    const combined = combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
+    return databaseType === "postgres" ? normalizePostgresTypeAlias(combined) : combined;
   }
   if (NUMERIC_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0) {
     const scale = Number.isInteger(column.numeric_scale) && Number(column.numeric_scale) >= 0 ? `,${column.numeric_scale}` : "";
     return combineDataTypeForDatabase(databaseType, baseType, `${column.numeric_precision}${scale}`);
   }
-  return column.data_type;
+  return databaseType === "postgres" ? normalizePostgresTypeAlias(column.data_type) : column.data_type;
 }
 
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {

@@ -1630,7 +1630,7 @@ pub async fn export_database_sql_core(
                 }
                 let ddl = if request.include_structure {
                     Some(
-                        crate::schema::get_table_ddl_core(
+                        crate::schema::get_table_ddl_for_export_core(
                             state,
                             &request.connection_id,
                             &request.database,
@@ -1788,7 +1788,7 @@ pub async fn export_database_sql_core(
             {
                 Some(result) => result,
                 None => {
-                    crate::schema::get_table_ddl_core(
+                    crate::schema::get_table_ddl_for_export_core(
                         state,
                         &request.connection_id,
                         &request.database,

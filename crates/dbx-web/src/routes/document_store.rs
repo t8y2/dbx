@@ -107,6 +107,7 @@ pub struct DocumentDeleteRequest {
     pub collection: String,
     pub id: String,
     pub routing: Option<String>,
+    pub document_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -256,13 +257,14 @@ pub async fn delete_document(
     Json(req): Json<DocumentDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
-    let result = dbx_core::document_ops::delete_document_core(
+    let result = dbx_core::document_ops::delete_document_core_with_type(
         &state.app,
         &req.connection_id,
         &req.database,
         &req.collection,
         &req.id,
         req.routing.as_deref(),
+        req.document_type.as_deref(),
     )
     .await
     .map_err(AppError::from)?;

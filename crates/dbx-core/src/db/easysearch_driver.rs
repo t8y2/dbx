@@ -88,9 +88,12 @@ pub async fn delete_document(
     client: &EasysearchClient,
     index: &str,
     id: &str,
+    document_type: Option<&str>,
     routing: Option<&str>,
 ) -> Result<u64, String> {
-    elasticsearch_driver::delete_document(&client.inner, index, id, routing).await.map_err(easysearch_error)
+    elasticsearch_driver::delete_document(&client.inner, index, id, document_type, routing)
+        .await
+        .map_err(easysearch_error)
 }
 
 pub async fn execute_rest_query(client: &EasysearchClient, input: &str) -> Result<QueryResult, String> {

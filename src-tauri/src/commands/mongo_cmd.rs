@@ -467,8 +467,16 @@ pub async fn mongo_delete_document(
     id: String,
     routing: Option<String>,
 ) -> Result<u64, String> {
-    crate::commands::document_cmd::document_delete_document(state, connection_id, database, collection, id, routing)
-        .await
+    crate::commands::document_cmd::document_delete_document(
+        state,
+        connection_id,
+        database,
+        collection,
+        id,
+        routing,
+        None,
+    )
+    .await
 }
 
 #[tauri::command]

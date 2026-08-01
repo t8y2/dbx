@@ -480,6 +480,84 @@ fn quote_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// Returns a SQL statement selecting 1 row when `name` exists in `schema`
+/// on the target side; None-kind support per family mirrors
+/// `transfer_object_kinds`.
+pub fn target_object_exists_sql(
+    db_type: &DatabaseType,
+    schema: &str,
+    name: &str,
+    kind: &TransferObjectKind,
+) -> Result<String, String> {
+    let schema = quote_string_literal(schema);
+    let name = quote_string_literal(name);
+    let q = |literal: &str| literal.to_string();
+    let sql = match (transfer_object_family(db_type), kind) {
+        (Some(TransferObjectFamily::Mysql), TransferObjectKind::Table | TransferObjectKind::View) => format!(
+            "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {name} \
+             AND TABLE_TYPE {} 'VIEW'",
+            if matches!(kind, TransferObjectKind::View) { "=" } else { "<>" }
+        ),
+        (Some(TransferObjectFamily::Mysql), TransferObjectKind::Procedure | TransferObjectKind::Function) => format!(
+            "SELECT 1 FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = {schema} AND ROUTINE_NAME = {name} \
+             AND ROUTINE_TYPE = {}",
+            q(if matches!(kind, TransferObjectKind::Procedure) { "'PROCEDURE'" } else { "'FUNCTION'" })
+        ),
+        (Some(TransferObjectFamily::Mysql), TransferObjectKind::Trigger) => format!(
+            "SELECT 1 FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {schema} AND TRIGGER_NAME = {name}"
+        ),
+        (Some(TransferObjectFamily::Mysql), TransferObjectKind::Event) => {
+            format!("SELECT 1 FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {schema} AND EVENT_NAME = {name}")
+        }
+        (Some(TransferObjectFamily::Postgres), TransferObjectKind::View | TransferObjectKind::MaterializedView) => {
+            format!(
+                "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {schema} AND c.relname = {name} AND c.relkind {}",
+                if matches!(kind, TransferObjectKind::MaterializedView) { "= 'm'" } else { "= 'v'" }
+            )
+        }
+        (Some(TransferObjectFamily::Postgres), TransferObjectKind::Table) => format!(
+            "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {schema} AND c.relname = {name} AND c.relkind = 'r'"
+        ),
+        (Some(TransferObjectFamily::Postgres), TransferObjectKind::Procedure | TransferObjectKind::Function) => {
+            format!(
+                "SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = {schema} AND p.proname = {name}"
+            )
+        }
+        (Some(TransferObjectFamily::Postgres), TransferObjectKind::Sequence) => format!(
+            "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {schema} AND c.relname = {name} AND c.relkind = 'S'"
+        ),
+        (Some(TransferObjectFamily::Postgres), TransferObjectKind::Trigger) => format!(
+            "SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {schema} AND t.tgname = {name} AND NOT t.tgisinternal"
+        ),
+        (
+            Some(TransferObjectFamily::Oracle),
+            TransferObjectKind::View
+            | TransferObjectKind::MaterializedView
+            | TransferObjectKind::Procedure
+            | TransferObjectKind::Function
+            | TransferObjectKind::Trigger
+            | TransferObjectKind::Sequence,
+        ) => format!(
+            "SELECT 1 FROM ALL_OBJECTS WHERE OWNER = {schema} AND OBJECT_NAME = {name} AND OBJECT_TYPE = {}",
+            q(match kind {
+                TransferObjectKind::View => "'VIEW'",
+                TransferObjectKind::MaterializedView => "'MATERIALIZED VIEW'",
+                TransferObjectKind::Procedure => "'PROCEDURE'",
+                TransferObjectKind::Function => "'FUNCTION'",
+                TransferObjectKind::Trigger => "'TRIGGER'",
+                _ => "'SEQUENCE'",
+            })
+        ),
+        _ => return Err(format!("Object existence check not supported for {:?} {:?}", db_type, kind)),
+    };
+    Ok(sql)
+}
 
 pub(crate) fn quote_postgres_string_literal(value: &str) -> String {
     if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
@@ -5564,6 +5642,30 @@ mod tests {
         }
     }
 
+    mod transfer_existence_tests {
+        use super::*;
+
+        #[test]
+        fn builds_target_existence_check_sql_per_family() {
+            let mysql =
+                target_object_exists_sql(&DatabaseType::Mysql, "shop", "v1", &TransferObjectKind::View).unwrap();
+            assert!(mysql.contains("information_schema.TABLES"));
+            assert!(mysql.contains("TABLE_TYPE = 'VIEW'"));
+            let mysql_ev =
+                target_object_exists_sql(&DatabaseType::Mysql, "shop", "e1", &TransferObjectKind::Event).unwrap();
+            assert!(mysql_ev.contains("information_schema.EVENTS"));
+            let mysql_tr =
+                target_object_exists_sql(&DatabaseType::Mysql, "shop", "t1", &TransferObjectKind::Trigger).unwrap();
+            assert!(mysql_tr.contains("information_schema.TRIGGERS"));
+            let pg =
+                target_object_exists_sql(&DatabaseType::Postgres, "public", "v1", &TransferObjectKind::View).unwrap();
+            assert!(pg.contains("pg_class"));
+            let orc =
+                target_object_exists_sql(&DatabaseType::Oracle, "HR", "SEQ1", &TransferObjectKind::Sequence).unwrap();
+            assert!(orc.contains("ALL_OBJECTS"));
+            assert!(target_object_exists_sql(&DatabaseType::Sqlite, "m", "x", &TransferObjectKind::View).is_err());
+        }
+    }
     fn test_transfer_request(tables: Vec<&str>) -> TransferRequest {
         TransferRequest {
             transfer_id: "transfer-1".to_string(),

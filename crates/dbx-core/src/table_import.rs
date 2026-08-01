@@ -1252,6 +1252,10 @@ fn xlsx_cell_ref_label_with_temporal_kind(cell: &DataRef<'_>, temporal_kind: Opt
 }
 
 pub fn xlsx_sheet_names(path: &str) -> Result<Vec<String>, String> {
+    if is_legacy_xls_path(path) {
+        let workbook = open_workbook_auto(path).map_err(|error| error.to_string())?;
+        return Ok(workbook.sheet_names().to_vec());
+    }
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
     let workbook_xml = read_xlsx_zip_text(&mut zip, "xl/workbook.xml")?;
@@ -6688,6 +6692,28 @@ mod tests {
             assert!(error.contains(&source_column), "{error}");
             assert!(error.contains("Save the workbook as .xlsx"), "{error}");
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn legacy_xls_preview_reads_sheet_names_without_zip_parser() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-preview-{}.xls", uuid::Uuid::new_v4()));
+        std::fs::write(&path, include_bytes!("../tests/fixtures/issue3683-formatted-numbers.xls")).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let (parsed, non_streaming, sheets) = parse_import_preview_file_with_options(
+            &path.to_string_lossy(),
+            TableImportSourceFormat::Excel,
+            &options,
+            10,
+        )
+        .await
+        .unwrap();
+
+        assert!(non_streaming);
+        assert_eq!(sheets, vec!["Sheet1"]);
+        assert_eq!(parsed.columns, vec!["column_1", "column_2", "column_3", "column_4", "column_5"]);
+        assert_eq!(parsed.rows.len(), 1);
         let _ = std::fs::remove_file(path);
     }
 

@@ -3075,6 +3075,7 @@ async function confirmPasteTable() {
           schema: entry.schema,
           sourceName: entry.sourceName,
           targetName,
+          normalizeNewTargetName: mode === "structure-and-data",
           ...dataCopyColumnOptions,
         });
         const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema });

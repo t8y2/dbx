@@ -6599,6 +6599,70 @@ fn first_string_cell(result: db::QueryResult) -> Result<String, String> {
         .ok_or_else(|| "Object source not found".to_string())
 }
 
+fn parse_hex_u32(value: &str, offset: usize) -> Option<u32> {
+    let end = offset.checked_add(8)?;
+    u32::from_str_radix(value.get(offset..end)?, 16).ok()
+}
+
+fn is_sql_routine_definition(source: &str) -> bool {
+    let mut words = source.split_ascii_whitespace();
+    if !words.next().is_some_and(|word| word.eq_ignore_ascii_case("CREATE")) {
+        return false;
+    }
+
+    let Some(next) = words.next() else {
+        return false;
+    };
+    let kind = if next.eq_ignore_ascii_case("OR") {
+        if !words.next().is_some_and(|word| word.eq_ignore_ascii_case("REPLACE")) {
+            return false;
+        }
+        words.next()
+    } else {
+        Some(next)
+    };
+
+    kind.is_some_and(|word| word.eq_ignore_ascii_case("FUNCTION") || word.eq_ignore_ascii_case("PROCEDURE"))
+}
+
+fn decode_opengauss_functiondef_record(source: &str) -> Option<String> {
+    const RECORD_HEADER_HEX_LEN: usize = 48;
+    const INT4_OID: u32 = 23;
+    const TEXT_OID: u32 = 25;
+
+    let hex = source.strip_prefix("0x").or_else(|| source.strip_prefix("0X"))?;
+    if hex.len() < RECORD_HEADER_HEX_LEN || !hex.is_ascii() || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    if parse_hex_u32(hex, 0)? != 2
+        || parse_hex_u32(hex, 8)? != INT4_OID
+        || parse_hex_u32(hex, 16)? != 4
+        || parse_hex_u32(hex, 24).is_none()
+        || parse_hex_u32(hex, 32)? != TEXT_OID
+    {
+        return None;
+    }
+
+    let definition_len = usize::try_from(parse_hex_u32(hex, 40)?).ok()?;
+    let expected_len = RECORD_HEADER_HEX_LEN.checked_add(definition_len.checked_mul(2)?)?;
+    if hex.len() != expected_len {
+        return None;
+    }
+
+    let definition_hex = &hex[RECORD_HEADER_HEX_LEN..];
+    let mut definition = Vec::with_capacity(definition_len);
+    for pair in definition_hex.as_bytes().chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        definition.push(u8::from_str_radix(pair, 16).ok()?);
+    }
+    let definition = String::from_utf8(definition).ok()?;
+    is_sql_routine_definition(&definition).then_some(definition)
+}
+
+fn normalize_routine_object_source(source: String) -> String {
+    decode_opengauss_functiondef_record(&source).unwrap_or(source)
+}
+
 async fn mysql_object_source(
     pool: &db::mysql::MySqlPool,
     database: &str,
@@ -6657,7 +6721,7 @@ pub async fn get_object_source_core(
     signature: Option<&str>,
     relation_name: Option<&str>,
 ) -> Result<db::ObjectSource, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
+    let mut source = retry_metadata_connection(state, connection_id, Some(database), || {
         get_object_source_once(
             state,
             connection_id,
@@ -6669,7 +6733,11 @@ pub async fn get_object_source_core(
             relation_name,
         )
     })
-    .await
+    .await?;
+    if matches!(source.object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) {
+        source.source = normalize_routine_object_source(source.source);
+    }
+    Ok(source)
 }
 
 async fn get_object_source_once(
@@ -7219,6 +7287,18 @@ mod object_source_tests {
     use super::*;
     use crate::types::ObjectSourceKind;
 
+    fn opengauss_functiondef_record_hex(headerlines: u32, definition: &[u8]) -> String {
+        let mut bytes = Vec::with_capacity(24 + definition.len());
+        bytes.extend_from_slice(&2_u32.to_be_bytes());
+        bytes.extend_from_slice(&23_u32.to_be_bytes());
+        bytes.extend_from_slice(&4_u32.to_be_bytes());
+        bytes.extend_from_slice(&headerlines.to_be_bytes());
+        bytes.extend_from_slice(&25_u32.to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(definition.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(definition);
+        format!("0x{}", crate::db::hex_encode(&bytes))
+    }
+
     #[tokio::test]
     async fn reads_sqlite_object_source_from_dotted_attached_schema() {
         let pool = db::sqlite::connect_path(":memory:").await.expect("connect primary database");
@@ -7318,6 +7398,40 @@ mod object_source_tests {
             postgres_function_object_source_sql_without_prokind("public", "recalc_score", true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND NOT p.proisagg AND NOT p.proiswindow ORDER BY p.oid LIMIT 1"
         );
+    }
+
+    #[test]
+    fn decodes_opengauss_binary_function_definition_record() {
+        let definition = "CREATE OR REPLACE FUNCTION pg_catalog.pg_table_size(regclass)\n RETURNS bigint\n LANGUAGE internal\n STRICT NOT FENCED NOT SHIPPABLE\nAS $function$pg_table_size$function$;\n";
+        let encoded = concat!(
+            "0x0000000200000017000000040000000400000019000000a8",
+            "435245415445204f52205245504c4143452046554e4354494f4e2070675f636174616c6f672e70675f7461626c655f73697a6528726567636c617373290a",
+            "2052455455524e5320626967696e740a204c414e475541474520696e7465726e616c0a20535452494354204e4f542046454e434544204e4f5420534849505041424c450a",
+            "4153202466756e6374696f6e2470675f7461626c655f73697a652466756e6374696f6e243b0a"
+        );
+
+        assert_eq!(decode_opengauss_functiondef_record(encoded).as_deref(), Some(definition));
+        assert_eq!(normalize_routine_object_source(encoded.to_string()), definition);
+    }
+
+    #[test]
+    fn preserves_text_and_malformed_opengauss_function_definitions() {
+        let postgres =
+            "CREATE OR REPLACE FUNCTION public.recalc_score() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;";
+        assert_eq!(normalize_routine_object_source(postgres.to_string()), postgres);
+
+        let ordinary_hex = "0x4352454154452046554e4354494f4e";
+        assert_eq!(normalize_routine_object_source(ordinary_hex.to_string()), ordinary_hex);
+
+        let mut truncated = opengauss_functiondef_record_hex(4, postgres.as_bytes());
+        truncated.truncate(truncated.len() - 2);
+        assert_eq!(normalize_routine_object_source(truncated.clone()), truncated);
+
+        let non_routine = opengauss_functiondef_record_hex(4, b"SELECT 1");
+        assert_eq!(normalize_routine_object_source(non_routine.clone()), non_routine);
+
+        let invalid_utf8 = opengauss_functiondef_record_hex(4, &[0xff, 0xfe]);
+        assert_eq!(normalize_routine_object_source(invalid_utf8.clone()), invalid_utf8);
     }
 
     #[test]

@@ -16,5 +16,6 @@ describe("ObjectBrowser cross-database table paste", () => {
     expect(objectBrowserSource).toContain("if (canTransferTableClipboard()) {");
     expect(objectBrowserSource).toContain("if (!canPasteTableClipboard() && !canTransferTableClipboard()) return;");
     expect(objectBrowserSource).toContain("pasteTableMode.value = defaultPasteTableMode(effectiveDatabaseType.value);");
+    expect(objectBrowserSource).toContain('normalizeNewTargetName: mode === "structure-and-data"');
   });
 });

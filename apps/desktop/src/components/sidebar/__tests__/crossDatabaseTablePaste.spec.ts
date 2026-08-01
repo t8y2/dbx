@@ -16,6 +16,7 @@ describe("cross-database table paste", () => {
   it("retains the local duplicate-table paste path", () => {
     expect(runtimeSource).toContain("if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();");
     expect(runtimeSource).toContain("pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());");
+    expect(runtimeSource).toContain('normalizeNewTargetName: mode === "structure-and-data"');
   });
 
   it("carries table comments through the local sidebar paste path", () => {

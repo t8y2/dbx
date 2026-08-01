@@ -2115,6 +2115,7 @@ async function confirmPasteTable() {
           schema,
           sourceName: entry.sourceName,
           targetName,
+          normalizeNewTargetName: mode === "structure-and-data",
           ...dataCopyColumnOptions,
         });
         const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema));

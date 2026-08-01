@@ -75,6 +75,36 @@ pub enum TransferOwnershipPolicy {
     ReassignMissing,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferContent {
+    #[default]
+    StructureAndData,
+    StructureOnly,
+    DataOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TransferObjectKind {
+    #[default]
+    Table,
+    View,
+    MaterializedView,
+    Procedure,
+    Function,
+    Trigger,
+    Sequence,
+    Event,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferObjectSelection {
+    pub object_type: TransferObjectKind,
+    pub names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferRequest {
@@ -89,6 +119,10 @@ pub struct TransferRequest {
     pub target_catalog: Option<String>,
     pub tables: Vec<String>,
     pub create_table: bool,
+    #[serde(default)]
+    pub content: TransferContent,
+    #[serde(default)]
+    pub objects: Vec<TransferObjectSelection>,
     #[serde(default)]
     pub mode: TransferMode,
     #[serde(default)]
@@ -5349,6 +5383,48 @@ mod tests {
         assert!(query_result_has_rows(&test_query_result(vec![vec![serde_json::json!(1)]])));
     }
 
+    #[test]
+    fn transfer_content_defaults_to_structure_and_data() {
+        let request: TransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId": "t1", "sourceConnectionId": "s", "sourceDatabase": "db",
+            "sourceSchema": "public", "targetConnectionId": "t", "targetDatabase": "db",
+            "targetSchema": "public", "tables": ["a"], "createTable": true,
+            "mode": "append", "targetTableNameCase": "preserve", "batchSize": 1000
+        }))
+        .unwrap();
+        assert_eq!(request.content, TransferContent::StructureAndData);
+        assert!(request.objects.is_empty());
+    }
+
+    #[test]
+    fn transfer_request_serializes_new_fields_camel_case() {
+        let request = TransferRequest {
+            transfer_id: "t1".to_string(),
+            source_connection_id: "s".to_string(),
+            source_database: "db".to_string(),
+            source_schema: "public".to_string(),
+            source_catalog: None,
+            target_connection_id: "t".to_string(),
+            target_database: "db".to_string(),
+            target_schema: "public".to_string(),
+            target_catalog: None,
+            tables: vec!["a".to_string()],
+            create_table: true,
+            content: TransferContent::StructureOnly,
+            objects: vec![TransferObjectSelection {
+                object_type: TransferObjectKind::View,
+                names: vec!["v1".to_string()],
+            }],
+            mode: TransferMode::Append,
+            target_table_name_case: TransferTableNameCase::Preserve,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
+            batch_size: 1000,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["content"], "structureOnly");
+        assert_eq!(json["objects"][0]["objectType"], "VIEW");
+        assert_eq!(json["objects"][0]["names"][0], "v1");
+    }
     fn test_transfer_request(tables: Vec<&str>) -> TransferRequest {
         TransferRequest {
             transfer_id: "transfer-1".to_string(),
@@ -5362,6 +5438,8 @@ mod tests {
             target_catalog: None,
             tables: tables.into_iter().map(str::to_string).collect(),
             create_table: true,
+            content: TransferContent::default(),
+            objects: Vec::new(),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
             ownership_policy: TransferOwnershipPolicy::Preserve,

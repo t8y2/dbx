@@ -691,4 +691,44 @@ describe("useDataGridExport prepared row statements", () => {
     );
     expect(extractDataGridSelection).not.toHaveBeenCalled();
   });
+
+  it("uses the Mongo update formatter for SQL Updates", async () => {
+    const item = { ...row(['ObjectId("507f1f77bcf86cd799439011")', "Alice"]), sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns: ["_id", "name"],
+      item,
+      mongoDocuments: [{ _id: { $oid: "507f1f77bcf86cd799439011" }, name: "Alice" }],
+      selectedCellMatrix: {
+        rowIndexes: [0],
+        columnIndexes: [0, 1],
+        columns: ["_id", "name"],
+        rows: [[item.data[0], item.data[1]]],
+      },
+    });
+
+    expect(state.canCopyWithExtractor("sql-updates")).toBe(true);
+    await expect(state.copyWithExtractor("sql-updates")).resolves.toBe(true);
+
+    const copied = vi.mocked(copyToClipboard).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain('db.getCollection("documents")');
+    expect(copied).toContain(".updateOne(");
+    expect(copied).toContain('"_id": ObjectId("507f1f77bcf86cd799439011")');
+    expect(copied).toContain('"name": "Alice"');
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+  });
+
+  it("does not expose Mongo SQL Updates without an explicit update target", async () => {
+    const item = { ...row(["507f1f77bcf86cd799439011", "Alice"]), sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns: ["_id", "name"],
+      item,
+      mongoDocuments: [{ _id: { $oid: "507f1f77bcf86cd799439011" }, name: "Alice" }],
+      mongoUpdateTarget: false,
+    });
+
+    expect(state.canCopyWithExtractor("sql-updates")).toBe(false);
+    await expect(state.copyWithExtractor("sql-updates")).resolves.toBe(false);
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
 });

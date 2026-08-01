@@ -469,6 +469,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return targetedRows().filter((item) => !item.isDraft);
   }
 
+  function updateEligibleRows(): RowItem[] {
+    return targetedRows().filter((item) => !item.isNew && !item.isDraft && !item.isDeleted);
+  }
+
   function insertableCopyColumnCount(excludePrimaryKeys: boolean, copyColumns = effectiveColumns(sourceColumns.value, columns.value), extractorOptions?: DataGridExtractorOptions): number {
     const primaryKeySet = new Set((tableMeta.value?.primaryKeys ?? []).map(normalizeColumnName));
     return copyColumns.filter((column): column is string => !!column && !isCopyInsertOmittedColumn(databaseType.value, column, tableMeta.value, extractorOptions) && (!excludePrimaryKeys || !primaryKeySet.has(normalizeColumnName(column)))).length;
@@ -493,7 +497,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const target = options.mongoUpdateTarget?.value;
     const documents = options.mongoDocuments?.value;
     if (!target || !documents) return undefined;
-    const rows = insertEligibleRows();
+    const rows = updateEligibleRows();
     if (rows.length === 0) return undefined;
     const limitedRows = rowLimit === undefined ? rows : rows.slice(0, rowLimit);
     const copyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
@@ -511,6 +515,24 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       statements.push(formatMongoCopyStatement(statement) ?? statement);
     }
     return statements.length > 0 ? statements.join("\n") : undefined;
+  }
+
+  function canBuildMongoExtractorUpdate(): boolean {
+    const target = options.mongoUpdateTarget?.value;
+    const documents = options.mongoDocuments?.value;
+    const rows = updateEligibleRows();
+    if (!target || !documents || rows.length === 0) return false;
+
+    const copyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
+    const normalizedIdColumn = normalizeColumnName(target.idColumn);
+    if (!copyColumns.some((column) => normalizeColumnName(column) === normalizedIdColumn)) return false;
+    if (!copyColumns.some((column) => column && normalizeColumnName(column) !== normalizedIdColumn)) return false;
+
+    return rows.every((item) => {
+      if (item.sourceIndex === undefined) return false;
+      const document = documents[item.sourceIndex];
+      return !!document && typeof document === "object" && !Array.isArray(document) && Object.prototype.hasOwnProperty.call(document, target.idColumn);
+    });
   }
 
   const { copyWithExtractor, previewWithExtractor, canCopyWithExtractor } = useDataGridExtractor({
@@ -537,6 +559,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     },
     buildMongoInsert: buildMongoExtractorInsert,
     buildMongoUpdate: buildMongoExtractorUpdate,
+    canBuildMongoUpdate: canBuildMongoExtractorUpdate,
     contextCell,
     contextSelectionIsSynthetic,
   });

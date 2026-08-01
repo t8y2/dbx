@@ -28,12 +28,13 @@ export type TreeNodeLoadEpoch = {
 
 export class TreeNodeLoadRegistry {
   private readonly generations = new Map<string, number>();
+  private readonly cancellationGenerations = new Map<string, number>();
 
   begin(node: TreeNodeLike): TreeNodeLoadHandle {
     const generation = (this.generations.get(node.id) ?? 0) + 1;
     this.generations.set(node.id, generation);
     node.isLoading = true;
-    return this.createHandle(node.id, generation);
+    return this.createHandle(node.id, generation, this.cancellationGenerations.get(node.id) ?? 0);
   }
 
   /** Snapshot the current generation without claiming ownership (no spinner). */
@@ -59,6 +60,22 @@ export class TreeNodeLoadRegistry {
         this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
       }
     }
+  }
+
+  /**
+   * User cancellation is stronger than ordinary invalidation: a load waiting for
+   * connection recovery must not reclaim ownership after its node was collapsed.
+   */
+  cancelPrefix(nodeId: string): void {
+    const prefix = `${nodeId}:`;
+    const affectedIds = new Set<string>([nodeId]);
+    for (const id of this.generations.keys()) {
+      if (id.startsWith(prefix)) affectedIds.add(id);
+    }
+    for (const id of affectedIds) {
+      this.cancellationGenerations.set(id, (this.cancellationGenerations.get(id) ?? 0) + 1);
+    }
+    this.invalidatePrefix(nodeId);
   }
 
   /** Bump recorded generations for descendants only (not the parent load itself). */
@@ -90,7 +107,7 @@ export class TreeNodeLoadRegistry {
     return this.generations.get(nodeId) === generation;
   }
 
-  private createHandle(nodeId: string, generation: number): TreeNodeLoadHandle {
+  private createHandle(nodeId: string, generation: number, cancellationGeneration: number): TreeNodeLoadHandle {
     const registry = this;
     return {
       nodeId,
@@ -99,6 +116,9 @@ export class TreeNodeLoadRegistry {
         return registry.isCurrent(nodeId, generation);
       },
       reclaim(node: TreeNodeLike) {
+        if (!registry.isCurrent(nodeId, generation) && (registry.cancellationGenerations.get(nodeId) ?? 0) !== cancellationGeneration) {
+          return this;
+        }
         if (node.id !== nodeId) {
           return registry.begin(node);
         }

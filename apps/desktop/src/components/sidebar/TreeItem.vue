@@ -54,6 +54,7 @@ import { clearActiveTableReferencePayload, createTableReferencePayload, createTa
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
@@ -374,36 +375,6 @@ function redactedConnectionString(value: string): string {
   return value.replace(/(:\/\/[^/\s:@?#;]+):([^@\s/?#;]+)@/g, "$1:***@").replace(/([?&;](?:password|pwd|pass|token|secret|key)=)[^&;]*/gi, "$1***");
 }
 
-function connectionTooltipScheme(config: Pick<ConnectionConfig, "db_type" | "ssl">): string {
-  switch (config.db_type) {
-    case "postgres":
-    case "gaussdb":
-    case "kwdb":
-    case "yashandb":
-    case "redshift":
-    case "questdb":
-      return "postgresql";
-    case "sqlserver":
-      return "mssql";
-    case "elasticsearch":
-    case "easysearch":
-    case "qdrant":
-    case "milvus":
-    case "weaviate":
-    case "chromadb":
-    case "rqlite":
-    case "turso":
-    case "mq":
-      return config.ssl ? "https" : "http";
-    case "cloudflare-d1":
-      return "https";
-    case "dameng":
-      return "dm";
-    default:
-      return config.db_type;
-  }
-}
-
 function hostForDisplay(host: string): string {
   if (!host.includes(":") || host.startsWith("[") || host.includes("://")) return host;
   return `[${host}]`;
@@ -422,7 +393,7 @@ function connectionTooltipUrl(config: ConnectionConfig): string {
     return `${config.db_type}://${host}`;
   }
 
-  const scheme = connectionTooltipScheme(config);
+  const scheme = connectionDisplayUrlScheme(config);
   const port = Number(config.port) > 0 ? `:${config.port}` : "";
   const user = cleanTooltipValue(config.username);
   const userInfo = user ? `${encodeURIComponent(user)}@` : "";

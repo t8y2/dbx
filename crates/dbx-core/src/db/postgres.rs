@@ -2945,6 +2945,77 @@ pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<C
     }
 }
 
+fn pg_quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn redshift_columns_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT c.column_name, \
+                CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+                c.is_nullable, \
+                c.column_default, \
+                CAST(c.numeric_precision AS varchar) AS numeric_precision, \
+                CAST(c.numeric_scale AS varchar) AS numeric_scale, \
+                CAST(c.character_maximum_length AS varchar) AS character_maximum_length \
+         FROM information_schema.columns c \
+         WHERE c.table_schema = {} AND c.table_name = {} \
+         ORDER BY c.ordinal_position",
+        pg_quote_literal(schema),
+        pg_quote_literal(table)
+    )
+}
+
+fn query_result_text(row: &[serde_json::Value], index: usize) -> Option<String> {
+    row.get(index).and_then(|value| match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    })
+}
+
+fn query_result_i32(row: &[serde_json::Value], index: usize) -> Option<i32> {
+    query_result_text(row, index)?.parse().ok()
+}
+
+fn redshift_columns_from_query_result(result: QueryResult) -> Vec<ColumnInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(ColumnInfo {
+                name: query_result_text(&row, 0)?,
+                data_type: query_result_text(&row, 1).unwrap_or_default(),
+                is_nullable: query_result_text(&row, 2).is_none_or(|value| value.eq_ignore_ascii_case("YES")),
+                column_default: query_result_text(&row, 3),
+                is_primary_key: false,
+                extra: None,
+                comment: None,
+                numeric_precision: query_result_i32(&row, 4),
+                numeric_scale: query_result_i32(&row, 5),
+                character_maximum_length: query_result_i32(&row, 6),
+                enum_values: None,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let result = execute_select_text(
+        &client,
+        &redshift_columns_sql(schema, table),
+        Instant::now(),
+        crate::query::MAX_ROWS,
+        None,
+    )
+    .await?;
+    Ok(redshift_columns_from_query_result(result))
+}
+
 pub(crate) fn pg_quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -3016,6 +3087,7 @@ pub async fn execute_query_with_max_rows_and_cancel(
     cancel_token: Option<CancellationToken>,
     budget: DbOperationBudget,
     cancel_context: Option<PostgresCancelContext>,
+    prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
     let pg_cancel_token = client.cancel_token();
@@ -3025,7 +3097,7 @@ pub async fn execute_query_with_max_rows_and_cancel(
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows),
+        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
     )
     .await
 }
@@ -3164,7 +3236,7 @@ pub async fn execute_query_with_schema_and_max_rows(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        return execute_query_with_max_rows_inner(&client, sql, max_rows).await;
+        return execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
     }
 
     let set_schema_start = Instant::now();
@@ -3182,7 +3254,7 @@ pub async fn execute_query_with_schema_and_max_rows(
     );
 
     let query_start = Instant::now();
-    let result = execute_query_with_max_rows_inner(&client, sql, max_rows).await;
+    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
     if result.is_ok() {
         clear_postgres_caches_after_ddl(pool, Some(&client), sql);
     }
@@ -3205,6 +3277,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     cancel_token: Option<CancellationToken>,
     budget: DbOperationBudget,
     cancel_context: Option<PostgresCancelContext>,
+    prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let checkout_start = Instant::now();
@@ -3227,7 +3300,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
             cancel_token,
             budget.query_timeout,
             budget.cancel_timeout,
-            execute_query_with_max_rows_inner(&client, sql, max_rows),
+            execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
         )
         .await;
     }
@@ -3254,7 +3327,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows),
+        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
     )
     .await;
     if result.is_ok() {
@@ -3493,12 +3566,17 @@ async fn execute_query_with_max_rows_inner(
     client: &deadpool_postgres::Client,
     sql: &str,
     max_rows: Option<usize>,
+    prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
     if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
-        execute_select_query(client, sql, start, row_limit).await
+        if prefer_text_protocol {
+            execute_select_text(client, sql, start, row_limit, None).await
+        } else {
+            execute_select_query(client, sql, start, row_limit).await
+        }
     } else {
         let affected = client.execute(sql, &[]).await.map_err(pg_error_to_string)?;
 
@@ -5719,6 +5797,61 @@ mod tests {
         let sql = list_objects_sql(false, false, false, false);
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(!sql.contains("pg_get_function_identity_arguments"));
+    }
+
+    #[test]
+    fn redshift_columns_sql_uses_simple_information_schema_metadata() {
+        let sql = redshift_columns_sql("tenant's", "orders");
+        assert!(sql.contains("FROM information_schema.columns c"));
+        assert!(sql.contains("c.table_schema = 'tenant''s'"));
+        assert!(sql.contains("c.table_name = 'orders'"));
+        assert!(!sql.contains("pg_attribute"));
+        assert!(!sql.contains("pg_index"));
+        assert!(!sql.contains('$'));
+    }
+
+    #[test]
+    fn redshift_columns_from_text_result_preserves_basic_metadata() {
+        let result = QueryResult {
+            columns: vec![
+                "column_name".to_string(),
+                "full_type".to_string(),
+                "is_nullable".to_string(),
+                "column_default".to_string(),
+                "numeric_precision".to_string(),
+                "numeric_scale".to_string(),
+                "character_maximum_length".to_string(),
+            ],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![
+                serde_json::json!("amount"),
+                serde_json::json!("numeric"),
+                serde_json::json!("NO"),
+                serde_json::Value::Null,
+                serde_json::json!(18),
+                serde_json::json!(2),
+                serde_json::Value::Null,
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        };
+
+        let columns = redshift_columns_from_query_result(result);
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "amount");
+        assert_eq!(columns[0].data_type, "numeric");
+        assert!(!columns[0].is_nullable);
+        assert_eq!(columns[0].numeric_precision, Some(18));
+        assert_eq!(columns[0].numeric_scale, Some(2));
+        assert_eq!(columns[0].character_maximum_length, None);
+        assert!(!columns[0].is_primary_key);
     }
 
     #[test]

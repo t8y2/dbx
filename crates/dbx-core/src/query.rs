@@ -989,6 +989,10 @@ fn query_pool_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&
     }
 }
 
+fn postgres_prefers_text_protocol(db_type: Option<DatabaseType>) -> bool {
+    db_type == Some(DatabaseType::Redshift)
+}
+
 pub async fn operation_budget_for_pool_key(
     state: &AppState,
     pool_key: &str,
@@ -1143,6 +1147,7 @@ pub async fn do_execute(
             let p = p.clone();
             let schema = schema.map(|s| s.to_string());
             let max_rows = options.max_rows;
+            let prefer_text_protocol = postgres_prefers_text_protocol(pool_db_type);
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
             drop(connections);
             if let Some(schema) = schema {
@@ -1154,6 +1159,7 @@ pub async fn do_execute(
                     cancel_token,
                     operation_budget.clone(),
                     cancel_context,
+                    prefer_text_protocol,
                 )
                 .await
             } else {
@@ -1164,6 +1170,7 @@ pub async fn do_execute(
                     cancel_token,
                     operation_budget.clone(),
                     cancel_context,
+                    prefer_text_protocol,
                 )
                 .await
             }
@@ -1910,7 +1917,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
 }
 
 trait MysqlBatchStatementExecutor {
-    async fn execute_statement(&mut self, statement: &str) -> Result<db::QueryResult, String>;
+    async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String>;
 }
 
 struct MysqlBatchConnection<'a> {
@@ -1923,11 +1930,11 @@ struct MysqlBatchConnection<'a> {
 }
 
 impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
-    async fn execute_statement(&mut self, statement: &str) -> Result<db::QueryResult, String> {
-        wait_for_query_opt(
+    async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String> {
+        wait_for_result_opt(
             self.cancel_token.clone(),
             self.query_timeout,
-            db::mysql::execute_query_on_conn_with_max_rows(
+            db::mysql::execute_query_results_on_conn_with_max_rows(
                 &mut *self.conn,
                 statement,
                 self.bare,
@@ -1958,9 +1965,15 @@ where
         }
 
         match executor.execute_statement(statement).await {
-            Ok(result) => {
-                report_execute_multi_progress(progress, statement_index, statements.len(), &result, true, None);
-                results.push(ExecuteMultiResult::success_with_index(result, statement_index));
+            Ok(statement_results) => {
+                if let Some(result) = statement_results.last() {
+                    report_execute_multi_progress(progress, statement_index, statements.len(), result, true, None);
+                }
+                results.extend(
+                    statement_results
+                        .into_iter()
+                        .map(|result| ExecuteMultiResult::success_with_index(result, statement_index)),
+                );
             }
             Err(err) => {
                 let action = pool_error_action(db_type, &err);
@@ -3657,6 +3670,13 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redshift_queries_prefer_text_protocol() {
+        assert!(postgres_prefers_text_protocol(Some(DatabaseType::Redshift)));
+        assert!(!postgres_prefers_text_protocol(Some(DatabaseType::Postgres)));
+        assert!(!postgres_prefers_text_protocol(None));
+    }
     #[cfg(unix)]
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
@@ -4102,15 +4122,19 @@ for line in sys.stdin:
     }
 
     struct FakeMysqlBatchExecutor {
-        outcomes: std::collections::VecDeque<Result<db::QueryResult, String>>,
+        outcomes: std::collections::VecDeque<Result<Vec<db::QueryResult>, String>>,
         executed: Vec<String>,
     }
 
     impl MysqlBatchStatementExecutor for FakeMysqlBatchExecutor {
-        async fn execute_statement(&mut self, statement: &str) -> Result<db::QueryResult, String> {
+        async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::QueryResult>, String> {
             self.executed.push(statement.to_string());
             self.outcomes.pop_front().expect("test outcome for statement")
         }
+    }
+
+    fn mysql_batch_result(result: db::QueryResult) -> Result<Vec<db::QueryResult>, String> {
+        Ok(vec![result])
     }
 
     async fn assert_sqlite_batch_error_behavior(failure_first: bool, continue_on_error: bool) {
@@ -4213,9 +4237,9 @@ for line in sys.stdin:
         let statements = vec!["first".to_string(), "fails".to_string(), "must-not-run".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
             outcomes: std::collections::VecDeque::from([
-                Ok(empty_query_result(0)),
+                mysql_batch_result(empty_query_result(0)),
                 Err("Duplicate entry".to_string()),
-                Ok(empty_query_result(0)),
+                mysql_batch_result(empty_query_result(0)),
             ]),
             executed: Vec::new(),
         };
@@ -4236,7 +4260,10 @@ for line in sys.stdin:
     async fn mysql_batch_reports_progress_for_each_completed_statement() {
         let statements = vec!["first".to_string(), "fails".to_string(), "must-not-run".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
-            outcomes: std::collections::VecDeque::from([Ok(empty_query_result(0)), Err("Duplicate entry".to_string())]),
+            outcomes: std::collections::VecDeque::from([
+                mysql_batch_result(empty_query_result(0)),
+                Err("Duplicate entry".to_string()),
+            ]),
             executed: Vec::new(),
         };
         let progress_events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -4284,10 +4311,55 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn mysql_batch_preserves_multiple_result_sets_from_one_statement() {
+        let statements = vec!["CALL testA()".to_string(), "UPDATE users SET active = 1".to_string()];
+        let result_set = |value| db::QueryResult {
+            columns: vec!["value".to_string()],
+            column_types: vec!["INT".to_string()],
+            column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![vec![serde_json::json!(value)]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        };
+        let mut executor = FakeMysqlBatchExecutor {
+            outcomes: std::collections::VecDeque::from([
+                Ok(vec![result_set(1), result_set(2), result_set(3)]),
+                mysql_batch_result(empty_query_result(1)),
+            ]),
+            executed: Vec::new(),
+        };
+
+        let (results, error_action) =
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false, None)
+                .await;
+
+        assert_eq!(executor.executed, statements);
+        assert_eq!(results.len(), 4);
+        assert_eq!(
+            results.iter().map(|result| result.statement_index).collect::<Vec<_>>(),
+            vec![Some(0), Some(0), Some(0), Some(1)]
+        );
+        assert_eq!(
+            results[..3].iter().map(|result| result.result.rows[0][0].clone()).collect::<Vec<_>>(),
+            vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)]
+        );
+        assert_eq!(error_action, None);
+    }
+
+    #[tokio::test]
     async fn mysql_batch_stops_when_the_first_statement_fails() {
         let statements = vec!["fails".to_string(), "must-not-run".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
-            outcomes: std::collections::VecDeque::from([Err("Duplicate entry".to_string()), Ok(empty_query_result(0))]),
+            outcomes: std::collections::VecDeque::from([
+                Err("Duplicate entry".to_string()),
+                mysql_batch_result(empty_query_result(0)),
+            ]),
             executed: Vec::new(),
         };
 
@@ -4306,9 +4378,9 @@ for line in sys.stdin:
         let statements = vec!["first".to_string(), "fails".to_string(), "third".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
             outcomes: std::collections::VecDeque::from([
-                Ok(empty_query_result(0)),
+                mysql_batch_result(empty_query_result(0)),
                 Err("Duplicate entry".to_string()),
-                Ok(empty_query_result(0)),
+                mysql_batch_result(empty_query_result(0)),
             ]),
             executed: Vec::new(),
         };
@@ -4331,7 +4403,10 @@ for line in sys.stdin:
     async fn mysql_batch_continues_when_the_first_statement_fails_and_enabled() {
         let statements = vec!["fails".to_string(), "second".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
-            outcomes: std::collections::VecDeque::from([Err("Duplicate entry".to_string()), Ok(empty_query_result(0))]),
+            outcomes: std::collections::VecDeque::from([
+                Err("Duplicate entry".to_string()),
+                mysql_batch_result(empty_query_result(0)),
+            ]),
             executed: Vec::new(),
         };
 
@@ -4350,9 +4425,9 @@ for line in sys.stdin:
         let statements = vec!["first".to_string(), "disconnects".to_string(), "must-not-run".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
             outcomes: std::collections::VecDeque::from([
-                Ok(empty_query_result(0)),
+                mysql_batch_result(empty_query_result(0)),
                 Err("connection reset by peer".to_string()),
-                Ok(empty_query_result(0)),
+                mysql_batch_result(empty_query_result(0)),
             ]),
             executed: Vec::new(),
         };

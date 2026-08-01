@@ -3417,10 +3417,20 @@ pub async fn get_columns_for_transfer(
 async fn get_postgres_indexes_for_transfer(
     state: &AppState,
     pool_key: &str,
+    database: &str,
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
     let connections = state.connections.read().await;
+    if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
+        let schema = schema.to_string();
+        let table = table.to_string();
+        drop(connections);
+        let mut client = client.lock().await;
+        return client.list_indexes(&database, &schema, &table, None).await;
+    }
     let Some(PoolKind::Postgres(pool)) = connections.get(pool_key) else {
         return Err("PostgreSQL pool not found".to_string());
     };
@@ -3432,10 +3442,20 @@ async fn get_postgres_indexes_for_transfer(
 async fn get_postgres_foreign_keys_for_transfer(
     state: &AppState,
     pool_key: &str,
+    database: &str,
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ForeignKeyInfo>, String> {
     let connections = state.connections.read().await;
+    if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
+        let schema = schema.to_string();
+        let table = table.to_string();
+        drop(connections);
+        let mut client = client.lock().await;
+        return client.list_foreign_keys(&database, &schema, &table, None).await;
+    }
     let Some(PoolKind::Postgres(pool)) = connections.get(pool_key) else {
         return Err("PostgreSQL pool not found".to_string());
     };
@@ -4572,13 +4592,27 @@ where
 
     let source_indexes =
         if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
-            get_postgres_indexes_for_transfer(state, source_pool_key, &request.source_schema, table).await?
+            get_postgres_indexes_for_transfer(
+                state,
+                source_pool_key,
+                &request.source_database,
+                &request.source_schema,
+                table,
+            )
+            .await?
         } else {
             Vec::new()
         };
     let source_foreign_keys =
         if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
-            get_postgres_foreign_keys_for_transfer(state, source_pool_key, &request.source_schema, table).await?
+            get_postgres_foreign_keys_for_transfer(
+                state,
+                source_pool_key,
+                &request.source_database,
+                &request.source_schema,
+                table,
+            )
+            .await?
         } else {
             Vec::new()
         };
@@ -5333,6 +5367,35 @@ mod tests {
             has_more: false,
             elasticsearch_raw_body: None,
         }
+    }
+
+    async fn test_app_state() -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dbx-transfer-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        (AppState::new(storage), dir)
+    }
+
+    #[tokio::test]
+    async fn postgres_transfer_metadata_routes_agent_pools() {
+        let (state, dir) = test_app_state().await;
+        state.connections.write().await.insert(
+            "source:source_db".to_string(),
+            PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub()),
+        );
+
+        let index_error =
+            get_postgres_indexes_for_transfer(&state, "source:source_db", "source_db", "source_schema", "items")
+                .await
+                .unwrap_err();
+        let foreign_key_error =
+            get_postgres_foreign_keys_for_transfer(&state, "source:source_db", "source_db", "source_schema", "items")
+                .await
+                .unwrap_err();
+
+        assert!(!index_error.contains("PostgreSQL pool not found"), "index error: {index_error}");
+        assert!(!foreign_key_error.contains("PostgreSQL pool not found"), "foreign key error: {foreign_key_error}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

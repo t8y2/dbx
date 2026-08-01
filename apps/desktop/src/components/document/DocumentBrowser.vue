@@ -594,16 +594,21 @@ function documentRoutingFromDocument(doc: JsonRecord | undefined): string | unde
   return normalizeDocumentStoreRouting(doc?._routing);
 }
 
+function documentTypeFromDocument(doc: JsonRecord | undefined): string | undefined {
+  const documentType = doc?._type;
+  return typeof documentType === "string" && documentType.trim() ? documentType.trim() : undefined;
+}
+
 function documentRoutingFromGridRow(row: MongoInputValue[] | undefined, columns: string[]): string | undefined {
   const routingColIdx = columns.indexOf("_routing");
   return routingColIdx >= 0 ? normalizeDocumentStoreRouting(row?.[routingColIdx]) : undefined;
 }
 
-function documentStoreWriteApis() {
+function documentStoreWriteApis(documentType?: string) {
   return {
     insert: (docJson: string, routing?: string) => api.documentInsertDocument(props.connectionId, props.database, props.collection, docJson, routing),
     update: (id: string, docJson: string, routing?: string) => api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, docJson, routing),
-    delete: (id: string, routing?: string) => api.documentDeleteDocument(props.connectionId, props.database, props.collection, id, routing),
+    delete: (id: string, routing?: string) => api.documentDeleteDocument(props.connectionId, props.database, props.collection, id, routing, documentType),
   };
 }
 
@@ -648,8 +653,9 @@ async function gridSave(changes: DocumentGridChanges) {
     if (id == null) continue;
     const document = documents.value[rowIdx];
     const routing = isEs ? documentRoutingFromDocument(document) : undefined;
+    const documentType = isEs ? documentTypeFromDocument(document) : undefined;
     const documentId = isEs ? id : (document?._id ?? id);
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isEs ? String(documentId) : serializeMongoDocumentId(documentId), routing);
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isEs ? String(documentId) : serializeMongoDocumentId(documentId), routing, documentType);
   }
 
   for (const newRow of changes.newRows) {
@@ -1336,10 +1342,10 @@ async function saveDoc() {
     const doc = buildDocumentFromEditor();
     if (!doc) return;
 
-    const apis = documentStoreWriteApis();
     const kind = documentStoreProvider.value.kind;
 
     if (isNew.value) {
+      const apis = documentStoreWriteApis();
       const explicitId = kind === "elasticsearch" ? documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch")) : null;
       await insertDocumentStoreDocumentCore({
         kind,
@@ -1362,6 +1368,7 @@ async function saveDoc() {
         return;
       }
       const currentRouting = documentRoutingFromDocument(current);
+      const apis = documentStoreWriteApis(kind === "elasticsearch" ? documentTypeFromDocument(current) : undefined);
       const write = resolveWriteIdentityFromEditor(doc, currentId, currentRouting);
       if (!write) {
         error.value = t("mongo.jsonIdRequired");
@@ -1400,7 +1407,7 @@ async function applyDeleteDoc(idx: number) {
   if (!id) return;
   error.value = "";
   try {
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), documentRoutingFromDocument(doc));
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), documentRoutingFromDocument(doc), documentStoreProvider.value.kind === "elasticsearch" ? documentTypeFromDocument(doc) : undefined);
     if (selectedIdx.value === idx) {
       selectedIdx.value = null;
       editJson.value = "";

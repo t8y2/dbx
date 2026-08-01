@@ -5334,6 +5334,11 @@ async fn get_columns_core_for_session_inner(
             PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
                 db::questdb::get_columns(p, schema, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::Postgres(p)
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) =>
+            {
+                db::postgres::get_redshift_columns(p, schema, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await.map(deduplicate_column_infos),
             PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await.map(deduplicate_column_infos),
             PoolKind::Rqlite(client) => {
@@ -5486,6 +5491,11 @@ async fn list_indexes_core_for_session(
             }
             PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
                 db::questdb::list_indexes(p, schema, table).await
+            }
+            PoolKind::Postgres(_)
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) =>
+            {
+                Ok(vec![])
             }
             PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_indexes(p, schema, table).await,

@@ -782,6 +782,51 @@ async fn connect_pool_attempt(
     setup_mode: MySqlSetupMode,
     eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
+    let result = connect_pool_attempt_with_keepalive(
+        url,
+        ca_cert_path,
+        timeout,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+        eof_mode,
+        MySqlTcpKeepaliveMode::Enabled,
+    )
+    .await;
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_without_tcp_keepalive(error)) {
+        log::info!("MySQL connection returned EBADF; retrying with TCP keepalive disabled");
+        return connect_pool_attempt_with_keepalive(
+            url,
+            ca_cert_path,
+            timeout,
+            max_connections,
+            idle_timeout_secs,
+            setup_database,
+            extra_setup_queries,
+            setup_mode,
+            eof_mode,
+            MySqlTcpKeepaliveMode::Disabled,
+        )
+        .await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_pool_attempt_with_keepalive(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
+) -> Result<MySqlPool, String> {
     let pool = create_pool(
         url,
         ca_cert_path,
@@ -791,6 +836,7 @@ async fn connect_pool_attempt(
         extra_setup_queries,
         setup_mode,
         eof_mode,
+        tcp_keepalive_mode,
     )?;
     verify_pool_connection_with_setup_fallback(
         pool,
@@ -803,6 +849,7 @@ async fn connect_pool_attempt(
         extra_setup_queries,
         setup_mode,
         eof_mode,
+        tcp_keepalive_mode,
     )
     .await
 }
@@ -825,9 +872,24 @@ enum MySqlEofMode {
     Legacy,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlTcpKeepaliveMode {
+    Enabled,
+    Disabled,
+}
+
 impl MySqlEofMode {
     fn deprecate_eof(self) -> bool {
         self == Self::Deprecate
+    }
+}
+
+impl MySqlTcpKeepaliveMode {
+    fn duration(self) -> Option<Duration> {
+        match self {
+            Self::Enabled => Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))),
+            Self::Disabled => None,
+        }
     }
 }
 
@@ -842,6 +904,7 @@ impl MySqlSetupMode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn verify_pool_connection_with_setup_fallback(
     pool: MySqlPool,
     timeout: Duration,
@@ -853,6 +916,7 @@ async fn verify_pool_connection_with_setup_fallback(
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
     eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
     match verify_pool_connection(&pool, timeout).await {
         Ok(()) => Ok(pool),
@@ -872,6 +936,7 @@ async fn verify_pool_connection_with_setup_fallback(
                 extra_setup_queries,
                 fallback_mode,
                 eof_mode,
+                tcp_keepalive_mode,
             )?;
             verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
         }
@@ -914,6 +979,7 @@ fn create_pool(
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
     eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
@@ -946,7 +1012,7 @@ fn create_pool(
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
-        .tcp_keepalive(Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))))
+        .tcp_keepalive(tcp_keepalive_mode.duration())
         .deprecate_eof(eof_mode.deprecate_eof())
         .setup(setup_queries);
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
@@ -1485,6 +1551,11 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
 
 fn mysql_error_should_retry_with_legacy_eof(error: &str) -> bool {
     error.to_ascii_lowercase().contains("packets out of sync")
+}
+
+fn mysql_error_should_retry_without_tcp_keepalive(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("bad file descriptor") && error.contains("os error 9")
 }
 
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
@@ -3676,6 +3747,91 @@ async fn execute_result_set_with_text_protocol_on_conn(
     })
 }
 
+async fn execute_result_sets_with_text_protocol_on_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    row_limit: usize,
+    max_rows: Option<usize>,
+    start: Instant,
+) -> Result<Vec<QueryResult>, String> {
+    let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    let mut results = Vec::new();
+
+    while advance_to_result_set_with_columns(&mut result).await? {
+        let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+        let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
+        let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
+        let mut spatial_values = Vec::new();
+        let mut truncated = false;
+
+        let rows = if should_collect_text_result_set(sql, row_limit, max_rows) {
+            let rows: Vec<mysql_async::Row> = result.collect().await.map_err(|e| e.to_string())?;
+            truncated = rows.len() > row_limit;
+            rows.iter()
+                .take(row_limit)
+                .map(|row| {
+                    let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns);
+                    spatial_values.push(srids);
+                    values
+                })
+                .collect()
+        } else {
+            let mut rows = Vec::new();
+            let mut stream = result
+                .stream::<mysql_async::Row>()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Empty result set stream".to_string())?;
+
+            while let Some(row) = stream.next().await {
+                let row = row.map_err(|e| e.to_string())?;
+                if rows.len() < row_limit {
+                    let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns);
+                    rows.push(values);
+                    spatial_values.push(srids);
+                } else {
+                    truncated = true;
+                }
+            }
+            rows
+        };
+
+        results.push(QueryResult {
+            columns,
+            column_types,
+            column_sortables: vec![],
+            spatial_columns: spatial_columns.finish(),
+            spatial_values,
+            rows,
+            affected_rows: 0,
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        });
+    }
+
+    if results.is_empty() {
+        results.push(QueryResult {
+            columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![],
+            affected_rows: result.affected_rows(),
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        });
+    }
+
+    Ok(results)
+}
+
 async fn advance_to_result_set_with_columns(
     result: &mut mysql_async::QueryResult<'_, '_, mysql_async::TextProtocol>,
 ) -> Result<bool, String> {
@@ -3994,6 +4150,22 @@ pub async fn execute_query_on_conn_with_max_rows(
             has_more: false,
             elasticsearch_raw_body: None,
         })
+    }
+}
+
+pub async fn execute_query_results_on_conn_with_max_rows(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    dialect: MySqlQueryDialect,
+) -> Result<Vec<QueryResult>, String> {
+    if is_result_set_query(sql, dialect) && (bare || prefers_text_protocol_query(sql, dialect)) {
+        let start = Instant::now();
+        execute_result_sets_with_text_protocol_on_conn(conn, sql, query_result_row_limit(max_rows), max_rows, start)
+            .await
+    } else {
+        execute_query_on_conn_with_max_rows(conn, sql, bare, max_rows, dialect).await.map(|result| vec![result])
     }
 }
 
@@ -5297,8 +5469,23 @@ mod tests {
     }
 
     #[test]
+    fn mysql_bad_file_descriptor_retries_without_tcp_keepalive() {
+        let error = "MySQL connection failed: Input/output error: Input/output error: Bad file descriptor (os error 9)";
+
+        assert!(mysql_error_should_retry_without_tcp_keepalive(error));
+        assert!(!mysql_error_should_retry_without_tcp_keepalive(
+            "MySQL connection failed: Connection reset by peer (os error 54)"
+        ));
+    }
+
+    #[test]
     fn mysql_tcp_keepalive_uses_milliseconds_not_seconds() {
         assert_eq!(MYSQL_TCP_KEEPALIVE_MS, 30_000);
+        assert_eq!(
+            MySqlTcpKeepaliveMode::Enabled.duration(),
+            Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS)))
+        );
+        assert_eq!(MySqlTcpKeepaliveMode::Disabled.duration(), None);
     }
 
     #[test]

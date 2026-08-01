@@ -540,6 +540,18 @@ pub async fn delete_document_core(
     id: &str,
     routing: Option<&str>,
 ) -> Result<u64, String> {
+    delete_document_core_with_type(state, connection_id, database, collection, id, routing, None).await
+}
+
+pub async fn delete_document_core_with_type(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    id: &str,
+    routing: Option<&str>,
+    document_type: Option<&str>,
+) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
@@ -549,12 +561,12 @@ pub async fn delete_document_core(
             drop(connections);
             // Elasticsearch requires the same custom routing value for writes
             // as was used to index the document.
-            elasticsearch_driver::delete_document(&client, collection, id, routing).await
+            elasticsearch_driver::delete_document(&client, collection, id, document_type, routing).await
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
             drop(connections);
-            easysearch_driver::delete_document(&client, collection, id, routing).await
+            easysearch_driver::delete_document(&client, collection, id, document_type, routing).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;

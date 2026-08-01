@@ -5410,6 +5410,12 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Default Model -->
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.defaultModel") }}</Label>
+                  <Input v-model="aiEditModel" autocomplete="off" class="col-span-2 h-8 text-xs" :placeholder="t('ai.manualModelPlaceholder')" />
+                </div>
+
                 <!-- Context Window -->
                 <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>

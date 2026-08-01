@@ -8,6 +8,9 @@ use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
+use sqlparser::ast::Statement;
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::future::Future;
@@ -3219,6 +3222,29 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
 }
 
+/// Returns whether PostgreSQL should execute this statement through the row
+/// retrieval path. DML without `RETURNING` needs `execute` for its command
+/// tag/affected-row count, while DML with `RETURNING` produces a result set.
+pub(crate) fn postgres_statement_returns_rows(sql: &str) -> bool {
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+        return true;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
+        return false;
+    };
+    let [statement] = statements.as_slice() else {
+        return false;
+    };
+
+    match statement {
+        Statement::Insert(insert) => insert.returning.is_some(),
+        Statement::Update(update) => update.returning.is_some(),
+        Statement::Delete(delete) => delete.returning.is_some(),
+        _ => false,
+    }
+}
+
 pub async fn execute_query(pool: &Pool, sql: &str) -> Result<QueryResult, String> {
     execute_query_with_max_rows(pool, sql, None).await
 }
@@ -3231,7 +3257,7 @@ pub async fn execute_query_with_max_rows(
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if postgres_statement_returns_rows(sql) {
         let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
         execute_select_query(&client, sql, start, row_limit).await
     } else {
@@ -3729,7 +3755,7 @@ async fn execute_query_with_max_rows_inner(
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if postgres_statement_returns_rows(sql) {
         if prefer_text_protocol {
             execute_select_text(client, sql, start, row_limit, None).await
         } else {
@@ -4679,6 +4705,27 @@ mod tests {
     }
 
     #[test]
+    fn postgres_statement_returns_rows_for_returning_dml_only() {
+        for sql in [
+            "INSERT INTO users (id) VALUES (1) RETURNING id",
+            "UPDATE users SET name = 'Ada' RETURNING id, name",
+            "DELETE FROM users WHERE id = 1 RETURNING id",
+            "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
+        ] {
+            assert!(postgres_statement_returns_rows(sql), "expected result rows for: {sql}");
+        }
+
+        for sql in [
+            "INSERT INTO users (id) VALUES (1)",
+            "UPDATE users SET name = 'Ada'",
+            "DELETE FROM users WHERE id = 1",
+            "INSERT INTO users (note) VALUES ('RETURNING is text')",
+        ] {
+            assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
+        }
+    }
+
+    #[test]
     fn database_list_does_not_collect_storage_usage() {
         assert!(list_databases_sql().contains("pg_database"));
         assert!(!list_databases_sql().contains("pg_database_size"));
@@ -4844,6 +4891,58 @@ mod tests {
                 Err(error) => panic!("docker postgres did not become ready: {error}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_dml_returning_preserves_result_rows() {
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+
+        execute_query(&pool, "CREATE TABLE dml_returning (id integer PRIMARY KEY, name text NOT NULL)")
+            .await
+            .expect("create table");
+
+        let inserted = execute_query(&pool, "INSERT INTO dml_returning VALUES (1, 'alice'), (2, 'bob')")
+            .await
+            .expect("insert rows");
+        let updated = execute_query(&pool, "UPDATE dml_returning SET name = 'bob-updated' WHERE id = 2")
+            .await
+            .expect("update rows");
+        let deleted = execute_query(&pool, "DELETE FROM dml_returning WHERE id = 1").await.expect("delete row");
+        let unmatched =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999").await.expect("update no rows");
+
+        assert_eq!(inserted.affected_rows, 2);
+        assert_eq!(updated.affected_rows, 1);
+        assert_eq!(deleted.affected_rows, 1);
+        assert_eq!(unmatched.affected_rows, 0);
+
+        let insert_returning = execute_query(&pool, "INSERT INTO dml_returning VALUES (3, 'carol') RETURNING id, name")
+            .await
+            .expect("insert returning");
+        let update_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = 'carol-updated' WHERE id = 3 RETURNING id, name")
+                .await
+                .expect("update returning");
+        let delete_returning = execute_query(&pool, "DELETE FROM dml_returning WHERE id = 3 RETURNING id, name")
+            .await
+            .expect("delete returning");
+        let empty_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999 RETURNING id, name")
+                .await
+                .expect("empty returning");
+
+        for result in [&insert_returning, &update_returning, &delete_returning] {
+            assert_eq!(result.columns, vec!["id", "name"]);
+            assert_eq!(result.rows.len(), 1);
+        }
+        assert_eq!(insert_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol")]);
+        assert_eq!(update_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol-updated")]);
+        assert_eq!(delete_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol-updated")]);
+        assert_eq!(empty_returning.columns, vec!["id", "name"]);
+        assert!(empty_returning.rows.is_empty());
     }
 
     async fn assert_postgres_18(pool: &Pool) {

@@ -4,6 +4,9 @@ use mysql_async::consts::ColumnType;
 use mysql_async::prelude::*;
 use percent_encoding::percent_decode_str;
 use rust_decimal::Decimal;
+use sqlparser::ast::Statement;
+use sqlparser::dialect::MySqlDialect;
+use sqlparser::parser::Parser;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -4175,12 +4178,31 @@ fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
     is_result_set_query(sql, dialect) || requires_text_protocol_query(sql, dialect)
 }
 
-fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
+pub(crate) fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
     starts_with_executable_sql_keyword_for_database(
         sql,
         &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "CALL"],
         DatabaseType::Mysql,
-    ) || dialect.supports_admin_show_results && is_admin_show_query(sql)
+    ) || mysql_statement_returns_rows(sql)
+        || dialect.supports_admin_show_results && is_admin_show_query(sql)
+}
+
+/// MariaDB 10.5+ returns a result set for INSERT/DELETE/REPLACE ... RETURNING.
+/// Route it through the existing query path; MySQL servers that do not support
+/// the syntax still return their normal SQL syntax error.
+fn mysql_statement_returns_rows(sql: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
+        return false;
+    };
+    let [statement] = statements.as_slice() else {
+        return false;
+    };
+
+    match statement {
+        Statement::Insert(insert) => insert.returning.is_some(),
+        Statement::Delete(delete) => delete.returning.is_some(),
+        _ => false,
+    }
 }
 
 fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
@@ -4607,6 +4629,15 @@ mod tests {
     fn mysql_with_queries_are_treated_as_result_sets() {
         let sql = "WITH RECURSIVE org_tree AS (SELECT 1 AS id) SELECT id FROM org_tree";
         assert!(is_result_set_query(sql, MySqlQueryDialect::default()));
+    }
+
+    #[test]
+    fn mariadb_returning_dml_is_treated_as_a_result_set() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
+        assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
+        assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
     }
 
     #[test]

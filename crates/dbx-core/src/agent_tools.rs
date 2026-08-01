@@ -616,8 +616,10 @@ async fn execute_execute_query(
 
 /// Format a QueryResult as a Markdown table for LLM consumption.
 fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<String, String> {
-    if result.rows.is_empty() {
-        return Ok("Query returned 0 rows.".to_string());
+    // A result without columns is a command result, not an empty result set.
+    // This is how drivers represent DML that does not use RETURNING.
+    if result.columns.is_empty() {
+        return Ok(format!("Query executed. {} row(s) affected.", result.affected_rows));
     }
 
     let mut lines = Vec::new();
@@ -1133,6 +1135,48 @@ for line in sys.stdin:
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
         assert!(names.contains(&"explain_query"));
+    }
+
+    fn query_result(columns: Vec<&str>, rows: Vec<Vec<serde_json::Value>>, affected_rows: u64) -> QueryResult {
+        QueryResult {
+            columns: columns.into_iter().map(str::to_string).collect(),
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            rows,
+            affected_rows,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        }
+    }
+
+    #[test]
+    fn query_result_formatter_reports_dml_affected_rows() {
+        let result = query_result(vec![], vec![], 2);
+
+        assert_eq!(format_query_result_as_text(&result, 50).unwrap(), "Query executed. 2 row(s) affected.");
+    }
+
+    #[test]
+    fn query_result_formatter_distinguishes_zero_row_dml_from_an_empty_result_set() {
+        let dml = query_result(vec![], vec![], 0);
+        let returning = query_result(vec!["id", "name"], vec![], 0);
+
+        assert_eq!(format_query_result_as_text(&dml, 50).unwrap(), "Query executed. 0 row(s) affected.");
+        assert_eq!(format_query_result_as_text(&returning, 50).unwrap(), "| id | name |\n|---|---|\n(0 rows, 1ms)");
+    }
+
+    #[test]
+    fn query_result_formatter_renders_returning_rows() {
+        let result =
+            query_result(vec!["id", "name"], vec![vec![serde_json::json!(5), serde_json::json!("returning")]], 0);
+
+        assert_eq!(
+            format_query_result_as_text(&result, 50).unwrap(),
+            "| id | name |\n|---|---|\n| 5 | returning |\n(1 rows, 1ms)"
+        );
     }
 
     #[test]

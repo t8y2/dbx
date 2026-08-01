@@ -22,7 +22,7 @@ use crate::database_capabilities;
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::is_write_sql;
-use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword};
+use crate::sql::{split_sql_batches, split_sql_statements};
 use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 
@@ -3522,7 +3522,7 @@ async fn execute_manual_txn_postgres_statement(
     sql: &str,
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if db::postgres::postgres_statement_returns_rows(sql) {
         db::postgres::execute_select_query(conn, sql, std::time::Instant::now(), row_limit).await
     } else {
         let affected = conn.execute(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
@@ -3548,7 +3548,7 @@ async fn execute_manual_txn_mysql_statement(
     sql: &str,
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"]) {
+    if db::mysql::is_result_set_query(sql, db::mysql::MySqlQueryDialect::default()) {
         let start = std::time::Instant::now();
         let mut result = conn.query_iter(sql).await.map_err(|e| format!("Query failed: {e}"))?;
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();

@@ -4,15 +4,17 @@ mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
 mod models;
+#[cfg(any(target_os = "windows", test))]
+mod startup_recovery;
+#[cfg(all(not(target_os = "windows"), not(test)))]
+#[path = "startup_recovery_noop.rs"]
+mod startup_recovery;
 mod window_state_guard;
 
 use commands::connection::AppState;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
-use std::ffi::OsString;
-use std::io::Write;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,12 +36,6 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
-const STARTUP_PROBE_LOG_FILE: &str = "startup.log";
-const STARTUP_PROBE_LOG_DIR_ENV: &str = "DBX_STARTUP_LOG_DIR";
-const STARTUP_PROBE_KEEP_ENV: &str = "DBX_KEEP_STARTUP_LOG";
-const WINDOWS_APP_DATA_DIR_NAME: &str = "com.dbx.app";
-#[cfg(target_os = "windows")]
-const WEBVIEW2_NO_SANDBOX_ENV: &str = "DBX_WEBVIEW2_NO_SANDBOX";
 #[cfg(target_os = "macos")]
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 #[cfg(target_os = "macos")]
@@ -119,8 +115,8 @@ fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool, linux_appind
         && (matches!(target_os, "macos" | "windows") || (target_os == "linux" && linux_appindicator_available))
 }
 
-fn should_enable_single_instance(debug_build: bool) -> bool {
-    !debug_build
+fn should_enable_single_instance(debug_build: bool, startup_recovery_attempt: bool) -> bool {
+    !debug_build && !startup_recovery_attempt
 }
 
 #[cfg(target_os = "macos")]
@@ -157,111 +153,13 @@ fn should_show_main_window_before_setup_tasks() -> bool {
     true
 }
 
-fn startup_probe_log_dir_from_inputs(
-    target_os: &str,
-    explicit_dir: Option<OsString>,
-    windows_appdata: Option<OsString>,
-) -> Option<PathBuf> {
-    if let Some(dir) = explicit_dir.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-    if target_os == "windows" {
-        return windows_appdata
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .map(|dir| dir.join(WINDOWS_APP_DATA_DIR_NAME));
-    }
-    None
-}
-
-fn startup_probe_log_dir() -> Option<PathBuf> {
-    startup_probe_log_dir_from_inputs(
-        std::env::consts::OS,
-        std::env::var_os(STARTUP_PROBE_LOG_DIR_ENV),
-        std::env::var_os("APPDATA"),
-    )
-}
-
-fn startup_probe_log_path() -> Option<PathBuf> {
-    startup_probe_log_dir().map(|dir| dir.join(STARTUP_PROBE_LOG_FILE))
-}
-
-fn startup_probe_should_keep_after_frontend_ready_from_value(value: Option<&str>) -> bool {
-    matches!(value, Some("1"))
-}
-
-fn startup_probe_should_keep_after_frontend_ready() -> bool {
-    startup_probe_should_keep_after_frontend_ready_from_value(std::env::var(STARTUP_PROBE_KEEP_ENV).ok().as_deref())
-}
-
-fn ensure_startup_probe_parent_dir(path: &std::path::Path) -> bool {
-    let Some(dir) = path.parent() else {
-        return false;
-    };
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    true
-}
-
-fn reset_startup_probe() {
-    let Some(path) = startup_probe_log_path() else {
-        return;
-    };
-    if !ensure_startup_probe_parent_dir(&path) {
-        return;
-    }
-    let _ = std::fs::remove_file(path);
-}
-
 fn append_startup_probe(message: impl AsRef<str>) {
-    let Some(path) = startup_probe_log_path() else {
-        return;
-    };
-    if !ensure_startup_probe_parent_dir(&path) {
-        return;
-    }
-    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
-        return;
-    };
-    let _ = writeln!(
-        file,
-        "[{}][pid={}] {}",
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-        std::process::id(),
-        message.as_ref()
-    );
+    startup_recovery::record(message);
 }
 
 pub(crate) fn clear_startup_probe_after_frontend_ready() {
-    if startup_probe_should_keep_after_frontend_ready() {
-        append_startup_probe("frontend ready; keeping startup probe by request");
-        return;
-    }
-    let Some(path) = startup_probe_log_path() else {
-        return;
-    };
-    let _ = std::fs::remove_file(path);
+    startup_recovery::mark_frontend_ready();
 }
-
-#[cfg(target_os = "windows")]
-fn configure_webview2_sandbox_compat() {
-    if !matches!(std::env::var(WEBVIEW2_NO_SANDBOX_ENV).as_deref(), Ok("1")) {
-        return;
-    }
-
-    let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-    if !args.split_whitespace().any(|arg| arg == "--no-sandbox") {
-        if !args.is_empty() {
-            args.push(' ');
-        }
-        args.push_str("--no-sandbox");
-    }
-    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn configure_webview2_sandbox_compat() {}
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
@@ -928,11 +826,9 @@ mod tests {
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
         should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
         should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_probe_log_dir_from_inputs, startup_probe_should_keep_after_frontend_ready_from_value,
         tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
-        WINDOWS_APP_DATA_DIR_NAME,
     };
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
@@ -995,8 +891,9 @@ mod tests {
 
     #[test]
     fn keeps_single_instance_for_release_builds_only() {
-        assert!(!should_enable_single_instance(true));
-        assert!(should_enable_single_instance(false));
+        assert!(!should_enable_single_instance(true, false));
+        assert!(should_enable_single_instance(false, false));
+        assert!(!should_enable_single_instance(false, true));
     }
 
     #[cfg(target_os = "macos")]
@@ -1045,40 +942,6 @@ mod tests {
     #[test]
     fn shows_main_window_while_startup_setup_continues() {
         assert!(should_show_main_window_before_setup_tasks());
-    }
-
-    #[test]
-    fn startup_probe_log_dir_prefers_explicit_override() {
-        assert_eq!(
-            startup_probe_log_dir_from_inputs(
-                "windows",
-                Some(OsString::from(r"D:\DBXDiagnostics")),
-                Some(OsString::from(r"C:\Users\test\AppData\Roaming")),
-            ),
-            Some(PathBuf::from(r"D:\DBXDiagnostics"))
-        );
-    }
-
-    #[test]
-    fn startup_probe_log_dir_uses_windows_appdata() {
-        assert_eq!(
-            startup_probe_log_dir_from_inputs("windows", None, Some(OsString::from(r"C:\Users\test\AppData\Roaming")),),
-            Some(PathBuf::from(r"C:\Users\test\AppData\Roaming").join(WINDOWS_APP_DATA_DIR_NAME))
-        );
-    }
-
-    #[test]
-    fn startup_probe_log_dir_is_disabled_without_windows_appdata() {
-        assert_eq!(startup_probe_log_dir_from_inputs("windows", None, None), None);
-        assert_eq!(startup_probe_log_dir_from_inputs("macos", None, Some(OsString::from("/Users/test/Library"))), None);
-    }
-
-    #[test]
-    fn startup_probe_log_is_kept_only_when_requested() {
-        assert!(startup_probe_should_keep_after_frontend_ready_from_value(Some("1")));
-        assert!(!startup_probe_should_keep_after_frontend_ready_from_value(None));
-        assert!(!startup_probe_should_keep_after_frontend_ready_from_value(Some("true")));
-        assert!(!startup_probe_should_keep_after_frontend_ready_from_value(Some("0")));
     }
 
     #[test]
@@ -1279,16 +1142,8 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    reset_startup_probe();
-    append_startup_probe(format!(
-        "process start version={} os={} arch={} exe={:?}",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        std::env::current_exe()
-    ));
+    startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
-    configure_webview2_sandbox_compat();
     append_startup_probe("runtime prerequisites configured");
     #[cfg(target_os = "linux")]
     apply_linux_webkit_rendering_workarounds();
@@ -1301,7 +1156,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init());
 
-    let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
+    let builder = if should_enable_single_instance(cfg!(debug_assertions), startup_recovery::is_recovery_attempt()) {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
@@ -2107,8 +1962,16 @@ pub fn run() {
             commands::tunnel_profiles::test_tunnel_profile,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .inspect(|app| {
+            append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));
+            startup_recovery::start_watchdog(app.handle());
+        })
+        .unwrap_or_else(|error| {
+            append_startup_probe(format!("tauri application build failed: {error}"));
+            panic!("error while building tauri application: {error}");
+        })
         .run(|app_handle, event| {
+            startup_recovery::record_run_event();
             #[cfg(not(target_os = "macos"))]
             let _ = (&app_handle, &event);
 

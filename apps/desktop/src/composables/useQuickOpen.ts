@@ -1,6 +1,7 @@
 import { computed, ref, watch } from "vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import * as api from "@/lib/backend/api";
@@ -467,12 +468,12 @@ export function useQuickOpen() {
 
   function remoteSearchContexts(): Array<{ conn: ConnectionConfig; database: string }> {
     if (typeof connectionStore.listCompletionTables !== "function") return [];
-    const connectedIds = connectionStore.connectedIds;
-    if (!(connectedIds instanceof Set)) return [];
 
     const databasesByConnection: Array<{ conn: ConnectionConfig; databases: string[] }> = [];
     for (const conn of connectionStore.connections) {
-      if (!connectedIds.has(conn.id) || REMOTE_SEARCH_UNSUPPORTED_TYPES.has(conn.db_type)) continue;
+      // listCompletionTables connects on demand. Keeping disconnected connections
+      // out here makes quick-open blind to unloaded tables after a cold start.
+      if (REMOTE_SEARCH_UNSUPPORTED_TYPES.has(conn.db_type)) continue;
       const databases = new Set<string>();
       collectConnectionDatabases(connectionStore.treeNodes, conn.id, databases);
       if (conn.database?.trim()) databases.add(conn.database.trim());
@@ -482,6 +483,8 @@ export function useQuickOpen() {
       for (const database of conn.attached_databases ?? []) {
         if (database.name.trim()) databases.add(database.name.trim());
       }
+      const defaultDatabase = resolveDefaultDatabase(conn, [...databases]);
+      if (defaultDatabase) databases.add(defaultDatabase);
       if (databases.size > 0) databasesByConnection.push({ conn, databases: [...databases] });
     }
 

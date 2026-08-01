@@ -851,7 +851,7 @@ describe("useQuickOpen", () => {
       expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
     });
 
-    it("does not request metadata from disconnected contexts", async () => {
+    it("searches disconnected contexts through lazy connection", async () => {
       const mockStore = remoteSearchStore({ connectedIds: new Set<string>() });
       vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
 
@@ -859,7 +859,24 @@ describe("useQuickOpen", () => {
       setQuery("users");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "users", 25, undefined, true);
+    });
+
+    it("derives the SQLite main database before its tree is expanded", async () => {
+      const mockStore = remoteSearchStore({
+        connections: [{ id: "sqlite-1", name: "SQLite", db_type: "sqlite", host: "/tmp/app.sqlite" }],
+        connectedIds: new Set<string>(),
+        treeNodes: [],
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "scroll_test", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("scroll_test");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("sqlite-1", "main", "scroll_test", 25, undefined, true);
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "scroll_test", type: "table", database: "main" })]));
     });
 
     it("keeps local results when remote metadata search fails", async () => {

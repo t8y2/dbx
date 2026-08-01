@@ -442,7 +442,7 @@ fn qualify_cross_family_view_target(sql: &str, target_family: &TransferObjectFam
     let mut out = create_re
         .replace_all(sql, |caps: &regex::Captures| {
             let name = &caps[2];
-            if caps.get(1).is_some_and(|m| !m.as_str().is_empty()) {
+            if matches!(caps.get(1), Some(m) if !m.as_str().is_empty()) {
                 caps[0].to_string()
             } else {
                 format!("CREATE VIEW {open}{target_schema}{close}.{open}{name}{close}")
@@ -457,7 +457,7 @@ fn qualify_cross_family_view_target(sql: &str, target_family: &TransferObjectFam
     out = ref_re
         .replace_all(&out, |caps: &regex::Captures| {
             let name = &caps[3];
-            if caps.get(2).is_some_and(|m| !m.as_str().is_empty()) {
+            if matches!(caps.get(2), Some(m) if !m.as_str().is_empty()) {
                 caps[0].to_string()
             } else {
                 format!("{} {open}{target_schema}{close}.{open}{name}{close}", &caps[1])

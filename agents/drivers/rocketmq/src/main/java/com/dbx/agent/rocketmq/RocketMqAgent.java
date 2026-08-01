@@ -423,22 +423,28 @@ public final class RocketMqAgent {
         DefaultMQAdminExt admin = requireAdmin();
         String keyword = stringOrEmpty(params, "keyword").toLowerCase(Locale.ROOT);
         int offset = Math.max(0, intOrDefault(params, "offset", 0));
+        // limit <= 0 means return all rows from offset (single-shot list from Rust adapter).
         int limit = intOrDefault(params, "limit", DEFAULT_LIST_LIMIT);
-        if (limit <= 0) {
-            limit = DEFAULT_LIST_LIMIT;
+        JsonObject conn = connectionObject(params);
+
+        // One ClusterInfo per list call — avoid repeated examineBrokerClusterInfo in helpers.
+        ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
+        Set<String> brokerSystemTopics = collectBrokerSystemTopics(admin);
+        Set<String> brokerNames = collectBrokerNames(clusterInfo);
+        String cluster = resolveClusterName(clusterInfo, conn);
+        Map<String, TopicConfig> brokerTopics = collectBrokerTopicConfigs(admin, conn, clusterInfo);
+        Map<String, Map<String, String>> topicAttributes = topicAttributesFromConfigs(brokerTopics);
+
+        // Prefer broker topic configs (Dashboard ground truth); nameserver routes can outlive broker deletion.
+        // Skip fetchTopicList when broker configs already provide the catalog.
+        Set<String> topicNames;
+        if (brokerTopics.isEmpty()) {
+            TopicList topicList = fetchTopicList(admin, conn);
+            topicNames = new TreeSet<>(topicList.getTopicList());
+        } else {
+            topicNames = brokerTopics.keySet();
         }
 
-        TopicList topicList = fetchTopicList(admin, connectionObject(params));
-        Set<String> brokerSystemTopics = collectBrokerSystemTopics(admin);
-        Set<String> brokerNames = collectBrokerNames(admin);
-        String cluster = clusterName(params, admin);
-        JsonObject conn = connectionObject(params);
-        Map<String, TopicConfig> brokerTopics = collectBrokerTopicConfigs(admin, conn);
-        Map<String, Map<String, String>> topicAttributes = topicAttributesFromConfigs(brokerTopics);
-        // Prefer broker topic configs (Dashboard ground truth); nameserver routes can outlive broker deletion.
-        Set<String> topicNames = brokerTopics.isEmpty()
-            ? new TreeSet<>(topicList.getTopicList())
-            : brokerTopics.keySet();
         List<Map<String, Object>> topics = new ArrayList<>();
         for (String topic : topicNames) {
             if (!keyword.isBlank() && !topic.toLowerCase(Locale.ROOT).contains(keyword)) {
@@ -462,7 +468,7 @@ public final class RocketMqAgent {
             Map<String, String> attributes = topicAttributes.get(topic);
             if (isUserTopic(topic) && readTopicMessageTypeAttribute(attributes) == null) {
                 String resolved = brokerConfig == null
-                    ? resolveTopicMessageType(admin, conn, topic)
+                    ? resolveTopicMessageType(admin, conn, topic, clusterInfo)
                     : readTopicMessageType(brokerConfig);
                 if (resolved != null && !resolved.isBlank()) {
                     attributes = attributes == null ? new HashMap<>() : new HashMap<>(attributes);
@@ -1800,30 +1806,43 @@ public final class RocketMqAgent {
 
     static List<String> resolveMasterBrokerAddrs(
         DefaultMQAdminExt admin, JsonObject conn, String brokerNameFilter) throws Exception {
-        ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
-        LinkedHashSet<String> addrs = new LinkedHashSet<>();
-        if (clusterInfo.getBrokerAddrTable() != null) {
-            for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
-                if (brokerNameFilter != null && !brokerNameFilter.isBlank()
-                    && !brokerNameFilter.equals(broker.getBrokerName())) {
-                    continue;
-                }
-                String masterAddr = null;
-                if (broker.getBrokerAddrs() != null && broker.getBrokerAddrs().containsKey(0L)) {
-                    masterAddr = broker.getBrokerAddrs().get(0L);
-                }
-                if (masterAddr == null || masterAddr.isBlank()) {
-                    masterAddr = broker.selectBrokerAddr();
-                }
-                if (masterAddr != null && !masterAddr.isBlank()) {
-                    addrs.add(remapBrokerAddrForClient(masterAddr, conn));
-                }
-            }
-        }
+        return resolveMasterBrokerAddrs(admin, conn, brokerNameFilter, admin.examineBrokerClusterInfo());
+    }
+
+    static List<String> resolveMasterBrokerAddrs(
+        DefaultMQAdminExt admin, JsonObject conn, String brokerNameFilter, ClusterInfo clusterInfo)
+        throws Exception {
+        LinkedHashSet<String> addrs = masterBrokerAddrsFromClusterInfo(clusterInfo, conn, brokerNameFilter);
         if (addrs.isEmpty()) {
-            addrs.add(resolveBrokerAddr(admin, conn));
+            addrs.add(resolveBrokerAddr(admin, conn, clusterInfo));
         }
         return new ArrayList<>(addrs);
+    }
+
+    /** Extract remapped master broker addresses from a ClusterInfo snapshot. */
+    static LinkedHashSet<String> masterBrokerAddrsFromClusterInfo(
+        ClusterInfo clusterInfo, JsonObject conn, String brokerNameFilter) {
+        LinkedHashSet<String> addrs = new LinkedHashSet<>();
+        if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+            return addrs;
+        }
+        for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
+            if (brokerNameFilter != null && !brokerNameFilter.isBlank()
+                && !brokerNameFilter.equals(broker.getBrokerName())) {
+                continue;
+            }
+            String masterAddr = null;
+            if (broker.getBrokerAddrs() != null && broker.getBrokerAddrs().containsKey(0L)) {
+                masterAddr = broker.getBrokerAddrs().get(0L);
+            }
+            if (masterAddr == null || masterAddr.isBlank()) {
+                masterAddr = broker.selectBrokerAddr();
+            }
+            if (masterAddr != null && !masterAddr.isBlank()) {
+                addrs.add(remapBrokerAddrForClient(masterAddr, conn));
+            }
+        }
+        return addrs;
     }
 
     private static void applyTopicConfigValue(TopicConfig config, String key, String value) {
@@ -2036,22 +2055,30 @@ public final class RocketMqAgent {
         if (!configured.isBlank()) {
             return configured;
         }
-        if (clusterInfo.getClusterAddrTable() != null && !clusterInfo.getClusterAddrTable().isEmpty()) {
+        if (clusterInfo != null
+            && clusterInfo.getClusterAddrTable() != null
+            && !clusterInfo.getClusterAddrTable().isEmpty()) {
             return clusterInfo.getClusterAddrTable().keySet().iterator().next();
         }
         return "DefaultCluster";
     }
 
     private static String resolveBrokerAddr(DefaultMQAdminExt admin, JsonObject conn) throws Exception {
+        return resolveBrokerAddr(admin, conn, admin.examineBrokerClusterInfo());
+    }
+
+    private static String resolveBrokerAddr(DefaultMQAdminExt admin, JsonObject conn, ClusterInfo clusterInfo)
+        throws Exception {
         String explicit = brokerAddress(conn);
         if (!explicit.isBlank()) {
             return explicit;
         }
-        ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
-        for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
-            String addr = broker.selectBrokerAddr();
-            if (addr != null && !addr.isBlank()) {
-                return remapBrokerAddrForClient(addr, conn);
+        if (clusterInfo != null && clusterInfo.getBrokerAddrTable() != null) {
+            for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
+                String addr = broker.selectBrokerAddr();
+                if (addr != null && !addr.isBlank()) {
+                    return remapBrokerAddrForClient(addr, conn);
+                }
             }
         }
         throw new IllegalStateException("No RocketMQ broker address found");
@@ -2299,18 +2326,23 @@ public final class RocketMqAgent {
     }
 
     private static Set<String> collectBrokerNames(DefaultMQAdminExt admin) {
-        Set<String> names = new HashSet<>();
         try {
-            ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
-            if (clusterInfo.getBrokerAddrTable() != null) {
-                for (BrokerData brokerData : clusterInfo.getBrokerAddrTable().values()) {
-                    if (brokerData.getBrokerName() != null && !brokerData.getBrokerName().isBlank()) {
-                        names.add(brokerData.getBrokerName());
-                    }
-                }
-            }
+            return collectBrokerNames(admin.examineBrokerClusterInfo());
         } catch (Exception ignored) {
             // Fall back to static reserved-topic filtering only.
+            return Set.of();
+        }
+    }
+
+    static Set<String> collectBrokerNames(ClusterInfo clusterInfo) {
+        Set<String> names = new HashSet<>();
+        if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+            return names;
+        }
+        for (BrokerData brokerData : clusterInfo.getBrokerAddrTable().values()) {
+            if (brokerData.getBrokerName() != null && !brokerData.getBrokerName().isBlank()) {
+                names.add(brokerData.getBrokerName());
+            }
         }
         return names;
     }
@@ -2332,9 +2364,19 @@ public final class RocketMqAgent {
     }
 
     private static Map<String, TopicConfig> collectBrokerTopicConfigs(DefaultMQAdminExt admin, JsonObject conn) {
+        try {
+            return collectBrokerTopicConfigs(admin, conn, admin.examineBrokerClusterInfo());
+        } catch (Exception ignored) {
+            // Fall back to nameserver topic list in listTopics.
+            return new LinkedHashMap<>();
+        }
+    }
+
+    private static Map<String, TopicConfig> collectBrokerTopicConfigs(
+        DefaultMQAdminExt admin, JsonObject conn, ClusterInfo clusterInfo) {
         Map<String, TopicConfig> merged = new LinkedHashMap<>();
         try {
-            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
+            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn, null, clusterInfo)) {
                 try {
                     TopicConfigSerializeWrapper wrapper =
                         admin.getAllTopicConfig(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS);
@@ -2413,12 +2455,23 @@ public final class RocketMqAgent {
 
     private static String resolveTopicMessageType(DefaultMQAdminExt admin, JsonObject conn, String topic) {
         try {
+            return resolveTopicMessageType(admin, conn, topic, admin.examineBrokerClusterInfo());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String resolveTopicMessageType(
+        DefaultMQAdminExt admin, JsonObject conn, String topic, ClusterInfo clusterInfo) {
+        try {
             TopicRouteData route = admin.examineTopicRouteInfo(topic);
             if (route.getQueueDatas() == null || route.getQueueDatas().isEmpty()) {
                 return null;
             }
             String brokerName = route.getQueueDatas().get(0).getBrokerName();
-            ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
+            if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+                return null;
+            }
             BrokerData brokerData = clusterInfo.getBrokerAddrTable().get(brokerName);
             if (brokerData == null) {
                 return null;
@@ -2434,9 +2487,16 @@ public final class RocketMqAgent {
         }
     }
 
+    /**
+     * Slice {@code items} from {@code offset}. When {@code limit <= 0}, return all remaining items
+     * (used by the Rust adapter's single-shot full list request).
+     */
     static <T> List<T> paginate(List<T> items, int offset, int limit) {
         if (offset >= items.size()) {
             return Collections.emptyList();
+        }
+        if (limit <= 0) {
+            return new ArrayList<>(items.subList(offset, items.size()));
         }
         int end = Math.min(items.size(), offset + limit);
         return new ArrayList<>(items.subList(offset, end));

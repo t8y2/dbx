@@ -52,7 +52,9 @@ const ROCKETMQ_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_cluster_monitoring: false,
 };
 
-const TOPIC_LIST_PAGE_SIZE: u32 = 200;
+/// `limit <= 0` tells the Java agent to return the full topic catalog in one response.
+/// Avoids fake client-side paging that rebuilt the entire catalog on every page.
+const TOPIC_LIST_FETCH_ALL: i32 = 0;
 
 pub struct RocketMqAdmin {
     client: Arc<Mutex<AgentDriverClient>>,
@@ -176,36 +178,21 @@ impl MessageQueueAdmin for RocketMqAdmin {
     // ---- Topics ----
 
     async fn list_topics(&self, _ns: &NamespaceRef, _opts: ListTopicsOpts) -> Result<Vec<TopicInfo>, String> {
-        let mut all = Vec::new();
-        let mut offset: u32 = 0;
+        // Single RPC: agent builds the catalog once. Fake offset/limit paging used to
+        // re-run getAllTopicConfig for every 200-row page.
+        let result: serde_json::Value = self
+            .call(
+                "mq_list_topics",
+                serde_json::json!({
+                    "keyword": "",
+                    "limit": TOPIC_LIST_FETCH_ALL,
+                    "offset": 0,
+                }),
+            )
+            .await?;
 
-        loop {
-            let result: serde_json::Value = self
-                .call(
-                    "mq_list_topics",
-                    serde_json::json!({
-                        "keyword": "",
-                        "limit": TOPIC_LIST_PAGE_SIZE,
-                        "offset": offset,
-                    }),
-                )
-                .await?;
-
-            let topics = result.get("topics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let page_len = topics.len();
-            for topic in topics {
-                all.push(topic_info_from_agent_value(&topic));
-            }
-
-            let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(offset as u64 + page_len as u64);
-            let fetch_next = topic_list_should_fetch_next(offset, page_len, total);
-            offset = offset.saturating_add(page_len as u32);
-            if !fetch_next {
-                break;
-            }
-        }
-
-        Ok(all)
+        let topics = result.get("topics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        Ok(topics.iter().map(topic_info_from_agent_value).collect())
     }
 
     async fn create_topic(&self, topic: &TopicRef, partitions: Option<u32>) -> Result<(), String> {
@@ -735,28 +722,9 @@ fn topic_info_from_agent_value(t: &serde_json::Value) -> TopicInfo {
     }
 }
 
-/// Whether another Agent topic list page should be requested after consuming `page_len` rows.
-fn topic_list_should_fetch_next(offset: u32, page_len: usize, total: u64) -> bool {
-    page_len > 0 && u64::from(offset) + (page_len as u64) < total
-}
-
 #[cfg(test)]
-fn topic_infos_from_agent_pages(pages: &[serde_json::Value]) -> Vec<TopicInfo> {
-    let mut all = Vec::new();
-    let mut offset: u32 = 0;
-    for page in pages {
-        let topics = page.get("topics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let page_len = topics.len();
-        for topic in topics {
-            all.push(topic_info_from_agent_value(&topic));
-        }
-        let total = page.get("total").and_then(|v| v.as_u64()).unwrap_or(offset as u64 + page_len as u64);
-        offset = offset.saturating_add(page_len as u32);
-        if page_len == 0 || offset as u64 >= total {
-            break;
-        }
-    }
-    all
+fn topic_infos_from_agent_list_response(response: &serde_json::Value) -> Vec<TopicInfo> {
+    response.get("topics").and_then(|v| v.as_array()).into_iter().flatten().map(topic_info_from_agent_value).collect()
 }
 
 /// Extract RocketMQ NameServer address from MqAdminConfig.extra.
@@ -1043,40 +1011,16 @@ mod tests {
     }
 
     #[test]
-    fn topic_list_should_fetch_next_when_more_rows_remain() {
-        assert!(!topic_list_should_fetch_next(200, 0, 201));
-        assert!(topic_list_should_fetch_next(0, 200, 201));
-        assert!(!topic_list_should_fetch_next(0, 200, 200));
-        assert!(topic_list_should_fetch_next(200, 1, 450));
-        assert!(!topic_list_should_fetch_next(400, 50, 450));
-    }
-
-    #[test]
-    fn topic_infos_from_agent_pages_merges_200_201_and_multi_page_totals() {
-        let page1: Vec<serde_json::Value> =
-            (0..200).map(|i| serde_json::json!({ "name": format!("topic-{i}"), "partitions": 4 })).collect();
-        let page2_201 = serde_json::json!({ "name": "topic-200", "partitions": 4 });
-        let response_201_first = serde_json::json!({ "topics": page1, "total": 201, "offset": 0, "limit": 200 });
-        let response_201_second =
-            serde_json::json!({ "topics": [page2_201], "total": 201, "offset": 200, "limit": 200 });
-        let merged_201 = topic_infos_from_agent_pages(&[response_201_first, response_201_second]);
-        assert_eq!(merged_201.len(), 201);
-        assert_eq!(merged_201.last().map(|t| t.name.as_str()), Some("topic-200"));
-
-        let page_a: Vec<serde_json::Value> =
-            (0..200).map(|i| serde_json::json!({ "name": format!("p-{i}"), "partitions": 1 })).collect();
-        let page_b: Vec<serde_json::Value> =
-            (200..400).map(|i| serde_json::json!({ "name": format!("p-{i}"), "partitions": 1 })).collect();
-        let page_c: Vec<serde_json::Value> =
-            (400..450).map(|i| serde_json::json!({ "name": format!("p-{i}"), "partitions": 1 })).collect();
-        let merged_450 = topic_infos_from_agent_pages(&[
-            serde_json::json!({ "topics": page_a, "total": 450 }),
-            serde_json::json!({ "topics": page_b, "total": 450 }),
-            serde_json::json!({ "topics": page_c, "total": 450 }),
-        ]);
-        assert_eq!(merged_450.len(), 450);
-        assert_eq!(merged_450.first().map(|t| t.name.as_str()), Some("p-0"));
-        assert_eq!(merged_450.last().map(|t| t.name.as_str()), Some("p-449"));
+    fn topic_infos_from_agent_list_response_parses_full_catalog() {
+        let topics: Vec<serde_json::Value> = (0..341)
+            .map(|i| serde_json::json!({ "name": format!("topic-{i}"), "partitions": 4, "messageType": "UNSPECIFIED" }))
+            .collect();
+        let response = serde_json::json!({ "topics": topics, "total": 341, "offset": 0, "limit": 0 });
+        let parsed = topic_infos_from_agent_list_response(&response);
+        assert_eq!(parsed.len(), 341);
+        assert_eq!(parsed.first().map(|t| t.name.as_str()), Some("topic-0"));
+        assert_eq!(parsed.last().map(|t| t.name.as_str()), Some("topic-340"));
+        assert_eq!(parsed[0].message_type.as_deref(), Some("UNSPECIFIED"));
     }
 
     #[test]

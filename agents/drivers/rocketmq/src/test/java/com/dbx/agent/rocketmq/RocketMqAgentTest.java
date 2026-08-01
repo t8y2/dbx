@@ -176,6 +176,29 @@ class RocketMqAgentTest {
     }
 
     @Test
+    void paginateLimitZeroReturnsAllFromOffset() {
+        List<Integer> items = IntStream.range(0, 341).boxed().toList();
+        assertEquals(341, RocketMqAgent.paginate(items, 0, 0).size());
+        assertEquals(141, RocketMqAgent.paginate(items, 200, 0).size());
+        assertEquals(200, RocketMqAgent.paginate(items, 200, 0).get(0));
+    }
+
+    @Test
+    void collectBrokerNamesFromClusterInfoSnapshot() {
+        org.apache.rocketmq.remoting.protocol.body.ClusterInfo clusterInfo =
+            new org.apache.rocketmq.remoting.protocol.body.ClusterInfo();
+        java.util.HashMap<String, org.apache.rocketmq.remoting.protocol.route.BrokerData> table =
+            new java.util.HashMap<>();
+        org.apache.rocketmq.remoting.protocol.route.BrokerData broker =
+            new org.apache.rocketmq.remoting.protocol.route.BrokerData();
+        broker.setBrokerName("broker-a");
+        table.put("broker-a", broker);
+        clusterInfo.setBrokerAddrTable(table);
+        assertEquals(Set.of("broker-a"), RocketMqAgent.collectBrokerNames(clusterInfo));
+        assertEquals(Set.of(), RocketMqAgent.collectBrokerNames(null));
+    }
+
+    @Test
     void resolveNameServerAddrSetSplitsMultiAddr() {
         JsonObject conn = JsonParser.parseString("""
             {"namesrv_addr":"127.0.0.1:9876;192.168.1.2:9876"}

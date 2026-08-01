@@ -113,6 +113,7 @@
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(10 10 10);
   --primary: rgb(23 23 23);
+  --dbx-primary-rgb: 23, 23, 23;
   --primary-foreground: rgb(250 250 250);
   --secondary: rgb(245 245 245);
   --secondary-foreground: rgb(23 23 23);
@@ -350,6 +351,7 @@ input[type="number"]:disabled::-webkit-outer-spin-button {
   --popover: rgb(30 30 32);
   --popover-foreground: rgb(221 221 226);
   --primary: rgb(208 208 214);
+  --dbx-primary-rgb: 208, 208, 214;
   --primary-foreground: rgb(19 20 22);
   --secondary: rgb(42 42 45);
   --secondary-foreground: rgb(215 215 219);
@@ -401,6 +403,7 @@ html.theme-soft {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(36 40 48);
   --primary: rgb(46 95 166);
+  --dbx-primary-rgb: 46, 95, 166;
   --primary-foreground: rgb(247 250 255);
   --secondary: rgb(237 241 246);
   --secondary-foreground: rgb(47 53 63);
@@ -441,6 +444,7 @@ html.theme-soft.dark {
   --popover: rgb(42 45 51);
   --popover-foreground: rgb(207 211 218);
   --primary: rgb(157 177 205);
+  --dbx-primary-rgb: 157, 177, 205;
   --primary-foreground: rgb(27 30 34);
   --secondary: rgb(47 51 58);
   --secondary-foreground: rgb(201 205 213);
@@ -481,6 +485,7 @@ html.theme-graphite {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(39 42 48);
   --primary: rgb(72 80 93);
+  --dbx-primary-rgb: 72, 80, 93;
   --primary-foreground: rgb(248 250 252);
   --secondary: rgb(238 240 244);
   --secondary-foreground: rgb(49 53 61);
@@ -521,6 +526,7 @@ html.theme-graphite.dark {
   --popover: rgb(42 44 50);
   --popover-foreground: rgb(205 208 214);
   --primary: rgb(174 181 192);
+  --dbx-primary-rgb: 174, 181, 192;
   --primary-foreground: rgb(27 29 33);
   --secondary: rgb(47 50 57);
   --secondary-foreground: rgb(199 202 208);
@@ -561,6 +567,7 @@ html.theme-cobalt {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(30 41 56);
   --primary: rgb(43 99 183);
+  --dbx-primary-rgb: 43, 99, 183;
   --primary-foreground: rgb(247 250 255);
   --secondary: rgb(232 240 250);
   --secondary-foreground: rgb(38 52 70);
@@ -601,6 +608,7 @@ html.theme-cobalt.dark {
   --popover: rgb(35 43 58);
   --popover-foreground: rgb(206 214 225);
   --primary: rgb(137 173 223);
+  --dbx-primary-rgb: 137, 173, 223;
   --primary-foreground: rgb(20 28 39);
   --secondary: rgb(43 53 70);
   --secondary-foreground: rgb(200 209 221);
@@ -641,6 +649,7 @@ html.theme-sage {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(34 46 41);
   --primary: rgb(58 123 106);
+  --dbx-primary-rgb: 58, 123, 106;
   --primary-foreground: rgb(246 252 249);
   --secondary: rgb(233 241 237);
   --secondary-foreground: rgb(42 58 52);
@@ -681,6 +690,7 @@ html.theme-sage.dark {
   --popover: rgb(38 48 45);
   --popover-foreground: rgb(206 216 212);
   --primary: rgb(138 184 169);
+  --dbx-primary-rgb: 138, 184, 169;
   --primary-foreground: rgb(22 32 29);
   --secondary: rgb(44 57 53);
   --secondary-foreground: rgb(200 210 206);
@@ -721,6 +731,7 @@ html.theme-amber {
   --popover: rgb(255 255 250);
   --popover-foreground: rgb(51 44 30);
   --primary: rgb(149 95 28);
+  --dbx-primary-rgb: 149, 95, 28;
   --primary-foreground: rgb(255 250 236);
   --secondary: rgb(247 238 213);
   --secondary-foreground: rgb(68 56 36);
@@ -761,6 +772,7 @@ html.theme-amber.dark {
   --popover: rgb(50 46 36);
   --popover-foreground: rgb(225 216 197);
   --primary: rgb(213 169 75);
+  --dbx-primary-rgb: 213, 169, 75;
   --primary-foreground: rgb(34 29 21);
   --secondary: rgb(59 53 40);
   --secondary-foreground: rgb(218 209 190);
@@ -801,6 +813,7 @@ html.theme-blush {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(57 45 53);
   --primary: rgb(184 86 123);
+  --dbx-primary-rgb: 184, 86, 123;
   --primary-foreground: rgb(255 248 251);
   --secondary: rgb(246 232 239);
   --secondary-foreground: rgb(74 55 67);
@@ -841,6 +854,7 @@ html.theme-blush.dark {
   --popover: rgb(58 47 55);
   --popover-foreground: rgb(230 214 222);
   --primary: rgb(226 160 184);
+  --dbx-primary-rgb: 226, 160, 184;
   --primary-foreground: rgb(39 29 35);
   --secondary: rgb(67 52 62);
   --secondary-foreground: rgb(222 206 215);
@@ -881,6 +895,7 @@ html.theme-vscode {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(45 45 45);
   --primary: rgb(0 122 204);
+  --dbx-primary-rgb: 0, 122, 204;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(243 243 243);
   --secondary-foreground: rgb(51 51 51);
@@ -922,6 +937,7 @@ html.theme-vscode.dark {
   --popover: rgb(45 45 48);
   --popover-foreground: rgb(212 212 212);
   --primary: rgb(0 122 204);
+  --dbx-primary-rgb: 0, 122, 204;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(45 45 48);
   --secondary-foreground: rgb(204 204 204);
@@ -963,6 +979,7 @@ html.theme-idea {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(40 40 40);
   --primary: rgb(75 110 175);
+  --dbx-primary-rgb: 75, 110, 175;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(239 240 242);
   --secondary-foreground: rgb(47 49 52);
@@ -1003,6 +1020,7 @@ html.theme-idea.dark {
   --popover: rgb(67 70 72);
   --popover-foreground: rgb(200 200 200);
   --primary: rgb(106 135 197);
+  --dbx-primary-rgb: 106, 135, 197;
   --primary-foreground: rgb(30 32 34);
   --secondary: rgb(60 63 65);
   --secondary-foreground: rgb(187 187 187);
@@ -1043,6 +1061,7 @@ html.theme-xcode {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(29 39 53);
   --primary: rgb(10 132 255);
+  --dbx-primary-rgb: 10, 132, 255;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(235 239 245);
   --secondary-foreground: rgb(43 55 72);
@@ -1083,6 +1102,7 @@ html.theme-xcode.dark {
   --popover: rgb(45 51 59);
   --popover-foreground: rgb(224 229 237);
   --primary: rgb(10 132 255);
+  --dbx-primary-rgb: 10, 132, 255;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(45 51 59);
   --secondary-foreground: rgb(216 222 232);
@@ -1123,6 +1143,7 @@ html.theme-jetbrains {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(28 32 37);
   --primary: rgb(108 93 211);
+  --dbx-primary-rgb: 108, 93, 211;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(235 237 241);
   --secondary-foreground: rgb(43 48 56);
@@ -1163,6 +1184,7 @@ html.theme-jetbrains.dark {
   --popover: rgb(49 51 56);
   --popover-foreground: rgb(231 233 237);
   --primary: rgb(123 97 255);
+  --dbx-primary-rgb: 123, 97, 255;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(43 45 48);
   --secondary-foreground: rgb(223 225 229);
@@ -1203,6 +1225,7 @@ html.theme-cursor {
   --popover: rgb(255 255 255);
   --popover-foreground: rgb(28 33 42);
   --primary: rgb(59 130 246);
+  --dbx-primary-rgb: 59, 130, 246;
   --primary-foreground: rgb(255 255 255);
   --secondary: rgb(239 241 245);
   --secondary-foreground: rgb(42 49 60);
@@ -1243,6 +1266,7 @@ html.theme-cursor.dark {
   --popover: rgb(27 30 39);
   --popover-foreground: rgb(223 225 232);
   --primary: rgb(107 164 255);
+  --dbx-primary-rgb: 107, 164, 255;
   --primary-foreground: rgb(8 12 20);
   --secondary: rgb(27 30 39);
   --secondary-foreground: rgb(214 216 223);
@@ -1283,6 +1307,7 @@ html.theme-claude {
   --popover: rgb(255 253 248);
   --popover-foreground: rgb(48 40 32);
   --primary: rgb(184 107 60);
+  --dbx-primary-rgb: 184, 107, 60;
   --primary-foreground: rgb(255 250 243);
   --secondary: rgb(242 231 219);
   --secondary-foreground: rgb(65 53 43);
@@ -1323,6 +1348,7 @@ html.theme-claude.dark {
   --popover: rgb(49 45 40);
   --popover-foreground: rgb(226 218 206);
   --primary: rgb(210 138 95);
+  --dbx-primary-rgb: 210, 138, 95;
   --primary-foreground: rgb(35 27 21);
   --secondary: rgb(55 49 43);
   --secondary-foreground: rgb(219 211 199);
@@ -1620,16 +1646,96 @@ body.dbx-table-reference-dragging * {
  * isolated so supported WebViews continue using the generated component CSS. */
 @supports not (color: oklch(0.5 0.1 180)) {
   @media (min-width: 640px) {
+    .sm\:block {
+      display: block !important;
+    }
+
+    .sm\:hidden {
+      display: none !important;
+    }
+
+    .sm\:inline {
+      display: inline !important;
+    }
+
     .sm\:flex-row {
       flex-direction: row !important;
+    }
+
+    .sm\:flex-wrap {
+      flex-wrap: wrap !important;
+    }
+
+    .sm\:items-start {
+      align-items: flex-start !important;
+    }
+
+    .sm\:items-center {
+      align-items: center !important;
+    }
+
+    .sm\:justify-between {
+      justify-content: space-between !important;
     }
 
     .sm\:justify-end {
       justify-content: flex-end !important;
     }
 
+    .sm\:gap-2 {
+      gap: 0.5rem !important;
+    }
+
+    .sm\:grid-cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+
     .sm\:grid-cols-3 {
       grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    }
+
+    .sm\:grid-cols-4 {
+      grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    }
+
+    .sm\:grid-cols-\[minmax\(0\,1fr\)_auto\] {
+      grid-template-columns: minmax(0, 1fr) auto !important;
+    }
+
+    .sm\:grid-cols-\[minmax\(0\,200px\)_minmax\(0\,1fr\)\] {
+      grid-template-columns: minmax(0, 200px) minmax(0, 1fr) !important;
+    }
+
+    .sm\:grid-cols-\[minmax\(0\,1fr\)_minmax\(220px\,0\.8fr\)\] {
+      grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr) !important;
+    }
+
+    .sm\:col-span-3 {
+      grid-column: span 3 / span 3 !important;
+    }
+
+    .sm\:w-full {
+      width: 100% !important;
+    }
+
+    .sm\:w-40 {
+      width: 10rem !important;
+    }
+
+    .sm\:w-64 {
+      width: 16rem !important;
+    }
+
+    .sm\:w-auto {
+      width: auto !important;
+    }
+
+    .sm\:flex-none {
+      flex: none !important;
+    }
+
+    .sm\:ml-auto {
+      margin-left: auto !important;
     }
   }
 
@@ -1729,9 +1835,28 @@ body.dbx-table-reference-dragging * {
     }
   }
 
+  [data-slot="dialog-positioner"] {
+    position: fixed !important;
+    inset: 0 !important;
+    top: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    z-index: 50 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100vw !important;
+    height: var(--dbx-viewport-height) !important;
+    padding: 1rem !important;
+    box-sizing: border-box !important;
+    pointer-events: none !important;
+  }
+
   [data-slot="dialog-content"] {
     width: calc(100vw - 2rem);
     max-width: 24rem;
+    max-height: calc(var(--dbx-viewport-height) - 2rem);
     border: 1px solid rgb(229, 229, 229);
     border-color: rgb(229, 229, 229) !important;
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.16);
@@ -1762,6 +1887,10 @@ body.dbx-table-reference-dragging * {
     max-width: 42rem !important;
   }
 
+  [data-slot="dialog-content"][class~="max-w-3xl"] {
+    max-width: 48rem !important;
+  }
+
   [data-slot="dialog-content"][class~="max-w-4xl"] {
     max-width: 56rem !important;
   }
@@ -1784,6 +1913,206 @@ body.dbx-table-reference-dragging * {
 
   [data-slot="dialog-content"][class*="max-w-[1100px]"] {
     max-width: 1100px !important;
+  }
+
+  [data-slot="dialog-content"][class*="max-w-[min(720px"] {
+    max-width: 720px !important;
+  }
+
+  [data-slot="dialog-content"].dbx-form-dialog {
+    display: flex !important;
+    flex-direction: column !important;
+    width: calc(100vw - 2rem) !important;
+    height: auto !important;
+    max-height: calc(var(--dbx-viewport-height) - 2rem) !important;
+    overflow-y: auto !important;
+    gap: 1rem !important;
+  }
+
+  [data-slot="dialog-content"].dbx-form-dialog--md {
+    max-width: 40rem !important;
+  }
+
+  [data-slot="dialog-content"].dbx-form-dialog--lg {
+    max-width: 45rem !important;
+  }
+
+  [data-slot="dialog-content"].dbx-form-dialog [data-slot="select-trigger"] {
+    height: 2rem !important;
+    min-height: 2rem !important;
+    box-sizing: border-box !important;
+  }
+
+  [data-slot="dialog-content"][class*="max-w-[min(94vw,920px)]"] {
+    max-width: 920px !important;
+  }
+
+  [data-slot="dialog-content"][class*="max-w-[min(94vw,1050px)]"] {
+    max-width: 1050px !important;
+  }
+
+  [data-slot="dialog-content"][class*="max-w-[min(96vw,1180px)]"] {
+    max-width: 1180px !important;
+  }
+
+  [data-slot="dialog-content"][class*="max-h-[min(760px"] {
+    max-height: calc(var(--dbx-viewport-height) - 2rem) !important;
+  }
+
+  [data-slot="dialog-content"][class*="h-[min(760px"]:not(.dbx-form-dialog) {
+    height: calc(var(--dbx-viewport-height) - 2rem) !important;
+  }
+
+  [data-slot="dialog-content"][class*="h-[min(82vh,760px)]"] {
+    height: 82vh !important;
+  }
+
+  [data-slot="dialog-content"][class*="h-[min(86vh,820px)]"] {
+    height: 86vh !important;
+  }
+
+  [data-slot="dialog-content"][class*="max-h-[min(90vh,860px)]"] {
+    max-height: 90vh !important;
+  }
+
+  .space-y-0\.5 > * + * {
+    margin-top: 0.125rem !important;
+  }
+
+  .space-y-1 > * + * {
+    margin-top: 0.25rem !important;
+  }
+
+  .space-y-1\.5 > * + * {
+    margin-top: 0.375rem !important;
+  }
+
+  .space-y-2 > * + * {
+    margin-top: 0.5rem !important;
+  }
+
+  .space-y-2\.5 > * + * {
+    margin-top: 0.625rem !important;
+  }
+
+  .space-y-3 > * + * {
+    margin-top: 0.75rem !important;
+  }
+
+  .space-y-4 > * + * {
+    margin-top: 1rem !important;
+  }
+
+  .space-y-5 > * + * {
+    margin-top: 1.25rem !important;
+  }
+
+  .space-y-6 > * + * {
+    margin-top: 1.5rem !important;
+  }
+
+  .bg-primary\/5 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.05) !important;
+  }
+
+  .bg-primary\/8 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.08) !important;
+  }
+
+  .bg-primary\/10 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.1) !important;
+  }
+
+  .bg-primary\/12 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.12) !important;
+  }
+
+  .bg-primary\/15 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.15) !important;
+  }
+
+  .bg-primary\/20 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.2) !important;
+  }
+
+  .bg-primary\/30 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.3) !important;
+  }
+
+  .bg-primary\/60 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.6) !important;
+  }
+
+  .bg-primary\/80 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.8) !important;
+  }
+
+  .bg-primary\/90 {
+    background-color: rgba(var(--dbx-primary-rgb), 0.9) !important;
+  }
+
+  .border-primary\/10 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.1) !important;
+  }
+
+  .border-primary\/20 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.2) !important;
+  }
+
+  .border-primary\/30 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.3) !important;
+  }
+
+  .border-primary\/35 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.35) !important;
+  }
+
+  .border-primary\/40 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.4) !important;
+  }
+
+  .border-primary\/50 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.5) !important;
+  }
+
+  .border-primary\/60 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.6) !important;
+  }
+
+  .border-primary\/70 {
+    border-color: rgba(var(--dbx-primary-rgb), 0.7) !important;
+  }
+
+  .text-primary\/80 {
+    color: rgba(var(--dbx-primary-rgb), 0.8) !important;
+  }
+
+  .hover\:bg-primary\/10:hover {
+    background-color: rgba(var(--dbx-primary-rgb), 0.1) !important;
+  }
+
+  .hover\:bg-primary\/15:hover {
+    background-color: rgba(var(--dbx-primary-rgb), 0.15) !important;
+  }
+
+  .hover\:bg-primary\/20:hover {
+    background-color: rgba(var(--dbx-primary-rgb), 0.2) !important;
+  }
+
+  .hover\:bg-primary\/30:hover {
+    background-color: rgba(var(--dbx-primary-rgb), 0.3) !important;
+  }
+
+  .hover\:bg-primary\/60:hover {
+    background-color: rgba(var(--dbx-primary-rgb), 0.6) !important;
+  }
+
+  .hover\:bg-primary\/80:hover {
+    background-color: rgba(var(--dbx-primary-rgb), 0.8) !important;
+  }
+
+  .hover\:bg-primary\/90:hover {
+    background-color: rgba(var(--dbx-primary-rgb), 0.9) !important;
   }
 
   [data-slot="tabs"][data-orientation="horizontal"] {

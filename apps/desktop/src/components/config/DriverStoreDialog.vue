@@ -1475,7 +1475,7 @@ watch(driverStoreTab, (tab) => {
                     v-if="!driver.installed && !isPrestoSqlBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
                     size="sm"
                     variant="ghost"
-                    class="h-7 w-7 rounded-md text-xs text-muted-foreground"
+                    class="driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground"
                     :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
                     :disabled="upgradingAll || installing !== null || agentImportBusy"
                     @click="importDriverFile(driver)"
@@ -1593,7 +1593,7 @@ watch(driverStoreTab, (tab) => {
                             v-if="!driver.installed && !isPrestoSqlBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
                             size="sm"
                             variant="ghost"
-                            class="h-7 w-7 rounded-md text-xs text-muted-foreground"
+                            class="driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground"
                             :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
                             :disabled="upgradingAll || installing !== null || agentImportBusy"
                             @click="importDriverFile(driver)"
@@ -1677,7 +1677,7 @@ watch(driverStoreTab, (tab) => {
                         v-if="!driver.installed && !isPrestoSqlBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
                         size="sm"
                         variant="ghost"
-                        class="h-7 w-7 rounded-md text-xs text-muted-foreground"
+                        class="driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground"
                         :title="importingDriver === driver.db_type ? t('driverStore.importing') : t('driverStore.importLocalJar')"
                         :disabled="upgradingAll || installing !== null || agentImportBusy"
                         @click="importDriverFile(driver)"
@@ -2158,28 +2158,15 @@ watch(driverStoreTab, (tab) => {
     margin-top: 0 !important;
   }
 
-  .driver-store-tab .space-y-1 > * + * {
-    margin-top: 0.25rem !important;
+  .driver-store-local-import-button {
+    width: 2rem !important;
+    height: 2rem !important;
+    padding: 0 !important;
   }
 
-  .driver-store-tab .space-y-2 > * + * {
-    margin-top: 0.5rem !important;
-  }
-
-  .driver-store-tab .space-y-2\.5 > * + * {
-    margin-top: 0.625rem !important;
-  }
-
-  .driver-store-tab .space-y-3 > * + * {
-    margin-top: 0.75rem !important;
-  }
-
-  .driver-store-tab .space-y-4 > * + * {
-    margin-top: 1rem !important;
-  }
-
-  .driver-store-tab .space-y-5 > * + * {
-    margin-top: 1.25rem !important;
+  .driver-store-local-import-button svg {
+    width: 1rem !important;
+    height: 1rem !important;
   }
 
   @media (min-width: 640px) {

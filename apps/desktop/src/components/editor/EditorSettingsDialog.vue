@@ -6179,42 +6179,23 @@ onUnmounted(cleanupPreviewEditor);
 }
 
 @supports not (color: oklch(0.5 0.1 180)) {
-  .settings-layout .space-y-0\.5 > * + * {
-    margin-top: 0.125rem !important;
-  }
-
-  .settings-layout .space-y-1 > * + * {
-    margin-top: 0.25rem !important;
-  }
-
-  .settings-layout .space-y-1\.5 > * + * {
-    margin-top: 0.375rem !important;
-  }
-
-  .settings-layout .space-y-2 > * + * {
-    margin-top: 0.5rem !important;
-  }
-
-  .settings-layout .space-y-3 > * + * {
-    margin-top: 0.75rem !important;
-  }
-
-  .settings-layout .space-y-4 > * + * {
-    margin-top: 1rem !important;
-  }
-
-  .settings-layout .space-y-5 > * + * {
-    margin-top: 1.25rem !important;
-  }
-
-  .settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7):not(.h-8):not(.h-9) {
+  .settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7) {
     height: 2rem !important;
     min-height: 2rem !important;
+    box-sizing: border-box !important;
   }
 
-  .settings-layout [data-slot="select-trigger"][data-size="sm"]:not(.h-7):not(.h-8):not(.h-9) {
+  .settings-layout [data-slot="select-trigger"].h-9 {
+    height: 2rem !important;
+    min-height: 2rem !important;
+    box-sizing: border-box !important;
+  }
+
+  .settings-layout [data-slot="select-trigger"][data-size="sm"],
+  .settings-layout [data-slot="select-trigger"].h-7 {
     height: 1.75rem !important;
     min-height: 1.75rem !important;
+    box-sizing: border-box !important;
   }
 
   .settings-layout .settings-shortcut-row {

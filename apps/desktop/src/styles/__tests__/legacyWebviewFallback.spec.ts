@@ -6,6 +6,8 @@ const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/Dia
 const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
 const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/DialogOverlay.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
+const connectionTreeSource = readFileSync(new URL("../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
+const scheduledDatabaseBackupSource = readFileSync(new URL("../../components/backup/ScheduledDatabaseBackupSettings.vue", import.meta.url), "utf8");
 const driverStoreDialogSource = readFileSync(new URL("../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
 const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
 const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
@@ -48,12 +50,50 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(connectionDialogSource).toContain("max-height: calc(var(--dbx-viewport-height) - 2rem);");
   });
 
+  it("centralizes legacy dialog positioning and layout utility fallbacks", () => {
+    const fallbackStart = globalsCss.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const splitpanesStart = globalsCss.indexOf("/* Splitpanes */");
+    const fallback = globalsCss.slice(fallbackStart, splitpanesStart);
+
+    expect(dialogContentSource).toContain('data-slot="dialog-positioner"');
+    expect(dialogScrollContentSource).toContain('data-slot="dialog-positioner"');
+    expect(fallback).toContain('[data-slot="dialog-positioner"]');
+    expect(fallback).toContain("display: flex !important;");
+    expect(fallback).toContain("align-items: center !important;");
+    expect(fallback).toContain("justify-content: center !important;");
+    expect(fallback).toContain(".sm\\:grid-cols-2");
+    expect(fallback).toContain("grid-template-columns: repeat(2, minmax(0, 1fr)) !important;");
+    expect(fallback).toContain(".sm\\:grid-cols-\\[minmax\\(0\\,200px\\)_minmax\\(0\\,1fr\\)\\]");
+    expect(fallback).toContain(".space-y-1\\.5 > * + *");
+    expect(fallback).toContain(".space-y-2\\.5 > * + *");
+    expect(scheduledDatabaseBackupSource).toContain("dbx-form-dialog dbx-form-dialog--lg");
+    expect(scheduledDatabaseBackupSource).toContain("max-w-[min(720px,calc(100vw-32px))]");
+    expect(fallback).toContain('[data-slot="dialog-content"].dbx-form-dialog');
+    expect(fallback).toContain('[data-slot="dialog-content"].dbx-form-dialog--lg');
+    expect(fallback).toContain("max-width: 45rem !important;");
+    expect(fallback).toContain('[data-slot="dialog-content"].dbx-form-dialog [data-slot="select-trigger"]');
+    expect(fallback).toContain("height: 2rem !important;");
+    expect(fallback).toContain('[data-slot="dialog-content"][class*="max-w-[min(720px"]');
+  });
+
   it("uses a lightweight theme-aware mask without full-window filters", () => {
     expect(dialogOverlaySource).not.toContain("backdrop-filter");
     expect(dialogOverlaySource).toContain("bg-black/25");
     expect(dialogOverlaySource).toContain("dark:bg-background/70");
     expect(globalsCss).not.toContain("dbx-dialog-backdrop");
     expect(globalsCss).not.toContain("filter: blur(4px);");
+  });
+
+  it("keeps primary alpha utilities readable in legacy WebViews", () => {
+    expect(globalsCss).toContain("--dbx-primary-rgb: 23, 23, 23;");
+    expect(globalsCss).toContain("--dbx-primary-rgb: 46, 95, 166;");
+    expect(globalsCss).toContain(".bg-primary\\/10");
+    expect(globalsCss).toContain("background-color: rgba(var(--dbx-primary-rgb), 0.1) !important;");
+    expect(globalsCss).toContain(".border-primary\\/30");
+    expect(globalsCss).toContain("border-color: rgba(var(--dbx-primary-rgb), 0.3) !important;");
+    expect(globalsCss).toContain(".hover\\:bg-primary\\/15:hover");
+    expect(connectionTreeSource).toContain("showActiveConnectionsOnly");
+    expect(connectionTreeSource.match(/bg-primary\/10 border-primary\/30/g)?.length).toBe(3);
   });
 
   it("keeps legacy tab triggers connected to the configured corner style", () => {
@@ -124,12 +164,7 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain(".driver-store-jdbc-tab:not([hidden])");
     expect(fallback).toContain(".driver-store-storage-tab:not([hidden])");
     expect(fallback).toContain("gap: 1.25rem !important;");
-    expect(fallback).toContain(".driver-store-tab .space-y-1 > * + *");
-    expect(fallback).toContain(".driver-store-tab .space-y-2 > * + *");
-    expect(fallback).toContain(".driver-store-tab .space-y-2\\.5 > * + *");
-    expect(fallback).toContain(".driver-store-tab .space-y-3 > * + *");
-    expect(fallback).toContain(".driver-store-tab .space-y-4 > * + *");
-    expect(fallback).toContain(".driver-store-tab .space-y-5 > * + *");
+    expect(fallback).not.toContain(".driver-store-tab .space-y-");
     expect(fallback).toContain("[data-driver-category-nav]");
     expect(fallback).toContain("width: 10rem !important;");
     expect(fallback).toContain("flex-direction: column !important;");
@@ -138,6 +173,21 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain(".driver-store-agent-results");
     expect(fallback).toContain("width: 0 !important;");
     expect(fallback).toContain("flex: 1 1 0% !important;");
+  });
+
+  it("keeps driver manager local import buttons large enough to target", () => {
+    const fallbackStart = driverStoreDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackEnd = driverStoreDialogSource.indexOf("@media (max-width: 900px)", fallbackStart);
+    const fallback = driverStoreDialogSource.slice(fallbackStart, fallbackEnd);
+
+    expect(driverStoreDialogSource.match(/driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground/g)?.length).toBe(3);
+    expect(driverStoreDialogSource.match(/variant="ghost"\n\s+class="driver-store-local-import-button/g)?.length).toBe(3);
+    expect(fallback).toContain(".driver-store-local-import-button");
+    expect(fallback).toContain("width: 2rem !important;");
+    expect(fallback).toContain("height: 2rem !important;");
+    expect(fallback).toContain(".driver-store-local-import-button svg");
+    expect(fallback).toContain("width: 1rem !important;");
+    expect(fallback).toContain("height: 1rem !important;");
   });
 
   it("keeps tunnel profile selection readable in legacy WebViews", () => {
@@ -178,16 +228,15 @@ describe("legacy WebView CSS fallbacks", () => {
 
     expect(fallbackStart).toBeGreaterThan(-1);
     expect(fallbackEnd).toBeGreaterThan(fallbackStart);
-    expect(fallback).toContain(".settings-layout .space-y-1 > * + *");
-    expect(fallback).toContain("margin-top: 0.25rem !important;");
-    expect(fallback).toContain(".settings-layout .space-y-2 > * + *");
-    expect(fallback).toContain("margin-top: 0.5rem !important;");
-    expect(fallback).toContain(".settings-layout .space-y-3 > * + *");
-    expect(fallback).toContain("margin-top: 0.75rem !important;");
-    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7):not(.h-8):not(.h-9)');
+    expect(fallback).not.toContain(".settings-layout .space-y-");
+    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7)');
     expect(fallback).toContain("height: 2rem !important;");
-    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"][data-size="sm"]:not(.h-7):not(.h-8):not(.h-9)');
+    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"].h-9');
+    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"][data-size="sm"],');
+    expect(fallback).toContain('.settings-layout [data-slot="select-trigger"].h-7');
     expect(fallback).toContain("height: 1.75rem !important;");
+    expect(editorSettingsDialogSource).toContain('SelectTrigger class="col-span-2" inputClass="h-8 text-xs"');
+    expect(editorSettingsDialogSource).not.toContain('SelectTrigger class="col-span-2 h-8 text-xs"');
     expect(fallback).toContain(".settings-layout .settings-shortcut-row");
     expect(fallback).toContain("grid-template-columns: minmax(0, 1fr) auto !important;");
     expect(fallback).toContain(".settings-layout .settings-shortcut-actions");

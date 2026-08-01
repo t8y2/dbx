@@ -1049,6 +1049,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "Aggiungi regola",
     filterBuilderColumn: "Colonna",
     filterBuilderValue: "Valore",
+    filterBuilderValueShortcutHint: "Shift+Enter può aggiungere una regola",
     filterBuilderValues: "Valori (separati da virgole o nuove righe)",
     filterBuilderRangeStart: "Valore iniziale",
     filterBuilderRangeEnd: "Valore finale",

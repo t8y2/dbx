@@ -1138,6 +1138,7 @@ export default withEnglishFallback({
     filterBuilderSearchColumns: "컬럼 검색...",
     filterBuilderNoMatchingColumns: "일치하는 컬럼이 없습니다",
     filterBuilderValue: "값",
+    filterBuilderValueShortcutHint: "Shift+Enter로 조건을 추가할 수 있습니다",
     filterBuilderValues: "값 (쉼표 또는 줄바꿈으로 구분)",
     filterBuilderRangeStart: "시작 값",
     filterBuilderRangeEnd: "끝 값",

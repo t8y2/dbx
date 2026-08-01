@@ -1156,6 +1156,7 @@ export default withEnglishFallback({
     filterBuilderSearchColumns: "搜索字段...",
     filterBuilderNoMatchingColumns: "没有匹配的字段",
     filterBuilderValue: "值",
+    filterBuilderValueShortcutHint: "Shift+Enter 可新增条件",
     filterBuilderValues: "多个值（用逗号或换行分隔）",
     filterBuilderRangeStart: "起始值",
     filterBuilderRangeEnd: "结束值",

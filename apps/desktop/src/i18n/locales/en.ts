@@ -1155,6 +1155,7 @@ export default {
     filterBuilderSearchColumns: "Search columns...",
     filterBuilderNoMatchingColumns: "No matching columns",
     filterBuilderValue: "Value",
+    filterBuilderValueShortcutHint: "Shift+Enter can add a rule",
     filterBuilderValues: "Values (comma or newline separated)",
     filterBuilderRangeStart: "Start value",
     filterBuilderRangeEnd: "End value",

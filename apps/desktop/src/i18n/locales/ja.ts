@@ -1067,6 +1067,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "ルールを追加",
     filterBuilderColumn: "列",
     filterBuilderValue: "値",
+    filterBuilderValueShortcutHint: "Shift+Enterで条件を追加できます",
     filterBuilderValues: "値（カンマまたは改行で区切る）",
     filterBuilderRangeStart: "開始値",
     filterBuilderRangeEnd: "終了値",

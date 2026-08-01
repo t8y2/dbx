@@ -1050,6 +1050,7 @@ export default withEnglishFallback({
     filterBuilderAddRule: "新增條件",
     filterBuilderColumn: "欄位",
     filterBuilderValue: "值",
+    filterBuilderValueShortcutHint: "Shift+Enter 可新增條件",
     filterBuilderValues: "多個值（以逗號或換行分隔）",
     filterBuilderRangeStart: "起始值",
     filterBuilderRangeEnd: "結束值",

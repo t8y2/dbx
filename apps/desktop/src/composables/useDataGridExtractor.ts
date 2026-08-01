@@ -47,8 +47,8 @@ interface UseDataGridExtractorOptions {
   copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }) => Promise<boolean>;
   canCopySqlInsert: (request: DataGridExtractRequest) => boolean;
   buildMongoInsert: (extractorOptions: DataGridExtractorOptions, rowLimit?: number) => Promise<string | undefined>;
-  buildMongoUpdate?: (extractorOptions: DataGridExtractorOptions, rowLimit?: number) => Promise<string | undefined>;
-  canBuildMongoUpdate?: () => boolean;
+  buildMongoUpdate?: (request: DataGridExtractRequest, rowLimit?: number) => Promise<string | undefined>;
+  canBuildMongoUpdate?: (request: DataGridExtractRequest) => boolean;
 }
 
 export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
@@ -184,7 +184,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
     if (extractor === "sql-updates") {
       // Mongo has a dedicated updateOne path that doesn't need SQL primary keys.
-      if (options.databaseType.value === "mongodb") return options.canBuildMongoUpdate?.() ?? false;
+      if (options.databaseType.value === "mongodb") {
+        const request = buildRequest(extractor, extractorOptions);
+        return request !== null && (options.canBuildMongoUpdate?.(request) ?? false);
+      }
       return canBuildSqlUpdateRequest();
     }
     return selectionData() !== null;
@@ -192,9 +195,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
   async function resolveMongoExtractorResult(extractor: DataGridCopyExtractorId, request: DataGridExtractRequest, rowLimit?: number) {
     if (options.databaseType.value !== "mongodb") return undefined;
-    const builder = extractor === "sql-inserts" ? options.buildMongoInsert : extractor === "sql-updates" ? options.buildMongoUpdate : undefined;
-    if (!builder) return undefined;
-    const text = (await builder(request.options, rowLimit)) ?? "";
+    if (extractor !== "sql-inserts" && extractor !== "sql-updates") return undefined;
+    const text = extractor === "sql-inserts" ? ((await options.buildMongoInsert(request.options, rowLimit)) ?? "") : ((await options.buildMongoUpdate?.(request, rowLimit)) ?? "");
     return { text, mimeType: "application/javascript", fileExtension: "js", rowCount: rowLimit ?? request.rows.length, columnCount: request.selectedColumnIndexes.length, warnings: undefined, omittedColumns: undefined };
   }
 

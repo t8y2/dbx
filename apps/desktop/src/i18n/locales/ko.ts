@@ -2213,6 +2213,7 @@ export default withEnglishFallback({
     confirmDropSchemaMessage: '스키마 "{name}"을(를) 삭제하시겠습니까? 스키마와 모든 객체가 영구적으로 삭제됩니다.',
     createSchemaSuccess: '스키마 "{name}" 생성됨',
     dropSchemaSuccess: '스키마 "{name}" 삭제됨',
+    dropDamengSchemaRequiresDifferentDba: "현재 연결에서는 이 스키마를 안전하게 삭제할 수 없습니다. 다른 DBA 사용자로 연결한 후 다시 시도하세요.",
     createSchemaNamePlaceholder: "스키마 이름",
     editSchemaComment: "주석 편집",
     editSchemaCommentTitle: '주석 편집: "{name}"',

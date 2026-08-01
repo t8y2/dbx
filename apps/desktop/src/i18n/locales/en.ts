@@ -2257,6 +2257,7 @@ export default {
     confirmDropSchemaMessage: 'Are you sure you want to drop schema "{name}"? This will permanently delete the schema and all its objects.',
     createSchemaSuccess: 'Schema "{name}" created',
     dropSchemaSuccess: 'Schema "{name}" dropped',
+    dropDamengSchemaRequiresDifferentDba: "Dameng cannot safely drop this schema from the current connection. Connect as a different DBA user and try again.",
     createSchemaNamePlaceholder: "Schema name",
     editSchemaComment: "Edit Comment",
     editSchemaCommentTitle: 'Edit Comment: "{name}"',

@@ -1329,6 +1329,12 @@ async function newQuery() {
     databaseType: effectiveDatabaseTypeForConnection(conn),
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
+  if (initialSql) {
+    const prefilledTab = queryStore.tabs.find((t) => t.id === tabId);
+    if (prefilledTab) {
+      prefilledTab.editorSelection = { anchor: initialSql.length, head: initialSql.length };
+    }
+  }
   try {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {

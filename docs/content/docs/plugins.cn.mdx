@@ -7,6 +7,10 @@ DBX 默认使用 Rust 原生数据库驱动。JDBC 是可选能力：当你需�
 
 <Callout type="info">JDBC 插件不会打包进 DBX 主应用，也不包含任何数据库厂商的 JDBC 驱动。你需要先安装 DBX JDBC 插件，再导入对应数据库的 JDBC driver JAR。</Callout>
 
+<Callout type="warn">“JDBC 能连接”不等于拥有原生 DBX profile 的全部能力。表树、对象源码、结构编辑、导入、传输和管理视图取决于 JDBC 元数据、识别出的实际数据库类型和驱动能力清单；未知数据库会按通用 JDBC 能力运行。</Callout>
+
+Desktop 导入的是本机 JAR；Docker/Web 中 JAR 和插件安装在服务器数据目录。浏览器电脑上的本地路径不能直接交给 Web 服务器使用，迁移配置时也不会自动携带驱动文件。
+
 ## 什么时候需要 JDBC
 
 优先使用 DBX 内置数据库类型，例如 MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、DM、GaussDB 等。

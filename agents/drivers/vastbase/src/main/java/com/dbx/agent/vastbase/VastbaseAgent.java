@@ -9,7 +9,7 @@ public final class VastbaseAgent extends PostgresLikeAgent {
     public static final PostgresLikeAgentProfile VASTBASE_PROFILE = new PostgresLikeAgentProfile(
         "cn.com.vastbase.Driver",
         "jdbc:vastbase://{host}:{port}/{database}"
-    );
+    ).withCatalogAttributeArraysMappedInJava();
 
     public VastbaseAgent() {
         super(VASTBASE_PROFILE);

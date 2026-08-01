@@ -619,9 +619,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		if err := session.server.validateConnection(); err == nil {
 			return map[string]bool{"ok": true}, false, nil
 		}
-		r.connectMu.Lock()
-		err = session.server.connectWithControl(session.server.params, session.server.cancelDB, false)
-		r.connectMu.Unlock()
+		err = r.reconnectSession(session)
 		return map[string]bool{"ok": true}, false, err
 	case "cancel_session":
 		session, err := r.session(stringParam(params, "agentSessionId"))
@@ -677,15 +675,25 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 	server := newServer()
 	params.URLParams = appendURLParam(params.URLParams, "APP_NAME", xuguSessionAppName(agentSessionID))
 	r.connectMu.Lock()
-	controlKey, controlDB, err := r.acquireControl(params)
-	if err == nil {
-		err = server.connectWithControl(params, controlDB, false)
+	controlKey, controlDB, controlErr := r.acquireControl(params)
+	var err error
+	if controlErr == nil {
+		var controlAttached bool
+		controlAttached, err = server.connectWithControl(params, controlDB, false)
+		if err != nil || !controlAttached {
+			// Business connect may have succeeded without cancel capability; drop the
+			// unused shared control ref. On hard failure, also release the reservation.
+			r.releaseControl(controlKey)
+			controlKey = ""
+		}
+	} else {
+		// SYSTEM control is optional for ordinary users (no SYSTEM account / no SYS_SESSIONS).
+		// Fall back to a business-database-only session so metadata and queries still work.
+		_, err = server.connectWithControl(params, nil, false)
+		controlKey = ""
 	}
 	r.connectMu.Unlock()
 	if err != nil {
-		if controlKey != "" {
-			r.releaseControl(controlKey)
-		}
 		return err
 	}
 	session := &agentSession{server: server, controlKey: controlKey}
@@ -703,6 +711,24 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 	}
 	r.sessions[agentSessionID] = session
 	return nil
+}
+
+func (r *runtimeServer) reconnectSession(session *agentSession) error {
+	return r.reconnectSessionWith(session, (*server).connectWithControl)
+}
+
+func (r *runtimeServer) reconnectSessionWith(
+	session *agentSession,
+	connect func(*server, connectParams, *sql.DB, bool) (bool, error),
+) error {
+	r.connectMu.Lock()
+	controlAttached, err := connect(session.server, session.server.params, session.server.cancelDB, false)
+	r.connectMu.Unlock()
+	if !controlAttached {
+		r.releaseControl(session.controlKey)
+		session.controlKey = ""
+	}
+	return err
 }
 
 func (r *runtimeServer) replaceSession(agentSessionID string, params connectParams) error {
@@ -736,6 +762,13 @@ func (r *runtimeServer) closeSession(agentSessionID string) error {
 }
 
 func (r *runtimeServer) acquireControl(params connectParams) (string, *sql.DB, error) {
+	return r.acquireControlWith(params, openDB)
+}
+
+func (r *runtimeServer) acquireControlWith(
+	params connectParams,
+	openControl func(connectParams) (*sql.DB, error),
+) (string, *sql.DB, error) {
 	r.controlMu.Lock()
 	defer r.controlMu.Unlock()
 	cancelParams := xuguControlParams(params)
@@ -744,7 +777,7 @@ func (r *runtimeServer) acquireControl(params connectParams) (string, *sql.DB, e
 		control.refs++
 		return key, control.db, nil
 	}
-	db, err := openDB(cancelParams)
+	db, err := openControl(cancelParams)
 	if err != nil {
 		return "", nil, err
 	}
@@ -982,51 +1015,96 @@ func (s *server) connect(params connectParams) error {
 	cancelParams := xuguControlParams(params)
 	cancelDB, err := openDB(cancelParams)
 	if err != nil {
+		_, err = s.connectWithControl(params, nil, false)
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := cancelDB.PingContext(ctx); err != nil {
 		cancelDB.Close()
+		_, err = s.connectWithControl(params, nil, false)
 		return err
 	}
-	if err := s.connectWithControl(params, cancelDB, true); err != nil {
-		cancelDB.Close()
+	attached, err := s.connectWithControl(params, cancelDB, true)
+	if err != nil {
+		// connectWithControl closes an owned cancelDB on failure.
 		return err
+	}
+	if !attached {
+		// Business session is usable; cancel/kill is degraded.
 	}
 	return nil
 }
 
-func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, ownsCancelDB bool) error {
+// connectWithControl opens the business database session.
+// When cancelDB can query SYS_SESSIONS and a unique new session is identified,
+// cancel/kill support is wired. Otherwise the session still succeeds without cancel
+// (controlAttached=false). Ordinary users often cannot use SYSTEM control.
+//
+// controlAttached is true only when cancelDB remains owned by the server session.
+// Callers that share cancelDB must release their control reservation when false.
+func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, ownsCancelDB bool) (controlAttached bool, err error) {
 	_ = s.disconnect()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	before, err := xuguDatabaseSessions(cancelDB)
-	if err != nil {
-		return err
+
+	closeOwnedControl := func() {
+		if ownsCancelDB && cancelDB != nil {
+			_ = cancelDB.Close()
+		}
 	}
+
+	var before map[xuguDatabaseSession]struct{}
+	controlReady := false
+	if cancelDB != nil {
+		before, err = xuguDatabaseSessions(cancelDB)
+		if err != nil {
+			// e.g. E18012 on SYS_SESSIONS — keep business connect path.
+			closeOwnedControl()
+			cancelDB = nil
+			ownsCancelDB = false
+		} else {
+			controlReady = true
+		}
+	}
+
 	db, err := openDB(params)
 	if err != nil {
-		return err
+		closeOwnedControl()
+		return false, err
 	}
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return err
+		closeOwnedControl()
+		return false, err
 	}
+
+	s.db = db
+	s.params = params
+	s.cancelDB = nil
+	s.ownsCancelDB = false
+	s.nodeID = 0
+	s.databaseSessionID = 0
+	s.killSession = nil
+
+	if !controlReady || cancelDB == nil {
+		return false, nil
+	}
+
 	after, err := xuguDatabaseSessions(cancelDB)
 	if err != nil {
-		db.Close()
-		return err
+		closeOwnedControl()
+		return false, nil
 	}
 	databaseSession, err := newXuguDatabaseSession(before, after)
 	if err != nil {
-		db.Close()
-		return err
+		// Ambiguous session tracking must not block ordinary browsing.
+		closeOwnedControl()
+		return false, nil
 	}
-	s.db = db
+
 	s.cancelDB = cancelDB
 	s.ownsCancelDB = ownsCancelDB
-	s.params = params
 	s.nodeID = databaseSession.nodeID
 	s.databaseSessionID = databaseSession.sessionID
 	s.killSession = func() {
@@ -1034,7 +1112,7 @@ func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, owns
 			_, _ = s.cancelDB.Exec(fmt.Sprintf("CALL DBMS_DBA.KILL_SESSION_TRANS(%d, %d)", s.nodeID, s.databaseSessionID))
 		}
 	}
-	return nil
+	return true, nil
 }
 
 func (s *server) disconnect() error {
@@ -1129,6 +1207,20 @@ func newXuguDatabaseSession(
 	before map[xuguDatabaseSession]struct{},
 	after map[xuguDatabaseSession]struct{},
 ) (xuguDatabaseSession, error) {
+	session, n, ok := controlSessionFromSnapshot(before, after)
+	if !ok {
+		return xuguDatabaseSession{}, fmt.Errorf("failed to identify Xugu server session: found %d new sessions", n)
+	}
+	return session, nil
+}
+
+// controlSessionFromSnapshot returns the single newly appeared session, if any.
+// Callers treat ok=false as a soft degrade signal (no cancel/kill), not a hard error.
+// n is the number of newly appeared sessions (useful for error messages).
+func controlSessionFromSnapshot(
+	before map[xuguDatabaseSession]struct{},
+	after map[xuguDatabaseSession]struct{},
+) (xuguDatabaseSession, int, bool) {
 	var candidates []xuguDatabaseSession
 	for session := range after {
 		if _, existed := before[session]; !existed {
@@ -1136,9 +1228,9 @@ func newXuguDatabaseSession(
 		}
 	}
 	if len(candidates) != 1 {
-		return xuguDatabaseSession{}, fmt.Errorf("failed to identify Xugu server session: found %d new sessions", len(candidates))
+		return xuguDatabaseSession{}, len(candidates), false
 	}
-	return candidates[0], nil
+	return candidates[0], 1, true
 }
 
 func buildDSN(params connectParams) string {

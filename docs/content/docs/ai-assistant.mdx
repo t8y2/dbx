@@ -1,186 +1,188 @@
 ---
 title: AI Assistant
-description: Configure an AI provider to generate SQL, explain queries, suggest optimizations, and help fix errors in DBX.
+description: Connect cloud, compatible API, or local CLI models to generate SQL, analyze data, and run controlled Agent workflows with schema context.
 ---
 
-The AI assistant helps with SQL work. It uses metadata from the active connection to understand tables and columns, then helps generate SQL, explain queries, suggest optimizations, or diagnose errors.
+The AI Assistant combines the active database, schema, SQL, errors, result preview, and explicitly mentioned objects into context for SQL generation, explanation, optimization, error repair, and data analysis.
 
-<Callout type="warn">AI-generated SQL is not executed automatically. Review table names, columns, filters, and affected rows before running it, especially on production connections.</Callout>
+<Callout type="warn">Ask mode produces suggestions. Agent mode can call query tools when the user explicitly requests real data. Any model output can be wrong. Review the target, fields, filters, parameters, and affected scope before executing SQL.</Callout>
 
-## Configuration
+## Model Integrations
+
+### API Providers
+
+DBX includes presets for:
+
+- Claude
+- OpenAI
+- Gemini
+- DeepSeek
+- Qwen
+- MiniMax
+- Ollama
+- OpenAI Compatible
+- Anthropic Compatible
+- Custom
+
+Compatible and custom configurations can set the endpoint, model, API style, authentication method, proxy, and context window. API styles include OpenAI-style completions, the Responses API, and Anthropic Messages. When supported, DBX discovers models and filters out endpoints that are not suitable for assistant or Agent use.
+
+### Local CLI Agents
+
+Desktop can also invoke locally installed and authenticated:
+
+- Claude Code CLI
+- Codex CLI
+- Pi Coding Agent
+
+You can configure the executable path and additional environment variables. CLI Agents run on the Desktop computer and access the active database through DBX-scoped MCP tools. Docker/Web hides these local CLI providers because the server cannot assume the browser computer has the commands installed.
+
+## Add a Configuration
 
 <Steps>
   <Step>
-    ### Open Settings
+    ### Open AI Settings
 
-    Open DBX settings and find the AI configuration section.
-
-  </Step>
-  <Step>
-    ### Choose a Provider
-
-    Select Anthropic, OpenAI, or a custom endpoint compatible with the OpenAI API.
+    Add a named AI configuration in editor settings. Multiple endpoints or credentials can be saved for the same provider.
 
   </Step>
   <Step>
-    ### Enter Credentials
+    ### Choose Provider and Model
 
-    Enter your API key. For custom endpoints, also enter the endpoint URL and model name.
+    Use a preset, compatible API, custom endpoint, or local CLI. Models are discovered from the provider or CLI when possible and can otherwise be entered manually.
 
   </Step>
   <Step>
-    ### Save and Test
+    ### Configure Authentication and Reasoning
 
-    Save the configuration, return to the editor, and try generating a simple query from natural language.
+    API modes accept an API key, auth method, endpoint, and proxy. Supported models expose effort, reasoning, or thinking controls based on provider capabilities rather than one universal setting.
+
+  </Step>
+  <Step>
+    ### Test and Save
+
+    The test reports success, latency, effective model, and categorized failures such as authentication, rate limit, timeout, or missing model.
 
   </Step>
 </Steps>
 
-<Callout type="info">When no API key is configured, AI features should prompt the user to complete setup instead of failing silently.</Callout>
+API keys, CLI environment variables, and custom endpoints may be sensitive. Do not share configuration screenshots, exports, or debug logs with untrusted parties.
 
-## Ask Mode And Agent Mode
+## Ask and Agent
 
-| Mode  | Behavior                                                                               | Execution                                                   |
-| ----- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Ask   | Generates SQL, explanations, fixes, optimizations, dialect conversions, or sample data | Does not imply anything has run                             |
-| Agent | Prioritizes one executable SQL statement when the user clearly asks DBX to query data  | DBX evaluates the generated SQL before attempting execution |
+| Mode | Best for | Tool and execution behavior |
+| --- | --- | --- |
+| Ask | Generate, explain, optimize, repair, or translate SQL, and provide advice from existing context | Does not proactively query the database; final answers should distinguish suggestions from verified results |
+| Agent | Requests such as “get the result,” “compare real data,” or “inspect schema first” that require iterative evidence | Can list tables, read columns, sample data, and run read-only queries; writes require exact confirmation |
 
-## Thinking Mode
+Agent should execute a query only when the original request explicitly asks for real data or results. A request to “write a query” should return SQL without running it, even in Agent mode.
 
-For providers and models that support extended reasoning (such as Claude with thinking enabled), DBX exposes a **Thinking** toggle in AI settings. When enabled:
+## Agent Turns and Retries
 
-- The model spends more time reasoning before generating SQL
-- Complex queries, multi-table joins, and optimization suggestions benefit most
-- Response time increases, but output quality improves for non-trivial tasks
+- **Maximum Agent turns** defaults to 30 and can be set from 5 to 500. It bounds model, tool, and repair-loop iterations
+- **Maximum API retries** defaults to 2 and can be set from 0 to 10 for rate limits, timeouts, and transient network errors. Claude Code, Codex, and Pi CLI providers do not use this API retry setting
+- The Agent stops when it reaches the turn limit, is cancelled, loses the connection, or is rejected by tool policy, while retaining completed steps and errors
 
-Toggle Thinking on or off per task. Leave it off for simple queries and explanations; enable it for complex schema reasoning, optimization, or debugging.
+Increasing the turn limit raises latency, database reads, and model cost. Prefer clear prompts, explicit table mentions, and narrower scope before raising the limit.
 
-## Table Mentions
+## Schema, Table, and SQL File Context
 
-Use `@table` or `@schema.table` mentions in your prompt to tell the AI which tables matter most:
+AI context can include:
 
-- `@users` — includes the `users` table schema in context
-- `@public.orders` — includes a specific schema-qualified table
-- Multiple mentions: `@users @orders @products` includes all three tables
+- Database type, connection name, database, and schema
+- Current or selected editor SQL and the latest error
+- Tables, columns, indexes, foreign keys, and limited sample rows
+- A bounded preview of the current result
+- Selected prompt templates
+- Referenced saved SQL file content
 
-Table mentions are the most reliable way to control schema context. They work even when the full schema is too large to include entirely.
+Type `@` in the prompt to search tables and saved SQL files:
 
-## Prompt Input History Navigation
+- `@users` prioritizes metadata for `users`
+- `@public.orders` selects a schema-qualified table
+- Multiple tables or SQL files can be selected together
 
-Navigate through your previous AI prompts using arrow keys:
+Large schemas are truncated. Explicit mentions are more reliable than asking the model to guess among every object, and they reduce tokens and metadata requests.
 
-- Press **↑** (Up Arrow) to cycle through previous prompts
-- Press **↓** (Down Arrow) to move forward in prompt history
-- Works in both Ask and Agent modes
-- Saves time when iterating on similar queries or explanations
+## Global Instructions and Prompt Templates
 
-The prompt history is preserved per session and helps you quickly reuse or modify previous AI requests without retyping.
+Settings can store:
 
-## Schema Context
+- **Global instructions** injected into every request, such as naming rules, time zone, soft-delete conventions, or production constraints
+- **Prompt templates** for reusable scenarios, such as “PostgreSQL-compatible SQL only” or “include index recommendations in every analysis”
 
-AI prompts can include the current database type, connection name, database, current SQL, recent error, result preview, and schema context. Schema context contains tables, columns, indexes, and foreign keys.
+Multiple templates can be active at once. DBX snapshots the selected templates and global instructions when the request is sent, so later edits do not alter an already running task.
 
-When a schema is large, DBX truncates context. Use table mentions to prioritize the tables you want AI to reason about.
+Templates enter model context. Do not put passwords, tokens, or unnecessary business data in them. Keep rules concise and non-conflicting because models may not resolve contradictory instructions as expected.
 
-## SQL Safety Policy
+## Writes and Production Safety
 
-| SQL Category                                                                          | DBX Behavior                                                                |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Read-only statements such as `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `DESC`, `EXPLAIN`  | Can be auto-executed in Agent mode when the user clearly asks to query      |
-| Scoped low-risk writes such as `INSERT` or keyed `UPDATE`                             | Auto-execute only in clearly non-production environments; otherwise confirm |
-| Multiple statements, `DELETE`, `MERGE`, `REPLACE`, `CREATE`, or unknown SQL           | Confirm before execution                                                    |
-| Dangerous statements such as `DROP`, `TRUNCATE`, `ALTER`, `RENAME`, or broad `UPDATE` | Blocked by the AI execution policy                                          |
+AI Agent execution boundaries are enforced by the backend, not only by prompting:
 
-Production-like connection names, hosts, or database names make DBX more conservative. Generated SQL is still text from an AI model; review it like code before trusting it.
+1. Read-only tools can be called as needed
+2. Non-read-only SQL must first be shown as an explicit proposal
+3. User confirmation binds authorization to the same connection, same database, and exact SQL text
+4. Authorization applies only to the next run and never becomes a permanent write grant
+5. AI Agents cannot receive write or DDL authorization for production databases; they can only return SQL for manual review in DBX
 
-## Common Uses
+Connection read-only protection, production protection, and database credentials remain upper bounds. A target change, SQL change, empty confirmation, or failed backend risk classification voids the grant.
+
+<Callout type="info">AI Agent never receives “write from now on” permission and cannot bypass MCP policy, connection read-only protection, or database privileges. See [Production Safety](/en/docs/production-safety) for the complete boundary.</Callout>
+
+## Reasoning Effort and Thinking
+
+Providers expose different mechanisms: enumerated effort, reasoning levels, boolean thinking, integer budgets, or free-text options. DBX shows controls from the active model capability and remembers the selection per configuration and model.
+
+- Use provider default or lower effort for simple generation and explanation
+- Increase effort for multi-table reasoning, difficult optimization, or error diagnosis
+- Higher effort usually increases latency and cost without guaranteeing correctness
+
+Do not assume one UI label has identical semantics across providers.
+
+## Conversations, History, and Export
+
+- Use ↑ and ↓ to navigate prompt history
+- Conversations can be saved with connection and database context
+- Final AI analysis messages can be exported as Markdown with connection name and timestamp
+- Markdown export contains the final answer only; internal reasoning and Agent steps are not appended
+
+Exports can still contain table names, SQL, result snippets, and business data. Review and redact them before sharing.
+
+## Common Tasks
 
 ### Generate SQL
 
-Describe the result you want, and the assistant generates SQL using metadata from the current connection:
+> Using `@orders` and `@customers`, generate a top-10 customer revenue query for the last 30 days. Return SQL only and do not execute it.
 
-> Show the top 10 customers by order amount in the last 30 days
+Explicitly saying “do not execute” clarifies intent. Review date functions, schema qualification, join keys, null handling, and row limits.
 
-Example output:
+### Analyze Real Data
 
-```sql
-SELECT c.name, SUM(o.amount) AS total_amount
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-WHERE o.created_at >= NOW() - INTERVAL 30 DAY
-GROUP BY c.id, c.name
-ORDER BY total_amount DESC
-LIMIT 10;
-```
+> Query daily order counts from `@orders` for the last seven days, run the read-only query, and explain unusual spikes.
 
-Before running generated SQL, check:
+This is appropriate for Agent mode because it explicitly requests real results.
 
-- Whether the tables and columns are correct
-- Whether the time range matches your intent
-- Whether aggregation and ordering are correct
-- Whether the result should be limited
+### Repair an Error
 
-### Explain SQL
+Provide the failed SQL, database error, and related tables. AI can inspect columns and dialect context, but version-specific behavior, privileges, locks, and execution plans still require human verification.
 
-Select SQL and ask the assistant to explain its structure:
+## Privacy and Troubleshooting
 
-- What each subquery does
-- How `JOIN` conditions connect tables
-- What the `WHERE` clause filters
-- How aggregation, grouping, and sorting work
+- Cloud providers receive the prompt, schema summary, SQL, and bounded result context sent to the model; their privacy terms apply
+- Ollama and local CLI can run locally, but the model process or CLI plugins may still have their own network and logging behavior
+- Proxies, compatible endpoints, and custom gateways may log request content
+- For connection-test failures, check endpoint, auth method, model name, proxy, and API-style compatibility
+- When Agent repeatedly fails, reduce context, mention exact tables, narrow the task, and inspect tool errors instead of only increasing the turn limit
 
-This is useful for reading legacy queries, reports, or complex views.
+## Related Features
 
-### Optimize SQL
-
-The assistant can suggest optimization directions, such as:
-
-- Possible full table scans
-- Missing indexes
-- Subqueries that may be rewritten as `JOIN`
-- Sorting, deduplication, or aggregation that could be reduced
-
-<Callout type="info">AI optimization suggestions are advisory. Confirm performance with the database execution plan, data volume, and index design.</Callout>
-
-### Fix Errors
-
-When SQL fails, send the error and query to the assistant for diagnosis. Common fixes include:
-
-- Syntax errors
-- Misspelled table or column names
-- Missing `GROUP BY` columns
-- Type mismatches
-- Dialect differences between database engines
-
-## Supported Providers
-
-DBX features an improved **searchable model dropdown** that makes it easy to find and select from available models across all supported providers.
-
-<Tabs groupId="ai-provider" items={['Anthropic', 'OpenAI', 'Custom Endpoint']}>
-  <Tab value="Anthropic">
-    Use this for Claude models. Enter your API key, then choose or type the model you want to use from the searchable dropdown.
-  </Tab>
-  <Tab value="OpenAI">
-    Use this for OpenAI models. Enter your API key, then choose or type the model you want to use.
-  </Tab>
-  <Tab value="Custom Endpoint">
-    Use this for services compatible with the OpenAI Chat Completions API, such as local model servers, enterprise gateways, or third-party model platforms.
-
-    Configure:
-
-    - Endpoint URL
-    - Model
-    - API key (required only when the service uses authentication)
-
-  </Tab>
-</Tabs>
-
-## Privacy and Security
-
-AI requests may include your prompt, SQL, error messages, and the schema context needed to answer. Before using an external provider, confirm:
-
-- Whether sending this information is allowed
-- Whether it includes sensitive field names, business logic, or sample data
-- Whether your team has compliance rules for third-party model calls
-
-If you want AI agents to query databases through tools, continue with [MCP Integration](/en/docs/mcp).
+<Cards>
+  <Card title="Production Safety" href="/en/docs/production-safety">
+    Review the shared boundaries for AI, MCP, read-only connections, and production protection.
+  </Card>
+  <Card title="MCP Integration" href="/en/docs/mcp">
+    Connect external AI coding assistants to databases through DBX.
+  </Card>
+  <Card title="Query Editor" href="/en/docs/query-editor">
+    Understand the SQL, result, and metadata context available to AI.
+  </Card>
+</Cards>

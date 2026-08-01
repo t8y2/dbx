@@ -9,11 +9,11 @@ DBX uses a hybrid driver architecture: built-in Rust drivers, standalone native 
 
 | Driver Type       | How It Works                         | Best For                                                                                                                                                        |
 | ----------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Native (built-in) | Rust drivers compiled into DBX       | MySQL, PostgreSQL, SQLite, SQL Server, Redis, MongoDB, DuckDB, ClickHouse, and more                                                                              |
-| Native Agent      | Standalone Go/Rust process managed by DBX | Oracle, KingBase, XuguDB, and databases with a mature native driver                                                                                          |
+| Native (built-in) | Rust drivers compiled into DBX       | MySQL, PostgreSQL, SQLite, SQL Server, Redis, MongoDB, ClickHouse, and more                                                                                      |
+| Native Agent / external driver | Standalone Go/Rust process or sidecar managed by DBX | Oracle, KingBase, XuguDB, DuckDB, and connections such as RabbitMQ that require a separate runtime |
 | JDBC Agent        | Java subprocess managed by DBX       | Databases that require JDBC: GaussDB, openGauss, DM, HighGo, Vastbase, UXDB, Trino, Hive, DB2, Informix, Neo4j, TDengine, YashanDB, GoldenDB, Kylin, SunDB, and more |
 
-<Callout type="info">Built-in drivers work immediately. Native Agents require only a platform-specific executable, while JDBC Agents also require a JRE. DBX handles the matching installation when you first create a connection.</Callout>
+<Callout type="info">Built-in drivers work immediately. Native Agents and sidecars need platform files, while JDBC Agents also need a JRE. The connection dialog prompts for missing components, but automatic installation depends on network access, platform, licensing, and current settings.</Callout>
 
 ## Driver Store
 
@@ -66,6 +66,12 @@ DBX checks for driver updates periodically:
 - Update badges appear on the Driver Store tab when newer versions are available
 - Click **Upgrade All Drivers** to update all installed drivers at once
 - Individual drivers can be upgraded from their entry in the store
+
+## Runtime Monitoring
+
+Driver Manager summarizes active external drivers and Agents, including protocol mode, active sessions, PID, memory, CPU, uptime, and the latest error. Supported runtimes can be stopped or restarted here. A shared runtime may serve multiple connections, so inspect active sessions first.
+
+Message-queue Agents such as RabbitMQ may use both a business protocol and a management API. Custom AMQP/management ports, SSH tunnels, and TLS targets must be configured independently; one port must not be inferred from the other.
 
 ## Offline Driver Import
 

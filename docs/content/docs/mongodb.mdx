@@ -1,76 +1,130 @@
 ---
-title: MongoDB Browser
-description: Browse MongoDB databases and collections, view documents, and edit data with the built-in JSON editor.
+title: MongoDB Workspace
+description: Browse, filter, edit, and copy MongoDB documents and manage collections, indexes, and GridFS.
 ---
 
-DBX supports browsing and editing MongoDB databases with a document-oriented interface designed for MongoDB's flexible schema model.
+The MongoDB workspace is organized around databases, collections, documents, indexes, and GridFS instead of forcing documents into a relational model. It provides both a grid and full JSON view while preserving Extended JSON types such as `ObjectId`, dates, and long integers.
 
-## Collections Browser
+## Connections and Drivers
 
-MongoDB databases and collections appear in the sidebar alongside relational databases. The browser supports:
+Use a standard `mongodb://` or `mongodb+srv://` connection string and include replica set, authentication database, TLS, and other parameters in the URL when needed. Atlas, replica sets, and direct deployments share the same connection entry point.
 
-- Listing all databases on the server
-- Listing collections within each database
-- Paginated document browsing within collections
-- Filter and sort support for document queries
-- **Database and collection deletion**: Right-click on a database or collection to delete it
-- **Collection metadata**: View collection statistics including document count, size, and indexes
+DBX prefers the native MongoDB path. When a server or authentication protocol requires the older driver, you can select or automatically fall back to the `mongodb-legacy` Agent. The legacy path may expose fewer administration and mutation capabilities.
 
-<Callout type="info">MongoDB connections support both standard connection strings and legacy connection formats. For replica sets, use the standard `mongodb://` connection URL with the replica set name.</Callout>
+## Databases and Collections
 
-## Switching Databases
+The object tree can:
 
-Use the `use <database>` command in the MongoDB command runner to switch the active database. This is equivalent to the MongoDB shell's `use` command and updates the current database context for subsequent operations.
+- List databases, collections, indexes, and GridFS buckets
+- Show document count, size, and other available collection statistics
+- Create, rename, or drop collections when using the writable native path
+- Drop databases, one index, or all deletable indexes except `_id_`
+- Open a document browser or query editor from a collection
 
-## Table View
+Rename and destructive operations show the target and request preview and remain subject to read-only and production protection.
 
-Collections are displayed in a table view that flattens the document structure:
+## Document Browsing and Pagination
 
-- Top-level fields appear as columns
-- Nested fields are shown in dot notation (e.g., `address.city`)
-- Missing fields across documents are handled gracefully
-- Column widths auto-fit to content
+The document browser supports:
 
-## Document Viewer
+- Paged reads with an estimated total
+- Grid and full-document views
+- Top-level and nested fields such as `address.city`
+- Searchable field selection, hidden columns, and persistent column layout
+- Quick filters plus multiple field conditions
+- Database-side sorting and collection queries
 
-Click any document to open it in the detail panel. The JSON viewer provides:
+MongoDB totals may be estimated. In actively changing collections, the count and final page can shift while browsing.
 
-- Syntax-highlighted JSON display
-- Collapsible nested objects and arrays
-- Copy individual fields or the entire document
+## Filters and Commands
 
-## Inline Editing
+Build field filters in the document browser or use shell-style commands in a MongoDB query tab. Completion can suggest collections, fields, query operators, update operators, aggregation stages, and cursor methods.
 
-Edit documents directly from the table view:
+Examples:
 
-- Double-click a cell to edit its value
-- Changes are staged locally before saving
-- Review the generated update command before applying
+```javascript
+db.users.find({ status: "active" }).sort({ createdAt: -1 })
+```
 
-## JSON Editor
+```javascript
+db.orders.aggregate([
+  { $match: { status: "paid" } },
+  { $group: { _id: "$customerId", total: { $sum: "$amount" } } }
+])
+```
 
-In document view, switch between field-tree editing and whole-document JSON editing:
+Use `use <database>` to switch the MongoDB query context.
 
-- Edit or create a document as a full JSON object
-- Validate the entire JSON payload before saving
-- Paste complete documents when inserting new records
-- Keep the field editor for targeted field changes
-- **Whole-document replace on update**: saving JSON replaces the document body
-- **Identity change**: editing `_id` inserts a document under the new id and deletes the previous one
-- **Date and Extended JSON preservation**: `$date`, `$oid`, and `$numberLong` values are preserved correctly during edits
+## Grid Editing
 
-## MongoDB Versions
+The grid expands common fields into columns and supports:
 
-DBX supports MongoDB 4.2 and later through the built-in driver. For pre-4.2 MongoDB instances, DBX can fall back to the JDBC agent driver. See [Driver Management](/en/docs/driver-management) for details on configuring agent drivers.
+- Editing top-level or nested fields
+- Adding and removing fields
+- Creating, cloning, and deleting documents
+- Copying selected documents as JSON, Markdown, or MongoDB Shell statements
+- Excluding `_id` when copying a new-document template
+- Reviewing pending update or delete targets before saving
 
-## Feature Coverage
+Collections with very different document shapes are better handled in the full-document view so hidden fields are not overlooked.
 
-| Feature                           | Support              |
-| --------------------------------- | -------------------- |
-| List databases and collections    | All versions         |
-| Document browsing with pagination | All versions         |
-| Table view with flattened fields  | All versions         |
-| Filter and sort                   | MongoDB 4.2+         |
-| Inline editing                    | All versions         |
-| JSON document editor              | All versions         |
-| SSH tunnel                        | Standard connections |
+## JSON Document Editing
+
+Document details can switch between a field tree and full JSON source:
+
+- Paste complete JSON when creating a document
+- Validate JSON syntax and root-object structure before save
+- Format, collapse, and copy nested objects or arrays
+- Preserve Extended JSON such as `$oid`, `$date`, and `$numberLong`
+- Change `_id` by creating the new document and removing the old one
+- Save full JSON with whole-document replacement semantics
+
+<Callout type="warn">Whole-document replacement writes the complete object back. Verify that the JSON contains every field that must be retained, especially in collections with concurrent updates.</Callout>
+
+## Indexes
+
+The object tree and collection structure can show index name, fields, uniqueness, and other metadata. When the native driver supports it, you can drop one index, drop all deletable indexes, or manage indexes through structure actions.
+
+MongoDB preserves `_id_`, and sharding or other server rules may protect additional indexes. The server response is authoritative.
+
+## GridFS
+
+The GridFS workspace manages buckets and files:
+
+- Browse, create, and delete buckets
+- Upload, download, preview, and delete files
+- Inspect filename, size, upload time, chunks, and metadata
+- Filter and sort files by fields
+- Export file lists or metadata
+
+Dropping a bucket removes its files and chunks. Verify the bucket name and backup before doing this in production.
+
+## Copy and Export
+
+- Copy the current document, selected documents, or field values
+- Copy as plain JSON or Extended JSON that preserves type information
+- Use multi-format copy and export from the grid result
+- Exporting a MongoDB `find` result continues through the full result scope instead of only the currently displayed page, subject to query and export limits
+
+Narrow filters before exporting a large collection and monitor server cursor use, network transfer, and local file size.
+
+## Safety and Compatibility Boundaries
+
+- Read-only connections block document, field, index, collection, database, and GridFS mutations
+- Production protection requires confirmation before recognizable writes
+- MCP Data read/write permits only scoped MongoDB mutations; opaque or effectively unbounded filters are high risk
+- The legacy Agent may not support native collection and index administration
+- Atlas permissions, authentication database, TLS, and IP allowlists are enforced by MongoDB
+- Paginated totals may be estimates and should not be treated as strongly consistent counts
+
+<Cards>
+  <Card title="Protect production writes" href="/en/docs/production-safety">
+    Review MongoDB filter scope, read-only connections, and MCP policy.
+  </Card>
+  <Card title="Connections and drivers" href="/en/docs/driver-management">
+    Manage native and legacy Agents and troubleshoot driver startup.
+  </Card>
+  <Card title="Specialized workspaces" href="/en/docs/specialized-workspaces">
+    Review Redis, search, vector, HBase, message queue, and configuration tools.
+  </Card>
+</Cards>

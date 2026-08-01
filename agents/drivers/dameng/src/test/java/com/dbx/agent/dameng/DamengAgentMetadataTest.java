@@ -197,6 +197,104 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void fallsBackToJdbcMetadataForRestrictedSchemaObjects() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> jdbcMetadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            sqls,
+            jdbcMetadataCalls,
+            List.of(
+                List.of("VIEW_B", "VIEW", "view comment"),
+                List.of("TABLE_A", "TABLE", "table comment"),
+                List.of("MV_C", "MATERIALIZED VIEW", "mv comment"),
+                List.of("APP_PROC", "PROCEDURE", "procedure comment"),
+                List.of("MTAB$_INTERNAL", "TABLE", "internal table")
+            ),
+            null,
+            "没有[SYS.ALL_OBJECTS]对象的查询权限"
+        ));
+        setConnectedUsername(agent, "APP_DATA%2026");
+
+        List<ObjectInfo> objects = agent.listObjects("APP_DATA%2026");
+
+        Assertions.assertEquals(List.of("MV_C", "TABLE_A", "VIEW_B"), objects.stream().map(ObjectInfo::getName).toList());
+        Assertions.assertEquals(List.of("MATERIALIZED_VIEW", "TABLE", "VIEW"), objects.stream().map(ObjectInfo::getObject_type).toList());
+        Assertions.assertEquals(List.of("APP_DATA%2026", "APP_DATA%2026", "APP_DATA%2026"), objects.stream().map(ObjectInfo::getSchema).toList());
+        Assertions.assertEquals(List.of("mv comment", "table comment", "view comment"), objects.stream().map(ObjectInfo::getComment).toList());
+        Assertions.assertEquals(4, sqls.size(), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream().allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
+        Assertions.assertEquals(List.of("catalog=null,schema=APP\\_DATA\\%2026,table=%,types=null"), jdbcMetadataCalls);
+    }
+
+    @Test
+    void appliesConstraintsToRestrictedSchemaObjectFallback() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            new ArrayList<>(),
+            new ArrayList<>(),
+            List.of(
+                List.of("VIEW_B", "VIEW", "keep view"),
+                List.of("TABLE_A", "TABLE", "keep table"),
+                List.of("TABLE_Z", "TABLE", "other"),
+                List.of("MV_C", "MATERIALIZED VIEW", "keep materialized view")
+            ),
+            null,
+            "no SYS.ALL_OBJECTS privilege"
+        ));
+        MetadataListConstraints constraints = new MetadataListConstraints(
+            "keep",
+            1,
+            1,
+            List.of("TABLE", "VIEW")
+        );
+
+        List<ObjectInfo> objects = agent.listObjects("APP", constraints);
+
+        Assertions.assertEquals(1, objects.size());
+        Assertions.assertEquals("VIEW_B", objects.get(0).getName());
+        Assertions.assertEquals("VIEW", objects.get(0).getObject_type());
+        Assertions.assertEquals("keep view", objects.get(0).getComment());
+    }
+
+    @Test
+    void doesNotFallbackForNonPermissionObjectMetadataErrors() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> jdbcMetadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            sqls,
+            jdbcMetadataCalls,
+            List.of(),
+            null,
+            "ALL_OBJECTS metadata query timed out"
+        ));
+
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.listObjects("APP"));
+
+        Assertions.assertEquals("ALL_OBJECTS metadata query timed out", error.getCause().getMessage());
+        Assertions.assertEquals(1, sqls.size(), String.join("\n", sqls));
+        Assertions.assertTrue(jdbcMetadataCalls.isEmpty(), jdbcMetadataCalls.toString());
+    }
+
+    @Test
+    void propagatesJdbcMetadataObjectFallbackErrors() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            new ArrayList<>(),
+            new ArrayList<>(),
+            List.of(),
+            new SQLException("JDBC metadata getTables failed"),
+            "没有[SYS.ALL_OBJECTS]对象的查询权限"
+        ));
+
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.listObjects("APP"));
+
+        Assertions.assertEquals("JDBC metadata getTables failed", error.getCause().getMessage());
+        Assertions.assertEquals(1, error.getSuppressed().length);
+    }
+
+    @Test
     void listSchemasIncludesSchemaObjectsWithoutChildren() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();

@@ -1049,6 +1049,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
+    if (databaseType.value === "mongodb") return false;
     // The full result is already in memory — don't re-execute the query on the
     // backend just to stream the same rows back to a file.
     if (hasCompleteLocalResult?.value) return false;
@@ -1122,6 +1123,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportQueryResultSqlViaBackend(rowIds?: number[]): Promise<boolean> {
     // Guard: only for query-result context without complete local result, desktop only
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) return false;
+    if (databaseType.value === "mongodb") return false;
     if (hasCompleteLocalResult?.value) return false;
     if (!isTauriRuntime()) return false; // Web → local export fallback
 

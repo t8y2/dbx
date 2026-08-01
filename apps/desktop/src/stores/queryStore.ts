@@ -73,6 +73,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle"]);
+const QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR = "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
@@ -4973,6 +4974,64 @@ export const useQueryStore = defineStore("query", () => {
     const queryBaseSql = queryResultBaseSql(tab);
     const exportSettings = useSettingsStore().editorSettings;
     const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
+
+    if (effectiveDbType === "mongodb") {
+      let mongoCommand;
+      try {
+        mongoCommand = await api.mongoParseShellCommand(sql);
+      } catch {
+        throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+      }
+      if (mongoCommand.kind !== "find") throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+
+      const pageLimit = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
+      const documents: unknown[] = [];
+      let copyDocuments: unknown[] | undefined = [];
+      let pageOffset = 0;
+      let totalRows = typeof tab.resultTotalRowCount === "number" ? Math.min(tab.resultTotalRowCount, exportRowLimit) : null;
+      const exportStartedAt = performance.now();
+      const exportExecutionId = uuid();
+
+      while (documents.length < exportRowLimit) {
+        const remaining = exportRowLimit - documents.length;
+        const plan = planMongoFindPagination(sql, mongoCommand, pageOffset, Math.min(pageLimit, remaining));
+        if (!plan) throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+        if (plan.requestLimit === 0) break;
+
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCommand.collection, plan.requestSkip, plan.requestLimit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, exportExecutionId);
+        const pageDocuments = result.documents.slice(0, plan.requestLimit);
+        documents.push(...pageDocuments);
+
+        if (copyDocuments) {
+          if (result.extended_documents?.length === result.documents.length) {
+            copyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length));
+          } else {
+            copyDocuments = undefined;
+          }
+        }
+
+        if (result.total_is_exact !== false) {
+          totalRows = Math.min(mongoFindLogicalTotal(result.total, plan), exportRowLimit);
+        }
+        onProgress?.({ rowsExported: documents.length, totalRows });
+
+        pageOffset += pageDocuments.length;
+        const reachedLogicalLimit = plan.logicalLimit !== undefined && pageOffset >= plan.logicalLimit;
+        const reachedExactTotal = result.total_is_exact !== false && pageOffset >= mongoFindLogicalTotal(result.total, plan);
+        if (pageDocuments.length === 0 || pageDocuments.length < plan.requestLimit || reachedLogicalLimit || reachedExactTotal) break;
+      }
+
+      const result = mongoDocumentsToQueryResult(documents, performance.now() - exportStartedAt, totalRows ?? documents.length, copyDocuments, totalRows !== null);
+      if (result.columns.length === 0) {
+        result.columns = tab.result.columns;
+        result.column_types = tab.result.column_types;
+      }
+      result.affected_rows = documents.length;
+      result.truncated = false;
+      result.has_more = false;
+      return result;
+    }
+
     const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
     // Use the already-computed total row count as a progress estimate so the
     // export dialog shows a moving bar instead of a stuck 0 while paginating.
@@ -5050,6 +5109,7 @@ export const useQueryStore = defineStore("query", () => {
     const settings = useSettingsStore().editorSettings;
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
+    if (effectiveDbType === "mongodb") return undefined;
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = queryResultBaseSql(tab);
     const resultStatementIndex = tab.result.statement_index;

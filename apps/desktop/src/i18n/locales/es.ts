@@ -2191,6 +2191,7 @@ export default withEnglishFallback({
     confirmDropSchemaMessage: '¿Estás seguro de que deseas eliminar el esquema "{name}"? Esto borrará permanentemente el esquema y todos sus objetos.',
     createSchemaSuccess: 'Esquema "{name}" creado',
     dropSchemaSuccess: 'Esquema "{name}" eliminado',
+    dropDamengSchemaRequiresDifferentDba: "La conexión actual no puede eliminar este esquema de forma segura. Conéctate con otro usuario DBA e inténtalo de nuevo.",
     createSchemaNamePlaceholder: "Nombre del esquema",
     editSchemaComment: "Editar comentario",
     editSchemaCommentTitle: 'Editar comentario: "{name}"',

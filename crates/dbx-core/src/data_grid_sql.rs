@@ -2463,6 +2463,11 @@ pub(crate) fn build_column_predicate(
         format!("BINARY {ident} = {}", format_grid_sql_literal(value, database_type, column_info))
     } else {
         let literal = format_grid_sql_literal(value, database_type, column_info);
+        if use_binary_text_comparison {
+            if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
+                return predicate;
+            }
+        }
         format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
     }
 }
@@ -2482,7 +2487,30 @@ fn build_save_column_predicate(
         format!("BINARY {ident} = {}", format_grid_save_sql_literal(value, database_type, column_info))
     } else {
         let literal = format_grid_save_sql_literal(value, database_type, column_info);
+        if use_binary_text_comparison {
+            if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
+                return predicate;
+            }
+        }
         format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
+    }
+}
+
+fn postgres_keyless_json_predicate(
+    database_type: Option<DatabaseType>,
+    ident: &str,
+    literal: &str,
+    column_info: Option<&DataGridColumnInfo>,
+) -> Option<String> {
+    if !is_postgres_like_pattern_database(database_type) {
+        return None;
+    }
+    let normalized = column_info?.data_type.trim().to_ascii_lowercase();
+    let data_type = normalized.rsplit('.').next().unwrap_or(&normalized).trim_matches('"');
+    match data_type {
+        "json" => Some(format!("{ident}::text = {literal}::text")),
+        "jsonb" => Some(format!("{ident} = {literal}::jsonb")),
+        _ => None,
     }
 }
 
@@ -3036,6 +3064,47 @@ mod tests {
         assert!(statement.contains(r#"E'"quoted"'::jsonb"#), "{statement}");
         assert!(statement.contains("NULL]"));
         assert!(!statement.contains('\u{1}'));
+    }
+
+    #[test]
+    fn postgres_keyless_update_casts_json_predicates() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "profiles".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("user_id", "uuid", false, None),
+                    column("status", "text", false, None),
+                    column("photo", "json", true, None),
+                    column("extend_list", "jsonb", true, None),
+                ]),
+            },
+            columns: vec!["user_id".to_string(), "status".to_string(), "photo".to_string(), "extend_list".to_string()],
+            source_columns: None,
+            rows: vec![vec![
+                json!("d7910cef-4188-4309-99ce-8e7b64d64869"),
+                json!("0"),
+                json!("[]"),
+                json!(r#"[{"type":"combobox","key":"gender","value":"C017MALE"}]"#),
+            ]],
+            dirty_rows: vec![(0, vec![(1, json!("1"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 1);
+        let statement = &result.statements[0];
+        assert!(statement.contains(r#""photo"::text = '[]'::text"#), "{statement}");
+        assert!(
+            statement.contains(r#""extend_list" = '[{"type":"combobox","key":"gender","value":"C017MALE"}]'::jsonb"#),
+            "{statement}"
+        );
     }
 
     #[test]

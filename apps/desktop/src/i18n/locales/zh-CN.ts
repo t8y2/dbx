@@ -2258,6 +2258,7 @@ export default withEnglishFallback({
     confirmDropSchemaMessage: "确定要删除 Schema「{name}」吗？这将永久删除该 Schema 及其所有对象。",
     createSchemaSuccess: "Schema「{name}」已创建",
     dropSchemaSuccess: "Schema「{name}」已删除",
+    dropDamengSchemaRequiresDifferentDba: "当前连接无法安全删除此 Schema。请改用其他 DBA 用户连接后重试。",
     createSchemaNamePlaceholder: "Schema 名称",
     editSchemaComment: "编辑注释",
     editSchemaCommentTitle: "编辑注释：「{name}」",

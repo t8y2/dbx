@@ -13,22 +13,30 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private static final String LEGACY_SESSION_ID = "__legacy__";
     private static final int MAX_SESSIONS = 256;
+    private static final int MAX_REQUEST_THREADS = 64;
+    private static final int MAX_CLEANUP_THREADS = 16;
     private static final long MAINTENANCE_INTERVAL_MILLIS = 60_000L;
 
     private final Supplier<? extends DatabaseAgent> agentFactory;
     private final Supplier<? extends SessionRpcHandler> sessionHandlerFactory;
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
-    private final ExecutorService requests = Executors.newCachedThreadPool();
+    private final ExecutorService requests;
+    private final ExecutorService cleanup;
     private final JdbcConnectionPoolRegistry poolRegistry;
     private final Gson gson = new Gson();
     private final PrintStream protocolOutput = System.out;
@@ -38,29 +46,43 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private ScheduledExecutorService maintenance;
 
     public MultiSessionJsonRpcServer(Supplier<? extends DatabaseAgent> agentFactory) {
-        this(agentFactory, new JdbcConnectionPoolRegistry());
+        this(agentFactory, new JdbcConnectionPoolRegistry(), RuntimeLimits.defaults());
     }
 
     MultiSessionJsonRpcServer(
         Supplier<? extends DatabaseAgent> agentFactory,
         JdbcConnectionPoolRegistry.PoolSettings poolSettings
     ) {
-        this(agentFactory, new JdbcConnectionPoolRegistry(poolSettings));
+        this(agentFactory, new JdbcConnectionPoolRegistry(poolSettings), RuntimeLimits.defaults());
+    }
+
+    MultiSessionJsonRpcServer(
+        Supplier<? extends DatabaseAgent> agentFactory,
+        JdbcConnectionPoolRegistry.PoolSettings poolSettings,
+        RuntimeLimits runtimeLimits
+    ) {
+        this(agentFactory, new JdbcConnectionPoolRegistry(poolSettings), runtimeLimits);
     }
 
     private MultiSessionJsonRpcServer(
         Supplier<? extends DatabaseAgent> agentFactory,
-        JdbcConnectionPoolRegistry poolRegistry
+        JdbcConnectionPoolRegistry poolRegistry,
+        RuntimeLimits runtimeLimits
     ) {
         this.agentFactory = agentFactory;
         this.sessionHandlerFactory = null;
         this.poolRegistry = poolRegistry;
+        this.requests = boundedExecutor(runtimeLimits.maximumRequestThreads, "dbx-agent-request");
+        this.cleanup = boundedExecutor(runtimeLimits.maximumCleanupThreads, "dbx-agent-cleanup");
     }
 
     private MultiSessionJsonRpcServer(Supplier<? extends SessionRpcHandler> sessionHandlerFactory, boolean customHandler) {
         this.agentFactory = null;
         this.sessionHandlerFactory = sessionHandlerFactory;
         this.poolRegistry = new JdbcConnectionPoolRegistry();
+        RuntimeLimits runtimeLimits = RuntimeLimits.defaults();
+        this.requests = boundedExecutor(runtimeLimits.maximumRequestThreads, "dbx-agent-request");
+        this.cleanup = boundedExecutor(runtimeLimits.maximumCleanupThreads, "dbx-agent-cleanup");
     }
 
     /** Creates a protocol v2 server for a non-JDBC, session-scoped agent. */
@@ -82,7 +104,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
                     writeResponse(handleRequest(request));
                     return;
                 }
-                requests.submit(() -> writeResponse(handleRequest(request)));
+                executeRequest(request, this::writeResponse);
             }
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -93,6 +115,14 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
 
     String handleRequest(String line) {
         return gson.toJson(handleRequest(JsonParser.parseString(line).getAsJsonObject()));
+    }
+
+    void executeRequest(JsonObject request, Consumer<JsonObject> responseConsumer) {
+        try {
+            requests.execute(() -> responseConsumer.accept(handleRequest(request)));
+        } catch (RejectedExecutionException error) {
+            responseConsumer.accept(errorResponse(request.get("id"), AgentRpcError.backpressure("request", error)));
+        }
     }
 
     private JsonObject handleRequest(JsonObject request) {
@@ -134,10 +164,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             }
             response.add("result", gson.toJsonTree(result));
         } catch (Throwable error) {
-            JsonObject rpcError = new JsonObject();
-            rpcError.addProperty("code", -1);
-            rpcError.addProperty("message", error.getMessage() == null ? error.toString() : error.getMessage());
-            response.add("error", rpcError);
+            response.add("error", AgentRpcError.toJson(error, method, stringOrNull(params, "agentSessionId")));
         }
         return response;
     }
@@ -165,7 +192,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             return session.connect(params);
         } catch (Exception error) {
             sessions.remove(sessionId, session);
-            session.close();
+            session.quarantineAndClose(cleanup);
             throw error;
         }
     }
@@ -173,7 +200,13 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private Object closeSession(String sessionId) {
         Session session = sessions.remove(sessionId);
         if (session != null) {
-            session.close();
+            boolean replaceRuntime = session.quarantineAndClose(cleanup);
+            if (replaceRuntime) {
+                throw AgentRpcError.resource(
+                    "close",
+                    new IllegalStateException("JDBC quarantine operation limit reached")
+                );
+            }
         }
         return Collections.singletonMap("ok", true);
     }
@@ -206,7 +239,11 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
 
     private void closeAllSessions() {
         for (String sessionId : sessions.keySet()) {
-            closeSession(sessionId);
+            try {
+                closeSession(sessionId);
+            } catch (AgentRpcError ignored) {
+                // Sessions are already detached; process shutdown remains the final cleanup boundary.
+            }
         }
     }
 
@@ -263,7 +300,16 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             }
         }
         closeAllSessions();
-        requests.shutdown();
+        requests.shutdownNow();
+        cleanup.shutdown();
+        try {
+            if (!cleanup.awaitTermination(2, TimeUnit.SECONDS)) {
+                cleanup.shutdownNow();
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            cleanup.shutdownNow();
+        }
         poolRegistry.close();
     }
 
@@ -273,6 +319,47 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             thread.setDaemon(true);
             return thread;
         };
+    }
+
+    private static ExecutorService boundedExecutor(int maximumThreads, String threadName) {
+        return new ThreadPoolExecutor(
+            0,
+            maximumThreads,
+            60L,
+            TimeUnit.SECONDS,
+            new SynchronousQueue<>(),
+            daemonThreadFactory(threadName),
+            new ThreadPoolExecutor.AbortPolicy()
+        );
+    }
+
+    private static JsonObject errorResponse(JsonElement id, Throwable error) {
+        JsonObject response = new JsonObject();
+        response.addProperty("jsonrpc", "2.0");
+        response.add("id", id);
+        response.add("error", AgentRpcError.toJson(error, "request", null));
+        return response;
+    }
+
+    private static String stringOrNull(JsonObject params, String key) {
+        return params.has(key) && !params.get(key).isJsonNull() ? params.get(key).getAsString() : null;
+    }
+
+    static final class RuntimeLimits {
+        private final int maximumRequestThreads;
+        private final int maximumCleanupThreads;
+
+        RuntimeLimits(int maximumRequestThreads, int maximumCleanupThreads) {
+            if (maximumRequestThreads <= 0 || maximumCleanupThreads <= 0) {
+                throw new IllegalArgumentException("Agent runtime thread limits must be positive");
+            }
+            this.maximumRequestThreads = maximumRequestThreads;
+            this.maximumCleanupThreads = maximumCleanupThreads;
+        }
+
+        private static RuntimeLimits defaults() {
+            return new RuntimeLimits(MAX_REQUEST_THREADS, MAX_CLEANUP_THREADS);
+        }
     }
 
     private static String requiredSessionId(JsonObject params) {
@@ -293,6 +380,8 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         private final JsonRpcServer server;
         private final SessionRpcHandler handler;
         private final ReentrantLock lock = new ReentrantLock();
+        private final AtomicReference<State> state = new AtomicReference<>(State.ACTIVE);
+        private final AtomicBoolean cleanupScheduled = new AtomicBoolean();
 
         private Session(JsonRpcServer server) {
             this.server = server;
@@ -305,8 +394,10 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         }
 
         private Object handle(String method, JsonObject params) throws Exception {
+            requireActive();
             lock.lock();
             try {
+                requireActive();
                 return handler == null ? server.dispatchForRuntime(method, params) : handler.handle(method, params);
             } finally {
                 lock.unlock();
@@ -314,8 +405,10 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         }
 
         private Object connect(JsonObject params) throws Exception {
+            requireActive();
             lock.lock();
             try {
+                requireActive();
                 return handler == null
                     ? server.dispatchForRuntime(AgentProtocol.METHOD_CONNECT, params)
                     : handler.connect(params);
@@ -324,9 +417,31 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             }
         }
 
+        private boolean quarantineAndClose(ExecutorService cleanup) {
+            state.compareAndSet(State.ACTIVE, State.QUARANTINED);
+            boolean replaceRuntime = server != null && server.quarantine();
+            if (!cleanupScheduled.compareAndSet(false, true)) {
+                return replaceRuntime;
+            }
+            try {
+                cleanup.execute(this::closeWhenIdle);
+            } catch (RejectedExecutionException error) {
+                throw AgentRpcError.resource("close", error);
+            }
+            return replaceRuntime;
+        }
+
+        private void closeWhenIdle() {
+            close();
+        }
+
         private void close() {
+            state.compareAndSet(State.ACTIVE, State.QUARANTINED);
             lock.lock();
             try {
+                if (state.get() == State.CLOSED) {
+                    return;
+                }
                 if (handler != null) {
                     handler.close();
                 } else {
@@ -334,6 +449,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
                 }
             } catch (Exception ignored) {
             } finally {
+                state.set(State.CLOSED);
                 lock.unlock();
             }
         }
@@ -347,7 +463,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         }
 
         private void expireIdleResources() {
-            if (handler != null) {
+            if (state.get() != State.ACTIVE || handler != null) {
                 return;
             }
             if (!lock.tryLock()) {
@@ -361,7 +477,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         }
 
         private void expireIdleResources(long nowMillis, long idleTimeoutMillis) {
-            if (handler != null) {
+            if (state.get() != State.ACTIVE || handler != null) {
                 return;
             }
             if (!lock.tryLock()) {
@@ -372,6 +488,18 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             } finally {
                 lock.unlock();
             }
+        }
+
+        private void requireActive() {
+            if (state.get() != State.ACTIVE) {
+                throw new IllegalStateException("Agent session is quarantined");
+            }
+        }
+
+        private enum State {
+            ACTIVE,
+            QUARANTINED,
+            CLOSED
         }
     }
 }

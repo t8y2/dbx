@@ -7,6 +7,10 @@ DBX uses native Rust database drivers by default. JDBC is optional: install the 
 
 <Callout type="info">The JDBC plugin is not bundled with the main DBX app, and it does not include vendor JDBC drivers. Install the DBX JDBC plugin first, then import the database vendor's JDBC driver JAR.</Callout>
 
+<Callout type="warn">A successful JDBC connection does not imply every capability of a native DBX profile. Object trees, source definitions, structure editing, import, transfer, and admin views depend on JDBC metadata, the detected effective database type, and the driver capability manifest. Unknown engines run with generic JDBC capabilities.</Callout>
+
+Desktop imports JARs from the local machine. Docker/Web installs JARs and the plugin in the server data directory; browser-local paths are not directly readable by the server, and configuration migration does not carry driver files automatically.
+
 ## When to Use JDBC
 
 Prefer built-in DBX database types first, such as MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, DM, and GaussDB.

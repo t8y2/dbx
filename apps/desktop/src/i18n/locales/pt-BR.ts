@@ -2191,6 +2191,7 @@ export default withEnglishFallback({
     confirmDropSchemaMessage: 'Tem certeza de que deseja remover o schema "{name}"? Isso excluirá permanentemente o schema e todos os seus objetos.',
     createSchemaSuccess: 'Schema "{name}" criado',
     dropSchemaSuccess: 'Schema "{name}" removido',
+    dropDamengSchemaRequiresDifferentDba: "A conexão atual não pode remover este schema com segurança. Conecte-se com outro usuário DBA e tente novamente.",
     createSchemaNamePlaceholder: "Nome do schema",
     editSchemaComment: "Editar comentário",
     editSchemaCommentTitle: 'Editar comentário: "{name}"',

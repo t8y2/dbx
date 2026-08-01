@@ -419,6 +419,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const staleTreeRefreshIds = new Set<string>();
+  const activeTreeRefreshGenerations = new Map<string, number>();
+  let nextTreeRefreshGeneration = 0;
   const metadataLoadCoordinator = new MetadataLoadCoordinator((event) => {
     console.debug("[DBX][metadata-load:coordinator]", event);
   });
@@ -913,7 +915,8 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   // Metadata loaders keep this internal: match connection-loss errors before recording generic errors.
-  function recordMetadataLoadError(connectionId: string, error: unknown) {
+  function recordMetadataLoadError(connectionId: string, error: unknown, load?: TreeNodeLoadHandle) {
+    if (load && !load.isCurrent()) return;
     if (recordConnectionLostError(connectionId, error)) return;
     recordConnectionError(connectionId, error);
   }
@@ -2976,7 +2979,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (cacheHit) {
         // Render the last known metadata immediately; network validation and refresh
         // continue in the background so opening a connection never waits on them.
-        void loadDatabases(connectionId, { ...options, force: true }).catch((error) => recordMetadataLoadError(connectionId, error));
+        void loadDatabases(connectionId, { ...options, force: true }).catch(() => undefined);
         return;
       }
     }
@@ -3053,7 +3056,7 @@ export const useConnectionStore = defineStore("connection", () => {
             let dorisCatalogs: CatalogInfo[] | null = null;
             if (connectionIsDorisFamilyCatalogCapable(config)) {
               dorisCatalogs = await withMetadataLoadTimeout(connectionId, api.listDorisCatalogs(connectionId), "catalogs").catch((error: unknown) => {
-                recordMetadataLoadError(connectionId, error);
+                recordMetadataLoadError(connectionId, error, load);
                 return null;
               });
             }
@@ -3134,7 +3137,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (liveNode) liveNode.isExpanded = true;
           if (options?.force) void loadSidebarDatabaseStorage(connectionId, { force: true });
         } catch (e) {
-          recordMetadataLoadError(connectionId, e);
+          recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
@@ -3203,7 +3206,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3258,7 +3261,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3295,7 +3298,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3349,7 +3352,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const liveNode = treeNodeLoadTarget(load);
       if (liveNode) liveNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3393,7 +3396,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3460,7 +3463,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3514,7 +3517,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3550,7 +3553,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3586,7 +3589,7 @@ export const useConnectionStore = defineStore("connection", () => {
       setChildren(targetNode, isMilvus && database ? collectionChildren : withSavedSqlRoot(connectionId, collectionChildren, targetNode));
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3631,7 +3634,7 @@ export const useConnectionStore = defineStore("connection", () => {
       setChildren(targetNode, children);
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3708,7 +3711,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await savePersistedTreeChildren(cacheKey, children);
           targetNode.isExpanded = true;
         } catch (e) {
-          recordMetadataLoadError(connectionId, e);
+          recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
@@ -3747,7 +3750,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await savePersistedTreeChildren(cacheKey, children);
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3783,7 +3786,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3821,7 +3824,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3866,7 +3869,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(node.connectionId, e);
+      recordMetadataLoadError(node.connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -3922,7 +3925,7 @@ export const useConnectionStore = defineStore("connection", () => {
       setChildren(targetNode, databaseNodes);
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4004,7 +4007,7 @@ export const useConnectionStore = defineStore("connection", () => {
           }
           targetNode.isExpanded = true;
         } catch (e) {
-          recordMetadataLoadError(connectionId, e);
+          recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
@@ -4031,7 +4034,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const nodeId = schema ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
       const cacheKey = schemaCacheKey(connectionId, database, schema || "", "objects-simple-v6");
       if (await hydrateTreeNodeFromCache(findNode(treeNodes.value, nodeId), cacheKey)) {
-        void loadTables(connectionId, database, schema, { ...options, force: true }).catch((error) => recordMetadataLoadError(connectionId, error));
+        void loadTables(connectionId, database, schema, { ...options, force: true }).catch(() => undefined);
         return;
       }
     }
@@ -4136,7 +4139,7 @@ export const useConnectionStore = defineStore("connection", () => {
             });
           }
         } catch (e) {
-          recordMetadataLoadError(connectionId, e);
+          recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
@@ -4162,9 +4165,7 @@ export const useConnectionStore = defineStore("connection", () => {
     });
     if (!options?.force && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
       if (await hydrateTreeNodeFromCache(node, objectGroupCacheKey(node))) {
-        void loadObjectGroupChildren(node, { ...options, force: true }).catch((error) => {
-          if (node.connectionId) recordMetadataLoadError(node.connectionId, error);
-        });
+        void loadObjectGroupChildren(node, { ...options, force: true }).catch(() => undefined);
         return;
       }
     }
@@ -4259,7 +4260,7 @@ export const useConnectionStore = defineStore("connection", () => {
           }
           targetNode.isExpanded = true;
         } catch (e) {
-          recordMetadataLoadError(node.connectionId, e);
+          recordMetadataLoadError(node.connectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
@@ -4383,7 +4384,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
           targetParent.isExpanded = true;
         } catch (e) {
-          recordMetadataLoadError(parentConnectionId, e);
+          recordMetadataLoadError(parentConnectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
@@ -4418,7 +4419,7 @@ export const useConnectionStore = defineStore("connection", () => {
       targetNode.objectCount = children.length;
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4553,7 +4554,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const finishedParent = treeNodeLoadTarget(load);
       if (finishedParent) finishedParent.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(parent.connectionId, e);
+      recordMetadataLoadError(parent.connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4795,7 +4796,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4836,7 +4837,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4881,7 +4882,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4923,7 +4924,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4954,7 +4955,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -4985,7 +4986,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -5016,7 +5017,7 @@ export const useConnectionStore = defineStore("connection", () => {
       );
       targetNode.isExpanded = true;
     } catch (e) {
-      recordMetadataLoadError(connectionId, e);
+      recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
       finishTreeNodeLoad(load);
@@ -5114,19 +5115,22 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function restoreExpandedChildren(node: TreeNode, expandedIds: Set<string>, options?: LoadTreeOptions) {
+  async function restoreExpandedChildren(node: TreeNode, expandedIds: Set<string>, options?: LoadTreeOptions, isCurrent: () => boolean = () => true) {
+    if (!isCurrent()) return;
     if (!node.children) return;
     for (const child of node.children) {
+      if (!isCurrent()) return;
       if (!expandedIds.has(child.id)) continue;
       await loadTreeNodeChildren(child, options);
-      await restoreExpandedChildren(child, expandedIds, options);
+      if (!isCurrent()) return;
+      await restoreExpandedChildren(child, expandedIds, options, isCurrent);
     }
   }
 
   async function refreshTreeNode(node: TreeNode) {
     invalidateMetadataCachesForNode(node);
     if (objectTypesForGroupNode(node.type)) {
-      clearLoadedChildrenCache(node.id);
+      clearLoadedChildrenCache(node.id, { deletePersisted: false });
       await loadObjectGroupChildren(node, { force: true });
       return;
     }
@@ -5144,24 +5148,44 @@ export const useConnectionStore = defineStore("connection", () => {
     const previousChildren = node.children;
     const previousHiddenChildren = node.hiddenChildren;
     const previousObjectCount = node.objectCount;
+    const previousExpanded = node.isExpanded;
     const previousLoadedIds = [...loadedTreeNodeChildrenIds.value].filter((id) => id === node.id || id.startsWith(`${node.id}:`));
     const previousConfirmedEmptyIds = [...confirmedEmptyTreeNodeIds.value].filter((id) => id === node.id || id.startsWith(`${node.id}:`));
-    await clearPersistedTreeCacheForNode(node);
-    clearLoadedChildrenCache(node.id);
-    if (node.type !== "connection-group") {
-      node.children = [];
-    }
+    const connectionRevision = node.connectionId ? connectionStateRevision(node.connectionId) : undefined;
+    const refreshGeneration = ++nextTreeRefreshGeneration;
+    activeTreeRefreshGenerations.set(node.id, refreshGeneration);
+    const ownsRefreshGeneration = () => activeTreeRefreshGenerations.get(node.id) === refreshGeneration;
+    const isCurrentRefresh = () => ownsRefreshGeneration() && (!node.connectionId || connectionStateRevision(node.connectionId) === connectionRevision);
     try {
+      await clearPersistedTreeCacheForNode(node);
+      if (!isCurrentRefresh()) return;
+      clearLoadedChildrenCache(node.id);
+      if (node.type !== "connection-group") {
+        node.children = [];
+      }
       await loadTreeNodeChildren(node, { force: true });
-      await restoreExpandedChildren(node, expandedIds, { force: true });
+      if (isCurrentRefresh()) {
+        await restoreExpandedChildren(node, expandedIds, { force: true }, isCurrentRefresh);
+      }
     } catch (error) {
-      node.children = previousChildren;
-      node.hiddenChildren = previousHiddenChildren;
-      node.objectCount = previousObjectCount;
-      clearLoadedChildrenCache(node.id, { deletePersisted: false });
-      for (const id of previousLoadedIds) loadedTreeNodeChildrenIds.value.add(id);
-      for (const id of previousConfirmedEmptyIds) confirmedEmptyTreeNodeIds.value.add(id);
+      // A stale failure must never overwrite a newer successful (including empty) result.
+      if (isCurrentRefresh()) {
+        const target = treeNodeInSidebarTree(node);
+        if (target) {
+          target.children = previousChildren;
+          target.hiddenChildren = previousHiddenChildren;
+          target.objectCount = previousObjectCount;
+          target.isExpanded = previousExpanded;
+          clearLoadedChildrenCache(target.id, { deletePersisted: false });
+          for (const id of previousLoadedIds) loadedTreeNodeChildrenIds.value.add(id);
+          for (const id of previousConfirmedEmptyIds) confirmedEmptyTreeNodeIds.value.add(id);
+        }
+      }
       throw error;
+    } finally {
+      if (ownsRefreshGeneration()) {
+        activeTreeRefreshGenerations.delete(node.id);
+      }
     }
   }
 

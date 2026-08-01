@@ -103,15 +103,15 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
               key={item.id}
               href={item.href}
               aria-current={active === item.id ? "page" : undefined}
-              className={`landing-nav-link inline-flex min-h-11 items-center rounded-[7px] px-[11px] text-[13px] font-medium max-[760px]:hidden ${item.tabletHidden ? "max-[900px]:hidden" : ""} ${active === item.id ? "text-landing-ink" : "text-landing-muted"}`}
+              className={`landing-nav-link inline-flex h-9 items-center rounded-[7px] px-[10px] text-[13px] font-medium max-[760px]:hidden ${item.tabletHidden ? "max-[900px]:hidden" : ""} ${active === item.id ? "text-landing-ink" : "text-landing-muted"}`}
             >
               {item.label}
             </Link>
           ))}
-          <Link href="https://github.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub" className="landing-nav-link inline-flex size-11 items-center justify-center rounded-[7px] text-landing-muted max-[760px]:hidden">
+          <Link href="https://github.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub" className="landing-nav-link inline-flex size-9 items-center justify-center rounded-[7px] text-landing-muted max-[760px]:hidden">
             <Github size={18} strokeWidth={2} />
           </Link>
-          <Link href={langHref} aria-label={t.langLabel} title={t.langLabel} className="landing-nav-link ml-1.5 inline-flex min-h-11 items-center justify-center rounded-[7px] border border-landing-line px-3 text-[12px] font-[650] tracking-tight text-landing-muted" onClick={() => setMenuOpen(false)}>
+          <Link href={langHref} aria-label={t.langLabel} title={t.langLabel} className="landing-nav-link ml-1.5 inline-flex h-9 items-center justify-center rounded-[7px] border border-landing-line px-3 text-[12px] font-[650] tracking-tight text-landing-muted" onClick={() => setMenuOpen(false)}>
             文/A
           </Link>
           <button

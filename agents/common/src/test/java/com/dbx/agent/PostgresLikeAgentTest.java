@@ -52,6 +52,8 @@ class PostgresLikeAgentTest {
         assertFalse(sql.contains("FROM pg_index"), sql);
         assertFalse(sql.contains(" AS key "), sql);
         assertFalse(sql.contains(" key."), sql);
+        assertTrue(sql.contains("JOIN LATERAL"), sql);
+        assertFalse(agent.getProfile().mapsCatalogAttributeArraysInJava());
     }
 
     @Test
@@ -86,6 +88,8 @@ class PostgresLikeAgentTest {
         assertTrue(sql.contains("ux_catalog.ux_get_functiondef"), sql);
         assertTrue(sql.contains("ux_catalog.ux_get_expr"), sql);
         assertFalse(sql.contains("pg_catalog"), sql);
+        assertTrue(sql.contains("JOIN LATERAL"), sql);
+        assertFalse(agent.getProfile().mapsCatalogAttributeArraysInJava());
     }
 
     @Test

@@ -234,7 +234,7 @@ describe("native RedisJSON editor", () => {
   });
 
   it("keeps retained drafts out of background refresh and exposes word wrap for every JSON editor", () => {
-    const refreshTtl = findFunction("refreshTtl");
+    const refreshAutoValue = findFunction("refreshAutoValue");
     const hashSearch = findFunction("onHashSearch");
     const viewMember = findFunction("viewMember");
     const setMemberValueFormat = findFunction("setMemberValueFormat");
@@ -243,9 +243,9 @@ describe("native RedisJSON editor", () => {
     const labels = templateElements(parsedViewer.descriptor.template!.ast as unknown as TemplateElement);
     const stringTextarea = findTemplateElement((element) => element.tag === "textarea" && directiveExpression(element, "model") === "editValue");
     const memberTextarea = findTemplateElement((element) => element.tag === "textarea" && directiveExpression(element, "model") === "memberEditValue");
-    const refreshItem = findTemplateElement((element) => element.tag === "DropdownMenuItem" && directiveExpression(element, "on", "select") === "refreshValueAndStreamGroups");
+    const refreshButton = findTemplateElement((element) => element.tag === "Button" && element.props.some((prop) => prop.type === 6 && prop.name === "data-redis-value-refresh"));
 
-    expect(refreshTtl.getText().match(/hasUnsavedRedisDraft\.value/g)).toHaveLength(2);
+    expect(refreshAutoValue.getText().match(/hasUnsavedRedisDraft\.value/g)).toHaveLength(2);
     expect(hashSearch.getText()).toContain("if (!hasRetainedMemberDraft.value) clearSelectedMember();");
     expect(viewMember.getText()).toContain("hasRetainedMemberDraft.value");
     // Clean JSON → other format must clear memberDraftFormat so rawText is not compared to the pretty baseline.
@@ -258,6 +258,6 @@ describe("native RedisJSON editor", () => {
     expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(memberValueView)")).toBe(true);
     expect(directiveExpression(stringTextarea, "bind", "readonly")).toBe("!canEditCurrentStringFormat || savingString");
     expect(directiveExpression(memberTextarea, "bind", "readonly")).toBe("savingMember");
-    expect(directiveExpression(refreshItem, "bind", "disabled")).toBe("hasUnsavedRedisDraft");
+    expect(directiveExpression(refreshButton, "bind", "disabled")).toBe("loading || refreshingValue || hasUnsavedRedisDraft");
   });
 });

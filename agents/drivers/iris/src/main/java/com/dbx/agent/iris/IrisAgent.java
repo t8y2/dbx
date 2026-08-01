@@ -7,6 +7,7 @@ import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.StandardJdbcMetadata;
 
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -41,7 +42,6 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
 
     static List<ColumnInfo> irisColumns(Connection conn, String schema, String table) {
         return unchecked(() -> {
-            Set<String> primaryKeys = irisPrimaryKeys(conn, schema, table);
             List<ColumnInfo> columns = new ArrayList<>();
             try (PreparedStatement stmt = conn.prepareStatement(columnSql(schema))) {
                 int index = 1;
@@ -60,7 +60,7 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
                             stringOrDefault(rs, "DATA_TYPE", "Unknown"),
                             !"NO".equalsIgnoreCase(stringOrNull(rs, "IS_NULLABLE")),
                             stringOrNull(rs, "COLUMN_DEFAULT"),
-                            primaryKeys.contains(name.toUpperCase(Locale.ROOT)),
+                            "YES".equalsIgnoreCase(stringOrNull(rs, "PRIMARY_KEY")),
                             null,
                             null,
                             intOrNull(rs, "NUMERIC_PRECISION"),
@@ -69,6 +69,9 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
                         ));
                     }
                 }
+            }
+            if (!hasPrimaryKey(columns)) {
+                markPrimaryKeys(columns, irisPrimaryKeys(conn, schema, table));
             }
             return columns;
         });
@@ -87,6 +90,23 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
     }
 
     private static Set<String> irisPrimaryKeys(Connection conn, String schema, String table) {
+        Set<String> keys = jdbcPrimaryKeys(conn, schema, table);
+        return keys.isEmpty() ? nativePrimaryKeys(conn, schema, table) : keys;
+    }
+
+    private static Set<String> jdbcPrimaryKeys(Connection conn, String schema, String table) {
+        Set<String> keys = new LinkedHashSet<>();
+        try {
+            DatabaseMetaData meta = conn.getMetaData();
+            try (ResultSet rs = meta.getPrimaryKeys(null, isBlank(schema) ? null : schema.trim(), table)) {
+                addPrimaryKeys(keys, rs);
+            }
+        } catch (Exception ignored) {
+        }
+        return keys;
+    }
+
+    private static Set<String> nativePrimaryKeys(Connection conn, String schema, String table) {
         Set<String> keys = new LinkedHashSet<>();
         try (PreparedStatement stmt = conn.prepareStatement(primaryKeySql(schema))) {
             int index = 1;
@@ -95,12 +115,7 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
             }
             stmt.setString(index, table);
             try (ResultSet rs = stmt.executeQuery()) {
-                while (rs.next()) {
-                    String column = rs.getString("COLUMN_NAME");
-                    if (!isBlank(column)) {
-                        keys.add(column.toUpperCase(Locale.ROOT));
-                    }
-                }
+                addPrimaryKeys(keys, rs);
             }
         } catch (Exception ignored) {
             // Primary key metadata is optional for display; column listing must keep working.
@@ -111,7 +126,7 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
     private static String columnSql(String schema) {
         StringBuilder sql = new StringBuilder(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
-                + "NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH "
+                + "PRIMARY_KEY, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH "
                 + "FROM INFORMATION_SCHEMA.COLUMNS WHERE "
         );
         if (!isBlank(schema)) {
@@ -119,6 +134,32 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
         }
         sql.append("UPPER(TABLE_NAME) = UPPER(?) ORDER BY ORDINAL_POSITION");
         return sql.toString();
+    }
+
+    private static void addPrimaryKeys(Set<String> keys, ResultSet rs) throws Exception {
+        while (rs.next()) {
+            String column = rs.getString("COLUMN_NAME");
+            if (!isBlank(column)) {
+                keys.add(column.toUpperCase(Locale.ROOT));
+            }
+        }
+    }
+
+    private static boolean hasPrimaryKey(List<ColumnInfo> columns) {
+        for (ColumnInfo column : columns) {
+            if (column.getIs_primary_key()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void markPrimaryKeys(List<ColumnInfo> columns, Set<String> primaryKeys) {
+        for (ColumnInfo column : columns) {
+            if (primaryKeys.contains(column.getName().toUpperCase(Locale.ROOT))) {
+                column.setIs_primary_key(true);
+            }
+        }
     }
 
     private static String primaryKeySql(String schema) {

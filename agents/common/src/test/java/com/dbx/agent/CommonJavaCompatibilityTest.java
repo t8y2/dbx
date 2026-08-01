@@ -151,7 +151,7 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
-    void multiSessionServerCreatesAndClosesIndependentAgents() {
+    void multiSessionServerCreatesAndClosesIndependentAgents() throws Exception {
         java.util.List<TrackingAgent> created = new java.util.ArrayList<>();
         MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(() -> {
             TrackingAgent agent = new TrackingAgent();
@@ -172,6 +172,7 @@ class CommonJavaCompatibilityTest {
         assertEquals(1, created.get(1).connectCount);
 
         server.handleRequest("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"close_session\",\"params\":{\"agentSessionId\":\"a\"}}");
+        awaitCondition(() -> created.get(0).disconnectCount == 1);
         assertEquals(1, created.get(0).disconnectCount);
         assertEquals(0, created.get(1).disconnectCount);
     }
@@ -595,6 +596,40 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void buildsCompositeKeysFromOrderedIndexAndForeignKeyMetadata() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "avatar_asset",
+            "app_config_info",
+            Arrays.asList(
+                new ColumnInfo("id", "bigint", false, null, true),
+                new ColumnInfo("tenant_id", "bigint", false, null, true),
+                new ColumnInfo("payload", "text", true, null, false)
+            ),
+            Collections.singletonList(new IndexInfo(
+                "app_config_info_pkey",
+                Arrays.asList("tenant_id", "id"),
+                true,
+                true
+            )),
+            Arrays.asList(
+                new ForeignKeyInfo("fk_account_region", "tenant_id", "accounts", "account_id"),
+                new ForeignKeyInfo("fk_account_region", "id", "accounts", "region_id")
+            )
+        );
+
+        assertEquals(
+            "CREATE TABLE \"avatar_asset\".\"app_config_info\" (\n" +
+                "  \"id\" bigint NOT NULL,\n" +
+                "  \"tenant_id\" bigint NOT NULL,\n" +
+                "  \"payload\" text,\n" +
+                "  PRIMARY KEY (\"tenant_id\", \"id\"),\n" +
+                "  CONSTRAINT \"fk_account_region\" FOREIGN KEY (\"tenant_id\", \"id\") REFERENCES \"accounts\"(\"account_id\", \"region_id\")\n" +
+                ");\n",
+            ddl
+        );
+    }
+
+    @Test
     void buildsTableDdlWithColumnComments() {
         String ddl = DdlBuilder.buildTableDdl(
             "public",
@@ -691,7 +726,7 @@ class CommonJavaCompatibilityTest {
 
     private static final class TrackingAgent extends MinimalAgent {
         private int connectCount;
-        private int disconnectCount;
+        private volatile int disconnectCount;
 
         @Override
         public void connect(ConnectParams params) {
@@ -1076,6 +1111,14 @@ class CommonJavaCompatibilityTest {
             }
         }
         return false;
+    }
+
+    private static void awaitCondition(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+        assertTrue(condition.getAsBoolean());
     }
 
     private static JsonObject protocolContract(String resourcePath) {

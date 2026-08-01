@@ -105,12 +105,50 @@ class OceanBaseOracleAgentTest {
     @Test
     void synchronizesSessionTimeoutForEveryQueryEntryPoint() {
         List<String> sql = new ArrayList<>();
+        List<Integer> queryTimeouts = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
-        TestSupport.setPrivateConnection(agent, executionConnection(sql));
+        Connection connection = executionConnection(sql, queryTimeouts, List.of());
+        TestSupport.setPrivateConnection(agent, connection);
 
         agent.executeQuery("SELECT 1 FROM DUAL", null, new ExecuteQueryOptions(10, null, 12));
         agent.executeQueryPage("SELECT 2 FROM DUAL", null, new QueryPageOptions(10, null, 10, 13));
         agent.startTableRead("SELECT 3 FROM DUAL", null, new QueryPageOptions(10, null, 10, 14));
+        Assertions.assertDoesNotThrow(() -> agent.beforePooledConnectionReturn(connection));
+
+        Assertions.assertEquals(List.of(
+            "ALTER SESSION SET ob_query_timeout = 12000000",
+            "SELECT 1 FROM DUAL",
+            "ALTER SESSION SET ob_query_timeout = 13000000",
+            "SELECT 2 FROM DUAL",
+            "ALTER SESSION SET ob_query_timeout = 14000000",
+            "SELECT 3 FROM DUAL",
+            "ALTER SESSION SET ob_query_timeout = 0"
+        ), sql);
+        Assertions.assertEquals(List.of(12, 13, 14), queryTimeouts);
+    }
+
+    @Test
+    void executesEveryQueryEntryPointWhenSessionTimeoutIsRejectedAsReadOnly() {
+        SQLException sqlStateError = new SQLException("wrapped");
+        sqlStateError.setNextException(new SQLException("read only", "25006"));
+        SQLException vendorError = new SQLException("wrapped", new SQLException("read only", null, 1456));
+        SQLException messageError = new SQLException("wrapped", new SQLException(
+            "(conn=1) OBE-01456: may not perform insert/delete/update operation inside a READ ONLY transaction"
+        ));
+        List<String> sql = new ArrayList<>();
+        List<Integer> queryTimeouts = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        Connection connection = executionConnection(
+            sql,
+            queryTimeouts,
+            List.of(sqlStateError, vendorError, messageError)
+        );
+        TestSupport.setPrivateConnection(agent, connection);
+
+        agent.executeQuery("SELECT 1 FROM DUAL", null, new ExecuteQueryOptions(10, null, 12));
+        agent.executeQueryPage("SELECT 2 FROM DUAL", null, new QueryPageOptions(10, null, 10, 13));
+        agent.startTableRead("SELECT 3 FROM DUAL", null, new QueryPageOptions(10, null, 10, 14));
+        Assertions.assertDoesNotThrow(() -> agent.beforePooledConnectionReturn(connection));
 
         Assertions.assertEquals(List.of(
             "ALTER SESSION SET ob_query_timeout = 12000000",
@@ -120,6 +158,25 @@ class OceanBaseOracleAgentTest {
             "ALTER SESSION SET ob_query_timeout = 14000000",
             "SELECT 3 FROM DUAL"
         ), sql);
+        Assertions.assertEquals(List.of(12, 13, 14), queryTimeouts);
+    }
+
+    @Test
+    void rejectsUnrelatedSessionTimeoutErrorsBeforeExecutingQuery() {
+        SQLException alterError = new SQLException("insufficient privileges", "42000", 1031);
+        List<String> sql = new ArrayList<>();
+        List<Integer> queryTimeouts = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, executionConnection(sql, queryTimeouts, List.of(alterError)));
+
+        RuntimeException error = Assertions.assertThrows(
+            RuntimeException.class,
+            () -> agent.executeQuery("SELECT 1 FROM DUAL", null, new ExecuteQueryOptions(10, null, 12))
+        );
+
+        Assertions.assertSame(alterError, error.getCause());
+        Assertions.assertEquals(List.of("ALTER SESSION SET ob_query_timeout = 12000000"), sql);
+        Assertions.assertTrue(queryTimeouts.isEmpty());
     }
 
     @Test
@@ -418,16 +475,33 @@ class OceanBaseOracleAgentTest {
     }
 
     private static Connection executionConnection(List<String> sql) {
+        return executionConnection(sql, new ArrayList<>(), List.of());
+    }
+
+    private static Connection executionConnection(
+        List<String> sql,
+        List<Integer> queryTimeouts,
+        List<SQLException> alterFailures
+    ) {
+        int[] alterFailureIndex = {0};
         Statement statement = proxy(Statement.class, (method, args) -> {
             if ("execute".equals(method.getName())) {
-                sql.add(String.valueOf(args[0]));
+                String statementSql = String.valueOf(args[0]);
+                sql.add(statementSql);
+                if (statementSql.startsWith("ALTER SESSION") && alterFailureIndex[0] < alterFailures.size()) {
+                    throw alterFailures.get(alterFailureIndex[0]++);
+                }
                 return false;
             }
             if ("getUpdateCount".equals(method.getName())) {
                 return 0;
             }
+            if ("setQueryTimeout".equals(method.getName())) {
+                queryTimeouts.add(((Number) args[0]).intValue());
+                return null;
+            }
             if ("close".equals(method.getName()) || "setMaxRows".equals(method.getName())
-                || "setFetchSize".equals(method.getName()) || "setQueryTimeout".equals(method.getName())) {
+                || "setFetchSize".equals(method.getName())) {
                 return null;
             }
             return defaultValue(method.getReturnType());

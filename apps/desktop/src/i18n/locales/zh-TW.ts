@@ -2190,6 +2190,7 @@ export default withEnglishFallback({
     confirmDropSchemaMessage: "確定要刪除 Schema「{name}」嗎？這將永久刪除該 Schema 及其所有物件。",
     createSchemaSuccess: "Schema「{name}」已建立",
     dropSchemaSuccess: "Schema「{name}」已刪除",
+    dropDamengSchemaRequiresDifferentDba: "目前連線無法安全刪除此 Schema。請改用其他 DBA 使用者連線後再試。",
     createSchemaNamePlaceholder: "Schema 名稱",
     editSchemaComment: "編輯註解",
     editSchemaCommentTitle: "編輯註解：「{name}」",

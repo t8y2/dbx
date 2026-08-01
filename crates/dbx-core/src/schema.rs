@@ -43,7 +43,7 @@ impl EphemeralAgentMetadataSession {
         let client_session_id = ephemeral_agent_metadata_session_id(db_config.as_ref(), task_kind);
         let cleanup_guard = match client_session_id.as_deref() {
             Some(client_session_id) => {
-                state.client_session_pool_cleanup_guard(connection_id, database, client_session_id).await
+                state.metadata_session_pool_cleanup_guard(connection_id, database, client_session_id).await
             }
             None => None,
         };
@@ -350,7 +350,7 @@ pub async fn list_sqlserver_linked_server_tables_core(
 /// use the MySQL protocol, so this is a defensive no-op); the caller's
 /// flat-sidebar fallback then renders the standard database list.
 pub async fn list_doris_catalogs_core(state: &AppState, connection_id: &str) -> Result<Vec<db::CatalogInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, None, None).await?;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     if let Some(PoolKind::Mysql(p, _)) = connections.get(&pool_key) {
@@ -373,7 +373,7 @@ pub async fn list_doris_catalog_databases_core(
     connection_id: &str,
     catalog: &str,
 ) -> Result<Vec<db::DatabaseInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, None, None).await?;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
@@ -417,7 +417,7 @@ pub async fn list_doris_catalog_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, None, None).await?;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
@@ -440,7 +440,7 @@ pub async fn get_doris_catalog_columns_core(
     database: &str,
     table: &str,
 ) -> Result<Vec<db::ColumnInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, None, None).await?;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
@@ -463,7 +463,7 @@ pub async fn get_doris_catalog_table_ddl_core(
     database: &str,
     table: &str,
 ) -> Result<String, String> {
-    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, None, None).await?;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
@@ -485,7 +485,7 @@ pub async fn list_doris_catalog_indexes_core(
     database: &str,
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, None, None).await?;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
@@ -654,7 +654,7 @@ async fn list_schema_infos_once(
     connection_id: &str,
     database: &str,
 ) -> Result<Vec<db::SchemaInfo>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
     let show_system_schemas = db_config.as_ref().is_some_and(|config| config.show_system_schemas);
     {
@@ -674,7 +674,7 @@ pub async fn list_data_types_core(
     database: &str,
 ) -> Result<Vec<String>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
         let connections = state.connections.read().await;
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
@@ -725,7 +725,7 @@ async fn list_schemas_once(
     database: &str,
     apply_visible_filter: bool,
 ) -> Result<Vec<String>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
     let show_system_schemas = db_config.as_ref().is_some_and(|config| config.show_system_schemas);
     let visible_schema_filter = visible_schema_filter(db_config.as_ref(), database, apply_visible_filter);
@@ -892,8 +892,13 @@ pub async fn list_vector_collections_core(
     connection_id: &str,
     database: &str,
 ) -> Result<Vec<db::vector_driver::CollectionInfo>, String> {
-    let pool_key =
-        state.get_or_create_pool(connection_id, if database.is_empty() { None } else { Some(database) }).await?;
+    let pool_key = state
+        .get_or_create_metadata_pool_for_session(
+            connection_id,
+            if database.is_empty() { None } else { Some(database) },
+            None,
+        )
+        .await?;
     let client = {
         let connections = state.connections.read().await;
         match connections.get(&pool_key) {
@@ -911,8 +916,13 @@ pub async fn get_vector_collection_detail_core(
     database: &str,
     collection: &str,
 ) -> Result<db::vector_driver::CollectionInfo, String> {
-    let pool_key =
-        state.get_or_create_pool(connection_id, if database.is_empty() { None } else { Some(database) }).await?;
+    let pool_key = state
+        .get_or_create_metadata_pool_for_session(
+            connection_id,
+            if database.is_empty() { None } else { Some(database) },
+            None,
+        )
+        .await?;
     let client = {
         let connections = state.connections.read().await;
         match connections.get(&pool_key) {
@@ -958,7 +968,8 @@ async fn get_table_comment_core_for_session(
     client_session_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
-        let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
+        let pool_key =
+            state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {
@@ -1656,7 +1667,7 @@ async fn load_oracle_table_comments_for_objects(
 }
 
 async fn oracle_agent_list_object_statistics(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
     timeout_duration: Option<Duration>,
@@ -1696,7 +1707,7 @@ async fn oracle_agent_list_object_statistics(
 }
 
 async fn dameng_agent_list_object_statistics(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
     timeout_duration: Option<Duration>,
@@ -1735,7 +1746,7 @@ async fn dameng_agent_list_object_statistics(
 }
 
 async fn agent_list_object_statistics(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
     sql: String,
@@ -1778,7 +1789,8 @@ async fn list_tables_once(
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::TableInfo>, String> {
-    let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
 
     {
@@ -2518,18 +2530,19 @@ mod tests {
         ephemeral_agent_metadata_session_id, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
-        is_retryable_metadata_error, metadata_name_or_comment_matches, mysql_external_driver_ddl_from_query_result,
-        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
+        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_metadata_catalog,
+        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, replace_metadata_runtime,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
-        uses_mongodb_agent_collection_listing, visible_schema_filter, TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT,
-        TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, TableNameFilter,
+        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use crate::connection::{AppState, PoolKind};
@@ -2868,8 +2881,182 @@ mod tests {
         assert!(is_retryable_metadata_error("Pool not found"));
         assert!(is_retryable_metadata_error("connection reset by peer"));
         assert!(is_retryable_metadata_error("Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常"));
+        assert!(is_retryable_metadata_error(
+            "Agent RPC error (-1): connection lost\nDBX_AGENT_ERROR_DATA:{\"category\":\"connection\",\"sessionDisposition\":\"quarantine\"}"
+        ));
+        assert!(!is_retryable_metadata_error(
+            "Agent RPC error (-1): connection text in SQL error\nDBX_AGENT_ERROR_DATA:{\"category\":\"sql\",\"sessionDisposition\":\"keep\"}"
+        ));
+        assert!(!is_retryable_metadata_error(
+            "Agent RPC error (-1): connection kept\nDBX_AGENT_ERROR_DATA:{\"category\":\"connection\",\"sessionDisposition\":\"keep\"}"
+        ));
+        assert!(!is_retryable_metadata_error(
+            "Agent RPC error (-1): runtime saturated\nDBX_AGENT_ERROR_DATA:{\"category\":\"resource\",\"sessionDisposition\":\"replace_runtime\"}"
+        ));
         assert!(!is_retryable_metadata_error("Unknown column 'email' in 'field list'"));
         assert!(!is_retryable_metadata_error("Access denied for user"));
+    }
+
+    #[test]
+    fn metadata_error_action_applies_fail_stop_to_every_attempt() {
+        let quarantine = "Agent RPC error (-1): connection lost\nDBX_AGENT_ERROR_DATA:{\"category\":\"connection\",\"sessionDisposition\":\"quarantine\"}";
+        let replace_runtime = "Agent RPC error (-1): runtime saturated\nDBX_AGENT_ERROR_DATA:{\"category\":\"resource\",\"sessionDisposition\":\"replace_runtime\"}";
+        let sql = "Agent RPC error (-1): syntax error\nDBX_AGENT_ERROR_DATA:{\"category\":\"sql\",\"sessionDisposition\":\"keep\"}";
+        let db_type = Some(DatabaseType::Dameng);
+
+        assert_eq!(metadata_error_action(db_type, quarantine, false), MetadataErrorAction::Retry);
+        assert_eq!(metadata_error_action(db_type, quarantine, true), MetadataErrorAction::Discard);
+        assert_eq!(
+            metadata_error_action(db_type, "Agent RPC call timed out (30s)", false),
+            MetadataErrorAction::Discard
+        );
+        assert_eq!(metadata_error_action(db_type, replace_runtime, false), MetadataErrorAction::ReplaceRuntime);
+        assert_eq!(metadata_error_action(db_type, replace_runtime, true), MetadataErrorAction::ReplaceRuntime);
+        assert_eq!(metadata_error_action(db_type, sql, false), MetadataErrorAction::Return);
+    }
+
+    #[tokio::test]
+    async fn metadata_fail_stop_detaches_base_pool_without_client_session() {
+        let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-fail-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Dameng);
+        config.id = "conn".to_string();
+        state.configs.write().await.insert(config.id.clone(), config);
+        state.connections.write().await.insert(
+            "conn:analytics:role:metadata".to_string(),
+            super::PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub()),
+        );
+
+        replace_metadata_runtime(&state, "conn", Some("analytics"), None).await;
+
+        assert!(!state.connections.read().await.contains_key("conn:analytics:role:metadata"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn metadata_timeout_detaches_pool_without_replaying_operation() {
+        let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Dameng);
+        config.id = "conn".to_string();
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state.connections.write().await.insert("conn:role:metadata".to_string(), super::PoolKind::Sqlite(pool));
+        let mut attempts = 0;
+
+        let result = super::retry_metadata_connection_for_session(&state, "conn", None, None, || {
+            attempts += 1;
+            async { Err::<(), _>("Agent RPC call timed out (30s)".to_string()) }
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err(), "Agent RPC call timed out (30s)");
+        assert_eq!(attempts, 1);
+        assert!(!state.connections.read().await.contains_key("conn:role:metadata"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn metadata_second_quarantine_detaches_replacement_pool() {
+        let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-quarantine-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Sqlite);
+        config.id = "conn".to_string();
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        config.database = None;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state.connections.write().await.insert("conn".to_string(), super::PoolKind::Sqlite(pool));
+        let mut attempts = 0;
+        let quarantine = "Agent RPC error (-1): connection lost\nDBX_AGENT_ERROR_DATA:{\"category\":\"connection\",\"sessionDisposition\":\"quarantine\"}";
+
+        let result = super::retry_metadata_connection_for_session(&state, "conn", None, None, || {
+            attempts += 1;
+            async { Err::<(), _>(quarantine.to_string()) }
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err(), quarantine);
+        assert_eq!(attempts, 2);
+        assert!(!state.connections.read().await.contains_key("conn"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn table_ddl_timeout_detaches_metadata_pool_without_replay() {
+        let dir = std::env::temp_dir().join(format!("dbx-schema-table-ddl-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("table-ddl-timeout-agent.py");
+        let call_count_path = dir.join("table-ddl-call-count");
+        let call_count = serde_json::to_string(&call_count_path.to_string_lossy()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, pathlib, sys
+call_count = pathlib.Path({call_count})
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}}
+        response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': result}}
+    elif req['method'] in ('validate_session', 'validate_connection'):
+        response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{}}}}
+    else:
+        previous = int(call_count.read_text()) if call_count.exists() else 0
+        call_count.write_text(str(previous + 1))
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'error': {{
+                'code': -1,
+                'message': 'metadata timed out',
+                'data': {{
+                    'category': 'timeout',
+                    'retryable': False,
+                    'sessionDisposition': 'quarantine',
+                    'stage': 'execute'
+                }}
+            }}
+        }}
+    print(json.dumps(response), flush=True)
+"#
+            ),
+        )
+        .unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+        let client =
+            crate::db::agent_driver::AgentDriverClient::shared_session(runtime.clone(), "metadata-session".to_string());
+        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Dameng);
+        config.id = "conn".to_string();
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool_key = "conn:analytics:role:metadata";
+        state.connections.write().await.insert(pool_key.to_string(), super::PoolKind::agent(client));
+
+        let error = super::get_table_ddl_core(&state, "conn", "analytics", "APP", "EVENTS", None).await.unwrap_err();
+
+        assert_eq!(crate::db::agent_driver::agent_rpc_error_category(&error).as_deref(), Some("timeout"));
+        assert_eq!(std::fs::read_to_string(call_count_path).unwrap(), "1");
+        assert!(!state.connections.read().await.contains_key(pool_key));
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4021,7 +4208,7 @@ async fn close_ephemeral_agent_metadata_session(
     let Some(client_session_id) = client_session_id else {
         return true;
     };
-    match state.close_client_session_pool(connection_id, database, client_session_id).await {
+    match state.close_metadata_session_pool(connection_id, database, client_session_id).await {
         Ok(_) => true,
         Err(error) => {
             log::warn!(
@@ -4047,7 +4234,9 @@ pub async fn completion_assistant_search_core(
         request.max_results
     );
     retry_metadata_connection(state, &request.connection_id, Some(&request.database), || async {
-        let pool_key = state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
+        let pool_key = state
+            .get_or_create_metadata_pool_for_session(&request.connection_id, Some(&request.database), None)
+            .await?;
         log::debug!("[schema][completion_assistant:start] {request_summary}");
         {
             let connections = state.connections.read().await;
@@ -4280,7 +4469,7 @@ async fn list_object_statistics_once(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::ObjectStatistics>, String> {
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     try_sqlserver!(connections, &pool_key, list_object_statistics, schema);
@@ -4370,7 +4559,8 @@ async fn list_objects_once(
     object_types: Option<&[String]>,
     client_session_id: Option<&str>,
 ) -> Result<ObjectListOutcome, String> {
-    let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
     let (mysql_limit, mysql_offset) =
         if filter.is_none_or(|value| value.trim().is_empty()) { (limit, offset) } else { (None, None) };
@@ -4567,7 +4757,8 @@ async fn list_completion_objects_once(
     schema: &str,
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
 
     let connections = state.connections.read().await;
@@ -4726,17 +4917,120 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, String>>,
 {
-    let result = operation().await;
-    match result {
-        Err(error) if is_retryable_metadata_error(&error) => {
-            state.reconnect_pool_for_session(connection_id, database, client_session_id).await?;
-            operation().await
+    let db_type = {
+        let configs = state.configs.read().await;
+        configs.get(connection_id).map(|config| config.db_type)
+    };
+    let mut retried = false;
+    loop {
+        let result = operation().await;
+        let action = result
+            .as_ref()
+            .err()
+            .map(|error| metadata_error_action(db_type, error, retried))
+            .unwrap_or(MetadataErrorAction::Return);
+        match action {
+            MetadataErrorAction::ReplaceRuntime => {
+                state
+                    .detach_metadata_pool_after_error(
+                        connection_id,
+                        database,
+                        client_session_id,
+                        result.as_ref().err().expect("replace-runtime action requires an error"),
+                        true,
+                    )
+                    .await;
+                return result;
+            }
+            MetadataErrorAction::Discard => {
+                state
+                    .detach_metadata_pool_after_error(
+                        connection_id,
+                        database,
+                        client_session_id,
+                        result.as_ref().err().expect("discard action requires an error"),
+                        false,
+                    )
+                    .await;
+                return result;
+            }
+            MetadataErrorAction::Retry => {
+                retried = true;
+                if let Err(error) =
+                    state.reconnect_metadata_pool_for_session(connection_id, database, client_session_id).await
+                {
+                    match metadata_error_action(db_type, &error, true) {
+                        MetadataErrorAction::ReplaceRuntime => {
+                            state
+                                .detach_metadata_pool_after_error(
+                                    connection_id,
+                                    database,
+                                    client_session_id,
+                                    &error,
+                                    true,
+                                )
+                                .await;
+                        }
+                        MetadataErrorAction::Retry | MetadataErrorAction::Discard => {
+                            state
+                                .detach_metadata_pool_after_error(
+                                    connection_id,
+                                    database,
+                                    client_session_id,
+                                    &error,
+                                    false,
+                                )
+                                .await;
+                        }
+                        MetadataErrorAction::Return => {}
+                    }
+                    return Err(error);
+                }
+            }
+            MetadataErrorAction::Return => return result,
         }
-        _ => result,
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataErrorAction {
+    Retry,
+    Discard,
+    ReplaceRuntime,
+    Return,
+}
+
+fn metadata_error_action(db_type: Option<DatabaseType>, error: &str, retried: bool) -> MetadataErrorAction {
+    if crate::db::agent_driver::agent_session_disposition(error)
+        == Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
+    {
+        MetadataErrorAction::ReplaceRuntime
+    } else if !retried && is_retryable_metadata_error(error) {
+        MetadataErrorAction::Retry
+    } else if should_discard_pool_after_error(db_type, error) {
+        MetadataErrorAction::Discard
+    } else {
+        MetadataErrorAction::Return
+    }
+}
+
+#[cfg(test)]
+async fn replace_metadata_runtime(
+    state: &AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    client_session_id: Option<&str>,
+) {
+    state.replace_runtime_for_metadata_pool(connection_id, database, client_session_id).await;
+}
+
 fn is_retryable_metadata_error(error: &str) -> bool {
+    let category = crate::db::agent_driver::agent_rpc_error_category(error);
+    if let Some(category) = category {
+        return category == "connection"
+            && crate::db::agent_driver::agent_session_disposition(error)
+                == Some(crate::db::agent_driver::AgentSessionDisposition::Quarantine);
+    }
     error == "Pool not found" || crate::query::is_connection_error(error)
 }
 
@@ -4791,7 +5085,7 @@ async fn get_columns_core_for_session_inner(
     let context_session_id = if use_client_session_context { client_session_id } else { None };
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
         let pool_key = state
-            .get_or_create_pool_for_session(connection_id, Some(database), client_session_id)
+            .get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id)
             .await?;
         let db_config = connection_config(state, connection_id).await;
 
@@ -5040,6 +5334,11 @@ async fn get_columns_core_for_session_inner(
             PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
                 db::questdb::get_columns(p, schema, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::Postgres(p)
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) =>
+            {
+                db::postgres::get_redshift_columns(p, schema, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await.map(deduplicate_column_infos),
             PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await.map(deduplicate_column_infos),
             PoolKind::Rqlite(client) => {
@@ -5074,7 +5373,7 @@ pub async fn get_sqlserver_column_metadata_core(
     table: &str,
 ) -> Result<Vec<db::sqlserver::SqlServerColumnMetadata>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let connections = state.connections.read().await;
         try_sqlserver!(connections, &pool_key, get_column_metadata, schema, table);
         Err("SQL Server column metadata requires a native SQL Server connection".to_string())
@@ -5158,7 +5457,8 @@ async fn list_indexes_core_for_session(
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::IndexInfo>, String> {
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
-        let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
+        let pool_key =
+            state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {
@@ -5191,6 +5491,11 @@ async fn list_indexes_core_for_session(
             }
             PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
                 db::questdb::list_indexes(p, schema, table).await
+            }
+            PoolKind::Postgres(_)
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) =>
+            {
+                Ok(vec![])
             }
             PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_indexes(p, schema, table).await,
@@ -5238,7 +5543,8 @@ async fn list_foreign_keys_core_for_session(
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::ForeignKeyInfo>, String> {
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
-        let pool_key = state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?;
+        let pool_key =
+            state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {
@@ -5286,7 +5592,7 @@ pub async fn list_triggers_core(
         return Ok(vec![]);
     }
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {
@@ -5332,7 +5638,7 @@ pub async fn list_constraints_core(
     table: &str,
 ) -> Result<Vec<db::ConstraintInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
         let connections = state.connections.read().await;
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
@@ -5353,7 +5659,7 @@ pub async fn list_partitions_core(
     table: &str,
 ) -> Result<Vec<db::PartitionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
         let connections = state.connections.read().await;
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
@@ -5374,7 +5680,7 @@ pub async fn list_subpartitions_core(
     table: &str,
 ) -> Result<Vec<db::SubpartitionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
         let connections = state.connections.read().await;
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
@@ -5396,7 +5702,7 @@ pub async fn list_functions_core(
     schema: &str,
 ) -> Result<Vec<db::FunctionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
@@ -5416,7 +5722,7 @@ pub async fn list_sequences_core(
     with_last_values: bool,
 ) -> Result<Vec<db::SequenceInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
@@ -5439,7 +5745,7 @@ pub async fn list_rules_core(
     schema: &str,
 ) -> Result<Vec<db::RuleInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
@@ -5458,7 +5764,7 @@ pub async fn list_extensions_core(
     schema: Option<&str>,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
             let connections = state.connections.read().await;
@@ -5486,7 +5792,7 @@ pub async fn list_available_extensions_core(
     database: &str,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
             let connections = state.connections.read().await;
@@ -5519,7 +5825,7 @@ pub async fn list_owners_core(
     schema: &str,
 ) -> Result<Vec<db::OwnerInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
@@ -5600,7 +5906,21 @@ async fn get_table_ddl_core_with_options(
         return Ok(source.source);
     }
 
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    retry_metadata_connection(state, connection_id, Some(database), || {
+        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access)
+    })
+    .await
+}
+
+async fn get_table_ddl_once(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    include_postgres_access: bool,
+) -> Result<String, String> {
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
 
     {
@@ -6362,7 +6682,7 @@ async fn get_object_source_once(
     signature: Option<&str>,
     relation_name: Option<&str>,
 ) -> Result<db::ObjectSource, String> {
-    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
     let source = {
         let connections = state.connections.read().await;
@@ -6525,7 +6845,7 @@ pub fn oracle_list_objects_sql(schema: &str) -> String {
 }
 
 async fn oracle_agent_list_objects(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
     timeout_duration: Option<Duration>,
@@ -6565,7 +6885,7 @@ async fn oracle_agent_list_objects(
 }
 
 async fn oracle_agent_object_source(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
     name: &str,
@@ -6585,7 +6905,7 @@ async fn oracle_agent_object_source(
 }
 
 async fn oracle_agent_table_ddl(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
     table: &str,
@@ -6666,7 +6986,7 @@ fn append_oracle_comments_to_ddl(
 }
 
 async fn db2_agent_table_ddl(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
     table: &str,

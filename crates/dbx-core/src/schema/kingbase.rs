@@ -71,7 +71,7 @@ fn list_available_extensions_sql(catalog: ExtensionCatalog) -> String {
 }
 
 async fn query_result(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     sql: &str,
     max_rows: usize,
@@ -88,7 +88,7 @@ async fn query_result(
 }
 
 async fn query_result_with_catalog_fallback(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     sys_sql: String,
     pg_sql: String,
@@ -104,7 +104,7 @@ async fn query_result_with_catalog_fallback(
 }
 
 pub(super) async fn list_extensions(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: Option<&str>,
     timeout_duration: Option<Duration>,
@@ -122,7 +122,7 @@ pub(super) async fn list_extensions(
 }
 
 pub(super) async fn list_available_extensions(
-    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     timeout_duration: Option<Duration>,
 ) -> Result<Vec<db::ExtensionInfo>, String> {

@@ -1,6 +1,6 @@
 ---
 title: Connection Import
-description: Import connections from Navicat and DBeaver so you can switch to DBX without re-entering connection details.
+description: Import connections, groups, and recognized database profiles from Navicat, DBeaver, and DataGrip.
 ---
 
 DBX can import connections from other database tools, saving you from manually re-creating dozens of connections when switching tools.
@@ -11,6 +11,7 @@ DBX can import connections from other database tools, saving you from manually r
 | ------- | ------------------------------ | ---------------------------------------------------- |
 | Navicat | `.ncx` export files            | Host, port, username, database type, connection name |
 | DBeaver | Connection configuration files | Host, port, username, database type, connection name |
+| DataGrip | Project or global files such as `dataSources.xml` | JDBC URL, driver, connection name, groups, and readable credentials |
 
 <Callout type="info">Imported connections preserve the original connection name and type. Passwords stored in encrypted format by other tools cannot be decrypted — you will need to re-enter passwords after import.</Callout>
 
@@ -32,6 +33,15 @@ DBX can import connections from other database tools, saving you from manually r
   <Step>### Review and Complete DBX extracts connection details from the configuration. Re-enter any passwords that could not be decrypted.</Step>
 </Steps>
 
+## Import DataGrip Connections
+
+<Steps>
+  <Step>### Select Configuration Choose **Import DataGrip** in DBX and select `dataSources.xml` from a DataGrip project or global configuration. A matching local file in the same directory can supply additional fields.</Step>
+  <Step>### Review Type Detection DBX combines driver references, database product names, JDBC subprotocols, and driver classes. Databases such as KingBase map to their DBX profile; unknown drivers remain generic JDBC.</Step>
+  <Step>### Review Groups DataGrip group paths are imported as DBX connection groups so project organization is preserved.</Step>
+  <Step>### Complete Credentials On macOS, DBX reads DataGrip Keychain passwords when available. Other encrypted or inaccessible credentials must be entered manually.</Step>
+</Steps>
+
 ## After Import
 
 Imported connections appear in the sidebar alongside manually created ones. You should:
@@ -50,3 +60,5 @@ Imported connections appear in the sidebar alongside manually created ones. You 
 | SSH tunnel keys              | Key file paths may differ between machines; re-select the key file  |
 | Custom driver configurations | Driver paths and versions are tool-specific                         |
 | Proxy settings               | Re-configure in the connection's Proxy tab                          |
+
+Import creates connection drafts; it does not prove they are reachable. Review the database profile, JDBC URL, SSL, SSH, proxy, and database fields before saving, then test every imported connection.

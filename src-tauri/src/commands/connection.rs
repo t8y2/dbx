@@ -162,7 +162,7 @@ async fn connect_agent_pool(
         }
     }
 
-    Ok(PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client))))
+    Ok(PoolKind::agent(client))
 }
 
 #[cfg(test)]
@@ -1216,7 +1216,7 @@ pub async fn connect_db(
                     .await
                     .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                 state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+                PoolKind::agent(client)
             } else {
                 let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => {
@@ -1266,7 +1266,7 @@ pub async fn connect_db(
                     mark_mongo_legacy_driver(&mut connected_config);
                     connected_db_config = metadata_connection_config(&connected_config);
                     persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
-                    PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+                    PoolKind::agent(client)
                 } else {
                     return Err(native_err);
                 }

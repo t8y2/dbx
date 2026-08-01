@@ -105,6 +105,51 @@ pub struct TransferObjectSelection {
     pub names: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferObjectFamily {
+    Mysql,
+    Postgres,
+    Oracle,
+}
+
+pub fn transfer_object_family(db_type: &DatabaseType) -> Option<TransferObjectFamily> {
+    match db_type {
+        DatabaseType::Mysql => Some(TransferObjectFamily::Mysql),
+        DatabaseType::Postgres
+        | DatabaseType::Kingbase
+        | DatabaseType::Gaussdb
+        | DatabaseType::Kwdb
+        | DatabaseType::OpenGauss => Some(TransferObjectFamily::Postgres),
+        DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::OceanbaseOracle => {
+            Some(TransferObjectFamily::Oracle)
+        }
+        _ => None,
+    }
+}
+
+pub fn is_same_transfer_family(a: &DatabaseType, b: &DatabaseType) -> bool {
+    match (transfer_object_family(a), transfer_object_family(b)) {
+        (Some(fa), Some(fb)) => fa == fb,
+        _ => false,
+    }
+}
+
+pub fn transfer_object_kinds(db_type: &DatabaseType) -> Vec<TransferObjectKind> {
+    use TransferObjectKind::*;
+    match transfer_object_family(db_type) {
+        Some(TransferObjectFamily::Mysql) => {
+            vec![Table, View, Procedure, Function, Trigger, Event]
+        }
+        Some(TransferObjectFamily::Postgres) => {
+            vec![Table, View, MaterializedView, Procedure, Function, Trigger, Sequence]
+        }
+        Some(TransferObjectFamily::Oracle) => {
+            vec![Table, View, MaterializedView, Procedure, Function, Trigger, Sequence]
+        }
+        None => Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferRequest {
@@ -291,131 +336,6 @@ pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedTransferTargetTable {
-    name: String,
-    preexisting: bool,
-}
-
-fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.clone()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        serde_json::Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn mysql_lower_case_table_names_from_result(result: &db::QueryResult) -> Option<u8> {
-    let row = result.rows.first()?;
-    row.get(1).or_else(|| row.first()).and_then(json_scalar_to_string)?.trim().parse::<u8>().ok()
-}
-
-async fn target_table_lookup_is_case_insensitive(
-    state: &AppState,
-    target_pool_key: &str,
-    target_db_type: &DatabaseType,
-) -> bool {
-    if !matches!(target_db_type, DatabaseType::Mysql) {
-        return false;
-    }
-
-    let result = match execute_on_pool(state, target_pool_key, "SHOW VARIABLES LIKE 'lower_case_table_names'").await {
-        Ok(result) => result,
-        Err(error) => {
-            log::debug!("[transfer] failed to read MySQL lower_case_table_names: {error}");
-            return false;
-        }
-    };
-
-    // MySQL lower_case_table_names=1/2 means table lookup is case-insensitive.
-    // Prefer the metadata name so generated INSERT/TRUNCATE SQL keeps the target
-    // table's declared case instead of the source-derived request case.
-    mysql_lower_case_table_names_from_result(&result).is_some_and(|value| value != 0)
-}
-
-fn existing_transfer_target_table_name(
-    requested_name: &str,
-    tables: &[db::TableInfo],
-    allow_case_insensitive_match: bool,
-) -> Option<String> {
-    if let Some(table) = tables.iter().find(|table| table.name == requested_name) {
-        return Some(table.name.clone());
-    }
-    if !allow_case_insensitive_match {
-        return None;
-    }
-    tables.iter().find(|table| table.name.eq_ignore_ascii_case(requested_name)).map(|table| table.name.clone())
-}
-
-async fn resolve_transfer_target_table_name(
-    state: &AppState,
-    request: &TransferRequest,
-    source_table: &str,
-    target_pool_key: &str,
-    target_db_type: &DatabaseType,
-    _source_catalog: Option<&str>,
-    target_catalog: Option<&str>,
-) -> ResolvedTransferTargetTable {
-    let requested_name = request.target_table_name(source_table);
-    if is_mongodb_transfer_type(target_db_type) {
-        return ResolvedTransferTargetTable { name: requested_name, preexisting: false };
-    }
-
-    let allow_case_insensitive_match =
-        target_table_lookup_is_case_insensitive(state, target_pool_key, target_db_type).await;
-
-    // Route through the catalog-aware path when targeting an external
-    // Doris/StarRocks catalog — otherwise the lookup runs against the
-    // default / internal catalog and can miss or misidentify the table.
-    let tables = if let Some(catalog) = resolve_external_transfer_catalog(target_catalog, target_db_type) {
-        crate::schema::list_doris_catalog_tables_core(
-            state,
-            &request.target_connection_id,
-            catalog,
-            &request.target_database,
-            Some(&requested_name),
-            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            log::debug!("[transfer] failed to resolve target table metadata for {requested_name} in catalog '{catalog}': {error}");
-            Vec::new()
-        })
-    } else {
-        crate::schema::list_tables_core(
-            state,
-            &request.target_connection_id,
-            &request.target_database,
-            &request.target_schema,
-            Some(&requested_name),
-            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
-            Vec::new()
-        })
-    };
-
-    if let Some(existing_name) =
-        existing_transfer_target_table_name(&requested_name, &tables, allow_case_insensitive_match)
-    {
-        ResolvedTransferTargetTable { name: existing_name, preexisting: true }
-    } else {
-        ResolvedTransferTargetTable { name: requested_name, preexisting: false }
-    }
-}
-
-fn quote_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
 
 pub(crate) fn quote_postgres_string_literal(value: &str) -> String {
     if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
@@ -5425,6 +5345,40 @@ mod tests {
         assert_eq!(json["objects"][0]["objectType"], "VIEW");
         assert_eq!(json["objects"][0]["names"][0], "v1");
     }
+
+    mod transfer_family_tests {
+        use super::*;
+
+        #[test]
+        fn same_family_matrix() {
+            // postgres family
+            assert!(is_same_transfer_family(&DatabaseType::Postgres, &DatabaseType::Kingbase));
+            assert!(is_same_transfer_family(&DatabaseType::Gaussdb, &DatabaseType::OpenGauss));
+            // oracle family
+            assert!(is_same_transfer_family(&DatabaseType::Oracle, &DatabaseType::Dameng));
+            assert!(is_same_transfer_family(&DatabaseType::OceanbaseOracle, &DatabaseType::Dameng));
+            // mysql
+            assert!(is_same_transfer_family(&DatabaseType::Mysql, &DatabaseType::Mysql));
+            // cross family
+            assert!(!is_same_transfer_family(&DatabaseType::Mysql, &DatabaseType::Postgres));
+            assert!(!is_same_transfer_family(&DatabaseType::Mysql, &DatabaseType::SqlServer));
+        }
+
+        #[test]
+        fn object_kinds_per_family() {
+            let mysql = transfer_object_kinds(&DatabaseType::Mysql);
+            assert!(mysql.contains(&TransferObjectKind::Event));
+            assert!(!mysql.contains(&TransferObjectKind::Sequence));
+            let pg = transfer_object_kinds(&DatabaseType::Postgres);
+            assert!(pg.contains(&TransferObjectKind::Sequence));
+            assert!(!pg.contains(&TransferObjectKind::Event));
+            let dm = transfer_object_kinds(&DatabaseType::Dameng);
+            assert!(dm.contains(&TransferObjectKind::Trigger));
+            assert!(dm.contains(&TransferObjectKind::Sequence));
+            assert!(transfer_object_kinds(&DatabaseType::Sqlite).is_empty());
+        }
+    }
+
     fn test_transfer_request(tables: Vec<&str>) -> TransferRequest {
         TransferRequest {
             transfer_id: "transfer-1".to_string(),

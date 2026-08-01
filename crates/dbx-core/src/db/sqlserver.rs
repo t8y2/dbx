@@ -3181,7 +3181,7 @@ mod tests {
         let execute_query = execute_query.split("pub async fn execute_batch").next().unwrap();
 
         assert!(execute_query.contains("sqlserver_dml_output_returns_rows(sql)"));
-        assert!(execute_query.contains("client.query(query_sql.as_str(), &[])"));
+        assert!(execute_query.contains("client.query(query.sql.as_str(), &[])"));
     }
 
     #[test]

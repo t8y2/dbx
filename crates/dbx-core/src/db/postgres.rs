@@ -3241,6 +3241,7 @@ pub(crate) fn postgres_statement_returns_rows(sql: &str) -> bool {
         Statement::Insert(insert) => insert.returning.is_some(),
         Statement::Update(update) => update.returning.is_some(),
         Statement::Delete(delete) => delete.returning.is_some(),
+        Statement::Merge(merge) => merge.output.is_some(),
         _ => false,
     }
 }
@@ -4710,6 +4711,7 @@ mod tests {
             "INSERT INTO users (id) VALUES (1) RETURNING id",
             "UPDATE users SET name = 'Ada' RETURNING id, name",
             "DELETE FROM users WHERE id = 1 RETURNING id",
+            "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
             "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
         ] {
             assert!(postgres_statement_returns_rows(sql), "expected result rows for: {sql}");
@@ -4719,6 +4721,7 @@ mod tests {
             "INSERT INTO users (id) VALUES (1)",
             "UPDATE users SET name = 'Ada'",
             "DELETE FROM users WHERE id = 1",
+            "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name",
             "INSERT INTO users (note) VALUES ('RETURNING is text')",
         ] {
             assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");

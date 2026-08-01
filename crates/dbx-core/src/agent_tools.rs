@@ -1142,6 +1142,8 @@ for line in sys.stdin:
             columns: columns.into_iter().map(str::to_string).collect(),
             column_types: Vec::new(),
             column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows,
             affected_rows,
             execution_time_ms: 1,

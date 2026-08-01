@@ -336,6 +336,150 @@ pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result
     Ok(())
 }
 
+pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String> {
+    validate_transfer_target_table_names(request)?;
+    if matches!(request.content, TransferContent::DataOnly) && !request.objects.is_empty() {
+        return Err("仅数据模式不传输非表对象".to_string());
+    }
+    for selection in &request.objects {
+        if selection.names.is_empty() {
+            return Err(format!("Object selection for {:?} is empty", selection.object_type));
+        }
+        for name in &selection.names {
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(format!("Invalid object name: {name:?}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedTransferTargetTable {
+    name: String,
+    preexisting: bool,
+}
+
+fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn mysql_lower_case_table_names_from_result(result: &db::QueryResult) -> Option<u8> {
+    let row = result.rows.first()?;
+    row.get(1).or_else(|| row.first()).and_then(json_scalar_to_string)?.trim().parse::<u8>().ok()
+}
+
+async fn target_table_lookup_is_case_insensitive(
+    state: &AppState,
+    target_pool_key: &str,
+    target_db_type: &DatabaseType,
+) -> bool {
+    if !matches!(target_db_type, DatabaseType::Mysql) {
+        return false;
+    }
+
+    let result = match execute_on_pool(state, target_pool_key, "SHOW VARIABLES LIKE 'lower_case_table_names'").await {
+        Ok(result) => result,
+        Err(error) => {
+            log::debug!("[transfer] failed to read MySQL lower_case_table_names: {error}");
+            return false;
+        }
+    };
+
+    // MySQL lower_case_table_names=1/2 means table lookup is case-insensitive.
+    // Prefer the metadata name so generated INSERT/TRUNCATE SQL keeps the target
+    // table's declared case instead of the source-derived request case.
+    mysql_lower_case_table_names_from_result(&result).is_some_and(|value| value != 0)
+}
+
+fn existing_transfer_target_table_name(
+    requested_name: &str,
+    tables: &[db::TableInfo],
+    allow_case_insensitive_match: bool,
+) -> Option<String> {
+    if let Some(table) = tables.iter().find(|table| table.name == requested_name) {
+        return Some(table.name.clone());
+    }
+    if !allow_case_insensitive_match {
+        return None;
+    }
+    tables.iter().find(|table| table.name.eq_ignore_ascii_case(requested_name)).map(|table| table.name.clone())
+}
+
+async fn resolve_transfer_target_table_name(
+    state: &AppState,
+    request: &TransferRequest,
+    source_table: &str,
+    target_pool_key: &str,
+    target_db_type: &DatabaseType,
+    _source_catalog: Option<&str>,
+    target_catalog: Option<&str>,
+) -> ResolvedTransferTargetTable {
+    let requested_name = request.target_table_name(source_table);
+    if is_mongodb_transfer_type(target_db_type) {
+        return ResolvedTransferTargetTable { name: requested_name, preexisting: false };
+    }
+
+    let allow_case_insensitive_match =
+        target_table_lookup_is_case_insensitive(state, target_pool_key, target_db_type).await;
+
+    // Route through the catalog-aware path when targeting an external
+    // Doris/StarRocks catalog — otherwise the lookup runs against the
+    // default / internal catalog and can miss or misidentify the table.
+    let tables = if let Some(catalog) = resolve_external_transfer_catalog(target_catalog, target_db_type) {
+        crate::schema::list_doris_catalog_tables_core(
+            state,
+            &request.target_connection_id,
+            catalog,
+            &request.target_database,
+            Some(&requested_name),
+            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!("[transfer] failed to resolve target table metadata for {requested_name} in catalog '{catalog}': {error}");
+            Vec::new()
+        })
+    } else {
+        crate::schema::list_tables_core(
+            state,
+            &request.target_connection_id,
+            &request.target_database,
+            &request.target_schema,
+            Some(&requested_name),
+            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
+            Vec::new()
+        })
+    };
+
+    if let Some(existing_name) =
+        existing_transfer_target_table_name(&requested_name, &tables, allow_case_insensitive_match)
+    {
+        ResolvedTransferTargetTable { name: existing_name, preexisting: true }
+    } else {
+        ResolvedTransferTargetTable { name: requested_name, preexisting: false }
+    }
+}
+
+fn quote_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 
 pub(crate) fn quote_postgres_string_literal(value: &str) -> String {
     if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
@@ -5376,6 +5520,47 @@ mod tests {
             assert!(dm.contains(&TransferObjectKind::Trigger));
             assert!(dm.contains(&TransferObjectKind::Sequence));
             assert!(transfer_object_kinds(&DatabaseType::Sqlite).is_empty());
+        }
+    }
+
+    mod transfer_validation_tests {
+        use super::*;
+
+        #[test]
+        fn validates_content_and_object_rules() {
+            let base = TransferRequest {
+                transfer_id: "t".into(),
+                source_connection_id: "s".into(),
+                source_database: "db".into(),
+                source_schema: "public".into(),
+                source_catalog: None,
+                target_connection_id: "t".into(),
+                target_database: "db".into(),
+                target_schema: "public".into(),
+                target_catalog: None,
+                tables: vec!["a".into()],
+                create_table: true,
+                mode: TransferMode::Append,
+                target_table_name_case: TransferTableNameCase::Preserve,
+                ownership_policy: TransferOwnershipPolicy::Preserve,
+                batch_size: 1000,
+                content: TransferContent::DataOnly,
+                objects: Vec::new(),
+            };
+            assert!(validate_transfer_request(&base).is_ok());
+
+            let with_objects = TransferRequest {
+                objects: vec![TransferObjectSelection {
+                    object_type: TransferObjectKind::View,
+                    names: vec!["v".into()],
+                }],
+                ..base.clone()
+            };
+            // DataOnly + objects → error
+            assert!(validate_transfer_request(&with_objects).is_err());
+
+            let structure_only = TransferRequest { content: TransferContent::StructureOnly, ..base.clone() };
+            assert!(validate_transfer_request(&structure_only).is_ok());
         }
     }
 

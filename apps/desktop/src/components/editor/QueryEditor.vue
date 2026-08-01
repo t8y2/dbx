@@ -1127,7 +1127,7 @@ async function pasteClipboardAsSqlInCondition(): Promise<boolean> {
     }
   }
 
-  const result = buildSqlInConditionFromPasteSource(source);
+  const result = buildSqlInConditionFromPasteSource(source, settingsStore.editorSettings.sqlFormatter.keywordCase);
   if (!result.ok) {
     const key = result.reason === "too-large" ? "editor.exPasteTooLarge" : result.reason === "too-many-values" ? "editor.exPasteTooManyValues" : result.reason === "not-list" ? "editor.exPasteNotList" : "editor.exPasteNoValues";
     toast(t(key, { limit: result.limit ?? 0 }), 5000);

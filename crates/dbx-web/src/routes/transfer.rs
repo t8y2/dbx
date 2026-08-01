@@ -78,7 +78,7 @@ pub async fn start_transfer(
     Json(body): Json<StartTransferRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
-    transfer::validate_transfer_target_table_names(&req).map_err(AppError::from)?;
+    transfer::validate_transfer_request(&req).map_err(AppError::from)?;
 
     // Reject transfer early if the target connection is read-only
     if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.target_connection_id).await {
@@ -115,6 +115,22 @@ pub async fn start_transfer(
                 return;
             }
         };
+
+        // Cross-family object transfers are validated inside transfer_schema_objects:
+        // only mechanically rewriteable kinds (views, sequences) are allowed; any
+        // other selection fails with a descriptive error. Structure-only data
+        // transfer is unsupported for MongoDB.
+        if matches!(req.content, transfer::TransferContent::StructureOnly)
+            && (matches!(source_db_type, dbx_core::models::connection::DatabaseType::MongoDb)
+                || matches!(target_db_type, dbx_core::models::connection::DatabaseType::MongoDb))
+        {
+            send_transfer_progress(
+                &progress_channel,
+                &terminal_transfer_error(&req, "MongoDB 暂不支持仅结构传输".to_string()),
+            );
+            finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+            return;
+        }
 
         // External Doris/StarRocks catalogs: pool is created with `catalog=` URL
         // setup (SET catalog) and without USE <external-db>. See ensure_transfer_pool.
@@ -321,22 +337,19 @@ pub async fn start_transfer(
             }
         }
 
-        if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
-            && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
-        {
+        // Transfer selected non-table objects (tables, views, procedures,
+        // functions, triggers, sequences, events) after the per-table loop.
+        let mut object_outcome = transfer::TransferObjectOutcome::default();
+        if !req.objects.is_empty() {
             let progress_channel_clone = progress_channel.clone();
-            match transfer::transfer_postgres_schema_objects(
-                &app,
-                &req,
-                &source_pool_key,
-                &target_pool_key,
-                |progress| {
-                    send_transfer_progress(&progress_channel_clone, &progress);
-                },
-            )
+            match transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+                send_transfer_progress(&progress_channel_clone, &progress);
+            })
             .await
             {
-                Ok(()) => {}
+                Ok(outcome) => {
+                    object_outcome = outcome;
+                }
                 Err(e) if e == "Cancelled" => {
                     let progress = transfer::TransferProgress {
                         transfer_id: req.transfer_id.clone(),
@@ -372,6 +385,16 @@ pub async fn start_transfer(
         }
 
         // Send done
+        if !object_outcome.failed.is_empty() {
+            failed_tables.push(format!("schema objects ({})", object_outcome.failed.len()));
+        }
+        let skip_suffix = if !object_outcome.skipped.is_empty() && failed_tables.is_empty() {
+            format!("，跳过 {} 个已存在对象", object_outcome.skipped.len())
+        } else if !object_outcome.skipped.is_empty() {
+            format!("；跳过 {} 个已存在对象", object_outcome.skipped.len())
+        } else {
+            String::new()
+        };
         let done = transfer::TransferProgress {
             transfer_id: req.transfer_id.clone(),
             table: String::new(),
@@ -381,12 +404,17 @@ pub async fn start_transfer(
             total_rows: None,
             status: if failed_tables.is_empty() { TransferStatus::Done } else { TransferStatus::Error },
             error: if failed_tables.is_empty() {
-                None
+                if skip_suffix.is_empty() {
+                    None
+                } else {
+                    Some(skip_suffix.clone())
+                }
             } else {
                 Some(format!(
-                    "{} table(s) failed: {}",
+                    "{} table(s) failed: {}{}",
                     failed_tables.len(),
-                    failed_tables.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                    failed_tables.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
+                    skip_suffix
                 ))
             },
             terminal: true,
@@ -403,7 +431,7 @@ pub async fn preview_transfer_ownership(
     Json(body): Json<PreviewTransferOwnershipRequest>,
 ) -> Result<Json<dbx_core::transfer::TransferOwnershipPreview>, AppError> {
     let req = body.request;
-    transfer::validate_transfer_target_table_names(&req).map_err(AppError::from)?;
+    transfer::validate_transfer_request(&req).map_err(AppError::from)?;
     let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
     let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
     let source_pool_key = transfer::ensure_transfer_pool(

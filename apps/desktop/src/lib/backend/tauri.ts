@@ -949,7 +949,7 @@ export async function getTableComment(connectionId: string, database: string, sc
   });
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[], filter?: string, limit?: number, offset?: number, catalog?: string): Promise<ObjectInfo[]> {
+export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string): Promise<ObjectInfo[]> {
   return invoke("list_objects", {
     connectionId,
     database,
@@ -3275,6 +3275,13 @@ export async function listenSqlFileProgress(handler: (progress: SqlFileProgress)
 export type TransferMode = "append" | "overwrite" | "upsert";
 export type TransferTableNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
+export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
+
+export interface TransferObjectSelection {
+  objectType: TransferObjectKind;
+  names: string[];
+}
 
 export interface TransferRequest {
   transferId: string;
@@ -3288,6 +3295,8 @@ export interface TransferRequest {
   targetCatalog?: string;
   tables: string[];
   createTable: boolean;
+  content: TransferContent;
+  objects: TransferObjectSelection[];
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
   ownershipPolicy?: TransferOwnershipPolicy;

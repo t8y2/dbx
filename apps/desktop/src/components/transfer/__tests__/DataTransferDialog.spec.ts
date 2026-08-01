@@ -32,7 +32,27 @@ describe("DataTransferDialog transfer prefill", () => {
 
   it("keeps only copied tables selected after loading the source list", () => {
     expect(dialogSource).toContain("function applyPendingTableSelection()");
-    expect(dialogSource).toContain("new Set(sourceTables.value.filter((table) => pending.includes(table)))");
+    expect(dialogSource).toContain("new Set(tables.filter((table) => pending.includes(table)))");
+  });
+
+  it("sends content and objects in the transfer request", () => {
+    expect(dialogSource).toContain("content: transferContent.value");
+    expect(dialogSource).toContain("objects: (Object.keys(selectedObjects.value)");
+    expect(dialogSource).toContain("objectType: kind");
+    expect(dialogSource).toContain('createTable: transferContent.value !== "dataOnly"');
+  });
+
+  it("loads non-table object groups per source database kind", () => {
+    expect(dialogSource).toContain("transferObjectKindsForDatabase");
+    expect(dialogSource).toContain("api.listObjects(sourceConnectionId.value, sourceDatabase.value, schema, [kind]");
+    expect(dialogSource).toContain("groups[kind] = objects.map((o) => o.name)");
+  });
+
+  it("disables non-table groups for data-only and cross-family transfers", () => {
+    expect(dialogSource).toContain("treeDisabledGroups");
+    expect(dialogSource).toContain('transferContent.value === "dataOnly"');
+    expect(dialogSource).toContain("crossFamilyTransferableKinds");
+    expect(dialogSource).toContain("objectDataOnlyDisabled");
   });
 
   it("allows a transfer between different schemas in the same database", () => {

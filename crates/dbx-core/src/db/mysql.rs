@@ -2727,6 +2727,14 @@ fn wants_routine_objects(object_types: Option<&[String]>) -> bool {
     requested_object_type(object_types, "PROCEDURE") || requested_object_type(object_types, "FUNCTION")
 }
 
+fn wants_trigger_objects(object_types: Option<&[String]>) -> bool {
+    requested_object_type(object_types, "TRIGGER")
+}
+
+fn wants_event_objects(object_types: Option<&[String]>) -> bool {
+    requested_object_type(object_types, "EVENT")
+}
+
 fn sql_pagination(limit: Option<usize>, offset: Option<usize>) -> String {
     limit.map_or_else(String::new, |limit| format!(" LIMIT {limit} OFFSET {}", offset.unwrap_or(0)))
 }
@@ -2815,6 +2823,32 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         parent_schema: get_opt_str(row, "parent_schema"),
         parent_name: get_opt_str(row, "parent_name"),
     }
+}
+
+fn list_triggers_objects_sql(database: &str) -> String {
+    format!(
+        "SELECT TRIGGER_NAME AS object_name, 'TRIGGER' AS object_type, NULL AS object_comment, \
+           CREATED AS created_at, NULL AS updated_at, \
+           TRIGGER_SCHEMA AS parent_schema, EVENT_OBJECT_TABLE AS parent_name, \
+           5 AS sort_order \
+         FROM information_schema.TRIGGERS \
+         WHERE TRIGGER_SCHEMA = {} \
+         ORDER BY object_name",
+        quote_value(database)
+    )
+}
+
+fn list_events_objects_sql(database: &str) -> String {
+    format!(
+        "SELECT EVENT_NAME AS object_name, 'EVENT' AS object_type, NULL AS object_comment, \
+           CREATED AS created_at, LAST_ALTERED AS updated_at, \
+           EVENT_SCHEMA AS parent_schema, NULL AS parent_name, \
+           6 AS sort_order \
+         FROM information_schema.EVENTS \
+         WHERE EVENT_SCHEMA = {} \
+         ORDER BY object_name",
+        quote_value(database)
+    )
 }
 
 pub struct PagedObjectList {
@@ -2910,6 +2944,40 @@ pub async fn list_objects(
             },
             Err(e) => {
                 log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
+            }
+        }
+    }
+
+    if wants_trigger_objects(object_types) {
+        let triggers_sql = list_triggers_objects_sql(database);
+        match conn.query_iter(&triggers_sql).await {
+            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+                Ok(trigger_rows) => {
+                    objects.extend(trigger_rows.iter().map(|row| row_to_object(row, database)));
+                }
+                Err(e) => {
+                    log::warn!("Skipping triggers for database `{}` in object browser: {}", database, e);
+                }
+            },
+            Err(e) => {
+                log::warn!("Skipping triggers for database `{}` in object browser: {}", database, e);
+            }
+        }
+    }
+
+    if wants_event_objects(object_types) {
+        let events_sql = list_events_objects_sql(database);
+        match conn.query_iter(&events_sql).await {
+            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+                Ok(event_rows) => {
+                    objects.extend(event_rows.iter().map(|row| row_to_object(row, database)));
+                }
+                Err(e) => {
+                    log::warn!("Skipping events for database `{}` in object browser: {}", database, e);
+                }
+            },
+            Err(e) => {
+                log::warn!("Skipping events for database `{}` in object browser: {}", database, e);
             }
         }
     }
@@ -5005,6 +5073,19 @@ mod tests {
         assert!(sql.contains("'TRIGGER' AS object_type"));
         assert!(sql.contains("EVENT_OBJECT_TABLE AS parent_name"));
         assert!(sql.contains("TRIGGER_SCHEMA = 'app'"));
+    }
+
+    #[test]
+    fn lists_triggers_and_events_via_information_schema() {
+        let sql = list_triggers_objects_sql("shop");
+        assert!(sql.contains("information_schema.TRIGGERS"));
+        assert!(sql.contains("TRIGGER_SCHEMA = 'shop'"));
+        let sql = list_events_objects_sql("shop");
+        assert!(sql.contains("information_schema.EVENTS"));
+        assert!(sql.contains("EVENT_SCHEMA = 'shop'"));
+        assert!(wants_trigger_objects(Some(&["TRIGGER".to_string()])));
+        assert!(!wants_trigger_objects(Some(&["TABLE".to_string()])));
+        assert!(wants_event_objects(Some(&["EVENT".to_string()])));
     }
 
     #[test]

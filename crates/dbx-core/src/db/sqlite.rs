@@ -2,6 +2,9 @@ use percent_encoding::percent_decode_str;
 use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, LoadExtensionGuard, OpenFlags};
+use sqlparser::ast::Statement;
+use sqlparser::dialect::SQLiteDialect;
+use sqlparser::parser::Parser;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
@@ -579,6 +582,45 @@ mod tests {
         let result = execute_query(&pool, "SELECT name FROM memory_probe WHERE id = 1;").await.expect("select row");
 
         assert_eq!(result.rows[0][0], serde_json::json!("Ada"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_dml_returning_preserves_result_rows() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+        execute_query(&pool, "CREATE TABLE dml_returning (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .await
+            .expect("create table");
+
+        let inserted = execute_query(&pool, "INSERT INTO dml_returning VALUES (1, 'alice')").await.expect("insert row");
+        let unmatched =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999").await.expect("update no rows");
+        assert_eq!(inserted.affected_rows, 1);
+        assert_eq!(unmatched.affected_rows, 0);
+
+        let insert_returning = execute_query(&pool, "INSERT INTO dml_returning VALUES (2, 'bob') RETURNING id, name")
+            .await
+            .expect("insert returning");
+        let update_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = 'bob-updated' WHERE id = 2 RETURNING id, name")
+                .await
+                .expect("update returning");
+        let delete_returning = execute_query(&pool, "DELETE FROM dml_returning WHERE id = 2 RETURNING id, name")
+            .await
+            .expect("delete returning");
+        let empty_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999 RETURNING id, name")
+                .await
+                .expect("empty returning");
+
+        for result in [&insert_returning, &update_returning, &delete_returning] {
+            assert_eq!(result.columns, vec!["id", "name"]);
+            assert_eq!(result.rows.len(), 1);
+        }
+        assert_eq!(insert_returning.rows[0], vec![serde_json::json!(2), serde_json::json!("bob")]);
+        assert_eq!(update_returning.rows[0], vec![serde_json::json!(2), serde_json::json!("bob-updated")]);
+        assert_eq!(delete_returning.rows[0], vec![serde_json::json!(2), serde_json::json!("bob-updated")]);
+        assert_eq!(empty_returning.columns, vec!["id", "name"]);
+        assert!(empty_returning.rows.is_empty());
     }
 
     #[tokio::test]
@@ -2322,6 +2364,28 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
 }
 
+/// DML with `RETURNING` produces a result set in SQLite and must use the
+/// statement query API instead of `execute_batch`.
+fn sqlite_statement_returns_rows(sql: &str) -> bool {
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
+        return true;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&SQLiteDialect {}, sql) else {
+        return false;
+    };
+    let [statement] = statements.as_slice() else {
+        return false;
+    };
+
+    match statement {
+        Statement::Insert(insert) => insert.returning.is_some(),
+        Statement::Update(update) => update.returning.is_some(),
+        Statement::Delete(delete) => delete.returning.is_some(),
+        _ => false,
+    }
+}
+
 const SQLITE_FUNCTION_ALIASES: &[(&str, &str)] = &[("if", "IIF"), ("substring", "substr")];
 
 fn normalize_sqlite_sql(sql: &str) -> String {
@@ -2426,7 +2490,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
     let row_limit = query_result_row_limit(max_rows);
 
     pool.with_connection(|conn| {
-        if starts_with_executable_sql_keyword(sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
+        if sqlite_statement_returns_rows(sql) {
             let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
             let columns = stmt.column_names().iter().map(|name| name.to_string()).collect::<Vec<_>>();
             let column_decl_types =

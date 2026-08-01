@@ -110,6 +110,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@dashboard`;
   }
+  if (tab.mode === "etcd-access-control") {
+    if (compact) return connectionDisplayName(tab.connectionId);
+    return `${connectionDisplayName(tab.connectionId)}@${t("tabs.etcdAccessControl")}`;
+  }
   if (tab.mode === "zookeeper") {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@keys`;
@@ -404,6 +408,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "redis") return t("tabs.redis");
   if (tab.mode === "etcd") return t("tabs.etcd");
   if (tab.mode === "etcd-dashboard") return t("tabs.etcdDashboard");
+  if (tab.mode === "etcd-access-control") return t("tabs.etcdAccessControl");
   if (tab.mode === "zookeeper") return t("tabs.zookeeper");
   if (tab.mode === "nacos") return "Nacos";
   if (tab.mode === "objects") return t("tabs.objects");

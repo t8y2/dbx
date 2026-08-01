@@ -1,6 +1,6 @@
 ---
 title: DBX CLI
-description: Use DBX connections from terminals, scripts, CI, and Codex.
+description: Use the native DBX CLI to read connections, schemas, query results, and AI context from terminals, scripts, CI, and Codex.
 ---
 
 <Callout type="info">DBX CLI is a dedicated command line package for terminal, script, and coding-agent workflows. It shares DBX connection storage and SQL safety rules with the MCP server.</Callout>
@@ -80,7 +80,30 @@ dbx capabilities
 dbx capabilities --json
 ```
 
-Direct execution currently supports PostgreSQL/Redshift, MySQL-compatible databases (MySQL, Doris, StarRocks), and SQLite. Other database types use the DBX Desktop bridge or DBX Agent/JDBC infrastructure.
+The CLI binary currently lists PostgreSQL, Redshift, MySQL, Doris, StarRocks, Manticore Search, SQLite, rqlite, KWDB, and QuestDB as direct-query types. `dbx capabilities` is authoritative for the installed version. Other types require a running DBX Desktop bridge or their Agent/external-driver infrastructure.
+
+## Execution Modes
+
+### Local Storage
+
+By default, CLI reads the same `dbx.db` connection store used by Desktop and MCP. `DBX_DATA_DIR` must point to the directory containing `dbx.db`.
+
+- Direct-query types can run while Desktop is closed
+- Bridge types require Desktop to be running and discoverable through the bridge port file in the data directory
+- Agent/JDBC, DuckDB, and other external-driver paths still require matching components installed through DBX
+- `dbx open` is always a Desktop UI operation and returns `DBX_NOT_RUNNING` when the app is unavailable
+
+### DBX Web and Docker
+
+Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local connection storage:
+
+```bash
+DBX_WEB_URL=https://dbx.example.com \
+DBX_WEB_PASSWORD='your-login-password' \
+dbx connections list --json
+```
+
+`DBX_WEB_PASSWORD` is the Web login password. In Web mode, connections, permissions, drivers, and file paths belong to the server environment. `dbx open` still targets a local Desktop bridge and should not be treated as a remote Web automation API.
 
 ## Default Connection
 
@@ -103,7 +126,7 @@ Errors are written to stderr and return a non-zero exit code.
 
 ## Query Controls
 
-`dbx query` executes one SQL statement. It is read-only by default.
+`dbx query` executes SQL for SQL connections and accepts supported Mongo shell commands for MongoDB connections. Redis is not executed through this command; use the MCP Redis tool or the DBX workspace instead. Query mode is read-only by default.
 
 ```bash
 dbx query local "select * from users" --limit 50 --timeout 10s --json
@@ -117,7 +140,9 @@ Use `--allow-writes` for non-dangerous write statements:
 dbx query local "update users set name = 'Ada' where id = 1" --allow-writes
 ```
 
-Dangerous SQL such as `DROP`, `TRUNCATE`, and `ALTER` requires both `--allow-writes` and `--allow-dangerous-sql`.
+Dangerous SQL such as `DROP`, `TRUNCATE`, and `ALTER` requires both `--allow-writes` and `--allow-dangerous-sql`. Explicit transaction statements remain blocked by CLI; use [MCP stateful sessions](/en/docs/mcp#stateful-query-sessions) or the DBX editor for pinned multi-step sessions.
+
+Writes and DDL against production databases remain blocked even when both flags are present. Production detection, SQL risk classification, connection read-only protection, and database privileges form independent upper bounds; the flags are not a production bypass.
 
 ## SQL Starting With a Dash
 

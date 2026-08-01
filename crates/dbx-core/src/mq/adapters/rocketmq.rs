@@ -966,6 +966,7 @@ mod tests {
             pinned_version: None,
             token_signing: None,
             connect_override: None,
+            management_connect_override: None,
             extra,
         }
     }

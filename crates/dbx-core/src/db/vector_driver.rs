@@ -794,6 +794,8 @@ fn json_to_query_result(status: u16, body: Value, start: Instant) -> QueryResult
         columns: vec!["status".to_string(), "response".to_string()],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![vec![
             Value::Number(status.into()),
             Value::String(serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())),
@@ -828,6 +830,8 @@ fn values_to_query_result(items: Vec<Value>, start: Instant) -> QueryResult {
         columns,
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         affected_rows: rows.len() as u64,
         rows,
         execution_time_ms: start.elapsed().as_millis(),

@@ -117,10 +117,11 @@ pub fn import_jdbc_drivers(plugins_root: &Path, paths: &[String]) -> Result<Vec<
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| format!("Invalid driver file path: {}", source.display()))?;
-        let target = unique_target_path(&drivers_dir, file_name);
-        if source == target {
+        let target = drivers_dir.join(file_name);
+        if paths_refer_to_same_file(&source, &target) {
             continue;
         }
+        let target = unique_target_path(&drivers_dir, file_name);
         std::fs::copy(&source, &target)
             .map_err(|err| format!("Failed to import {} to {}: {err}", source.display(), target.display()))?;
     }
@@ -899,6 +900,13 @@ pub fn unique_target_path(dir: &Path, file_name: &str) -> PathBuf {
     unreachable!()
 }
 
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    matches!((left.canonicalize(), right.canonicalize()), (Ok(left), Ok(right)) if left == right)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,6 +996,40 @@ mod tests {
         assert_eq!(drivers[0].name, "standalone.jar");
         assert_eq!(drivers[0].bundle_id, None);
         assert!(list_jdbc_local_bundles(&root).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn single_local_jar_already_in_drivers_dir_is_not_duplicated() {
+        let root = std::env::temp_dir().join(format!("dbx-jdbc-managed-jar-test-{}", uuid::Uuid::new_v4()));
+        let source = root.join("jdbc").join("drivers").join("standalone.jar");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"driver").unwrap();
+
+        let drivers = import_jdbc_drivers(&root, &[source.to_string_lossy().to_string()]).unwrap();
+
+        assert_eq!(drivers.len(), 1);
+        assert_eq!(drivers[0].name, "standalone.jar");
+        assert!(!source.with_file_name("standalone-1.jar").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn single_local_jar_with_existing_name_keeps_unique_import_behavior() {
+        let root = std::env::temp_dir().join(format!("dbx-jdbc-duplicate-name-test-{}", uuid::Uuid::new_v4()));
+        let installed = root.join("jdbc").join("drivers").join("standalone.jar");
+        let source = root.join("source").join("standalone.jar");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&installed, b"installed").unwrap();
+        std::fs::write(&source, b"new").unwrap();
+
+        let drivers = import_jdbc_drivers(&root, &[source.to_string_lossy().to_string()]).unwrap();
+
+        assert_eq!(drivers.len(), 2);
+        assert!(drivers.iter().any(|driver| driver.name == "standalone.jar"));
+        assert!(drivers.iter().any(|driver| driver.name == "standalone-1.jar"));
+        assert_eq!(std::fs::read(root.join("jdbc/drivers/standalone-1.jar")).unwrap(), b"new");
         let _ = std::fs::remove_dir_all(root);
     }
 

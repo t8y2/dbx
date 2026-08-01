@@ -141,6 +141,85 @@ func TestRuntimeRejectsSessionsBeyondLimit(t *testing.T) {
 	}
 }
 
+func TestRuntimeReconnectReleasesDetachedControlAndAllowsReplacement(t *testing.T) {
+	runtime := newRuntimeServer()
+	params := connectParams{
+		Host:     "127.0.0.1",
+		Port:     5138,
+		Database: "SHOP_DEMO",
+		Username: "DBX_LOCAL_TEST",
+		Password: "secret",
+	}
+	controlKey := buildDSN(xuguControlParams(params))
+	oldControl, err := sql.Open("xugu-test-fast", "old-control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	businessDB, err := sql.Open("xugu-test-fast", "business")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer businessDB.Close()
+
+	session := &agentSession{
+		server:     newServer(),
+		controlKey: controlKey,
+	}
+	session.server.params = params
+	session.server.cancelDB = oldControl
+	runtime.controls[controlKey] = &sharedControl{db: oldControl, refs: 1}
+
+	err = runtime.reconnectSessionWith(
+		session,
+		func(server *server, _ connectParams, cancelDB *sql.DB, _ bool) (bool, error) {
+			if cancelDB != oldControl {
+				t.Fatalf("reconnect control = %p, want %p", cancelDB, oldControl)
+			}
+			server.db = businessDB
+			server.cancelDB = nil
+			return false, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.controlKey != "" {
+		t.Fatalf("detached control key = %q, want empty", session.controlKey)
+	}
+	if _, exists := runtime.controls[controlKey]; exists {
+		t.Fatal("detached shared control should be removed")
+	}
+	if err := businessDB.Ping(); err != nil {
+		t.Fatalf("business reconnect should remain usable: %v", err)
+	}
+	if err := oldControl.Ping(); err == nil {
+		t.Fatal("detached shared control should be closed")
+	}
+
+	replacementControl, err := sql.Open("xugu-test-fast", "replacement-control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := 0
+	replacementKey, replacementDB, err := runtime.acquireControlWith(
+		params,
+		func(connectParams) (*sql.DB, error) {
+			opened++
+			return replacementControl, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened != 1 || replacementKey != controlKey || replacementDB != replacementControl {
+		t.Fatalf("unexpected replacement control: opened=%d key=%q db=%p", opened, replacementKey, replacementDB)
+	}
+	if control := runtime.controls[controlKey]; control == nil || control.refs != 1 || control.db != replacementControl {
+		t.Fatalf("replacement control not registered: %#v", control)
+	}
+	runtime.releaseControl(replacementKey)
+}
+
 func TestNewXuguDatabaseSessionFindsOnlyNewSession(t *testing.T) {
 	existing := xuguDatabaseSession{nodeID: 1, sessionID: 10}
 	created := xuguDatabaseSession{nodeID: 1, sessionID: 11}
@@ -153,6 +232,89 @@ func TestNewXuguDatabaseSessionFindsOnlyNewSession(t *testing.T) {
 	}
 	if result != created {
 		t.Fatalf("unexpected session: %+v", result)
+	}
+}
+
+func TestControlSessionFromSnapshotDegradesWhenAmbiguous(t *testing.T) {
+	existing := xuguDatabaseSession{nodeID: 1, sessionID: 10}
+	createdA := xuguDatabaseSession{nodeID: 1, sessionID: 11}
+	createdB := xuguDatabaseSession{nodeID: 1, sessionID: 12}
+
+	if _, n, ok := controlSessionFromSnapshot(
+		map[xuguDatabaseSession]struct{}{existing: {}},
+		map[xuguDatabaseSession]struct{}{existing: {}, createdA: {}, createdB: {}},
+	); ok || n != 2 {
+		t.Fatalf("expected ambiguous session set to degrade with n=2, got ok=%v n=%d", ok, n)
+	}
+	if _, n, ok := controlSessionFromSnapshot(
+		map[xuguDatabaseSession]struct{}{existing: {}},
+		map[xuguDatabaseSession]struct{}{existing: {}},
+	); ok || n != 0 {
+		t.Fatalf("expected empty delta to degrade with n=0, got ok=%v n=%d", ok, n)
+	}
+	if _, err := newXuguDatabaseSession(
+		map[xuguDatabaseSession]struct{}{existing: {}},
+		map[xuguDatabaseSession]struct{}{existing: {}, createdA: {}, createdB: {}},
+	); err == nil {
+		t.Fatal("expected error when session identity is ambiguous")
+	}
+
+	// Unique new session still attaches.
+	if got, n, ok := controlSessionFromSnapshot(
+		map[xuguDatabaseSession]struct{}{existing: {}},
+		map[xuguDatabaseSession]struct{}{existing: {}, createdA: {}},
+	); !ok || n != 1 || got != createdA {
+		t.Fatalf("expected unique session %v, got %v ok=%v n=%d", createdA, got, ok, n)
+	}
+}
+
+func TestCancelActiveQueryWithoutKillSessionIsSafe(t *testing.T) {
+	s := newServer()
+	// Degraded sessions leave killSession nil; cancel must not panic.
+	s.killSession = nil
+	s.cancelActiveQuery()
+
+	ctx, cancel := s.beginActiveOperationWithTimeout(1)
+	defer s.endActiveOperation(cancel)
+	if ctx == nil {
+		t.Fatal("expected active context")
+	}
+	s.cancelActiveQuery()
+}
+
+func TestServerDisconnectClearsDegradedControlState(t *testing.T) {
+	s := newServer()
+	s.params = connectParams{Database: "SHOP_DEMO", Username: "DBX_LOCAL_TEST"}
+	s.nodeID = 0
+	s.databaseSessionID = 0
+	s.killSession = nil
+	s.cancelDB = nil
+	s.ownsCancelDB = false
+	if err := s.disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if s.db != nil || s.cancelDB != nil || s.killSession != nil {
+		t.Fatalf("expected cleared session state, got db=%v cancelDB=%v killSessionSet=%v", s.db, s.cancelDB, s.killSession != nil)
+	}
+}
+
+func TestXuguControlParamsForcesSystemDatabase(t *testing.T) {
+	params := connectParams{
+		Host:     "127.0.0.1",
+		Port:     5138,
+		Database: "SHOP_DEMO",
+		Username: "DBX_LOCAL_TEST",
+		Password: "secret",
+	}
+	control := xuguControlParams(params)
+	if control.Database != "SYSTEM" {
+		t.Fatalf("control database = %q, want SYSTEM", control.Database)
+	}
+	if control.ConnectionString != "" {
+		t.Fatalf("control connection string should be cleared, got %q", control.ConnectionString)
+	}
+	if params.Database != "SHOP_DEMO" {
+		t.Fatal("xuguControlParams must not mutate caller's database")
 	}
 }
 

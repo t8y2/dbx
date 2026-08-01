@@ -143,6 +143,14 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
     quote_transfer_identifier(name, db_type)
 }
 
+fn quote_identifier_with_identifier_quote(
+    name: &str,
+    db_type: &DatabaseType,
+    identifier_quote: Option<&str>,
+) -> String {
+    crate::sql_dialect::quote_table_data_identifier(Some(*db_type), name, identifier_quote)
+}
+
 /// Resolve an optional catalog for external-catalog routing in the transfer
 /// pipeline.  Returns `Some(catalog)` only when:
 ///   - the catalog is non-empty and not a built-in catalog name, AND
@@ -215,6 +223,25 @@ pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType, catalo
     // Only use 3-part catalog-qualified names for Doris/StarRocks external catalogs.
     let effective_catalog = resolve_external_transfer_catalog(catalog, db_type);
     qualified_transfer_table(table, schema, db_type, effective_catalog)
+}
+
+fn qualified_table_with_identifier_quote(
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    identifier_quote: Option<&str>,
+) -> String {
+    if crate::sql_dialect::uses_connection_identifier_quote(Some(*db_type), identifier_quote) {
+        crate::sql_dialect::table_data_qualified_table_name(
+            Some(*db_type),
+            (!schema.trim().is_empty()).then_some(schema),
+            table,
+            identifier_quote,
+        )
+    } else {
+        qualified_table(table, schema, db_type, catalog)
+    }
 }
 
 pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result<(), String> {
@@ -495,6 +522,20 @@ pub(crate) fn is_identity_column_extra(extra: Option<&str>) -> bool {
     })
 }
 
+pub(crate) fn is_mysql_generated_column_extra(extra: Option<&str>) -> bool {
+    extra.is_some_and(|value| {
+        let mut parts = value.split_whitespace();
+        let Some(first) = parts.next() else {
+            return false;
+        };
+        if first.eq_ignore_ascii_case("generated") {
+            return true;
+        }
+        matches!(first.to_ascii_lowercase().as_str(), "virtual" | "stored" | "persistent")
+            && parts.next().is_some_and(|part| part.eq_ignore_ascii_case("generated"))
+    })
+}
+
 pub(crate) fn selected_columns_include_identity_extras(columns: &[String], column_extras: &[Option<String>]) -> bool {
     columns
         .iter()
@@ -523,6 +564,10 @@ fn is_sqlserver_non_insertable_transfer_column(
         && is_sqlserver_rowversion_type(&column.data_type)
 }
 
+fn is_mysql_non_insertable_transfer_column(column: &db::ColumnInfo, source_db_type: &DatabaseType) -> bool {
+    *source_db_type == DatabaseType::Mysql && is_mysql_generated_column_extra(column.extra.as_deref())
+}
+
 fn writable_transfer_columns(
     columns: &[db::ColumnInfo],
     source_db_type: &DatabaseType,
@@ -530,7 +575,10 @@ fn writable_transfer_columns(
 ) -> Vec<db::ColumnInfo> {
     columns
         .iter()
-        .filter(|column| !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type))
+        .filter(|column| {
+            !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type)
+                && !is_mysql_non_insertable_transfer_column(column, source_db_type)
+        })
         .cloned()
         .collect()
 }
@@ -830,10 +878,24 @@ fn parse_mysql_extra_clauses(extra: Option<&str>) -> MysqlExtraClauses {
 }
 
 fn postgres_order_by_expression(columns: &[String], db_type: &DatabaseType) -> Option<String> {
+    postgres_order_by_expression_with_identifier_quote(columns, db_type, None)
+}
+
+fn postgres_order_by_expression_with_identifier_quote(
+    columns: &[String],
+    db_type: &DatabaseType,
+    identifier_quote: Option<&str>,
+) -> Option<String> {
     if columns.is_empty() {
         return None;
     }
-    Some(columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", "))
+    Some(
+        columns
+            .iter()
+            .map(|column| quote_identifier_with_identifier_quote(column, db_type, identifier_quote))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn oracle_rownum_page_sql(col_list: &str, base_sql: String, offset: u64, limit: usize) -> String {
@@ -1970,7 +2032,7 @@ pub fn generate_create_table_ddl(
     };
 
     let create_prefix = match target_db {
-        DatabaseType::SqlServer => "CREATE TABLE",
+        DatabaseType::SqlServer | DatabaseType::Dameng => "CREATE TABLE",
         _ => "CREATE TABLE IF NOT EXISTS",
     };
 
@@ -2015,7 +2077,9 @@ pub fn generate_comment_ddl(
     target_db: &DatabaseType,
     table_comment: Option<&str>,
 ) -> Vec<String> {
-    if !matches!(target_db, DatabaseType::Postgres | DatabaseType::Oracle | DatabaseType::ClickHouse) {
+    if !(is_postgres_transfer_dialect(target_db)
+        || matches!(target_db, DatabaseType::Oracle | DatabaseType::ClickHouse))
+    {
         return Vec::new();
     }
 
@@ -2023,7 +2087,7 @@ pub fn generate_comment_ddl(
     let mut statements = Vec::new();
 
     // Table-level comment first (PostgreSQL/Oracle only; ClickHouse doesn't support COMMENT ON TABLE)
-    if matches!(target_db, DatabaseType::Postgres | DatabaseType::Oracle) {
+    if is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle) {
         if let Some(comment) = table_comment {
             let trimmed = comment.trim();
             if !trimmed.is_empty() {
@@ -2043,7 +2107,7 @@ pub fn generate_comment_ddl(
             let qcol = quote_identifier(&c.name, target_db);
 
             match target_db {
-                DatabaseType::Postgres | DatabaseType::Oracle => {
+                target_db if is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle) => {
                     statements.push(format!("COMMENT ON COLUMN {full_table}.{qcol} IS '{escaped}'"));
                 }
                 DatabaseType::ClickHouse => {
@@ -2602,15 +2666,45 @@ pub fn pagination_sql_with_filter_order(
     order_by: Option<&str>,
     default_order_columns: &[String],
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type, None);
-    let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+    pagination_sql_with_filter_order_and_identifier_quote(
+        columns,
+        table,
+        schema,
+        db_type,
+        offset,
+        limit,
+        where_input,
+        order_by,
+        default_order_columns,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn pagination_sql_with_filter_order_and_identifier_quote(
+    columns: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    offset: u64,
+    limit: usize,
+    where_input: Option<&str>,
+    order_by: Option<&str>,
+    default_order_columns: &[String],
+    identifier_quote: Option<&str>,
+) -> String {
+    let full_table = qualified_table_with_identifier_quote(table, schema, db_type, None, identifier_quote);
+    let col_list = columns
+        .iter()
+        .map(|c| quote_identifier_with_identifier_quote(c, db_type, identifier_quote))
+        .collect::<Vec<_>>()
+        .join(", ");
     let predicate = crate::sql_dialect::normalize_where_input(where_input);
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
-    let order_expression = order_by
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| postgres_order_by_expression(default_order_columns, db_type));
+    let order_expression =
+        order_by.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).or_else(|| {
+            postgres_order_by_expression_with_identifier_quote(default_order_columns, db_type, identifier_quote)
+        });
 
     match db_type {
         DatabaseType::Oracle => {
@@ -2647,7 +2741,18 @@ pub fn count_sql_with_where(
     where_input: Option<&str>,
     catalog: Option<&str>,
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type, catalog);
+    count_sql_with_where_and_identifier_quote(table, schema, db_type, where_input, catalog, None)
+}
+
+pub fn count_sql_with_where_and_identifier_quote(
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    where_input: Option<&str>,
+    catalog: Option<&str>,
+    identifier_quote: Option<&str>,
+) -> String {
+    let full_table = qualified_table_with_identifier_quote(table, schema, db_type, catalog, identifier_quote);
     let predicate = crate::sql_dialect::normalize_where_input(where_input);
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     format!("SELECT COUNT(*) FROM {full_table}{where_clause}")
@@ -2662,12 +2767,42 @@ pub fn keyset_pagination_sql(
     last_pk_values: &[serde_json::Value],
     limit: usize,
 ) -> String {
-    let full_table = qualified_table(table, schema, db_type, None);
-    let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-    let order =
-        primary_keys.iter().map(|pk| format!("{} ASC", quote_identifier(pk, db_type))).collect::<Vec<_>>().join(", ");
+    keyset_pagination_sql_with_identifier_quote(
+        columns,
+        table,
+        schema,
+        db_type,
+        primary_keys,
+        last_pk_values,
+        limit,
+        None,
+    )
+}
 
-    let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type);
+#[allow(clippy::too_many_arguments)]
+pub fn keyset_pagination_sql_with_identifier_quote(
+    columns: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    primary_keys: &[String],
+    last_pk_values: &[serde_json::Value],
+    limit: usize,
+    identifier_quote: Option<&str>,
+) -> String {
+    let full_table = qualified_table_with_identifier_quote(table, schema, db_type, None, identifier_quote);
+    let col_list = columns
+        .iter()
+        .map(|c| quote_identifier_with_identifier_quote(c, db_type, identifier_quote))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = primary_keys
+        .iter()
+        .map(|pk| format!("{} ASC", quote_identifier_with_identifier_quote(pk, db_type, identifier_quote)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type, identifier_quote);
 
     match db_type {
         DatabaseType::Oracle => {
@@ -2689,12 +2824,16 @@ fn keyset_where_clause(
     primary_keys: &[String],
     last_pk_values: &[serde_json::Value],
     db_type: &DatabaseType,
+    identifier_quote: Option<&str>,
 ) -> String {
     if primary_keys.is_empty() || last_pk_values.is_empty() {
         return String::new();
     }
 
-    let quoted_keys = primary_keys.iter().map(|pk| quote_identifier(pk, db_type)).collect::<Vec<_>>();
+    let quoted_keys = primary_keys
+        .iter()
+        .map(|pk| quote_identifier_with_identifier_quote(pk, db_type, identifier_quote))
+        .collect::<Vec<_>>();
     let literals = last_pk_values.iter().map(|v| value_to_sql_literal(v, db_type)).collect::<Vec<_>>();
     let comparison_count = quoted_keys.len().min(literals.len());
     if comparison_count == 0 {
@@ -5184,6 +5323,8 @@ mod tests {
             columns: Vec::new(),
             column_types: Vec::new(),
             column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows,
             affected_rows: 0,
             execution_time_ms: 0,
@@ -5343,6 +5484,49 @@ mod tests {
     }
 
     #[test]
+    fn mysql_writable_transfer_columns_skip_only_generated_columns() {
+        let columns = vec![
+            test_column("id", "int"),
+            db::ColumnInfo { extra: Some("DEFAULT_GENERATED".to_string()), ..test_column("created_at", "timestamp") },
+            db::ColumnInfo { extra: Some("auto_increment".to_string()), ..test_column("sequence_id", "bigint") },
+            db::ColumnInfo {
+                extra: Some("VIRTUAL GENERATED".to_string()),
+                ..test_column("virtual_total", "decimal(10,2)")
+            },
+            db::ColumnInfo { extra: Some("stored generated".to_string()), ..test_column("stored_hash", "varchar(64)") },
+            db::ColumnInfo {
+                extra: Some("PERSISTENT GENERATED".to_string()),
+                ..test_column("persistent_total", "decimal(10,2)")
+            },
+            db::ColumnInfo { extra: Some("GENERATED ALWAYS".to_string()), ..test_column("explicit_generated", "int") },
+            db::ColumnInfo {
+                extra: Some("on update CURRENT_TIMESTAMP".to_string()),
+                ..test_column("updated_at", "timestamp")
+            },
+        ];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Mysql, &DatabaseType::Mysql);
+
+        assert_eq!(
+            writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["id", "created_at", "sequence_id", "updated_at"]
+        );
+        assert_eq!(columns.len(), 8, "DDL metadata must retain generated columns");
+    }
+
+    #[test]
+    fn non_mysql_transfer_columns_keep_generated_markers() {
+        let columns = vec![
+            test_column("id", "int"),
+            db::ColumnInfo { extra: Some("STORED GENERATED".to_string()), ..test_column("computed", "int") },
+        ];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Postgres, &DatabaseType::Postgres);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "computed"]);
+    }
+
+    #[test]
     fn non_sqlserver_target_writable_transfer_columns_keep_timestamp_type() {
         let columns = vec![test_column("id", "int"), test_column("updated_at", "timestamp")];
 
@@ -5393,6 +5577,64 @@ mod tests {
         assert!(!ddl.contains("`age` INT COMMENT")); // no comment for age
         assert!(ddl.contains("`name` VARCHAR(100) NOT NULL COMMENT '用户姓名'"));
         assert!(ddl.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn dameng_create_table_omits_if_not_exists_without_changing_other_prefixes() {
+        let cols = vec![test_column("id", "int")];
+
+        let dameng = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        let mysql = generate_create_table_ddl(
+            &cols,
+            "users",
+            "",
+            "app",
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        let postgres = generate_create_table_ddl(
+            &cols,
+            "users",
+            "",
+            "public",
+            &DatabaseType::Postgres,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        let sqlserver = generate_create_table_ddl(
+            &cols,
+            "users",
+            "",
+            "dbo",
+            &DatabaseType::SqlServer,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(dameng.starts_with("CREATE TABLE \"SYSDBA\".\"users\" ("), "ddl: {dameng}");
+        assert!(!dameng.contains("IF NOT EXISTS"), "ddl: {dameng}");
+        assert!(dameng.contains("\"id\" INTEGER"), "ddl: {dameng}");
+        assert!(mysql.starts_with("CREATE TABLE IF NOT EXISTS `users` ("), "ddl: {mysql}");
+        assert!(postgres.starts_with("CREATE TABLE IF NOT EXISTS \"public\".\"users\" ("), "ddl: {postgres}");
+        assert!(
+            sqlserver.starts_with(
+                "IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'users')\nCREATE TABLE [dbo].[users] ("
+            ),
+            "ddl: {sqlserver}"
+        );
     }
 
     #[test]
@@ -5514,6 +5756,37 @@ mod tests {
         assert!(stmts[0].contains("COMMENT ON TABLE \"public\".\"items\" IS '项目表'"));
         assert!(stmts[1].contains("COMMENT ON COLUMN \"public\".\"items\".\"id\" IS '主键'"));
         assert!(stmts[2].contains("COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'"));
+    }
+
+    #[test]
+    fn kingbase_comment_ddl_generates_and_escapes_comments() {
+        let cols = vec![
+            db::ColumnInfo { comment: Some("owner's id".to_string()), ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some("display name".to_string()), ..test_column("name", "varchar(100)") },
+        ];
+
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Kingbase, Some("team's items"));
+
+        assert_eq!(
+            stmts,
+            vec![
+                "COMMENT ON TABLE \"public\".\"items\" IS 'team''s items'".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"id\" IS 'owner''s id'".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"name\" IS 'display name'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn kingbase_comment_ddl_skips_empty_comments() {
+        let cols = vec![
+            db::ColumnInfo { comment: None, ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some("  ".to_string()), ..test_column("name", "varchar(100)") },
+        ];
+
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Kingbase, Some("  "));
+
+        assert!(stmts.is_empty());
     }
 
     #[test]

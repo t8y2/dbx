@@ -7,9 +7,27 @@ const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY: &str = "compatibleOjdbcVers
 const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM: &str = "compatibleOjdbcVersion=8";
 const ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS: u64 = 15_000;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentSessionRole {
+    #[default]
+    Workload,
+    Metadata,
+}
+
+impl AgentSessionRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Workload => "workload",
+            Self::Metadata => "metadata",
+        }
+    }
+}
+
 fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
-    if config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana") {
+    if config.db_type == DatabaseType::H2
+        || (config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana"))
+    {
         ""
     } else {
         driver_class
@@ -17,6 +35,16 @@ fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
 }
 
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
+    agent_connect_params_with_role(config, host, port, database, AgentSessionRole::Workload)
+}
+
+pub fn agent_connect_params_with_role(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    database: &str,
+    session_role: AgentSessionRole,
+) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
     } else if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
@@ -81,6 +109,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "informix_server": config.informix_server,
         "jdbc_driver_class": agent_jdbc_driver_class(config),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
+        "sessionRole": session_role.as_str(),
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
@@ -661,6 +690,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_connect_params_default_to_workload_session_role() {
+        let params = agent_connect_params(&config(DatabaseType::H2, Some("test")), "127.0.0.1", 9092, "test");
+        assert_eq!(params["sessionRole"], "workload");
+    }
+
+    #[test]
+    fn metadata_agent_connect_params_include_metadata_session_role() {
+        let params = agent_connect_params_with_role(
+            &config(DatabaseType::H2, Some("test")),
+            "127.0.0.1",
+            9092,
+            "test",
+            AgentSessionRole::Metadata,
+        );
+        assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
     fn mongodb_database_falls_back_to_uri_database() {
         let mut cfg = config(DatabaseType::MongoDb, None);
         cfg.connection_string = Some("mongodb://user:secret@127.0.0.1:27017/app_db?authSource=admin".to_string());
@@ -734,6 +781,19 @@ mod tests {
         assert_eq!(params["port"], 9092);
         assert_eq!(params["database"], "test");
         assert_eq!(params["connection_string"], "");
+    }
+
+    #[test]
+    fn h2_agent_connect_params_ignore_stale_driver_class() {
+        for driver_profile in [None, Some("h2-legacy")] {
+            let mut cfg = config(DatabaseType::H2, Some("test"));
+            cfg.driver_profile = driver_profile.map(str::to_string);
+            cfg.jdbc_driver_class = Some("h2_embedded".to_string());
+
+            let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+
+            assert_eq!(params["jdbc_driver_class"], "");
+        }
     }
 
     #[test]
@@ -1063,6 +1123,16 @@ mod tests {
 
         assert_eq!(params["jdbc_driver_class"], "sap_hana");
         assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/custom-driver.jar"]));
+    }
+
+    #[test]
+    fn generic_jdbc_agent_connect_params_preserve_custom_driver_class() {
+        let mut cfg = config(DatabaseType::Jdbc, Some("test"));
+        cfg.jdbc_driver_class = Some("com.example.CustomDriver".to_string());
+
+        let params = agent_connect_params(&cfg, "jdbc.example.com", 1234, "test");
+
+        assert_eq!(params["jdbc_driver_class"], "com.example.CustomDriver");
     }
 
     #[test]

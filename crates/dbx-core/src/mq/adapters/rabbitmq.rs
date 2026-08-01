@@ -1,9 +1,9 @@
-//! RabbitMQ admin adapter. Communicates with a Java agent process
-//! (`RabbitMqAgent.java`) via JSON-RPC over stdin/stdout. The Java agent uses
-//! the `amqp-client` library for admin and message operations.
+//! RabbitMQ admin adapter. Communicates with the native Go agent via JSON-RPC
+//! over stdin/stdout. The agent uses `amqp091-go` for AMQP operations and the
+//! RabbitMQ management HTTP API for administrative operations.
 //!
 //! This adapter follows the same pattern as the Kafka agent:
-//! 1. Spawn a Java agent process via `AgentDriverClient`
+//! 1. Spawn the native agent process via `AgentDriverClient`
 //! 2. Perform JSON-RPC handshake + connect
 //! 3. Delegate all `MessageQueueAdmin` trait methods to JSON-RPC calls
 
@@ -59,7 +59,7 @@ pub struct RabbitMqAdmin {
 }
 
 impl RabbitMqAdmin {
-    /// Spawn the RabbitMQ Java agent, perform handshake, and connect.
+    /// Spawn the RabbitMQ native agent, perform handshake, and connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
         let mut client = AgentDriverClient::spawn(launch).await?;
 
@@ -861,7 +861,73 @@ fn extra_port(extra: &serde_json::Value) -> Result<u16, String> {
     }
 }
 
-/// Build the connection params JSON from MqAdminConfig for the Java agent.
+fn configured_management_port(cfg: &MqAdminConfig) -> Result<Option<u16>, String> {
+    let Some(value) = cfg.extra.get("properties").and_then(|value| value.get("management_port")) else {
+        return Ok(None);
+    };
+    let port = if let Some(port) = value.as_u64() {
+        u16::try_from(port).map_err(|_| format!("RabbitMQ management port {port} is out of range (1-65535)"))?
+    } else if let Some(port) = value.as_str() {
+        port.trim().parse::<u16>().map_err(|_| format!("invalid RabbitMQ management port '{port}'"))?
+    } else {
+        return Err("RabbitMQ management port must be a number or a numeric string".to_string());
+    };
+    if port == 0 {
+        return Err("RabbitMQ management port must be between 1 and 65535".to_string());
+    }
+    Ok(Some(port))
+}
+
+pub(crate) fn primary_amqp_endpoint(cfg: &MqAdminConfig) -> Result<(String, u16), String> {
+    let address_list = addresses(cfg);
+    let first = address_list
+        .split(',')
+        .map(str::trim)
+        .find(|address| !address.is_empty())
+        .ok_or("RabbitMQ addresses are empty")?;
+    let parsed = reqwest::Url::parse(&format!("amqp://{first}"))
+        .map_err(|error| format!("RabbitMQ address '{first}' is invalid: {error}"))?;
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| format!("RabbitMQ address '{first}' has no host"))?;
+    Ok((host.to_string(), parsed.port().unwrap_or(extra_port(&cfg.extra)?)))
+}
+
+/// Resolve the independently configured RabbitMQ Management HTTP endpoint.
+///
+/// A blank admin URL is only safe to derive for RabbitMQ's default AMQP ports.
+/// Custom AMQP listeners do not define the Management listener port, so callers
+/// must not silently fall back to another broker's default port 15672/15671.
+pub(crate) fn management_endpoint(cfg: &MqAdminConfig) -> Result<Option<(String, u16)>, String> {
+    if !cfg.admin_url.trim().is_empty() {
+        let parsed = reqwest::Url::parse(cfg.admin_url.trim())
+            .map_err(|error| format!("RabbitMQ Management API URL is invalid: {error}"))?;
+        let host = parsed
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or("RabbitMQ Management API URL does not include a host")?;
+        let port = parsed.port_or_known_default().ok_or("RabbitMQ Management API URL does not include a port")?;
+        return Ok(Some((host.to_string(), port)));
+    }
+
+    let (host, amqp_port) = primary_amqp_endpoint(cfg)?;
+    if let Some(port) = configured_management_port(cfg)? {
+        return Ok(Some((host, port)));
+    }
+    let tls_enabled =
+        cfg.extra.get("properties").and_then(|properties| properties.as_object()).is_some_and(|properties| {
+            properties.get("ssl").and_then(|value| value.as_bool()).unwrap_or(false)
+                || properties.get("tls").and_then(|value| value.as_bool()).unwrap_or(false)
+        });
+    let is_default_amqp_port = amqp_port == 5672 || (tls_enabled && amqp_port == 5671);
+    if !is_default_amqp_port {
+        return Ok(None);
+    }
+    Ok(Some((host, if tls_enabled { 15671 } else { 15672 })))
+}
+
+/// Build the connection params JSON from MqAdminConfig for the native agent.
 /// Blank credentials are omitted so the agent falls back to its guest/guest
 /// default instead of authenticating as `:`. A non-empty `admin_url` is
 /// forwarded as `management_url`; otherwise the agent derives the management
@@ -893,6 +959,18 @@ fn build_connection_params(cfg: &MqAdminConfig) -> Result<serde_json::Value, Str
     }
     if !cfg.admin_url.trim().is_empty() {
         params["management_url"] = serde_json::json!(cfg.admin_url);
+    }
+    if let Some(connect_override) = &cfg.connect_override {
+        params["connect_override"] = serde_json::json!({
+            "host": connect_override.host,
+            "port": connect_override.port,
+        });
+    }
+    if let Some(connect_override) = &cfg.management_connect_override {
+        params["management_connect_override"] = serde_json::json!({
+            "host": connect_override.host,
+            "port": connect_override.port,
+        });
     }
     Ok(params)
 }
@@ -946,6 +1024,7 @@ mod tests {
             pinned_version: None,
             token_signing: None,
             connect_override: None,
+            management_connect_override: None,
             extra,
         }
     }
@@ -1046,10 +1125,36 @@ mod tests {
             false,
         );
         cfg.admin_url = "http://rabbit.internal:15672/proxy".to_string();
+        cfg = cfg.with_connect_override("127.0.0.1", 45672).with_management_connect_override("127.0.0.1", 45673);
 
         let params = build_connection_params(&cfg).expect("connection params");
 
         assert_eq!(params.get("management_url").and_then(|v| v.as_str()), Some("http://rabbit.internal:15672/proxy"));
+        assert_eq!(params.pointer("/connect_override/host").and_then(|v| v.as_str()), Some("127.0.0.1"));
+        assert_eq!(params.pointer("/connect_override/port").and_then(|v| v.as_u64()), Some(45672));
+        assert_eq!(params.pointer("/management_connect_override/host").and_then(|v| v.as_str()), Some("127.0.0.1"));
+        assert_eq!(params.pointer("/management_connect_override/port").and_then(|v| v.as_u64()), Some(45673));
+    }
+
+    #[test]
+    fn management_endpoint_does_not_guess_for_custom_amqp_port() {
+        let custom = rabbitmq_config(serde_json::json!({ "addresses": "rabbit.internal:5673" }), MqAuth::None, false);
+        assert_eq!(primary_amqp_endpoint(&custom).unwrap(), ("rabbit.internal".to_string(), 5673));
+        assert_eq!(management_endpoint(&custom).unwrap(), None);
+
+        let configured = rabbitmq_config(
+            serde_json::json!({
+                "addresses": "rabbit.internal:5673",
+                "properties": { "management_port": 15673 }
+            }),
+            MqAuth::None,
+            false,
+        );
+        assert_eq!(management_endpoint(&configured).unwrap(), Some(("rabbit.internal".to_string(), 15673)));
+
+        let mut explicit = custom;
+        explicit.admin_url = "https://management.internal:8443/rmq".to_string();
+        assert_eq!(management_endpoint(&explicit).unwrap(), Some(("management.internal".to_string(), 8443)));
     }
 
     #[test]

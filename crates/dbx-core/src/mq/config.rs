@@ -10,12 +10,12 @@ use crate::models::connection::ConnectionConfig;
 use crate::mq::auth::MqAuth;
 use crate::mq::types::{MqSystemKind, MqTokenSigningConfig};
 
-/// Runtime TCP endpoint override for MQ admin requests.
+/// Runtime TCP endpoint override for an MQ transport.
 ///
-/// The public admin URL remains unchanged so TLS hostname verification, SNI and
-/// the HTTP Host header continue to target the broker name. The HTTP client uses
-/// this endpoint only for the underlying TCP connection, e.g. after an SSH/proxy
-/// tunnel has mapped the broker to a local port.
+/// The logical broker endpoint remains unchanged so TLS hostname verification,
+/// SNI and protocol-level host names continue to target the broker. The client
+/// uses this endpoint only for the underlying TCP connection, e.g. after an
+/// SSH/proxy tunnel has mapped the broker to a local port.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MqConnectOverride {
@@ -48,6 +48,11 @@ pub struct MqAdminConfig {
     /// Runtime-only TCP endpoint override used by transport layers.
     #[serde(skip)]
     pub connect_override: Option<MqConnectOverride>,
+    /// Runtime-only TCP endpoint override for a secondary management endpoint.
+    /// RabbitMQ uses this in addition to the AMQP `connect_override` because
+    /// its Management HTTP API listens on an independently configured port.
+    #[serde(skip)]
+    pub management_connect_override: Option<MqConnectOverride>,
     /// System-specific extension fields (e.g. Kafka bootstrap servers).
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub extra: serde_json::Value,
@@ -85,6 +90,11 @@ impl MqAdminConfig {
 
     pub fn with_connect_override(mut self, host: &str, port: u16) -> Self {
         self.connect_override = Some(MqConnectOverride { host: host.to_string(), port });
+        self
+    }
+
+    pub fn with_management_connect_override(mut self, host: &str, port: u16) -> Self {
+        self.management_connect_override = Some(MqConnectOverride { host: host.to_string(), port });
         self
     }
 }

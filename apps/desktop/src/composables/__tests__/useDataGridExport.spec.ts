@@ -433,6 +433,37 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
   });
 
+  it("supports a one-off INSERT primary-key override without changing saved options", async () => {
+    const autoIncrementTable: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [{ name: "id", data_type: "int", is_nullable: false, is_primary_key: true, extra: "auto_increment" }],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[7]] };
+    const savedOptions = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+    };
+    const includePrimaryKeys = {
+      ...savedOptions,
+      sql: { ...savedOptions.sql, excludePrimaryKeysFromInsert: false },
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "INSERT INTO `users` (`id`) VALUES (7);",
+      mimeType: "text/sql",
+      fileExtension: "sql",
+      rowCount: 1,
+      columnCount: 1,
+    });
+    const state = createExportState(autoIncrementTable, ["id"], matrix, [7], undefined, undefined, [], savedOptions);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
+    expect(state.canCopyWithExtractor("sql-inserts", includePrimaryKeys)).toBe(true);
+    await expect(state.copyWithExtractor("sql-inserts", includePrimaryKeys)).resolves.toBe(true);
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ excludePrimaryKeysFromInsert: false }) }) }));
+    expect(savedOptions.sql.excludePrimaryKeysFromInsert).toBe(true);
+  });
+
   it("sends only selected values for non-SQL extraction and marks column selections", async () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["Ada"]] };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({

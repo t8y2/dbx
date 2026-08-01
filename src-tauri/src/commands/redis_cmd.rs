@@ -88,6 +88,16 @@ pub async fn redis_get_value(
 }
 
 #[tauri::command]
+pub async fn redis_get_ttl(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+) -> Result<i64, String> {
+    dbx_core::redis_ops::redis_get_ttl_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
 pub async fn redis_get_stream_entries(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

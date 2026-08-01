@@ -1,203 +1,113 @@
 ---
 title: Database Support
-description: Understand which databases DBX can connect to and which advanced features are available per engine.
+description: Understand DBX connection profiles, driver runtimes, specialized workspaces, and capability-gated advanced features.
 ---
 
-<Callout type="info">DBX uses native Rust drivers for the main app whenever possible. Some engines are compatibility profiles over MySQL or PostgreSQL protocols, and some are handled through Agent drivers or the optional [JDBC Plugin](/en/docs/plugins).</Callout>
+The new-connection picker provides more than 70 database and service profiles. A profile defines defaults, form fields, presentation, and a driver entry point, but being able to connect does not mean every advanced feature is available.
 
-## Connection Profiles
+<Callout type="info">The installed connection picker and `crates/dbx-core/assets/database-drivers.manifest.json` are authoritative for current types and capabilities. This page intentionally avoids a brittle exhaustive matrix.</Callout>
 
-The connection dialog exposes ready-to-use profiles with default ports and driver labels.
+## Connection Families
 
-| Group                          | Profiles                                                                                                                                                        | Notes                                                                                          |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Core SQL engines               | MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, Teradata, Vertica, Exasol, Firebird, SAP HANA, YashanDB, GBase   | Available directly in the DBX connection picker                                                |
-| Document, key-value, vector, and config services | Redis, MongoDB, Elasticsearch, Easysearch, Qdrant, Milvus, Weaviate, ChromaDB, etcd, Apache ZooKeeper, Nacos                                                       | Use dedicated browsers, admin consoles, or query flows instead of the generic relational grid where appropriate |
-| MySQL-compatible profiles      | MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB, TDSQL, PolarDB, GreatSQL, custom MySQL                                          | Reuse MySQL-style connection handling where the engine speaks a compatible protocol            |
-| PostgreSQL-compatible profiles | openGauss, KingBase, HighGo, Vastbase, CockroachDB, custom PostgreSQL                                                                                            | Reuse PostgreSQL-style connection handling where the engine speaks a compatible protocol       |
-| File-based engines             | SQLite, DuckDB, Microsoft Access, RQLite, Turso                                                                                                                  | Choose a local database file or HTTP endpoint instead of host and port                         |
-| Time-series and edge           | Cloudflare D1, InfluxDB, IoTDB, TDengine, Databend, QuestDB                                                                                                      | Managed SQLite, time-series, IoT, or edge workloads                                            |
-| Analytics and messaging services | Apache Spark, Dremio, Apache Pulsar, Apache Kafka, Apache RocketMQ, RabbitMQ                                                                                             | Distributed analytics, messaging, and stream-management workloads                              |
-| Agent/JDBC-oriented engines    | H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, OSCAR, XuguDB, UXDB, Databricks, IRIS, JDBC                       | Feature coverage depends on the driver path used by that engine                                |
+### SQL and Compatible Protocols
 
-## Default Ports
+- Core SQL engines such as MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, Oracle, and Redshift
+- MySQL-protocol or syntax profiles such as MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, and GoldenDB
+- PostgreSQL-compatible profiles such as openGauss, GaussDB, KingBase, HighGo, Vastbase, and CockroachDB
+- Vendor databases including DM, KWDB, YashanDB, GBase, Teradata, Vertica, Exasol, Firebird, and SAP HANA
+- Agent/JDBC analytics engines such as Snowflake, Trino, PrestoSQL, Hive, Spark, DB2, Informix, Databricks, and BigQuery
 
-| Profile                                     | Default Port |
-| ------------------------------------------- | -----------: |
-| MySQL / MariaDB / GoldenDB / TDSQL / PolarDB / GreatSQL |         3306 |
-| PostgreSQL / openGauss / GaussDB / Vastbase |         5432 |
-| Redis                                       |         6379 |
-| MongoDB                                     |        27017 |
-| ClickHouse                                  |         8123 |
-| SQL Server                                  |         1433 |
-| Oracle                                      |         1521 |
-| Elasticsearch / Easysearch                  |         9200 |
-| Qdrant                                      |         6333 |
-| Milvus                                      |        19530 |
-| Weaviate                                    |         8080 |
-| ChromaDB                                    |         8000 |
-| TiDB                                        |         4000 |
-| OceanBase                                   |         2881 |
-| Doris / SelectDB / StarRocks / Databend     |         9030 |
-| Manticore Search                            |         9306 |
-| Redshift                                    |         5439 |
-| CockroachDB                                 |        26257 |
-| DM                                          |         5236 |
-| KingBase                                    |        54321 |
-| HighGo                                      |         5866 |
-| UXDB                                        |        52025 |
-| KWDB                                        |        26257 |
-| YashanDB                                    |         1688 |
-| GBase                                       |         5258 |
-| Firebird                                    |         3050 |
-| Teradata                                    |         1025 |
-| Vertica                                     |         5433 |
-| Exasol                                      |         8563 |
-| SAP HANA                                    |        39015 |
-| Databricks                                  |          443 |
-| Cloudflare D1 REST API                      |          443 |
-| InfluxDB                                    |         8086 |
-| IoTDB                                       |         6667 |
-| etcd                                        |         2379 |
-| Apache ZooKeeper                            |         2181 |
-| Nacos                                       |         8848 |
-| Nacos console/admin API                     |         8085 |
-| IRIS                                        |         1972 |
-| RQLite                                      |         4001 |
-| H2                                          |         9092 |
-| Snowflake                                   |          443 |
-| Trino                                       |         8080 |
-| PrestoSQL                                   |         8080 |
-| Hive                                        |        10000 |
-| Apache Spark                                |        10015 |
-| DB2                                         |        50000 |
-| Informix                                    |         9088 |
-| Dremio                                      |        31010 |
-| Neo4j                                       |         7687 |
-| Cassandra                                   |         9042 |
-| BigQuery                                    |          443 |
-| Kylin                                       |         7070 |
-| SunDB                                       |        22000 |
-| OSCAR                                       |         2003 |
-| TDengine                                    |         6041 |
-| XuguDB                                      |         5138 |
-| QuestDB                                     |         8812 |
-| Apache Pulsar Admin API                     |         8080 |
-| Apache Kafka                                |         9092 |
-| Apache RocketMQ NameServer                  |         9876 |
-| RabbitMQ AMQP                               |         5672 |
+Protocol compatibility covers only connection and selected dialect behavior. Versions, system catalogs, DDL, privileges, and management APIs differ, so DBX uses separate profiles and capability overrides instead of enabling features by family name alone.
 
-<Callout type="info">SQLite, DuckDB, Access, and JDBC profiles use port `0` in the saved connection model when a network port is not part of the connection.</Callout>
+### File, Edge, and Hosted Databases
 
-## Local database test environments
+- SQLite, DuckDB, and Microsoft Access
+- Cloudflare D1, Turso, and RQLite
+- H2 and local databases reached through JDBC URLs
 
-DBX maintains pinned, reproducible Docker Compose recipes for ClickHouse, MariaDB, MongoDB, MySQL, PostgreSQL, and Redis. Use them when you need a clean local instance to test a connection, driver behavior, or a bug fix. See the [Database Test Lab](/en/docs/database-lab) for commands, safe defaults, and the supported versions.
+Desktop file paths belong to the local computer. Docker/Web paths belong to the server container or mounted host storage; a path on the browser computer is not mapped automatically.
 
-## Feature Matrix
+### Specialized Data Models and Services
 
-DBX intentionally enables advanced workflows only where the app has enough metadata and SQL-generation support.
+- Redis and MongoDB
+- Elasticsearch, Easysearch, and Manticore Search
+- Qdrant, Milvus, Weaviate, and ChromaDB
+- HBase
+- Pulsar, Kafka, RocketMQ, and RabbitMQ
+- etcd, ZooKeeper, and Nacos
+- InfluxDB, IoTDB, TDengine, and other time-series or IoT profiles
 
-| Feature                        | Supported Types                                                                                                                                                                                                                                                                       |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Schema-aware tree              | PostgreSQL, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, UXDB, Vastbase, JDBC, H2, Snowflake, Trino, DB2, TDengine, XuguDB, Teradata, Vertica, Exasol, Firebird, SAP HANA, YashanDB, GBase                                                                     |
-| ER diagram                     | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, UXDB, Vastbase, GoldenDB, Access, H2, DB2, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB                                                                                 |
-| Database search                | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DuckDB, ClickHouse, DM, GaussDB, KWDB, KingBase, HighGo, UXDB, Vastbase, GoldenDB, Access, H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, TDengine, XuguDB, Databricks, Teradata, Vertica  |
-| Table import                   | MySQL, PostgreSQL, SQLite, Cloudflare D1, DuckDB, ClickHouse, SQL Server, Oracle, Doris, StarRocks, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, UXDB, Vastbase, GoldenDB, Access, Databend                                                                                         |
-| Geometry map preview           | PostgreSQL, HighGo, KingBase, Vastbase, openGauss, GaussDB (PostGIS `geometry` / `geography` columns are returned as WKT in the result grid and unlock the grid-toolbar map preview button)                                                                                                |
-| Table structure editor         | MySQL, PostgreSQL, SQLite, SQL Server, KWDB, UXDB                                                                                                                                                                                                                                    |
-| Create database                | MySQL, PostgreSQL, SQL Server, ClickHouse, Oracle, DM, GaussDB, KWDB, Doris, StarRocks, Redshift, Teradata, Vertica                                                                                                                                                                   |
-| Field lineage                  | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB                                                                                                                                                                                             |
-| Data transfer                  | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, ClickHouse, DuckDB, DM, GaussDB, KWDB                                                                                                                                                                                   |
-| SQL file execution unavailable | Redis, MongoDB, Elasticsearch, Easysearch, etcd, Nacos                                                                                                                                                                                                                                |
+These connections use key-value, document, search, vector, messaging, or configuration-center workspaces. They do not inherit every relational grid or SQL concept. See [Specialized Workspaces](/en/docs/specialized-workspaces).
 
-<Callout type="warn">If a database can connect but does not appear in a feature row, that feature may be hidden or limited for that engine. This prevents DBX from generating SQL it cannot review reliably.</Callout>
+## Driver Runtimes
 
-## Connection Options
+| Runtime | Description | Typical boundary |
+| --- | --- | --- |
+| Built-in native | Rust driver compiled into DBX | Available immediately after installation |
+| Native Agent / sidecar | DBX-managed Go, Rust, or external process | Requires platform files; DuckDB, Oracle, KingBase, XuguDB, RabbitMQ, and similar paths may use separate runtimes |
+| JDBC Agent | Java Agent plus a vendor JDBC driver | Requires a JRE, Agent, and legally obtained vendor JAR |
+| JDBC plugin | Optional generic JDBC extension | Unknown engines run with generic JDBC capabilities |
 
-Most network databases support host, port, username, password, default database, optional URL parameters, SSL, connection color, and tunnel / proxy settings. File-based engines replace host and port with a file picker.
+See [Driver Management](/en/docs/driver-management) for installation, upgrades, offline packages, and runtime monitoring, and [JDBC Plugin](/en/docs/plugins) for custom JDBC.
 
-DBX can also parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, DM, GaussDB, KWDB, openGauss, TDengine, XuguDB, Access, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB, SAP HANA, InfluxDB, QuestDB, IoTDB, etcd, Nacos, RQLite, and Databricks.
+## Capability Levels
 
-### Easysearch
+The driver manifest uses capability levels from basic connection through controlled operations, with per-engine overrides:
 
-DBX provides a dedicated Easysearch connection type on port `9200` and connects through its Elasticsearch-compatible HTTP REST API. It reuses DBX's existing Elasticsearch document engine for index and document browsing, Query DSL, REST requests, common SQL queries, pagination and counts, document CRUD, and bulk write flows.
+| Level | Meaning |
+| --- | --- |
+| Connect | Establish a connection and run profile-supported basic queries |
+| Browse | Browse databases, schemas, tables, or specialized objects |
+| Understand | Add read-only source, search, and relationship workflows |
+| Operate | Add controlled writes such as table data editing |
 
-Easysearch documents compatibility with the Elasticsearch 7.10 API and ecosystem, but this does not imply complete equivalence with every Elasticsearch version, X-Pack feature, ES|QL, or other proprietary extension. Enable SSL for HTTPS endpoints; self-signed test deployments use the same TLS connection path.
+Individual capabilities then control features such as:
 
-### Cloudflare D1
+- Schema search and ER diagrams
+- Table data and table structure editing
+- Table import and data transfer
+- SQL file execution
+- Field lineage and query explain
+- Database creation, user administration, and driver management
 
-Create a **Cloudflare D1** connection with the Account ID, D1 Database ID (UUID), and an API Token. The token needs `D1 Read` permission for browsing and queries; add `D1 Write` for inserts, updates, DDL, imports, or transfers. DBX uses Cloudflare's HTTPS API directly, so SSH and proxy transport layers are not available for this profile.
+Menu availability is therefore more meaningful than a static database name list. When an action is missing, check the DBX version, database profile, runtime mode, and installed components.
 
-### Nacos Console
+## Feature Boundaries
 
-Nacos connections open a dedicated admin console for namespaces, configs, services, instances, config history, and raw API requests. Use the Nacos console/admin API address when creating the connection. Nacos 3 Docker deployments usually expose that console on `8085`; older deployments may share `8848` with the service port.
+### SQL Files and Relational Tools
 
-### ClickHouse TLS
+Redis, MongoDB, search, vector, HBase, configuration-center, and message-queue workspaces do not use relational SQL file execution. Some SQL engines support query and browse workflows without structure editing, import, or transfer.
 
-ClickHouse connections support TLS encryption. When creating a ClickHouse connection, enable the TLS toggle to connect over HTTPS instead of HTTP. This is recommended for production ClickHouse instances or any ClickHouse Cloud deployments.
+### Import and Transfer
 
-### GaussDB Native Driver
+[Table Import](/en/docs/table-import) and [Data Transfer](/en/docs/data-transfer) filter connections by capability. Cross-engine paths also depend on type mapping, keys, identity columns, schemas, and target DDL support.
 
-GaussDB and openGauss now use a native Rust driver (`rust-gaussdb`) instead of ODBC. Connections that previously used the PostgreSQL compatibility path are auto-migrated to the GaussDB driver. The native driver provides better type handling and metadata support specific to GaussDB.
+### Backup and Export
 
-### DuckDB File and Memory Modes
+- [Database Export](/en/docs/database-export) is a capability-driven logical SQL export
+- [Database Backup](/en/docs/database-backup) currently schedules consistent MySQL and PostgreSQL backups in Desktop only
+- Cloud Sync and configuration export migrate DBX settings, not business database contents
 
-DuckDB connections support two modes:
+### Desktop and Docker/Web
 
-- **File mode**: Select a `.db` or `.duckdb` file for persistent storage
-- **Memory mode**: Use an in-memory database for temporary analysis. Data is lost when the connection is closed.
+Both runtimes share most Rust core query, metadata, and safety policy, but are not feature-identical. Local SQL folders, system file selection, Deep Links, local CLI Agents, and scheduled database backup are Desktop-only. Web files, drivers, and Agents live in the server data directory.
 
-Create a new DuckDB database file directly from the connection form by entering a path that does not yet exist.
+## Default Ports and Connection URLs
 
-### DuckDB Connection Init Script
+Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
 
-DuckDB connections can run a SQL script every time the connection is established. Configure it in the **Init Script** field of the connection dialog. Typical uses are loading extensions, creating secrets, tuning session options, and attaching additional catalogs:
+Services such as RabbitMQ may expose separate business and management ports. A custom AMQP port must not be used to infer the Management API port. SSH tunnels, HTTP proxies, TLS SNI, and physical dial targets should also be verified independently.
 
-```sql
-INSTALL quack;
-LOAD quack;
-ATTACH 'quack:analytics-host' AS remote (TOKEN 'your_token');
-```
+DBX parses many common DSNs and URLs, but parameters vary by version and cloud vendor. After a successful connection test, still verify the actual database, schema, SSL, and privilege scope.
 
-Or attach a [DuckLake](https://ducklake.select/) catalog:
+## Local Test Environments
 
-```sql
-INSTALL ducklake;
-LOAD ducklake;
-ATTACH 'ducklake:/data/lake/meta.ducklake' AS lake (DATA_PATH '/data/lake/files');
-```
+The repository includes pinned Docker Compose labs for ClickHouse, MariaDB, MongoDB, MySQL, PostgreSQL, and Redis. Use [Database Test Lab](/en/docs/database-lab) for connection, driver, and regression testing.
 
-- Databases attached by the script (local files, DuckLake, remote Quack servers, ...) appear in the sidebar like configured attached databases, and are re-attached automatically on every reconnect. Prefer an explicit `AS alias` so catalog names stay stable.
-- Statements run in order; when one fails, the connection fails with the statement number and the engine error so the script is easy to fix.
-- The script runs on every new connection, so prefer statements that are safe to repeat, and use guards such as `IF NOT EXISTS` where the engine or extension supports them.
-- The init script is stored like a connection password: it lives in the local secret store, is never written to plain-text config files, and only syncs inside the encrypted sensitive payload — tokens such as the Quack `TOKEN` above stay out of public sync snapshots and exports.
-
-### In-Memory SQLite
-
-SQLite connections can use `:memory:` as the file path for ephemeral, in-memory databases. This is useful for quick experiments or temporary data transformations.
-
-### Doris / StarRocks Multi-Catalog
-
-Doris and StarRocks are MPP engines that federate external data through catalogs (`SHOW CATALOGS`). DBX lists every catalog the current user can read and renders them as a `catalog → database → table` tree:
-
-- The built-in `internal` catalog shows the engine's own databases and tables.
-- External catalogs (Hive, Iceberg, Hudi, Paimon, JDBC, etc.) list their databases and tables the same way. Catalogs you lack permission to read are skipped silently.
-- When only the `internal` catalog is present, the sidebar stays flat (no catalog grouping layer) so single-catalog deployments are unaffected.
-
-Opening a table from an external catalog previews its data using the 3-part `catalog.database.table` name, so no session `SWITCH` is needed. External catalogs expose tables and views only — routines, sequences, triggers, and foreign keys are not available.
-
-## Extending Support
-
-Use the [JDBC Plugin](/en/docs/plugins) when a database is not covered by the built-in profiles or when your team must use a vendor JDBC driver. JDBC keeps vendor driver JARs outside the main DBX app, so you control which driver files are installed.
+## Related Pages
 
 <Cards>
-  <Card title="Create a Connection" href="/en/docs/getting-started">
-    Install DBX, choose a database profile, and test the first connection.
-  </Card>
-  <Card title="JDBC Plugin" href="/en/docs/plugins">
-    Install the optional JDBC plugin and import vendor driver JARs.
-  </Card>
-  <Card title="Tunnel / Proxy" href="/en/docs/ssh-tunnel">
-    Reach databases behind private networks, bastion hosts, proxies, or HTTP tunnel scripts.
-  </Card>
+  <Card title="Specialized Workspaces" href="/en/docs/specialized-workspaces">Review non-relational, search, vector, messaging, and configuration-center interfaces.</Card>
+  <Card title="Driver Management" href="/en/docs/driver-management">Install and diagnose native Agents, sidecars, JDBC Agents, and JREs.</Card>
+  <Card title="Production Safety" href="/en/docs/production-safety">Understand database privileges, read-only protection, production protection, and automation boundaries.</Card>
 </Cards>

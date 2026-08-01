@@ -57,6 +57,48 @@ export function moveVisibleColumnIndex(options: { orderedIndexes: readonly numbe
   return next;
 }
 
+export function moveDisplayableColumnIndex(options: { orderedIndexes: readonly number[]; fromDisplayableIndex: number; toDisplayableIndex: number }): number[] {
+  const next = [...options.orderedIndexes];
+  if (next.length === 0) return next;
+
+  const from = Math.max(0, Math.min(options.fromDisplayableIndex, next.length - 1));
+  const to = Math.max(0, Math.min(options.toDisplayableIndex, next.length - 1));
+  const [moved] = next.splice(from, 1);
+  if (moved === undefined) return next;
+
+  next.splice(to, 0, moved);
+  return next;
+}
+
+export function mergeUnavailableColumnOrderKeys(currentKeys: readonly string[], previousKeys: readonly string[]): string[] {
+  const normalizedCurrentKeys = [...new Set(currentKeys)];
+  const currentKeySet = new Set(normalizedCurrentKeys);
+  const missingBeforeCurrent = new Set<string>();
+  const missingAfterCurrent = new Map<string, Set<string>>();
+  let precedingCurrentKey: string | undefined;
+
+  for (const key of previousKeys) {
+    if (currentKeySet.has(key)) {
+      precedingCurrentKey = key;
+      continue;
+    }
+    if (!precedingCurrentKey) {
+      missingBeforeCurrent.add(key);
+      continue;
+    }
+    const anchoredKeys = missingAfterCurrent.get(precedingCurrentKey) ?? new Set<string>();
+    anchoredKeys.add(key);
+    missingAfterCurrent.set(precedingCurrentKey, anchoredKeys);
+  }
+
+  const mergedKeys = [...missingBeforeCurrent];
+  for (const key of normalizedCurrentKeys) {
+    mergedKeys.push(key);
+    mergedKeys.push(...(missingAfterCurrent.get(key) ?? []));
+  }
+  return mergedKeys;
+}
+
 export function columnOrderKeysForIndexes(indexes: readonly number[], columnKeys: readonly string[]): string[] {
   return indexes.map((index) => columnKeys[index]).filter((key): key is string => !!key);
 }

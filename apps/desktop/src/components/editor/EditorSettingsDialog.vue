@@ -40,6 +40,7 @@ import {
   type OpenTabsRestoreMode,
   type SidebarObjectInfoMode,
   type SqlSemanticDiagnosticsMode,
+  type SavedSqlOpenTargetMode,
   type UpdateDownloadSource,
   type CustomThemeColors,
   type CustomTheme,
@@ -306,6 +307,7 @@ const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSe
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
 const editContinueOnErrorOnBatch = ref(settingsStore.editorSettings.continueOnErrorOnBatch);
 const editConfirmUnsavedSqlClose = ref(settingsStore.editorSettings.confirmUnsavedSqlClose);
+const editSavedSqlOpenTargetMode = ref<SavedSqlOpenTargetMode>(settingsStore.editorSettings.savedSqlOpenTargetMode);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
@@ -465,6 +467,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     continueOnErrorOnBatch: editContinueOnErrorOnBatch.value,
     confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
+    savedSqlOpenTargetMode: editSavedSqlOpenTargetMode.value,
     appLayout: editAppLayout.value,
     tabLayout: editTabLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
@@ -730,6 +733,7 @@ function syncEditorSettingsDraftFromStore() {
   editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
   editContinueOnErrorOnBatch.value = settingsStore.editorSettings.continueOnErrorOnBatch;
   editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
+  editSavedSqlOpenTargetMode.value = settingsStore.editorSettings.savedSqlOpenTargetMode;
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
@@ -930,6 +934,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
     editContinueOnErrorOnBatch.value = DEFAULT_EDITOR_SETTINGS.continueOnErrorOnBatch;
     editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
+    editSavedSqlOpenTargetMode.value = DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode;
     editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
   } else if (tab === "formatter") {
@@ -1018,6 +1023,7 @@ function resetAllDefaults() {
   editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
+  editSavedSqlOpenTargetMode.value = DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
@@ -3334,6 +3340,24 @@ onUnmounted(cleanupPreviewEditor);
               </div>
 
               <div class="grid gap-3 md:grid-cols-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="editor-saved-sql-open-target">{{ t("settings.savedSqlOpenTarget") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ editSavedSqlOpenTargetMode === "current" ? t("settings.savedSqlOpenTargetCurrentDescription") : t("settings.savedSqlOpenTargetSavedDescription") }}
+                    </p>
+                  </div>
+                  <Select v-model="editSavedSqlOpenTargetMode">
+                    <SelectTrigger id="editor-saved-sql-open-target" class="h-8 w-44 shrink-0 px-2 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="saved">{{ t("settings.savedSqlOpenTargetSaved") }}</SelectItem>
+                      <SelectItem value="current">{{ t("settings.savedSqlOpenTargetCurrent") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-sql-semantic-diagnostics">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>

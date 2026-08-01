@@ -1,108 +1,177 @@
 ---
 title: Query Editor
-description: Write, complete, format, execute, and reuse SQL in DBX.
+description: Write, understand, parameterize, execute, analyze, and reuse SQL in DBX.
 ---
 
-The query editor is where daily SQL work happens: writing queries, using completion, formatting statements, executing selected fragments, and returning to previous SQL through history.
+The query editor is the SQL workspace in DBX. It combines dialect-aware highlighting and completion, semantic diagnostics, parameter input, execution progress, multiple results, execution plans, query history, the SQL library, and AI assistance in one tab.
 
 ## Basic Workflow
 
 <Steps>
   <Step>
-    ### Open a Connection
+    ### Choose connection context
 
-    Select a database connection from the sidebar. DBX loads the database type and metadata for the active connection.
-
-  </Step>
-  <Step>
-    ### Write SQL
-
-    Type SQL in the editor. Completion suggestions use SQL keywords, tables, views, columns, and available relationship metadata.
+    Select a connection, database, and schema when creating a query. You can also open a contextual query from the object tree, Quick Open, SQL Library, or SQL Files.
 
   </Step>
   <Step>
-    ### Execute the Query
+    ### Write and inspect SQL
 
-    Use the shortcut to execute all SQL or only the selected fragment. Results appear in the data grid below the editor.
+    Use completion, hover details, semantic diagnostics, formatting, and code folding. Depending on settings, `Ctrl/Cmd+Click` can navigate to table data or the related object.
 
   </Step>
   <Step>
-    ### Reuse History
+    ### Make the execution scope explicit
 
-    Open query history to bring back previously executed SQL for repeated debugging or analysis.
+    Select the SQL to run or use the current statement or full editor. For multi-statement text, the execution target picker can confirm the exact range.
+
+  </Step>
+  <Step>
+    ### Inspect results or a plan
+
+    The result area supports multiple runs, horizontal tabs, or a list view. Use Explain Plan to inspect the plan tree, summary, and standard result table.
+
+  </Step>
+  <Step>
+    ### Save and reuse
+
+    Save stable queries to the SQL Library or external `.sql` files, then reopen them through history, Quick Open, or folders.
 
   </Step>
 </Steps>
 
 ## Execute SQL
 
-| Action                      | macOS                         | Windows / Linux                |
-| --------------------------- | ----------------------------- | ------------------------------ |
-| Execute all SQL             | `Cmd+Enter`                   | `Ctrl+Enter`                   |
-| Execute selected SQL        | Select text, then `Cmd+Enter` | Select text, then `Ctrl+Enter` |
-| Execute in a new result tab | `Cmd+\`                       | `Ctrl+\`                       |
+| Action | macOS | Windows / Linux |
+| --- | --- | --- |
+| Execute the current scope | `Cmd+Enter` | `Ctrl+Enter` |
+| Execute in a new result | `Cmd+\` | `Ctrl+\` |
+| Stop execution | Click the execution button after it changes to Stop | Click the execution button after it changes to Stop |
 
-<Callout type="info">When text is selected, DBX executes only the selected SQL. When nothing is selected, it executes the full editor content.</Callout>
+When text is selected, DBX prioritizes the selection. Otherwise, the current-statement and execution-target settings determine the scope. Shortcuts can be changed under [Keyboard Shortcuts](/en/docs/keyboard-shortcuts).
 
-After execution, the result area shows returned rows, duration, affected row count, or the error message. For multi-statement scripts, select the exact fragment you want to run to reduce mistakes.
+Normal execution updates the active result. **Execute in a new result** preserves older results for comparison. Results can use horizontal tabs or a list view, and repeated executions can retain run history or pin important results.
 
-Regular execution replaces the active result. Use **Execute SQL in new result tab** when you need to keep the current result and compare it with another run. By default, DBX tiles every run as a horizontal result tab that you can switch or close directly. When many runs are retained, only the run-tab strip scrolls while the current table label stays fixed. You can switch retained runs to a compact list under **View options** in the result toolbar. The selected SQL and current-statement rules are the same for both execution actions.
+For multi-statement execution, the result area shows the current statement, total count, completion state, and errors. When the driver supports it, the active query or remaining statements can be cancelled.
 
-Both execution shortcuts are configurable under **Settings → Shortcuts**. DBX reports conflicts within the SQL editor scope and requires them to be resolved before applying shortcut changes.
+<Callout type="warn">Cancellation depends on the driver and database. After Stop is clicked, the server may still need time to interrupt the current statement.</Callout>
 
-DBX also tracks query sessions so long-running result sets can be closed when you leave them, and active queries can be cancelled from the UI when the database driver supports cancellation.
+## Execution Scope and Target Picker
 
-### SQL Execution Target Picker
+| Scope | How it is selected | Best for |
+| --- | --- | --- |
+| Selected SQL | Highlight text before execution | The clearest and safest option in a multi-statement draft |
+| Current statement | Put the cursor inside a statement | Running one statement from a script quickly |
+| Full editor | No selection and settings choose the full document | Short, single-purpose scripts |
 
-For queries that contain a single statement, DBX can execute it directly without showing a target picker. When your SQL contains multiple statements, DBX displays an execution target picker with a preview decoration to help you choose which statement to run.
+The execution target picker marks executable statements and shows a preview when needed. It can be disabled in settings, but it is useful for production and complex scripts.
 
-Enable or disable the execution target picker in Settings under **Show execution target picker**. When disabled, DBX executes the entire editor content without prompting.
+Use [SQL File Execution](/en/docs/sql-file) for large `.sql` files or tasks that need per-statement progress and file-level statistics.
 
-## Execution Scope
+## Completion and Semantic Diagnostics
 
-| Scope             | How It Is Chosen                            | Use Case                                          |
-| ----------------- | ------------------------------------------- | ------------------------------------------------- |
-| Selected SQL      | Highlight text before running               | Safest option for multi-statement scratch pads    |
-| Current statement | Use editor cursor workflows where available | Run one statement without selecting text manually |
-| Full editor       | Run with no selection                       | Single-purpose query tabs and short scripts       |
+Completion uses the active database dialect and metadata to suggest:
 
-<Callout type="warn">DBX can execute batches and scripts, but the query editor is still safest when you run one reviewed statement at a time. Use [SQL File Execution](/en/docs/sql-file) for large `.sql` files that need progress tracking.</Callout>
+- SQL keywords, functions, types, and engine-specific syntax
+- Databases, schemas, tables, views, columns, and column comments
+- Table aliases, CTEs, subquery scope, and visible fields
+- JOIN conditions based on foreign keys or relationship metadata
+- Dialect-specific functions and syntax for MySQL, PostgreSQL, SQL Server, ClickHouse, and others
+- User-defined [SQL Snippets](/en/docs/sql-snippets)
 
-## Autocomplete
+Semantic diagnostics flag selected unresolved tables, columns, aliases, and SQL structures. They help catch mistakes early but do not guarantee that vendor extensions will be accepted or rejected; the server result remains authoritative.
 
-Completion suggestions come from the active database context:
+<Callout type="info">Refresh connection metadata after creating or changing objects. DBX caches and lazy-loads table structure to reduce repeated requests in large schemas.</Callout>
 
-- **SQL keywords**: `SELECT`, `FROM`, `WHERE`, `GROUP BY`, and more
-- **Object names**: tables, views, schemas, and databases
-- **Column names**: inferred from referenced tables and aliases
-- **JOIN suggestions**: related tables and join conditions from foreign keys or known relationships
-- **SQL Server syntax**: `CROSS APPLY`, `OUTER APPLY`, and related completions for SQL Server connections
+## Table and Object Navigation
 
-<Callout type="info">Completion accuracy depends on connection metadata. If you just created a table or changed columns, refresh the connection metadata and try again.</Callout>
+- `Ctrl/Cmd+Click` a table name to open data or locate the object, depending on settings
+- Locate the table referenced at the cursor in the sidebar
+- Use Quick Open to search connections, databases, tables, SQL Files, and the SQL Library
+- Search embedded object-source views and open SQL in the editor for further work
 
-## Format SQL
+Navigation depends on SQL parsing and current metadata. Dynamic SQL, ambiguous names, or references without a schema may require manual confirmation.
 
-Use the format button in the toolbar to standardize indentation, line breaks, and keyword style. Formatting is useful before sharing a query, reviewing a migration script, or debugging a complex statement.
+## SQL Parameters and Variables
 
-Formatting only changes the editor text. It does not execute SQL or modify the database.
+Before execution, DBX can recognize common placeholders and open a parameter-input dialog:
+
+| Syntax | Example |
+| --- | --- |
+| Positional | `?` |
+| Named | `:user_id` |
+| Shell style | `${user_id}` |
+| MyBatis style | `#{user_id}` |
+| SQL Server style | `@user_id` |
+| Script variable | `@set user_id = 42;` |
+
+Parameters can be entered as strings, numbers, booleans, `NULL`, or raw SQL values. Per-database settings can disable placeholder forms that conflict with native syntax.
+
+<Callout type="warn">Raw SQL parameters are not quoted automatically. Use them only for reviewed SQL fragments and never concatenate untrusted input.</Callout>
+
+## Formatting, Compacting, and Folding
+
+- **Format SQL** normalizes indentation, line breaks, and keyword style
+- **Compact SQL** removes unnecessary whitespace for copying or inspecting generated SQL
+- **Code folding** collapses long queries, subqueries, or routine blocks and has configurable shortcuts
+- See [SQL Formatting](/en/docs/sql-formatter) for formatter and variable-syntax settings
+
+Formatting and compacting only change editor text; they do not execute SQL.
+
+## Explain Plan
+
+Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `WITH`, `TABLE`, or `VALUES`. Supported databases can return:
+
+- A standard result table
+- An expandable plan tree
+- Node, cost, estimated-row, relation, and index summaries
+- Raw details returned by the database
+
+`EXPLAIN` semantics vary by database, and some engines provide only table or text output. A plan reflects optimizer estimates rather than real production performance; evaluate it together with data volume, statistics, indexes, and measured runtime.
 
 ## Query History
 
-DBX records executed SQL so you can reuse it later:
+Query history stores executed SQL per connection with time and context. You can:
 
-- History is stored per connection
-- Previous statements can be reviewed by time
-- Clicking a history item loads it back into the editor
-- Useful for investigation queries, reports, and repair statements
-- History entries preserve enough context to identify manual queries and AI-assisted work
-- **Execution time range filter**: Filter history entries by date range to find queries executed within a specific time period
+- Filter by date range
+- Search and restore SQL into the editor
+- Distinguish normal and AI-assisted sources
+- Recover or compare earlier troubleshooting work
+- Use historical SQL as a possible reference source in field lineage
 
-<Callout type="warn">Query history may include business fields, table names, or filter values. Be mindful of sensitive information on shared machines or demo environments.</Callout>
+<Callout type="warn">History can contain business fields, table names, predicates, or literal values. Review sensitive information before sharing logs, screenshots, or configuration backups.</Callout>
 
-## Working With the Data Grid
+## SQL Library and SQL Files
 
-Query results open in the [Data Grid](/en/docs/data-grid). If the result is editable, DBX shows the SQL before saving changes. For analysis-only results, you can export CSV, JSON, or Markdown.
+| Method | Best for | Platform boundary |
+| --- | --- | --- |
+| SQL Library | Saving and searching reusable queries in folders inside DBX | Full local SQL Library management is available on Desktop; cloud-sync scope depends on settings |
+| External SQL Files | Sharing `.sql` files with a repository, script directory, or editor | Local file open/save and the file tree are Desktop capabilities |
+| Query tabs | Temporary analysis and unfinished drafts | Settings can restore all tabs, pinned tabs only, or none |
 
-## Working With AI
+The save dialog can search or create folders. Quick Open indexes both SQL Library entries and SQL Files.
 
-The editor can send the current SQL, active connection type, database name, recent error, result preview, and loaded schema context to the [AI Assistant](/en/docs/ai-assistant). In Ask mode, AI returns SQL and explanations only. In Agent mode, DBX applies an execution policy before attempting to run generated SQL.
+## Safety and Boundaries
+
+- Read-only connections reject recognizable writes in the core execution path
+- Production protection requires a fresh explicit confirmation for writes
+- Dangerous-SQL confirmation and Redis command safety are additional layers
+- `USE` and database switches update query context, but the active connection and target database still need review
+- Completion, diagnostics, and explain plans depend on the active driver and metadata support
+
+See [Production and Write Safety](/en/docs/production-safety) for the complete rules.
+
+<Cards>
+  <Card title="Inspect results" href="/en/docs/data-grid">
+    Learn data-grid browsing, copying, export, and safe editing.
+  </Card>
+  <Card title="Run SQL files" href="/en/docs/sql-file">
+    Execute large scripts with file- and statement-level progress.
+  </Card>
+  <Card title="Configure snippets" href="/en/docs/sql-snippets">
+    Create personal SQL templates that expand through completion.
+  </Card>
+  <Card title="Use AI" href="/en/docs/ai-assistant">
+    Generate, explain, and optimize SQL, then return it to the editor for review.
+  </Card>
+</Cards>

@@ -1,80 +1,68 @@
 import { describe, expect, it } from "vitest";
 
-import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
+import { computeDisplayTtl, computeTtlCountdownTick, computeTtlCountdownValue, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
 
-describe("computeAutoRefreshTick", () => {
-  it("returns idle when auto-refresh is disabled", () => {
-    expect(computeAutoRefreshTick(false, 10, false)).toEqual({ type: "idle" });
-    // countdown value and loading flag don't matter when disabled
-    expect(computeAutoRefreshTick(false, 0, false)).toEqual({ type: "idle" });
-    expect(computeAutoRefreshTick(false, 5, true)).toEqual({ type: "idle" });
+describe("computeTtlCountdownTick", () => {
+  it("returns decrement while a positive TTL remains", () => {
+    expect(computeTtlCountdownTick(10)).toEqual({ type: "decrement" });
+    expect(computeTtlCountdownTick(1)).toEqual({ type: "decrement" });
   });
 
-  it("returns decrement while more than one second remains", () => {
-    expect(computeAutoRefreshTick(true, 10, false)).toEqual({ type: "decrement" });
-    // decrement even when loading — countdown should keep ticking
-    expect(computeAutoRefreshTick(true, 3, true)).toEqual({ type: "decrement" });
-  });
-
-  it("refreshes on the expiry tick instead of exposing a zero countdown", () => {
-    expect(computeAutoRefreshTick(true, 1, false)).toEqual({ type: "refresh" });
-    expect(computeAutoRefreshTick(true, 0, false)).toEqual({ type: "refresh" });
-    expect(computeAutoRefreshTick(true, -1, false)).toEqual({ type: "refresh" });
-  });
-
-  it("does not start another refresh when a load is already in flight", () => {
-    expect(computeAutoRefreshTick(true, 1, true)).toEqual({ type: "decrement" });
-    // This prevents concurrent load() calls
-    expect(computeAutoRefreshTick(true, 0, true)).toEqual({ type: "idle" });
-    expect(computeAutoRefreshTick(true, -1, true)).toEqual({ type: "idle" });
+  it("stops decrementing after the TTL has reached zero", () => {
+    expect(computeTtlCountdownTick(0)).toEqual({ type: "idle" });
+    expect(computeTtlCountdownTick(-1)).toEqual({ type: "idle" });
   });
 });
 
-describe("shouldStopAutoRefresh", () => {
-  it("returns true when TTL is zero (key expired)", () => {
-    expect(shouldStopAutoRefresh(0)).toBe(true);
+describe("computeTtlCountdownValue", () => {
+  it("accounts for time elapsed while countdown timers are paused", () => {
+    expect(computeTtlCountdownValue(60, 10_000, 40_000)).toBe(30);
   });
 
-  it("returns true when TTL is negative (no expiry or key deleted)", () => {
-    expect(shouldStopAutoRefresh(-1)).toBe(true);
-    expect(shouldStopAutoRefresh(-2)).toBe(true);
+  it("preserves Redis sentinel values and clamps expired TTLs", () => {
+    expect(computeTtlCountdownValue(5, 10_000, 20_000)).toBe(0);
+    expect(computeTtlCountdownValue(-1, 10_000, 20_000)).toBe(-1);
+    expect(computeTtlCountdownValue(-2, 10_000, 20_000)).toBe(-2);
   });
+});
 
-  it("returns false when TTL is positive (key still alive)", () => {
-    expect(shouldStopAutoRefresh(1)).toBe(false);
-    expect(shouldStopAutoRefresh(3600)).toBe(false);
+describe("normalizeRedisAutoRefreshInterval", () => {
+  it("uses the default for invalid values and clamps arbitrary input to safe seconds", () => {
+    expect(normalizeRedisAutoRefreshInterval("invalid")).toBe(DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS);
+    expect(normalizeRedisAutoRefreshInterval(0)).toBe(1);
+    expect(normalizeRedisAutoRefreshInterval(1.9)).toBe(1);
+    expect(normalizeRedisAutoRefreshInterval(9_999)).toBe(3600);
   });
 });
 
 describe("computeDisplayTtl", () => {
-  it("returns server TTL when auto-refresh is disabled", () => {
-    expect(computeDisplayTtl(false, 3, 10)).toBe(10);
+  it("returns the live countdown regardless of automatic network refresh", () => {
+    expect(computeDisplayTtl(3, 10)).toBe(3);
   });
 
   it("does not flash back to the stale server TTL at zero", () => {
-    expect(computeDisplayTtl(true, 0, 5)).toBe(0);
+    expect(computeDisplayTtl(0, 5)).toBe(0);
   });
 
-  it("returns live countdown when auto-refresh is active and counting", () => {
-    expect(computeDisplayTtl(true, 5, 10)).toBe(5);
-    expect(computeDisplayTtl(true, 1, 10)).toBe(1);
+  it("returns live countdown while counting", () => {
+    expect(computeDisplayTtl(5, 10)).toBe(5);
+    expect(computeDisplayTtl(1, 10)).toBe(1);
   });
 
   it("clamps an active countdown below zero instead of showing stale data", () => {
-    expect(computeDisplayTtl(true, -1, 10)).toBe(0);
+    expect(computeDisplayTtl(-1, 10)).toBe(0);
   });
 });
 
 describe("computeTtlForExpiryEdit", () => {
   it("keeps a last-confirmed positive TTL during the in-flight zero-countdown window", () => {
-    expect(computeTtlForExpiryEdit(true, 0, 5)).toBe(5);
-    expect(computeTtlForExpiryEdit(true, -1, 5)).toBe(5);
+    expect(computeTtlForExpiryEdit(0, 5)).toBe(5);
+    expect(computeTtlForExpiryEdit(-1, 5)).toBe(5);
   });
 
   it("uses the live positive countdown and preserves non-expiring server states", () => {
-    expect(computeTtlForExpiryEdit(true, 3, 10)).toBe(3);
-    expect(computeTtlForExpiryEdit(false, 3, 10)).toBe(10);
-    expect(computeTtlForExpiryEdit(true, 0, -1)).toBe(-1);
-    expect(computeTtlForExpiryEdit(true, 0, -2)).toBe(-2);
+    expect(computeTtlForExpiryEdit(3, 10)).toBe(3);
+    expect(computeTtlForExpiryEdit(0, -1)).toBe(-1);
+    expect(computeTtlForExpiryEdit(0, -2)).toBe(-2);
   });
 });

@@ -21,6 +21,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     confirmDangerousSqlExecution: true,
     continueOnErrorOnBatch: false,
     confirmUnsavedSqlClose: true,
+    savedSqlOpenTargetMode: "saved",
     objectBrowserViewMode: "list",
     sqlVariableSyntaxOverrides: {},
     tabLayout: "scroll",
@@ -35,6 +36,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the table-open page size", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableOpenPageSize");
+  });
+
+  it("includes the saved SQL open target mode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("savedSqlOpenTargetMode");
   });
 });
 
@@ -53,6 +58,10 @@ describe("editorSettingsDraftFromSettings", () => {
     const settings = makeSettings();
     delete (settings as Partial<EditorSettings>).tableOpenPageSize;
     expect(editorSettingsDraftFromSettings(settings).tableOpenPageSize).toBe(100);
+  });
+
+  it("maps the saved SQL open target mode", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ savedSqlOpenTargetMode: "current" })).savedSqlOpenTargetMode).toBe("current");
   });
 });
 
@@ -94,6 +103,14 @@ describe("editorSettingsDraftChanged", () => {
     draft.tableOpenPageSize = Number.NaN;
     expect(editorSettingsDraftChanged(draft, base)).toBe(false);
   });
+
+  it("detects a saved SQL open target change", () => {
+    const settings = makeSettings({ savedSqlOpenTargetMode: "saved" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.savedSqlOpenTargetMode = "current";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
 });
 
 describe("editorSettingsPatchFromDraft", () => {
@@ -120,6 +137,14 @@ describe("editorSettingsPatchFromDraft", () => {
     const base = editorSettingsDraftFromSettings(settings);
     draft.tableOpenPageSize = 200000.9;
     expect(editorSettingsPatchFromDraft(draft, base).tableOpenPageSize).toBe(100000);
+  });
+
+  it("includes the saved SQL open target when changed", () => {
+    const settings = makeSettings({ savedSqlOpenTargetMode: "saved" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.savedSqlOpenTargetMode = "current";
+    expect(editorSettingsPatchFromDraft(draft, base).savedSqlOpenTargetMode).toBe("current");
   });
 });
 

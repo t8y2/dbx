@@ -39,12 +39,6 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
   {
-    name: "XLSX row limit",
-    message: "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.",
-    key: "exportProgress.xlsxRowLimit",
-    params: { limit: "1,048,575" },
-  },
-  {
     name: "streaming export unsupported",
     message: "Streaming export is unsupported for this query. Simplify it or use a supported driver.",
     key: "exportProgress.streamingUnsupported",
@@ -172,7 +166,6 @@ describe("backend error wording is pinned to the Rust sources", () => {
   const rust = (path: string) => readFileSync(new URL(`../../../../../${path}`, import.meta.url), "utf8");
 
   test.each([
-    ["crates/dbx-core/src/query_result_export.rs", "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result."],
     ["crates/dbx-core/src/query_result_export.rs", "Streaming export is unsupported for this query. Simplify it or use a supported driver."],
     ["crates/dbx-core/src/query_result_export.rs", "Streaming export needs a result-set session, but this driver returned no session_id."],
     ["crates/dbx-core/src/agent_service.rs", "Failed to remove the old JRE directory: "],

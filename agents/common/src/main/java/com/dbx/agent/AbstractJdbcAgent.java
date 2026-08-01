@@ -29,6 +29,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     private boolean requestActive;
     private boolean leasePinnedAtRequestStart;
     private boolean sessionAffinity;
+    private boolean pooledConnectionPoisoned;
 
     @Override
     public final Connection getConnection() {
@@ -47,6 +48,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             sessionAffinity = false;
             requestActive = false;
             leasePinnedAtRequestStart = false;
+            pooledConnectionPoisoned = false;
             loadDriver(params);
             configuredDatabase = params.getDatabase();
             connectParams = params;
@@ -256,6 +258,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             sessionAffinity = false;
             requestActive = false;
             leasePinnedAtRequestStart = false;
+            pooledConnectionPoisoned = false;
             identifierQuote = "";
         });
     }
@@ -271,24 +274,54 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return poolRegistry != null;
     }
 
-    final synchronized void beginPooledRequest() throws Exception {
-        if (poolRegistry == null) {
-            return;
-        }
-        if (connectParams == null) {
-            throw new IllegalStateException("Not connected");
-        }
-        requestActive = true;
-        leasePinnedAtRequestStart = pooledLease != null;
-        if (pooledLease == null) {
-            try {
-                pooledLease = borrowPooledConnection();
-            } catch (Exception error) {
-                requestActive = false;
-                throw error;
+    final synchronized boolean quarantinePooledConnection() {
+        pooledConnectionPoisoned = true;
+        return requestActive && pooledLease != null && pooledLease.quarantine();
+    }
+
+    final void beginPooledRequest() throws Exception {
+        ConnectParams params;
+        String identity;
+        JdbcConnectionPoolRegistry registry;
+        synchronized (this) {
+            if (poolRegistry == null) {
+                return;
             }
+            if (connectParams == null || poolIdentity == null) {
+                throw new IllegalStateException("Not connected");
+            }
+            requestActive = true;
+            leasePinnedAtRequestStart = pooledLease != null;
+            if (pooledLease != null) {
+                connection = pooledLease.connection();
+                return;
+            }
+            params = connectParams;
+            identity = poolIdentity;
+            registry = poolRegistry;
         }
-        connection = pooledLease.connection();
+
+        JdbcConnectionPoolRegistry.Lease borrowed;
+        try {
+            borrowed = borrowPooledConnection(registry, identity, params);
+        } catch (Exception error) {
+            synchronized (this) {
+                requestActive = false;
+                leasePinnedAtRequestStart = false;
+            }
+            throw error;
+        }
+
+        synchronized (this) {
+            if (pooledConnectionPoisoned) {
+                requestActive = false;
+                leasePinnedAtRequestStart = false;
+                borrowed.evict();
+                throw new IllegalStateException("JDBC Session was quarantined while waiting for a connection");
+            }
+            pooledLease = borrowed;
+            connection = borrowed.connection();
+        }
     }
 
     final synchronized void finishPooledRequest(
@@ -301,6 +334,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             return;
         }
         requestActive = false;
+        if (pooledConnectionPoisoned) {
+            releasePooledConnection(true);
+            return;
+        }
         if (succeeded && requiresSessionAffinity) {
             sessionAffinity = true;
             JdbcSchemaSwitcher.forget(connection);
@@ -322,7 +359,14 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     final synchronized void releaseIdlePooledConnection(JdbcExecutor executor) {
-        if (poolRegistry == null || requestActive || sessionAffinity || pooledLease == null) {
+        if (poolRegistry == null || requestActive || pooledLease == null) {
+            return;
+        }
+        if (pooledConnectionPoisoned) {
+            releasePooledConnection(true);
+            return;
+        }
+        if (sessionAffinity) {
             return;
         }
         if (executor.hasOpenSessions() || executor.hasActiveStatements()) {
@@ -489,18 +533,20 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     private Connection openInitializedConnection(ConnectParams params) throws Exception {
         Connection opened = openConnection(params);
-        boolean initialized = false;
         try {
             afterPhysicalConnect(params, opened);
-            initialized = true;
             return opened;
-        } finally {
-            if (!initialized) {
-                try {
-                    opened.close();
-                } catch (Exception ignored) {
-                }
+        } catch (Exception error) {
+            try {
+                opened.close();
+            } catch (Exception closeError) {
+                error.addSuppressed(closeError);
+                throw AgentRpcError.resource(
+                    "close",
+                    new JdbcConnectionPoolRegistry.PhysicalConnectionStateUnknownException(error)
+                );
             }
+            throw error;
         }
     }
 
@@ -509,12 +555,24 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         if (params == null || poolIdentity == null || poolRegistry == null) {
             throw new IllegalStateException("Not connected");
         }
-        return poolRegistry.borrow(poolIdentity, () -> openInitializedConnection(params));
+        return borrowPooledConnection(poolRegistry, poolIdentity, params);
+    }
+
+    private JdbcConnectionPoolRegistry.Lease borrowPooledConnection(
+        JdbcConnectionPoolRegistry registry,
+        String identity,
+        ConnectParams params
+    ) throws Exception {
+        return registry.borrow(
+            identity,
+            JdbcSessionRole.from(params.getSessionRole()),
+            () -> openInitializedConnection(params)
+        );
     }
 
     private void closeCurrentConnection() throws Exception {
         if (pooledLease != null) {
-            boolean evict = sessionAffinity || !preparePooledConnectionForReturn();
+            boolean evict = pooledConnectionPoisoned || sessionAffinity || !preparePooledConnectionForReturn();
             releasePooledConnection(evict);
         } else if (connection != null) {
             connection.close();

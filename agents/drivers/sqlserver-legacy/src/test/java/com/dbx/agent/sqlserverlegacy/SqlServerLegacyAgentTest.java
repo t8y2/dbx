@@ -9,6 +9,17 @@ import java.sql.SQLException;
 
 class SqlServerLegacyAgentTest {
     @Test
+    void metadataSchemaKeepsExplicitSchemaAndResolvesDefault() {
+        Assertions.assertEquals("sales", SqlServerLegacyAgent.normalizeMetadataSchema("sales", "dbo"));
+        Assertions.assertEquals("tenant_owner", SqlServerLegacyAgent.normalizeMetadataSchema("", "tenant_owner"));
+        Assertions.assertEquals("dbo", SqlServerLegacyAgent.normalizeMetadataSchema(null, "  "));
+        Assertions.assertEquals(
+            "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name",
+            SqlServerLegacyAgent.unqualifiedObjectSchemaSql()
+        );
+    }
+
+    @Test
     void constructorRelaxesLegacyTlsPolicyBeforeDriverLoading() {
         String key = "jdk.tls.disabledAlgorithms";
         String original = Security.getProperty(key);

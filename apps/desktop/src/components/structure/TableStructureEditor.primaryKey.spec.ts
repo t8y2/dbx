@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => ({
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
   updateEditorSettings: vi.fn(),
+  loadObjectDdl: vi.fn(),
+  invalidateObjectDdl: vi.fn(),
+  loadObjectMetadataFacet: vi.fn(),
+  invalidateTableMetadataCache: vi.fn(),
 }));
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -184,6 +188,12 @@ vi.mock("@/stores/settingsStore", () => ({
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false } }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({ createShikiSqlHighlighter: vi.fn(async () => (sql: string) => sql) }));
+vi.mock("@/lib/metadata/objectDdlCache", () => ({
+  loadObjectDdl: mocks.loadObjectDdl,
+  invalidateObjectDdl: mocks.invalidateObjectDdl,
+}));
+vi.mock("@/lib/metadata/objectMetadataCache", () => ({ loadObjectMetadataFacet: mocks.loadObjectMetadataFacet }));
+vi.mock("@/lib/metadata/tableMetadataCache", () => ({ invalidateTableMetadataCache: mocks.invalidateTableMetadataCache }));
 vi.mock("@/lib/backend/api", () => ({
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
@@ -254,6 +264,33 @@ async function mountEditor(databaseType: "dameng" | "oracle", isPrimaryKey = fal
   return root;
 }
 
+async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl") {
+  mocks.connection.db_type = "postgres";
+  mocks.connection.name = "postgres";
+  mocks.connection.driver_label = "postgres";
+  mocks.ensureConnected.mockResolvedValue(undefined);
+  mocks.listDataTypes.mockResolvedValue([]);
+  mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
+  mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
+  mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({ value: facet === "comment" ? "" : [], cacheStatus: "remote" }));
+
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(TableStructureEditor, {
+    connectionId: mocks.connection.id,
+    database: "test",
+    schema: "public",
+    tableName: "users",
+    initialTab,
+  });
+  mountedApps.push(app);
+  app.mount(root);
+  await nextTick();
+  await Promise.resolve();
+  await nextTick();
+  return root;
+}
+
 function columnCheckbox(root: HTMLElement, header: string): HTMLInputElement {
   const headerIndex = Array.from(root.querySelectorAll("thead th")).findIndex((cell) => cell.textContent?.trim() === header);
   if (headerIndex < 0) throw new Error(`Missing ${header} column`);
@@ -266,6 +303,9 @@ function columnCheckbox(root: HTMLElement, header: string): HTMLInputElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
+  mocks.invalidateObjectDdl.mockResolvedValue(undefined);
+  mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
 });
 
 afterEach(() => {
@@ -320,5 +360,27 @@ describe("TableStructureEditor primary key editing", () => {
         columns: [expect.objectContaining({ isPrimaryKey: false })],
       }),
     );
+  });
+});
+
+describe("TableStructureEditor metadata loading", () => {
+  it("opens the initial DDL tab without starting structure metadata loads", async () => {
+    await mountLoadingEditor("ddl");
+
+    await vi.waitFor(() => expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1));
+    expect(mocks.loadObjectMetadataFacet).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["columns", ["columns", "comment"]],
+    ["indexes", ["columns", "indexes", "comment"]],
+    ["foreignKeys", ["columns", "foreign-keys", "comment"]],
+    ["triggers", ["triggers", "comment"]],
+  ] as const)("loads only the required facets for the initial %s tab", async (initialTab, expectedFacets) => {
+    await mountLoadingEditor(initialTab);
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet).toHaveBeenCalledTimes(expectedFacets.length));
+    expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(expectedFacets);
+    expect(mocks.loadObjectDdl).not.toHaveBeenCalled();
   });
 });

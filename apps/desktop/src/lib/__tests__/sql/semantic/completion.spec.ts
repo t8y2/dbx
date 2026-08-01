@@ -134,6 +134,56 @@ describe("semantic SQL completion candidates", () => {
     expect(context.qualifierParts).toEqual(["DatabaseB", "OUT", "orders"]);
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["target_marker"]);
   });
+
+  it("completes SQL Server tables from the database dbo schema after a double dot", () => {
+    const { context, items } = semanticCompletion(
+      "SELECT * FROM BarDB..|",
+      {
+        tables: [{ name: "orders", database: "BarDB", schema: "dbo", type: "table" }],
+      },
+      { databaseType: "sqlserver", dialect: "sqlserver" },
+    );
+
+    expect(context).toMatchObject({
+      prefix: "",
+      qualifier: "BarDB.dbo",
+      qualifierParts: ["BarDB", "dbo"],
+    });
+    expect(items.filter((item) => item.type === "table")).toEqual([expect.objectContaining({ label: "orders", apply: "orders" })]);
+  });
+
+  it("completes SQL Server alias columns from the exact double-dot metadata target", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["FooDB.dbo.orders", [{ name: "wrong_database", table: "orders", schema: "dbo" }]],
+      ["BarDB.sales.orders", [{ name: "wrong_schema", table: "orders", schema: "sales" }]],
+      ["BarDB.dbo.orders", [{ name: "target_marker", table: "orders", schema: "dbo" }]],
+    ]);
+    const { model, context, items } = semanticCompletion("SELECT * FROM BarDB..orders AS o WHERE o.|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(model.rowSources).toEqual([
+      expect.objectContaining({
+        name: "orders",
+        qualifierParts: ["BarDB", "dbo"],
+        alias: "o",
+        metadataTarget: { database: "BarDB", schema: "dbo", table: "orders" },
+      }),
+    ]);
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: "orders", database: "BarDB", schema: "dbo", alias: "o" })]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["target_marker"]);
+  });
+
+  it("completes unqualified SQL Server columns from the exact double-dot metadata target", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["FooDB.dbo.orders", [{ name: "wrong_database", table: "orders", schema: "dbo" }]],
+      ["BarDB.sales.orders", [{ name: "wrong_schema", table: "orders", schema: "sales" }]],
+      ["BarDB.dbo.orders", [{ name: "target_marker", table: "orders", schema: "dbo" }]],
+    ]);
+    const { context, items } = semanticCompletion("SELECT * FROM BarDB..orders WHERE tar|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: "orders", database: "BarDB", schema: "dbo" })]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["target_marker"]);
+  });
+
   it.each([
     ["MySQL ORDER BY", "SELECT * FROM t LIMIT 100 or|", "mysql", "mysql", "ORDER BY"],
     ["PostgreSQL ON CONFLICT", "INSERT INTO t VALUES (1) on|", "postgres", "postgres", "ON CONFLICT"],
@@ -418,5 +468,21 @@ WHERE a.id = b.fk_kpi_set_score_id`,
 
     expect(context.suggestTables).toBe(true);
     expect(items.filter((item) => item.type === "table").map((item) => item.label)).toEqual(["orders"]);
+  });
+
+  it.each([
+    ["PostgreSQL quoted table", 'SELECT * FROM "users" wh|', "postgres", "postgres"],
+    ["PostgreSQL quoted schema.table", 'SELECT * FROM "public"."users" wh|', "postgres", "postgres"],
+    ["PostgreSQL quoted keyword table", 'SELECT * FROM "from" wh|', "postgres", "postgres"],
+    ["PostgreSQL quoted schema.keyword table", 'SELECT * FROM "public"."from" wh|', "postgres", "postgres"],
+    ["MySQL backtick table", "SELECT * FROM `users` wh|", "mysql", "mysql"],
+    ["MySQL backtick keyword table", "SELECT * FROM `join` wh|", "mysql", "mysql"],
+    ["SQL Server bracket table", "SELECT * FROM [users] wh|", "sqlserver", "sqlserver"],
+    ["SQL Server bracket keyword table", "SELECT * FROM [update] wh|", "sqlserver", "sqlserver"],
+  ] as const)("offers WHERE keyword completion after a quoted prefilled table (%s)", (_label, markedSql, databaseType, dialect) => {
+    const { context, items } = semanticCompletion(markedSql, {}, { databaseType, dialect });
+
+    expect(context.suggestKeywords).toBe(true);
+    expect(items.filter((item) => item.type === "keyword").map((item) => item.label)).toEqual(expect.arrayContaining(["WHERE", "WHEN", "WITH"]));
   });
 });

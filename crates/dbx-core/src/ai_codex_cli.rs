@@ -984,6 +984,7 @@ pub async fn run_codex_agent(
 
 #[cfg(test)]
 mod tests {
+    use super::codex_process_env_with_system_proxy;
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{

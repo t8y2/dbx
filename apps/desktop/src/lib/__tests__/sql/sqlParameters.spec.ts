@@ -253,6 +253,66 @@ describe("extractSqlParameters", () => {
     expect(substituteSqlParameters(sql, { real: { kind: "number", value: "7" } }, { databaseType: "doris" })).toBe("create table `broken` (value struct<field:int,\nselect 7;");
   });
 
+  it("ignores DuckDB compact struct literal field separators", () => {
+    const sql = `
+      select {
+        'compact':column,
+        'spaced' : other_column,
+        bare_key:third_column,
+        'nested':{'inner':nested_column},
+        'listed':[{'item':list_column}],
+        'mapped':map(['entry'], [{'value':mapped_column}])
+      }
+      from t
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "duckdb" })).toBe(sql);
+  });
+
+  it("keeps real DuckDB named placeholders in struct values and outside structs", () => {
+    const sql = "select {'key': :value, 'nested': {'inner':coalesce(:nested_value, fallback_column)}}, :outside from t";
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["value", "nested_value", "outside"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          value: { kind: "number", value: "1" },
+          nested_value: { kind: "number", value: "2" },
+          outside: { kind: "number", value: "3" },
+        },
+        { databaseType: "duckdb" },
+      ),
+    ).toBe("select {'key': 1, 'nested': {'inner':coalesce(2, fallback_column)}}, 3 from t");
+  });
+
+  it("does not globally hide DuckDB named placeholders inside braces", () => {
+    const sql = "select {'key':column}, {fn coalesce(:inside, 1)}, :outside";
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["inside", "outside"]);
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual(["column", "inside", "outside"]);
+  });
+
+  it("ignores DuckDB struct separators around comments and quoted values", () => {
+    const sql = `
+      select {
+        'key' /* field separator */ :column,
+        'text':'literal :ignored',
+        'call':coalesce(:value, {'inner':inner_column})
+      }, :outside
+      -- {'comment':comment_column}
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["value", "outside"]);
+  });
+
+  it("falls back conservatively for an unterminated DuckDB struct literal", () => {
+    const sql = "select {'key':column, 'nested':{'inner':nested_column}\nunion all select :later";
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["column", "nested_column", "later"]);
+  });
+
   it("ignores Doris VARIANT field type separators", () => {
     const sql = `
       create table \`events\` (

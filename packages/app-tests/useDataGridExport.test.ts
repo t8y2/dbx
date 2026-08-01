@@ -28,7 +28,7 @@ const dialogMock = vi.hoisted(() => ({ save: vi.fn() }));
 const toastMock = vi.hoisted(() => vi.fn());
 const translateMock = vi.hoisted(() =>
   vi.fn((key: string, params?: Record<string, unknown>) => {
-    if (key === "exportProgress.xlsxRowLimit") return `XLSX 最多支持 ${params?.limit} 行数据，请使用 CSV 导出完整结果。`;
+    if (key === "exportProgress.streamingUnsupported") return "当前查询暂不支持流式导出，请简化查询或使用受支持的驱动。";
     if (key === "grid.exportFailed") return `导出失败：${params?.message}`;
     return key;
   }),
@@ -397,10 +397,28 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
 });
 
-test("streaming query result export translates terminal backend errors before the toast", async () => {
-  const rawMessage = "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.";
+test("MongoDB full query result CSV export uses the full-result fallback", async () => {
+  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb" });
+  fullExportResult.mockResolvedValueOnce({
+    columns: ["_id", "name"],
+    rows: [["1", "Ada"]],
+    affected_rows: 1,
+    execution_time_ms: 1,
+  });
+
+  await composable.exportCsv();
+
+  assert.equal(queryResultExportRequest.mock.calls.length, 0);
+  assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
+  assert.equal(fullExportResult.mock.calls.length, 1);
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][1], ["_id", "name"]);
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["1", "Ada"]]);
+});
+
+test("streaming query result export translates streaming unsupported error before the toast", async () => {
+  const rawMessage = "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
   apiMock.startQueryResultExport.mockImplementationOnce(async (request, onProgress) => {
-    onProgress({ exportId: request.exportId, tableName: "", rowsExported: 0, totalRows: 1_048_576, status: "Error", errorMessage: rawMessage });
+    onProgress({ exportId: request.exportId, tableName: "", rowsExported: 0, totalRows: 0, status: "Error", errorMessage: rawMessage });
     throw new Error(rawMessage);
   });
   const { composable, exportProgressState } = buildExportHarness();
@@ -408,7 +426,7 @@ test("streaming query result export translates terminal backend errors before th
   await composable.exportXlsx();
 
   assert.equal(exportProgressState.value.errorMessage, rawMessage);
-  assert.deepEqual(toastMock.mock.calls.at(-1), ["导出失败：XLSX 最多支持 1,048,575 行数据，请使用 CSV 导出完整结果。", 5000]);
+  assert.deepEqual(toastMock.mock.calls.at(-1), ["导出失败：当前查询暂不支持流式导出，请简化查询或使用受支持的驱动。", 5000]);
 });
 
 test("complete local query result XLSX export does not re-execute the query", async () => {

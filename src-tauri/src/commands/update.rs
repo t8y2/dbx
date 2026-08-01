@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -19,6 +20,8 @@ const R2_LATEST_RELEASE_DOWNLOAD_PREFIX: &str = "https://dl.dbxio.com/releases/l
 const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
+const DOWNLOAD_CANCELED_ERROR: &str = "Download canceled by user.";
+const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PORTABLE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PORTABLE_SIGNATURE_BYTES: usize = 64 * 1024;
 const IS_WINDOWS_7_TARGET: bool = cfg!(target_vendor = "win7");
@@ -37,7 +40,7 @@ pub struct UpdateDownloadProgress {
 }
 
 enum PendingUpdate {
-    Downloading,
+    Downloading(Arc<DownloadCancellation>),
     Installing,
     Ready(ReadyUpdate),
 }
@@ -53,30 +56,86 @@ struct PortableAssetCandidate {
     signature_url: String,
 }
 
+#[derive(Debug)]
+struct DownloadCancellation {
+    canceled: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for DownloadCancellation {
+    fn default() -> Self {
+        let (canceled, _) = tokio::sync::watch::channel(false);
+        Self { canceled }
+    }
+}
+
+impl DownloadCancellation {
+    fn cancel(&self) {
+        self.canceled.send_replace(true);
+    }
+
+    fn is_canceled(&self) -> bool {
+        *self.canceled.borrow()
+    }
+
+    async fn canceled(&self) {
+        let mut canceled = self.canceled.subscribe();
+        if *canceled.borrow() {
+            return;
+        }
+        while canceled.changed().await.is_ok() {
+            if *canceled.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct PendingUpdateState {
     pending: Mutex<Option<PendingUpdate>>,
 }
 
 impl PendingUpdateState {
-    fn begin_download(&self) -> Result<(), String> {
+    fn begin_download(&self) -> Result<Arc<DownloadCancellation>, String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
         if pending.is_some() {
             return Err("An update is already downloading or ready to install.".to_string());
         }
-        *pending = Some(PendingUpdate::Downloading);
-        Ok(())
+        let cancellation = Arc::new(DownloadCancellation::default());
+        *pending = Some(PendingUpdate::Downloading(Arc::clone(&cancellation)));
+        Ok(cancellation)
     }
 
-    fn finish_download(&self, update: ReadyUpdate) -> Result<(), String> {
+    fn finish_download(&self, cancellation: &Arc<DownloadCancellation>, update: ReadyUpdate) -> Result<(), String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+        let is_current = matches!(
+            pending.as_ref(),
+            Some(PendingUpdate::Downloading(current))
+                if Arc::ptr_eq(current, cancellation) && !cancellation.is_canceled()
+        );
+        if !is_current {
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
         *pending = Some(PendingUpdate::Ready(update));
         Ok(())
     }
 
-    fn cancel_download(&self) {
+    fn finish_failed_download(&self, cancellation: &Arc<DownloadCancellation>) -> Result<(), String> {
+        let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+        let is_current = matches!(
+            pending.as_ref(),
+            Some(PendingUpdate::Downloading(current)) if Arc::ptr_eq(current, cancellation)
+        );
+        if is_current {
+            *pending = None;
+        }
+        Ok(())
+    }
+
+    pub fn cancel_download(&self) {
         if let Ok(mut pending) = self.pending.lock() {
-            if matches!(pending.as_ref(), Some(PendingUpdate::Downloading)) {
+            if let Some(PendingUpdate::Downloading(cancellation)) = pending.as_ref() {
+                cancellation.cancel();
                 *pending = None;
             }
         }
@@ -153,18 +212,6 @@ impl UpdateDownloadSource {
         }
     }
 
-    fn r2_fallback_url(&self, url: &str) -> Result<Option<String>, String> {
-        if matches!(self, Self::Official) || url.starts_with(R2_LATEST_RELEASE_DOWNLOAD_PREFIX) {
-            return Ok(None);
-        }
-        let filename = url
-            .rsplit('/')
-            .next()
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| format!("Unsupported update download URL for {} source: {url}", self.label()))?;
-        Ok(Some(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}")))
-    }
-
     fn portable_asset_candidates(
         &self,
         latest_version: &str,
@@ -187,6 +234,55 @@ impl UpdateDownloadSource {
             .into_iter()
             .map(|archive_url| PortableAssetCandidate { signature_url: format!("{archive_url}.sig"), archive_url })
             .collect())
+    }
+
+    fn installer_asset_candidates(&self, download_url: &str, latest_version: Option<&str>) -> Vec<String> {
+        let filename = download_url.rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or("");
+
+        let tag = latest_version.map(tag_version).unwrap_or_else(|| {
+            if let Some(pos) = download_url.find("/releases/download/") {
+                let rest = &download_url[pos + "/releases/download/".len()..];
+                if let Some(tag_end) = rest.find('/') {
+                    return rest[..tag_end].to_string();
+                }
+            }
+            "".to_string()
+        });
+
+        let raw_candidates = match self {
+            Self::Official => {
+                let mut urls = Vec::new();
+                if !filename.is_empty() {
+                    urls.push(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"));
+                }
+                urls.push(download_url.to_string());
+                if !tag.is_empty() && !filename.is_empty() {
+                    urls.push(format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"));
+                }
+                urls
+            }
+            Self::Cnb => {
+                let mut urls = Vec::new();
+                if let Ok(Some(rewritten)) = self.rewrite_download_url(download_url) {
+                    urls.push(rewritten);
+                } else if !tag.is_empty() && !filename.is_empty() {
+                    urls.push(format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"));
+                }
+                if !filename.is_empty() {
+                    urls.push(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"));
+                }
+                urls.push(download_url.to_string());
+                urls
+            }
+        };
+
+        let mut unique = Vec::new();
+        for url in raw_candidates {
+            if !unique.contains(&url) {
+                unique.push(url);
+            }
+        }
+        unique
     }
 }
 
@@ -229,6 +325,11 @@ pub async fn get_system_proxy_url() -> Option<String> {
 }
 
 #[tauri::command]
+pub fn cancel_update_download(state: tauri::State<'_, PendingUpdateState>) {
+    state.cancel_download();
+}
+
+#[tauri::command]
 pub async fn download_update(
     app: AppHandle,
     state: tauri::State<'_, PendingUpdateState>,
@@ -246,20 +347,20 @@ pub async fn download_update(
     } else {
         None
     };
-    state.begin_download()?;
+    let cancellation = state.begin_download()?;
     let result = if let Some(version) = portable_version {
-        download_portable_update_inner(&app, &source, &version)
+        download_portable_update_inner(&app, &source, &version, &cancellation)
             .await
             .map(|archive| ReadyUpdate::Portable { archive, version })
     } else {
-        download_update_inner(&app, &source, latest_version.as_deref())
+        download_update_inner(&app, &source, latest_version.as_deref(), &cancellation)
             .await
             .map(|(update, bytes)| ReadyUpdate::Installer { update: Box::new(update), bytes })
     };
     match result {
-        Ok(update) => state.finish_download(update),
+        Ok(update) => state.finish_download(&cancellation, update),
         Err(error) => {
-            state.cancel_download();
+            state.finish_failed_download(&cancellation)?;
             Err(error)
         }
     }
@@ -269,6 +370,7 @@ async fn download_update_inner(
     app: &AppHandle,
     source: &UpdateDownloadSource,
     latest_version: Option<&str>,
+    cancellation: &Arc<DownloadCancellation>,
 ) -> Result<(Update, Vec<u8>), String> {
     let endpoint_urls = source.endpoints(latest_version)?;
     println!("[DBX updater] checking from {} endpoints: {}", source.label(), endpoint_urls.join(", "));
@@ -286,46 +388,89 @@ async fn download_update_inner(
 
     let updater = builder.build().map_err(|e| format!("Failed to create updater: {e}"))?;
     let update = updater.check().await.map_err(|e| format!("Failed to check updates: {e}"))?;
-    let Some(mut update) = update else {
+    let Some(update) = update else {
         return Err("No update available.".to_string());
     };
-    if let Some(download_url) = source.rewrite_download_url(update.download_url.as_str())? {
-        update.download_url = download_url.parse().map_err(|e| format!("Invalid CNB update download URL: {e}"))?;
-    }
-    if !update_url_is_available(update.download_url.as_str()).await {
-        if let Some(fallback_url) = source.r2_fallback_url(update.download_url.as_str())? {
-            println!("[DBX updater] {} asset unavailable; falling back to R2: {fallback_url}", source.label());
-            update.download_url = fallback_url.parse().map_err(|e| format!("Invalid R2 update download URL: {e}"))?;
+
+    let candidates = source.installer_asset_candidates(update.download_url.as_str(), latest_version);
+    println!("[DBX updater] candidates for installer download: {:?}", candidates);
+
+    let mut failures = Vec::new();
+
+    for candidate_url in candidates {
+        if cancellation.is_canceled() {
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
+        println!("[DBX updater] downloading installer update from {candidate_url}");
+        let parsed_url = match reqwest::Url::parse(&candidate_url) {
+            Ok(url) => url,
+            Err(e) => {
+                failures.push(format!("{candidate_url}: Invalid URL ({e})"));
+                continue;
+            }
+        };
+
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let finished_downloaded = Arc::clone(&downloaded);
+        let progress_app_chunk = app.clone();
+        let progress_app_finish = app.clone();
+
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::channel::<()>(16);
+
+        let download_result = {
+            let mut candidate_update = update.clone();
+            candidate_update.download_url = parsed_url.clone();
+
+            let download_fut = async move {
+                candidate_update
+                    .download(
+                        move |chunk_len, total| {
+                            let downloaded = downloaded
+                                .fetch_add(chunk_len as u64, Ordering::Relaxed)
+                                .saturating_add(chunk_len as u64);
+                            let _ = progress_app_chunk
+                                .emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded, total });
+                            let _ = progress_tx.try_send(());
+                        },
+                        move || {
+                            let downloaded = finished_downloaded.load(Ordering::Relaxed);
+                            let _ = progress_app_finish.emit(
+                                UPDATE_DOWNLOAD_PROGRESS_EVENT,
+                                UpdateDownloadProgress { downloaded, total: Some(downloaded) },
+                            );
+                        },
+                    )
+                    .await
+                    .map_err(|error| format!("Failed to download update: {error}"))
+            };
+
+            wait_for_progressing_download(download_fut, progress_rx, cancellation, DOWNLOAD_STALL_TIMEOUT).await
+        };
+
+        match download_result {
+            Ok(bytes) => {
+                let mut ready_update = update.clone();
+                ready_update.download_url = parsed_url;
+                return Ok((ready_update, bytes));
+            }
+            Err(error) => {
+                if cancellation.is_canceled() || error.contains("canceled") {
+                    return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+                }
+                println!("[DBX updater] installer candidate failed ({candidate_url}): {error}");
+                failures.push(format!("{candidate_url}: {error}"));
+            }
         }
     }
-    println!("[DBX updater] downloading from {} URL: {}", source.label(), update.download_url);
 
-    let downloaded = Arc::new(AtomicU64::new(0));
-    let finished_downloaded = Arc::clone(&downloaded);
-    let bytes = update
-        .download(
-            |chunk_len, total| {
-                let downloaded =
-                    downloaded.fetch_add(chunk_len as u64, Ordering::Relaxed).saturating_add(chunk_len as u64);
-                let _ = app.emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded, total });
-            },
-            || {
-                let downloaded = finished_downloaded.load(Ordering::Relaxed);
-                let _ = app.emit(
-                    UPDATE_DOWNLOAD_PROGRESS_EVENT,
-                    UpdateDownloadProgress { downloaded, total: Some(downloaded) },
-                );
-            },
-        )
-        .await
-        .map_err(|e| format!("Failed to download update: {e}"))?;
-    Ok((update, bytes))
+    Err(format!("Failed to download update after trying all available mirrors. {}", failures.join("; ")))
 }
 
 async fn download_portable_update_inner(
     app: &AppHandle,
     source: &UpdateDownloadSource,
     latest_version: &Version,
+    cancellation: &Arc<DownloadCancellation>,
 ) -> Result<Vec<u8>, String> {
     let latest_version_text = latest_version.to_string();
     let candidates = source.portable_asset_candidates(&latest_version_text, std::env::consts::ARCH)?;
@@ -333,14 +478,29 @@ async fn download_portable_update_inner(
     let mut failures = Vec::new();
 
     for candidate in candidates {
+        if cancellation.is_canceled() {
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
         println!("[DBX updater] downloading portable update from {}", candidate.archive_url);
         let result = async {
-            let signature =
-                download_bounded_bytes(&client, &candidate.signature_url, MAX_PORTABLE_SIGNATURE_BYTES, None).await?;
+            let signature = download_bounded_bytes(
+                &client,
+                &candidate.signature_url,
+                MAX_PORTABLE_SIGNATURE_BYTES,
+                None,
+                cancellation,
+            )
+            .await?;
             let signature = String::from_utf8(signature)
                 .map_err(|error| format!("Portable update signature is not valid UTF-8: {error}"))?;
-            let archive =
-                download_bounded_bytes(&client, &candidate.archive_url, MAX_PORTABLE_ARCHIVE_BYTES, Some(app)).await?;
+            let archive = download_bounded_bytes(
+                &client,
+                &candidate.archive_url,
+                MAX_PORTABLE_ARCHIVE_BYTES,
+                Some(app),
+                cancellation,
+            )
+            .await?;
             update_portable::verify_portable_archive(&archive, &signature, latest_version, std::env::consts::ARCH)?;
             Ok::<Vec<u8>, String>(archive)
         }
@@ -349,6 +509,9 @@ async fn download_portable_update_inner(
         match result {
             Ok(archive) => return Ok(archive),
             Err(error) => {
+                if cancellation.is_canceled() || error.contains("canceled") {
+                    return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+                }
                 println!("[DBX updater] portable update candidate failed: {error}");
                 failures.push(format!("{}: {error}", candidate.archive_url));
             }
@@ -359,8 +522,10 @@ async fn download_portable_update_inner(
 }
 
 fn portable_update_http_client() -> Result<reqwest::Client, String> {
-    let mut builder =
-        reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(15 * 60));
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(15 * 60));
     if let Some(proxy_url) = dbx_core::update::system_proxy_url() {
         let proxy = reqwest::Proxy::all(&proxy_url).map_err(|error| format!("Invalid system proxy URL: {error}"))?;
         builder = builder.proxy(proxy);
@@ -373,14 +538,26 @@ async fn download_bounded_bytes(
     url: &str,
     max_bytes: usize,
     progress_app: Option<&AppHandle>,
+    cancellation: &DownloadCancellation,
 ) -> Result<Vec<u8>, String> {
-    let mut response = client
-        .get(url)
-        .send()
-        .await
+    if cancellation.is_canceled() {
+        return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+    }
+
+    let request_fut = client.get(url).send();
+    let response_res = wait_for_download_step(
+        request_fut,
+        cancellation,
+        DOWNLOAD_STALL_TIMEOUT,
+        format!("Connection stalled while connecting to {url}"),
+    )
+    .await?;
+
+    let mut response = response_res
         .map_err(|error| format!("Failed to request {url}: {error}"))?
         .error_for_status()
         .map_err(|error| format!("Failed to download {url}: {error}"))?;
+
     let total = response.content_length();
     if total.is_some_and(|total| total > max_bytes as u64) {
         return Err(format!("Update asset exceeds the {max_bytes} byte limit."));
@@ -390,9 +567,27 @@ async fn download_bounded_bytes(
         let _ = app.emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded: 0, total });
     }
     let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(max_bytes as u64) as usize);
-    while let Some(chunk) =
-        response.chunk().await.map_err(|error| format!("Failed while downloading {url}: {error}"))?
-    {
+
+    loop {
+        if cancellation.is_canceled() {
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
+
+        let chunk_fut = response.chunk();
+        let chunk_res = wait_for_download_step(
+            chunk_fut,
+            cancellation,
+            DOWNLOAD_STALL_TIMEOUT,
+            format!("Download stalled: no data received for 15 seconds from {url}"),
+        )
+        .await?;
+
+        let chunk = match chunk_res {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => return Err(format!("Failed while downloading {url}: {error}")),
+        };
+
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(format!("Update asset exceeds the {max_bytes} byte limit."));
         }
@@ -403,6 +598,47 @@ async fn download_bounded_bytes(
         }
     }
     Ok(bytes)
+}
+
+async fn wait_for_progressing_download<T>(
+    download: impl Future<Output = Result<T, String>>,
+    mut progress: tokio::sync::mpsc::Receiver<()>,
+    cancellation: &DownloadCancellation,
+    stall_timeout: Duration,
+) -> Result<T, String> {
+    tokio::pin!(download);
+    let stall = tokio::time::sleep(stall_timeout);
+    tokio::pin!(stall);
+    let mut progress_open = true;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.canceled() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
+            result = &mut download => return result,
+            update = progress.recv(), if progress_open => {
+                if update.is_some() {
+                    stall.as_mut().reset(tokio::time::Instant::now() + stall_timeout);
+                } else {
+                    progress_open = false;
+                }
+            }
+            _ = &mut stall => return Err("Download stalled: no data received for 15 seconds".to_string()),
+        }
+    }
+}
+
+async fn wait_for_download_step<T>(
+    step: impl Future<Output = T>,
+    cancellation: &DownloadCancellation,
+    stall_timeout: Duration,
+    timeout_error: String,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = cancellation.canceled() => Err(DOWNLOAD_CANCELED_ERROR.to_string()),
+        result = tokio::time::timeout(stall_timeout, step) => result.map_err(|_| timeout_error),
+    }
 }
 
 #[tauri::command]
@@ -439,26 +675,15 @@ fn schedule_portable_update_exit(app: AppHandle) {
     });
 }
 
-async fn update_url_is_available(url: &str) -> bool {
-    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
-        Ok(client) => client,
-        Err(_) => return false,
-    };
-    // Request only the first byte because some release hosts do not implement HEAD consistently.
-    client
-        .get(url)
-        .header(reqwest::header::RANGE, "bytes=0-0")
-        .send()
-        .await
-        .is_ok_and(|response| response.status().is_success())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        requires_manual_update, tag_version, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX,
-        GITHUB_RELEASE_DOWNLOAD_PREFIX, OFFICIAL_UPDATE_ENDPOINTS, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
+        requires_manual_update, tag_version, wait_for_download_step, wait_for_progressing_download,
+        DownloadCancellation, PendingUpdateState, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX,
+        DOWNLOAD_CANCELED_ERROR, GITHUB_RELEASE_DOWNLOAD_PREFIX, OFFICIAL_UPDATE_ENDPOINTS,
+        R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
     };
+    use std::{future::pending, sync::Arc, time::Duration};
 
     #[test]
     fn all_windows_7_builds_require_manual_updates() {
@@ -505,14 +730,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_r2_fallback_for_mirror_asset() {
-        let fallback = UpdateDownloadSource::Cnb
-            .r2_fallback_url("https://cnb.cool/dbxio.com/dbx/-/releases/download/v0.5.44/DBX_0.5.44_x64.dmg")
-            .unwrap();
-        assert_eq!(fallback, Some(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.44_x64.dmg")));
-    }
-
-    #[test]
     fn builds_signed_official_portable_asset_candidates() {
         let candidates = UpdateDownloadSource::Official.portable_asset_candidates("0.5.64", "x86_64").unwrap();
         assert_eq!(candidates.len(), 2);
@@ -538,5 +755,97 @@ mod tests {
             candidates[1].archive_url,
             format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_arm64-portable.zip")
         );
+    }
+
+    #[test]
+    fn builds_installer_asset_candidates_for_cnb_source() {
+        let candidates = UpdateDownloadSource::Cnb.installer_asset_candidates(
+            "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg",
+            Some("0.5.64"),
+        );
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], "https://cnb.cool/dbxio.com/dbx/-/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg");
+        assert_eq!(candidates[1], format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_aarch64.dmg"));
+        assert_eq!(candidates[2], "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg");
+    }
+
+    #[test]
+    fn builds_installer_asset_candidates_for_official_source() {
+        let candidates = UpdateDownloadSource::Official.installer_asset_candidates(
+            "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg",
+            Some("0.5.64"),
+        );
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_aarch64.dmg"));
+        assert_eq!(candidates[1], "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg");
+        assert!(!candidates.iter().any(|url| url.contains("cnb.cool")));
+    }
+
+    #[test]
+    fn retry_uses_an_independent_cancellation_token() {
+        let state = PendingUpdateState::default();
+        let first = state.begin_download().unwrap();
+
+        state.cancel_download();
+        let second = state.begin_download().unwrap();
+
+        assert!(first.is_canceled());
+        assert!(!second.is_canceled());
+    }
+
+    #[test]
+    fn stale_attempt_cannot_clear_an_active_retry() {
+        let state = PendingUpdateState::default();
+        let first = state.begin_download().unwrap();
+        state.cancel_download();
+        let second = state.begin_download().unwrap();
+
+        state.finish_failed_download(&first).unwrap();
+
+        assert!(state.begin_download().is_err());
+        assert!(!second.is_canceled());
+    }
+
+    #[tokio::test]
+    async fn cancel_wakes_installer_download_without_waiting_for_stall_timeout() {
+        let cancellation = Arc::new(DownloadCancellation::default());
+        let task_cancellation = Arc::clone(&cancellation);
+        let (_progress_tx, progress_rx) = tokio::sync::mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            wait_for_progressing_download(
+                pending::<Result<(), String>>(),
+                progress_rx,
+                &task_cancellation,
+                Duration::from_secs(30),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err(), DOWNLOAD_CANCELED_ERROR);
+    }
+
+    #[tokio::test]
+    async fn cancel_wakes_portable_network_read_without_waiting_for_timeout() {
+        let cancellation = Arc::new(DownloadCancellation::default());
+        let task_cancellation = Arc::clone(&cancellation);
+        let task = tokio::spawn(async move {
+            wait_for_download_step(
+                pending::<()>(),
+                &task_cancellation,
+                Duration::from_secs(30),
+                "network timeout".to_string(),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err(), DOWNLOAD_CANCELED_ERROR);
     }
 }

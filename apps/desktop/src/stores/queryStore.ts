@@ -64,6 +64,7 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
 import { formatError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { SavedSqlFile } from "@/types/database";
@@ -72,6 +73,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle"]);
+const QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR = "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
@@ -93,6 +95,10 @@ interface BuildQueryResultExportRequestOptions {
   includeSqlSheet?: boolean;
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
+}
+
+interface OpenSavedSqlOptions {
+  targetMode?: SavedSqlOpenTargetMode;
 }
 
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
@@ -152,7 +158,7 @@ function exactTotalFromIncompletePage(result: QueryResult, pageLimit: number | u
   return (pageOffset ?? 0) + result.rows.length;
 }
 
-function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, maxRows: number): QueryResult {
+export function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, maxRows: number): QueryResult {
   if (segment.execution_error) throw new Error(String(segment.rows[0]?.[0] ?? "Failed to load the next result segment"));
   if (previous.columns.length !== segment.columns.length || previous.columns.some((column, index) => column !== segment.columns[index])) {
     throw new Error("Result columns changed while loading the next segment");
@@ -164,12 +170,25 @@ function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, m
     if (existing.length !== previous.rows.length || next.length !== segment.rows.length) return undefined;
     return [...existing, ...next.slice(0, appendedRowCount)];
   };
+  const sridByColumn = new Map<number, number | null>();
+  for (const column of previous.spatial_columns ?? []) {
+    sridByColumn.set(column.column_index, column.srid);
+  }
+  for (const column of segment.spatial_columns ?? []) {
+    const existing = sridByColumn.get(column.column_index) ?? null;
+    sridByColumn.set(column.column_index, existing ?? column.srid);
+  }
+  const spatial_columns = Array.from(sridByColumn.entries())
+    .map(([column_index, srid]) => ({ column_index, srid }))
+    .sort((a, b) => a.column_index - b.column_index);
   // Keep prior row objects intact so source-index based dirty/new/deleted state
   // remains valid, while bounding the in-memory result by the configured cap.
   return markQueryResultRowsRaw({
     ...segment,
     appended_from_row_count: previous.rows.length,
     rows: [...previous.rows, ...segment.rows.slice(0, appendedRowCount)],
+    spatial_columns: spatial_columns.length > 0 ? spatial_columns : undefined,
+    spatial_values: appendParallelValues(previous.spatial_values, segment.spatial_values),
     mongo_documents: appendParallelValues(previous.mongo_documents, segment.mongo_documents),
     mongo_copy_documents: appendParallelValues(previous.mongo_copy_documents, segment.mongo_copy_documents),
     execution_time_ms: (previous.execution_time_ms ?? 0) + (segment.execution_time_ms ?? 0),
@@ -354,6 +373,20 @@ function isOracleCurrentSchemaStatement(statement: string | undefined): boolean 
 
 function isSapHanaSetSchemaStatement(statement: string | undefined): boolean {
   return /^SET\s+SCHEMA\s+(?:"(?:[^"]|"")*"|[A-Za-z_][\w$#]*)\s*;?\s*$/i.test(sqlStatementWithoutLeadingComments(statement));
+}
+
+function sqlServerUseDatabaseFromStatement(statement: string | undefined): string | undefined {
+  const match = /^USE\s+(?:\[((?:[^\]]|\]\])*)\]|"((?:[^"]|"")*)"|([A-Za-z_][\w@$#]*))\s*;?\s*$/i.exec(sqlStatementWithoutLeadingComments(statement));
+  if (!match) return undefined;
+  if (match[1] !== undefined) return match[1].replaceAll("]]", "]");
+  if (match[2] !== undefined) return match[2].replaceAll('""', '"');
+  return match[3];
+}
+
+function isSqlServerBatchErrorResult(result: QueryResult): boolean {
+  // SQL Server batch errors can arrive without execution_error metadata.
+  // A standalone USE statement cannot legitimately return an Error column.
+  return result.execution_error === true || (result.columns.length === 1 && result.columns[0] === "Error" && result.rows.length > 0);
 }
 
 function sapHanaCurrentSchemaFromResult(result: QueryResult): string | undefined {
@@ -2464,7 +2497,26 @@ export const useQueryStore = defineStore("query", () => {
     refreshExternalSqlFileTitles();
   }
 
-  function openSavedSql(file: SavedSqlFile) {
+  function currentSavedSqlExecutionTarget(): SavedSqlExecutionTarget | undefined {
+    const activeTab = tabs.value.find((tab) => tab.id === activeTabId.value);
+    const target = savedSqlExecutionTargetFromTab(activeTab);
+    if (!target || !useConnectionStore().getConfig(target.connectionId)) return undefined;
+    return target;
+  }
+
+  function applySavedSqlExecutionTarget(tab: QueryTab, target: SavedSqlExecutionTarget) {
+    updateConnection(tab.id, target.connectionId, target.database);
+    if (tab.catalog !== target.catalog || tab.database !== target.database) {
+      if (tab.catalog !== undefined || target.catalog !== undefined) updateCatalog(tab.id, target.catalog, target.database);
+      else updateDatabase(tab.id, target.database);
+    }
+    updateSchema(tab.id, target.schema);
+  }
+
+  function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
+    const targetMode = options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode;
+    const currentTarget = targetMode === "current" ? currentSavedSqlExecutionTarget() : undefined;
+    const target = resolveSavedSqlExecutionTarget(file, targetMode, currentTarget);
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
       persistSavedSqlEditorPosition(existing);
@@ -2475,6 +2527,7 @@ export const useQueryStore = defineStore("query", () => {
         existing.editorSelection = restored.selection;
         existing.editorViewport = restored.viewport;
       }
+      applySavedSqlExecutionTarget(existing, target);
       switchTab(existing.id);
       return existing.id;
     }
@@ -2485,9 +2538,10 @@ export const useQueryStore = defineStore("query", () => {
       id,
       title: file.name,
       customTitle: true,
-      connectionId: file.connectionId,
-      database: file.database,
-      schema: file.schema,
+      connectionId: target.connectionId,
+      database: target.database,
+      schema: target.schema,
+      catalog: target.catalog,
       sql: file.sql,
       savedSqlId: file.id,
       originalSql: file.sql,
@@ -2511,9 +2565,6 @@ export const useQueryStore = defineStore("query", () => {
       const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
       if (!file) continue;
       tab.title = tab.customTitle ? tab.title : file.name;
-      tab.connectionId = file.connectionId;
-      tab.database = file.database;
-      tab.schema = file.schema;
       tab.sql = file.sql;
       tab.originalSql = file.sql;
       const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
@@ -2609,22 +2660,6 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
-
-    // Sync connection change back to the saved SQL file if this tab is linked
-    if (tab.savedSqlId) {
-      const savedSqlStore = useSavedSqlStore();
-      void savedSqlStore.ensureFileContent(tab.savedSqlId).then((existing) => {
-        if (!existing) return;
-        return savedSqlStore.saveFile({
-          id: existing.id,
-          connectionId,
-          name: existing.name,
-          database,
-          schema: existing.schema,
-          sql: existing.sql,
-        });
-      });
-    }
   }
 
   function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {
@@ -2791,6 +2826,7 @@ export const useQueryStore = defineStore("query", () => {
     source: EditableQuerySource;
     analysis: EditableQueryInfo;
     request: TableMetadataRequest;
+    writeSchema?: string;
   };
 
   interface EditableQueryExecutionPreparation {
@@ -2814,7 +2850,11 @@ export const useQueryStore = defineStore("query", () => {
     // with a qualified source.
     const qualifiedSourceDatabase = dbType === "sqlserver" ? source.catalog : connectionUsesDatabaseObjectTreeMode(conn) ? source.schema : undefined;
     const metadataDatabase = qualifiedSourceDatabase || executionDatabase || conn?.database || tab.database;
-    let schema = source.schema || tab.schema;
+    // SQL Server does not apply the query tab's selected schema to an
+    // unqualified object reference. Resolve metadata through the login's
+    // default schema (with the driver's dbo fallback) so metadata and writes
+    // target the same object as the original SELECT.
+    let schema = source.schema || (dbType === "sqlserver" ? "" : tab.schema);
     if (!schema) {
       if (dbType === "postgres" || dbType === "kwdb") schema = "public";
       else schema = "";
@@ -2822,7 +2862,7 @@ export const useQueryStore = defineStore("query", () => {
     // Oracle-family connection databases are service names, not schemas. When
     // the query does not qualify a schema, let the driver resolve the current
     // login user's schema instead of looking up metadata under the service name.
-    const resolvedSchema = ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
+    const resolvedSchema = (dbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema) ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
     const metadataSchema = normalizeOracleLikeMetadataIdentifier(dbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
     const metadataTableName = normalizeOracleLikeMetadataIdentifier(dbType, source.tableName, source.tableNameQuoted)!;
     const metadataCatalog = normalizeOracleLikeMetadataIdentifier(dbType, source.catalog, source.catalogQuoted);
@@ -2832,10 +2872,14 @@ export const useQueryStore = defineStore("query", () => {
       schema: metadataSchema || undefined,
       tableName: metadataTableName,
     };
+    // Keep SQL Server writes unqualified unless the SELECT source explicitly
+    // named a schema, so SELECT and UPDATE resolve the same object.
+    const writeSchema = dbType === "sqlserver" && !source.schema ? undefined : metadataSchema || undefined;
     const knownTableType = tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined;
     return {
       source: metadataSource,
       analysis: normalizeOracleLikeQueryAnalysis(dbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
+      writeSchema,
       request: {
         connectionId: tab.connectionId!,
         database: metadataDatabase,
@@ -2856,7 +2900,7 @@ export const useQueryStore = defineStore("query", () => {
       tableMeta: {
         catalog: target.request.catalog,
         database: target.request.database,
-        schema: target.request.schema || undefined,
+        schema: target.writeSchema,
         tableName: target.request.tableName,
         tableType: metadata.tableType,
         columns: metadata.columns,
@@ -3844,7 +3888,10 @@ export const useQueryStore = defineStore("query", () => {
       if (tab.mode === "query") {
         const prepared = await prepareEditableQueryExecution(tab, sqlToExecute, conn, effectiveDbType, executionDatabase, traceId, elapsed);
         sqlToExecute = prepared.sql;
-        queryMetadataSql = prepared.metadataSql;
+        // Database sorting executes a generated wrapper around the user's query.
+        // Keep editability metadata anchored to the original query so the wrapper
+        // does not turn an otherwise editable result into a complex read-only one.
+        queryMetadataSql = options?.resultSortedSql && !options?.querySort ? queryBaseSql : prepared.metadataSql;
         hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
         if (options?.querySort) {
           const sorted = await api.buildSortedQuerySql({
@@ -3874,6 +3921,21 @@ export const useQueryStore = defineStore("query", () => {
         pageOffset = plan.pageOffset;
         countSql = plan.countSql;
         useAgentResultSession = plan.useAgentResultSession;
+        const hasBoundedPagination = typeof pageLimit === "number" && typeof pageOffset === "number";
+        if (options?.appendResult && !hasBoundedPagination && !useAgentResultSession) {
+          const current = tabs.value.find((item) => item.id === id);
+          if (current?.executionId === executionId && current.result) {
+            current.result.has_more = false;
+            const activeResultIndex = current.activeResultIndex;
+            if (Array.isArray(current.results) && typeof activeResultIndex === "number" && activeResultIndex >= 0 && activeResultIndex < current.results.length) {
+              current.results[activeResultIndex]!.has_more = false;
+            }
+            touchResult(current);
+            syncDisplayedResultRun(current, queryBaseSql, openInNewResultTab);
+          }
+          queryExecutionLog("info", "append-result:pagination-unsupported", { traceId, elapsed: elapsed() });
+          return false;
+        }
       } else if (tab.mode === "data") {
         pageLimit = options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
         pageOffset = options?.pagination?.offset ?? 0;
@@ -3945,6 +4007,7 @@ export const useQueryStore = defineStore("query", () => {
       reconcileBatchSqlResults(tab, executionId, results);
       const successfulOracleSchemaChanges = effectiveDbType === "oracle" ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
       const successfulSapHanaSchemaChanges = effectiveDbType === "saphana" ? results.filter((result) => result.execution_error !== true && isSapHanaSetSchemaStatement(result.sourceStatement)).length : 0;
+      const sqlServerUseDatabase = effectiveDbType === "sqlserver" && !results.some(isSqlServerBatchErrorResult) ? sqlServerUseDatabaseFromStatement(sql) : undefined;
       if (hiddenPrimaryKeys.length > 0 && results.length === 1) {
         const hiddenIndexes = hiddenResultColumnIndexes(results[0]!.columns, hiddenPrimaryKeys);
         if (hiddenIndexes.length > 0) results[0]!.hidden_column_indexes = hiddenIndexes;
@@ -3980,6 +4043,12 @@ export const useQueryStore = defineStore("query", () => {
         if (resolvedSapHanaSchema) {
           current.schema = resolvedSapHanaSchema;
           current.completionContextVersion = (current.completionContextVersion ?? 0) + successfulSapHanaSchemaChanges;
+        }
+        if (sqlServerUseDatabase && current.database !== sqlServerUseDatabase) {
+          rollbackTabTransaction(current);
+          void closeClientConnectionSession(current);
+          current.database = sqlServerUseDatabase;
+          current.schema = undefined;
         }
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
@@ -4932,6 +5001,64 @@ export const useQueryStore = defineStore("query", () => {
     const queryBaseSql = queryResultBaseSql(tab);
     const exportSettings = useSettingsStore().editorSettings;
     const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
+
+    if (effectiveDbType === "mongodb") {
+      let mongoCommand;
+      try {
+        mongoCommand = await api.mongoParseShellCommand(sql);
+      } catch {
+        throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+      }
+      if (mongoCommand.kind !== "find") throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+
+      const pageLimit = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
+      const documents: unknown[] = [];
+      let copyDocuments: unknown[] | undefined = [];
+      let pageOffset = 0;
+      let totalRows = typeof tab.resultTotalRowCount === "number" ? Math.min(tab.resultTotalRowCount, exportRowLimit) : null;
+      const exportStartedAt = performance.now();
+      const exportExecutionId = uuid();
+
+      while (documents.length < exportRowLimit) {
+        const remaining = exportRowLimit - documents.length;
+        const plan = planMongoFindPagination(sql, mongoCommand, pageOffset, Math.min(pageLimit, remaining));
+        if (!plan) throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+        if (plan.requestLimit === 0) break;
+
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCommand.collection, plan.requestSkip, plan.requestLimit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, exportExecutionId);
+        const pageDocuments = result.documents.slice(0, plan.requestLimit);
+        documents.push(...pageDocuments);
+
+        if (copyDocuments) {
+          if (result.extended_documents?.length === result.documents.length) {
+            copyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length));
+          } else {
+            copyDocuments = undefined;
+          }
+        }
+
+        if (result.total_is_exact !== false) {
+          totalRows = Math.min(mongoFindLogicalTotal(result.total, plan), exportRowLimit);
+        }
+        onProgress?.({ rowsExported: documents.length, totalRows });
+
+        pageOffset += pageDocuments.length;
+        const reachedLogicalLimit = plan.logicalLimit !== undefined && pageOffset >= plan.logicalLimit;
+        const reachedExactTotal = result.total_is_exact !== false && pageOffset >= mongoFindLogicalTotal(result.total, plan);
+        if (pageDocuments.length === 0 || pageDocuments.length < plan.requestLimit || reachedLogicalLimit || reachedExactTotal) break;
+      }
+
+      const result = mongoDocumentsToQueryResult(documents, performance.now() - exportStartedAt, totalRows ?? documents.length, copyDocuments, totalRows !== null);
+      if (result.columns.length === 0) {
+        result.columns = tab.result.columns;
+        result.column_types = tab.result.column_types;
+      }
+      result.affected_rows = documents.length;
+      result.truncated = false;
+      result.has_more = false;
+      return result;
+    }
+
     const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
     // Use the already-computed total row count as a progress estimate so the
     // export dialog shows a moving bar instead of a stuck 0 while paginating.
@@ -5009,6 +5136,7 @@ export const useQueryStore = defineStore("query", () => {
     const settings = useSettingsStore().editorSettings;
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
+    if (effectiveDbType === "mongodb") return undefined;
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = queryResultBaseSql(tab);
     const resultStatementIndex = tab.result.statement_index;

@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
+import type { ConnectionConfig } from "@/types/database";
 import {
+  GAUSSDB_M_JDBC_DRIVER_CLASS,
   connectionObjectTreeNodeSchema,
   connectionQueryExecutionSchema,
   connectionShouldLoadIdentifierQuote,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
+  gaussdbConnectionMode,
   gaussdbIdentifierQuoteOverride,
   gaussdbIdentifierQuoteStyle,
   inferJdbcDialect,
+  setGaussdbConnectionMode,
   setGaussdbIdentifierQuoteStyle,
   supportsGaussdbIdentifierQuoteStyle,
 } from "@/lib/database/jdbcDialect";
@@ -134,6 +138,58 @@ describe("jdbc dialect inference", () => {
     };
 
     expect(inferJdbcDialect(damengConnection)).toBe("dameng");
+  });
+
+  it("uses Hive tree and execution semantics for Inceptor JDBC metadata", () => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:hive2://inceptor.example.com:10000/default",
+      database_info: { productName: "Apache Hive", driverName: "Inceptor JDBC 8.37.3" },
+    };
+
+    expect(inferJdbcDialect(connection)).toBe("hive");
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("hive");
+    expect(connectionUsesDatabaseObjectTreeMode(connection)).toBe(false);
+    expect(connectionObjectTreeNodeSchema(connection, "CS")).toBe("CS");
+    expect(connectionQueryExecutionSchema(connection, "CS", undefined, false)).toBe("CS");
+  });
+
+  it.each([
+    { driver_profile: "inceptor" },
+    { driver_label: "Inceptor JDBC 8.37.3" },
+    { jdbc_driver_class: "io.transwarp.inceptor.jdbc.InceptorDriver" },
+    { jdbc_driver_paths: ["C:\\drivers\\InceptorJDBC.jar"] },
+    { database_info: { driverName: "Inceptor JDBC 8.37.3" } },
+    { database_info: { serverComment: "Transwarp Inceptor Server" } },
+  ])("detects Inceptor from explicit JDBC identity %#", (identity) => {
+    expect(inferJdbcDialect({ db_type: "jdbc", ...identity })).toBe("hive");
+  });
+
+  it("recognizes Apache Hive metadata without changing generic hive2 or MySQL inference", () => {
+    expect(inferJdbcDialect({ db_type: "jdbc", database_info: { productName: "Apache Hive" } })).toBe("hive");
+    expect(inferJdbcDialect({ db_type: "jdbc", driver_label: "Kyuubi JDBC", connection_string: "jdbc:hive2://kyuubi.example.com/default" })).toBe("mysql");
+    expect(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:hive2://hiveserver.example.com/default" })).toBe("mysql");
+    expect(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:mysql://mysql.example.com/app" })).toBe("mysql");
+  });
+
+  it("prefers explicit Kyuubi identity over Apache Hive product metadata", () => {
+    expect(inferJdbcDialect({ db_type: "jdbc", driver_label: "Kyuubi JDBC", database_info: { productName: "Apache Hive" } })).toBe("mysql");
+  });
+});
+
+describe("GaussDB connection mode", () => {
+  it("keeps native connections compatible and configures M mode for the vendor JDBC driver", () => {
+    const connection = { db_type: "gaussdb", driver_profile: "gaussdb", driver_label: "GaussDB" } as ConnectionConfig;
+
+    expect(gaussdbConnectionMode(connection)).toBe("native");
+    setGaussdbConnectionMode(connection, "m-jdbc");
+    expect(connection.driver_profile).toBe("gaussdb-m");
+    expect(connection.jdbc_driver_class).toBe(GAUSSDB_M_JDBC_DRIVER_CLASS);
+    expect(gaussdbIdentifierQuoteOverride(connection)).toBeUndefined();
+
+    setGaussdbConnectionMode(connection, "native");
+    expect(connection.driver_profile).toBe("gaussdb");
+    expect(connection.jdbc_driver_class).toBeUndefined();
   });
 });
 

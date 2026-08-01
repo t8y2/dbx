@@ -27,10 +27,10 @@ use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
     DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics,
-    OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
+    OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
-const GAUSSDB_COMPATIBILITY_SQL: &str =
+pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
     "SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()";
 
 pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
@@ -41,7 +41,7 @@ pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
     gaussdb_identifier_quote_for_compatibility_mode(&compatibility_mode).map(str::to_string)
 }
 
-fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
+pub(crate) fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
     match compatibility_mode.trim().to_ascii_uppercase().as_str() {
         "M" | "B" | "MYSQL" => Some("`"),
         "A" | "PG" | "ORA" | "POSTGRESQL" => Some("\""),
@@ -230,6 +230,10 @@ fn pg_optional_array_to_json<T>(
     )
 }
 
+fn pg_json_array_values_to_json(values: Vec<Option<serde_json::Value>>) -> serde_json::Value {
+    pg_optional_array_to_json(values, |value| serde_json::Value::String(value.to_string()))
+}
+
 fn pg_float_number(v: f64) -> serde_json::Value {
     serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
 }
@@ -347,6 +351,9 @@ fn pg_bit_string_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json
 }
 
 fn pg_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+    if let Ok(values) = row.try_get::<_, Vec<Option<serde_json::Value>>>(idx) {
+        return Some(pg_json_array_values_to_json(values));
+    }
     if let Ok(values) = row.try_get::<_, Vec<Option<String>>>(idx) {
         return Some(pg_optional_array_to_json(values, serde_json::Value::String));
     }
@@ -444,6 +451,10 @@ fn pg_scalar_type_requires_text_protocol(oid: u32, col_type: PgColType) -> bool 
 }
 
 fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
+    if pg_type.oid() == Type::RECORD.oid() || pg_type.oid() == Type::RECORD_ARRAY.oid() {
+        return true;
+    }
+
     match pg_type.kind() {
         Kind::Array(element_type) => element_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
         Kind::Simple => pg_scalar_type_requires_text_protocol(pg_type.oid(), col_type),
@@ -592,6 +603,86 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
         }
         PgColType::Other => pg_fallback_value_to_json(row, idx),
     }
+}
+
+fn pg_value_to_json_with_srid(row: &Row, idx: usize, col_type: PgColType) -> (serde_json::Value, Option<u32>) {
+    if col_type != PgColType::Geometry {
+        return (pg_value_to_json_classified(row, idx, col_type), None);
+    }
+    if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
+        return match super::wkb::decode_wkb_geometry(&raw) {
+            Some(geometry) => (serde_json::Value::String(geometry.wkt), geometry.srid),
+            None => (super::binary_value_to_json(&raw), None),
+        };
+    }
+    (serde_json::Value::Null, None)
+}
+
+fn pg_text_fallback_value(value: &str, col_type: Option<PgColType>) -> (serde_json::Value, Option<u32>) {
+    let (value, srid, _) = pg_text_fallback_value_with_spatial(value, col_type);
+    (value, srid)
+}
+
+fn pg_text_fallback_value_with_spatial(
+    value: &str,
+    col_type: Option<PgColType>,
+) -> (serde_json::Value, Option<u32>, bool) {
+    match col_type {
+        Some(PgColType::Geometry) => decode_pg_text_wkb(value)
+            .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
+            .or_else(|| split_pg_ewkt(value, false).map(|(value, srid)| (value, srid, true)))
+            .unwrap_or_else(|| (serde_json::Value::String(value.to_string()), None, true)),
+        Some(_) => (serde_json::Value::String(value.to_string()), None, false),
+        None => decode_pg_text_wkb(value)
+            .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
+            .or_else(|| split_pg_ewkt(value, true).map(|(value, srid)| (value, srid, true)))
+            .unwrap_or_else(|| (serde_json::Value::String(value.to_string()), None, false)),
+    }
+}
+
+fn decode_pg_text_wkb(value: &str) -> Option<super::wkb::DecodedGeometry> {
+    let trimmed = value.trim();
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .or_else(|| trimmed.strip_prefix("\\x"))
+        .or_else(|| trimmed.strip_prefix("\\X"))
+        .unwrap_or(trimmed);
+    if hex.len() < 10 || !hex.len().is_multiple_of(2) || !matches!(&hex[..2], "00" | "01") || !hex.is_ascii() {
+        return None;
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    super::wkb::decode_wkb_geometry(&bytes)
+}
+
+fn split_pg_ewkt(value: &str, require_recognizable_wkt: bool) -> Option<(serde_json::Value, Option<u32>)> {
+    let rest = value.strip_prefix("SRID=")?;
+    let (srid, wkt) = rest.split_once(';')?;
+    let srid = srid.parse::<i64>().ok().and_then(|value| u32::try_from(value).ok())?;
+    if require_recognizable_wkt && !is_recognizable_wkt(wkt) {
+        return None;
+    }
+    Some((serde_json::Value::String(wkt.to_string()), (srid != 0).then_some(srid)))
+}
+
+fn is_recognizable_wkt(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    const TYPES: [&str; 7] =
+        ["POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"];
+    TYPES.iter().any(|geometry_type| {
+        trimmed
+            .get(..geometry_type.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(geometry_type))
+            .and_then(|_| trimmed.as_bytes().get(geometry_type.len()))
+            .is_some_and(|next| next.is_ascii_whitespace() || *next == b'(')
+    })
 }
 
 /// Serialize a pgvector `vector` component with f32 shortest round-trip decimal text.
@@ -872,6 +963,13 @@ async fn execute_select_prepared(
     );
     tokio::pin!(stream);
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
+    let mut spatial_columns = SpatialColumnBuilder::new(
+        column_classes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, col_type)| (*col_type == PgColType::Geometry).then_some(index)),
+    );
     let mut truncated = false;
 
     let rows_start = Instant::now();
@@ -881,13 +979,19 @@ async fn execute_select_prepared(
             break;
         }
         let row = row_result?;
-        result_rows.push(
-            (0..row.columns().len())
-                .map(|i| {
-                    pg_value_to_json_classified(&row, i, column_classes.get(i).copied().unwrap_or(PgColType::Other))
-                })
-                .collect(),
-        );
+        let mut values = Vec::with_capacity(row.columns().len());
+        let mut row_srids = vec![None; row.columns().len()];
+        for (i, row_srid) in row_srids.iter_mut().enumerate() {
+            let col_type = column_classes.get(i).copied().unwrap_or(PgColType::Other);
+            let (value, srid) = pg_value_to_json_with_srid(&row, i, col_type);
+            if col_type == PgColType::Geometry {
+                spatial_columns.observe(i, srid);
+                *row_srid = srid;
+            }
+            values.push(value);
+        }
+        result_rows.push(values);
+        spatial_values.push(row_srids);
     }
     log::info!(
         "[postgres][select:rows:done] elapsed_ms={} total_ms={} row_count={} truncated={}",
@@ -897,10 +1001,13 @@ async fn execute_select_prepared(
         truncated
     );
 
+    let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(PreparedSelectOutcome::Complete(QueryResult {
         columns,
         column_types,
         column_sortables: Vec::new(),
+        spatial_columns,
+        spatial_values,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -926,6 +1033,15 @@ async fn execute_select_text(
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
+    let column_classes =
+        prepared_column_types.as_ref().map(|types| classify_pg_column_types(types)).unwrap_or_default();
+    let mut spatial_columns = SpatialColumnBuilder::new(
+        column_classes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, col_type)| (*col_type == PgColType::Geometry).then_some(index)),
+    );
     let mut truncated = false;
 
     while let Some(message) = stream.next().await {
@@ -942,13 +1058,25 @@ async fn execute_select_text(
                     break;
                 }
                 let mut values = Vec::with_capacity(row.len());
-                for i in 0..row.len() {
-                    values.push(match row.try_get(i).map_err(pg_error_to_string)? {
-                        Some(value) => serde_json::Value::String(value.to_string()),
-                        None => serde_json::Value::Null,
-                    });
+                let mut row_srids = vec![None; row.len()];
+                for (i, row_srid) in row_srids.iter_mut().enumerate() {
+                    match row.try_get(i).map_err(pg_error_to_string)? {
+                        Some(value) => {
+                            let (decoded, srid, is_spatial) =
+                                pg_text_fallback_value_with_spatial(value, column_classes.get(i).copied());
+                            values.push(decoded);
+                            if is_spatial {
+                                spatial_columns.observe(i, srid);
+                                *row_srid = srid;
+                            }
+                        }
+                        None => {
+                            values.push(serde_json::Value::Null);
+                        }
+                    }
                 }
                 result_rows.push(values);
+                spatial_values.push(row_srids);
             }
             Err(_) if result_rows.len() >= row_limit => {
                 truncated = true;
@@ -960,10 +1088,13 @@ async fn execute_select_text(
         }
     }
 
+    let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(QueryResult {
         column_types: matching_pg_text_column_types(&columns, prepared_column_types),
         columns,
         column_sortables: Vec::new(),
+        spatial_columns,
+        spatial_values,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1101,6 +1232,8 @@ async fn stream_select_query_text(
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
+    let column_classes =
+        prepared_column_types.as_ref().map(|types| classify_pg_column_types(types)).unwrap_or_default();
     let mut rows_streamed = 0_u64;
     while let Some(message) = stream.next().await {
         match message.map_err(pg_error_to_string)? {
@@ -1121,7 +1254,7 @@ async fn stream_select_query_text(
                 let mut values = Vec::with_capacity(row.len());
                 for i in 0..row.len() {
                     values.push(match row.try_get(i).map_err(pg_error_to_string)? {
-                        Some(value) => serde_json::Value::String(value.to_string()),
+                        Some(value) => pg_text_fallback_value(value, column_classes.get(i).copied()).0,
                         None => serde_json::Value::Null,
                     });
                 }
@@ -1190,7 +1323,7 @@ pub async fn stream_query_rows(
     match stream_query_rows_on_client(&client, sql, max_rows, cancelled, &mut on_row).await {
         Ok(rows) => Ok(rows),
         Err(error) if should_retry_postgres_text_query_message(&error.to_ascii_lowercase()) => {
-            stream_query_rows_text_on_client(&client, sql, max_rows, cancelled, &mut on_row).await
+            stream_query_rows_text_on_client(&client, sql, max_rows, cancelled, None, &mut on_row).await
         }
         Err(error) => Err(error),
     }
@@ -1210,7 +1343,7 @@ async fn stream_query_rows_on_client(
             "[postgres][row_stream:text_fallback] unsupported_type={} switching_to=simple_query",
             unsupported_type
         );
-        return stream_query_rows_text_on_client(client, sql, max_rows, cancelled, on_row).await;
+        return stream_query_rows_text_on_client(client, sql, max_rows, cancelled, Some(&column_classes), on_row).await;
     }
     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     let stream = client.query_raw(&stmt, params).await.map_err(pg_error_to_string)?;
@@ -1241,6 +1374,7 @@ async fn stream_query_rows_text_on_client(
     sql: &str,
     max_rows: Option<usize>,
     cancelled: &AtomicBool,
+    column_classes: Option<&[PgColType]>,
     on_row: &mut impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
@@ -1260,7 +1394,9 @@ async fn stream_query_rows_text_on_client(
             let mut values = Vec::with_capacity(row.len());
             for i in 0..row.len() {
                 values.push(match row.try_get(i).map_err(pg_error_to_string)? {
-                    Some(value) => serde_json::Value::String(value.to_string()),
+                    Some(value) => {
+                        pg_text_fallback_value(value, column_classes.and_then(|classes| classes.get(i)).copied()).0
+                    }
                     None => serde_json::Value::Null,
                 });
             }
@@ -2860,6 +2996,8 @@ pub async fn execute_query_with_max_rows(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -3368,6 +3506,8 @@ async fn execute_query_with_max_rows_inner(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -4064,6 +4204,32 @@ mod tests {
     use std::time::Instant;
     use tokio_postgres::types::FromSql;
 
+    fn pg_array_binary(element_oid: u32, elements: &[Option<Vec<u8>>]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1_i32.to_be_bytes());
+        raw.extend_from_slice(&i32::from(elements.iter().any(Option::is_none)).to_be_bytes());
+        raw.extend_from_slice(&element_oid.to_be_bytes());
+        raw.extend_from_slice(&(elements.len() as i32).to_be_bytes());
+        raw.extend_from_slice(&1_i32.to_be_bytes());
+        for element in elements {
+            match element {
+                Some(bytes) => {
+                    raw.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                    raw.extend_from_slice(bytes);
+                }
+                None => raw.extend_from_slice(&(-1_i32).to_be_bytes()),
+            }
+        }
+        raw
+    }
+
+    fn pg_jsonb_binary(value: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(value.len() + 1);
+        raw.push(1);
+        raw.extend_from_slice(value);
+        raw
+    }
+
     #[test]
     fn gaussdb_compatibility_mode_selects_identifier_quote() {
         for mode in ["M", "B", "mysql", " MYSQL "] {
@@ -4074,6 +4240,55 @@ mod tests {
         }
         assert_eq!(gaussdb_identifier_quote_for_compatibility_mode("C"), None);
         assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(""), None);
+    }
+
+    #[test]
+    fn postgres_json_arrays_decode_elements_without_jsonb_version_bytes() {
+        let json_raw = pg_array_binary(
+            Type::JSON.oid(),
+            &[
+                Some(br#"{"kind":"json"}"#.to_vec()),
+                Some(br#""text""#.to_vec()),
+                Some(br#"[1,true,null]"#.to_vec()),
+                None,
+            ],
+        );
+        let jsonb_raw = pg_array_binary(
+            Type::JSONB.oid(),
+            &[
+                Some(pg_jsonb_binary(br#"{"port":10031,"type":"admin_web"}"#)),
+                Some(pg_jsonb_binary(br#""quoted""#)),
+                Some(pg_jsonb_binary(br#"[2,false,{"nested":true}]"#)),
+                None,
+            ],
+        );
+
+        let json_values = Vec::<Option<serde_json::Value>>::from_sql(&Type::JSON_ARRAY, &json_raw).unwrap();
+        let jsonb_values = Vec::<Option<serde_json::Value>>::from_sql(&Type::JSONB_ARRAY, &jsonb_raw).unwrap();
+
+        assert_eq!(
+            pg_json_array_values_to_json(json_values),
+            serde_json::json!([r#"{"kind":"json"}"#, r#""text""#, "[1,true,null]", null])
+        );
+        let decoded = pg_json_array_values_to_json(jsonb_values);
+        assert_eq!(
+            decoded,
+            serde_json::json!([
+                r#"{"port":10031,"type":"admin_web"}"#,
+                r#""quoted""#,
+                r#"[2,false,{"nested":true}]"#,
+                null
+            ])
+        );
+        assert!(!decoded.to_string().contains('\u{1}'));
+    }
+
+    #[test]
+    fn postgres_json_array_decoder_is_limited_to_json_element_types() {
+        assert!(Vec::<Option<serde_json::Value>>::accepts(&Type::JSON_ARRAY));
+        assert!(Vec::<Option<serde_json::Value>>::accepts(&Type::JSONB_ARRAY));
+        assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::TEXT_ARRAY));
+        assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::INT4_ARRAY));
     }
 
     fn pg_interval_bytes(microseconds: i64, days: i32, months: i32) -> [u8; 16] {
@@ -4125,6 +4340,19 @@ mod tests {
         assert!(pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::GenericArray));
+    }
+
+    #[test]
+    fn postgres_record_types_require_text_protocol() {
+        assert!(pg_type_requires_text_protocol(&Type::RECORD, PgColType::Other));
+        assert!(pg_type_requires_text_protocol(&Type::RECORD_ARRAY, PgColType::GenericArray));
+
+        let dynamic_record =
+            Type::new("record".to_string(), Type::RECORD.oid(), Kind::Simple, "pg_catalog".to_string());
+        let dynamic_record_array =
+            Type::new("_record".to_string(), Type::RECORD_ARRAY.oid(), Kind::Simple, "pg_catalog".to_string());
+        assert!(pg_type_requires_text_protocol(&dynamic_record, PgColType::Other));
+        assert!(pg_type_requires_text_protocol(&dynamic_record_array, PgColType::GenericArray));
     }
 
     #[test]
@@ -4246,6 +4474,45 @@ mod tests {
         assert_eq!(classify_pg_type("int4"), PgColType::Other);
         assert_eq!(classify_pg_type("varchar"), PgColType::Other);
         assert_eq!(classify_pg_type(""), PgColType::Other);
+    }
+
+    #[test]
+    fn postgres_text_spatial_value_separates_srid_from_wkt() {
+        assert_eq!(
+            pg_text_fallback_value("SRID=4326;POINT(1 2)", Some(PgColType::Geometry)),
+            (serde_json::json!("POINT(1 2)"), Some(4326))
+        );
+        assert_eq!(
+            pg_text_fallback_value("SRID=0;POINT(1 2)", Some(PgColType::Geometry)),
+            (serde_json::json!("POINT(1 2)"), None)
+        );
+        assert_eq!(
+            pg_text_fallback_value("POINT(1 2)", Some(PgColType::Geometry)),
+            (serde_json::json!("POINT(1 2)"), None)
+        );
+    }
+
+    #[test]
+    fn postgres_text_spatial_value_decodes_hex_ewkb() {
+        let ewkb = "0101000020E6100000000000000000F03F0000000000000040";
+        for value in [ewkb.to_string(), format!("0x{ewkb}"), format!("\\x{ewkb}")] {
+            assert_eq!(
+                pg_text_fallback_value(&value, Some(PgColType::Geometry)),
+                (serde_json::json!("POINT(1 2)"), Some(4326))
+            );
+            assert_eq!(pg_text_fallback_value(&value, None), (serde_json::json!("POINT(1 2)"), Some(4326)));
+        }
+
+        let srid_zero = "010100002000000000000000000000F03F0000000000000040";
+        assert_eq!(pg_text_fallback_value(srid_zero, None), (serde_json::json!("POINT(1 2)"), None));
+    }
+
+    #[test]
+    fn postgres_text_fallback_does_not_reinterpret_ordinary_text() {
+        for value in ["SRID=abc;POINT(1 2)", "SRID=4326;not geometry", "0101-not-hex", "POINTLESS"] {
+            assert_eq!(pg_text_fallback_value(value, None), (serde_json::json!(value), None));
+        }
+        assert_eq!(pg_text_fallback_value("SRID=4326;point(1 2)", None), (serde_json::json!("point(1 2)"), Some(4326)));
     }
 
     struct DockerPostgres {

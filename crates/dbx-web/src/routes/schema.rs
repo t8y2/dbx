@@ -52,6 +52,17 @@ pub async fn list_database_storage(
     Ok(Json(result))
 }
 
+pub async fn get_sqlserver_completion_context(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::sqlserver::SqlServerCompletionContext>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::get_sqlserver_completion_context_core(&state.app, &q.connection_id, database)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 /// Resolve a non-internal catalog for dispatch to the Doris multi-catalog path.
 async fn external_doris_catalog(state: &Arc<WebState>, connection_id: &str, catalog: Option<&str>) -> Option<String> {
     dbx_core::schema::resolve_external_doris_catalog(&state.app, connection_id, catalog).await

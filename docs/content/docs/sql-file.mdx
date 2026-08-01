@@ -1,76 +1,123 @@
 ---
 title: SQL File Execution
-description: Execute .sql files against a selected connection, monitor progress, and cancel remaining statements when needed.
+description: Preview and execute one or more SQL files in order with per-file statistics, statement progress, and failure reporting.
 ---
 
-SQL File Execution runs local `.sql` scripts in DBX. Use it for initialization scripts, data patches, database dumps, and migration scripts.
+SQL File Execution runs initialization scripts, database exports, data patches, and migrations. DBX shows a truncated preview first, then executes files in selection order and statements in script order.
 
-<Callout type="warn">SQL files may modify large amounts of data or schema. Confirm the target connection, target database, and script source before running. Back up production databases first.</Callout>
+<Callout type="warn">SQL files can create, modify, or remove large amounts of data and schema. The preview is not the complete file and cannot prove a script is safe. Verify the target connection, database, file order, and source before execution.</Callout>
+
+## Desktop and Docker/Web
+
+| Runtime | File location and handling |
+| --- | --- |
+| Desktop | Selects one or more local `.sql` files directly and can display local filename or path information |
+| Docker/Web | Uploads browser-selected files into temporary DBX server storage; the UI shows the selected names instead of server UUID paths |
+
+In Docker/Web, reading and execution happen on the server. Temporary resources are released after the operation. The server cannot directly open arbitrary paths from the computer running the browser.
 
 ## Workflow
 
 <Steps>
   <Step>
-    ### Open SQL File Execution
+    ### Select One or More Files
 
-    Open the SQL file execution panel in DBX.
-
-  </Step>
-  <Step>
-    ### Choose a File
-
-    Select a local `.sql` file. Large files may take longer to parse and execute.
+    Files remain in selection order. Multi-file mode shows a side list; select an item to switch the preview pane.
 
   </Step>
   <Step>
-    ### Select Target Connection
+    ### Review Preview and File Details
 
-    Choose the connection and database where the script should run.
-
-  </Step>
-  <Step>
-    ### Start Execution
-
-    DBX executes the script statement by statement and shows progress.
+    Each file reports its name, size, preview lines, and truncation state. Large files read only a limited preview, while execution still streams the complete content.
 
   </Step>
   <Step>
-    ### Check Results
+    ### Select Connection and Database
 
-    After execution, review successful statements, failed statements, and error messages.
+    A target database is normally required. When the script establishes database context itself, such as an earlier recognizable `USE`, DBX can allow execution without a preselected database on supported paths.
+
+  </Step>
+  <Step>
+    ### Choose Error Policy and Confirm
+
+    Execution stops on the first failure by default. Continue on error records failures and proceeds to later statements and files. Protected production contexts require a fresh confirmation before execution.
+
+  </Step>
+  <Step>
+    ### Run and Inspect Results
+
+    Progress includes the current file, statement index, success and failure counts, affected rows, elapsed time, statement summary, and error. Multi-file runs finish with per-file statistics and totals.
 
   </Step>
 </Steps>
 
-## Statement Splitting
+## Multi-File Session Semantics
 
-DBX reads SQL files as a stream and tries to detect statement boundaries correctly instead of splitting on every semicolon:
+Selected files form one execution task and run in list order. MySQL-compatible paths reuse one pinned connection across the complete batch, so state established by an earlier file can affect later files, including:
 
-- Semicolons inside strings are not treated as statement endings
-- Semicolons inside line and block comments are ignored
-- PostgreSQL dollar-quoted function bodies are kept together
-- SQL Server `GO` lines split batches
-- MySQL executable comments are prepared for the target connection before import: MySQL-compatible connections unwrap executable content, non-MySQL connections skip it, and import-helper directives such as `ENABLE/DISABLE KEYS`, `LOCK/UNLOCK TABLES`, and session state restores are skipped
+- `USE database`
+- Temporary tables
+- Session variables and settings
+- Explicit transactions
+
+This supports split initialization and restore scripts, but makes ordering significant. Do not batch unrelated scripts when session state could leak between them.
+
+## Statement Splitting and Import Helpers
+
+DBX reads files as a stream and uses database-aware splitting instead of breaking at every semicolon:
+
+- Semicolons inside strings, line comments, and block comments do not terminate a statement
+- PostgreSQL dollar-quoted function bodies remain intact
+- Standalone SQL Server `GO` lines split batches
+- MySQL routine `DELIMITER` workflows are recognized
+- MySQL executable comments are unwrapped for compatible targets and skipped for other targets
+- Import helpers such as `ENABLE/DISABLE KEYS`, `LOCK/UNLOCK TABLES`, and selected session-state restoration directives are handled or skipped by executor policy
+
+Database dialects and script generators vary widely. Test complex scripts first, especially those containing custom delimiters, client-only commands, or meta-commands generated by administration tools.
+
+## Error Policy
+
+### Stop on Error
+
+The default ends the task after the first failed statement. DBX retains completed statistics, the failed statement summary, and the database error.
+
+### Continue on Error
+
+When enabled, DBX records a failure and proceeds. Multi-file tasks also move to the next file and report success count, failure count, affected rows, and elapsed time for each file.
+
+<Callout type="info">Continue on error changes task control flow only. It does not repair transaction state. Some databases require an explicit rollback after a transaction error, so later statements may continue failing.</Callout>
+
+## Cancellation and Transactions
+
+Cancellation stops later statements, but statements already submitted or committed are not reverted automatically. If the script must be atomic, control transactions explicitly and verify that the target engine, DDL, and import statements provide the required semantics.
+
+With a shared multi-file session, an open transaction can continue across file boundaries. Use clear `BEGIN`, `COMMIT`, or `ROLLBACK` statements instead of relying on closing the dialog to commit or roll back.
 
 ## Database Coverage
 
-SQL file execution is for SQL-oriented engines. DBX hides or disables it for Redis, MongoDB, Elasticsearch, and Easysearch because those connections do not execute relational SQL scripts.
+The action follows the driver's `sqlFileExecution` capability. Most SQL-oriented drivers enable it. Specialized Redis, MongoDB, search, vector, HBase, configuration-center, and message-queue workspaces do not execute relational SQL files.
 
-## Error Handling
-
-By default, execution stops when a statement fails. You can enable continue-on-error to keep running later statements while recording failures.
-
-## Cancelling Execution
-
-You can cancel while execution is running. Cancelling stops later statements from running, but statements already submitted to the database are not rolled back automatically.
-
-<Callout type="info">If a script must be atomic, include transaction control in the script itself and confirm the target database supports the required transaction behavior.</Callout>
+Query execution support does not guarantee compatibility with every client script language. Meta-commands specific to `psql`, `mysql`, `sqlcmd`, or another client may need conversion into SQL the database server accepts directly.
 
 ## Before Running
 
-- Confirm the active connection is the intended environment
-- Verify the script comes from a trusted source
-- Look for `DROP`, `TRUNCATE`, broad `UPDATE`, or broad `DELETE`
-- Run the script in a test environment first when possible
-- Decide whether continue-on-error is appropriate
-- Back up with [Database Export](/en/docs/database-export) when needed
+- Verify file order and database context
+- Check whether previews are truncated and review the complete files in an editor
+- Look for `DROP`, `TRUNCATE`, unqualified `UPDATE` / `DELETE`, privilege changes, or configuration changes
+- Decide whether continue-on-error could hide a critical failure
+- Check read-only and production protection on the target
+- Create a [Database Export](/en/docs/database-export) or [Database Backup](/en/docs/database-backup) first when appropriate
+
+## Related Features
+
+<Cards>
+  <Card title="Database Export" href="/en/docs/database-export">
+    Generate structure, data, and object SQL files.
+  </Card>
+  <Card title="Database Backup" href="/en/docs/database-backup">
+    Schedule MySQL and PostgreSQL backups in Desktop.
+  </Card>
+  <Card title="Production Safety" href="/en/docs/production-safety">
+    Understand pre-execution confirmation, read-only protection, and privilege boundaries.
+  </Card>
+</Cards>

@@ -91,7 +91,49 @@ class InformixAgentTest {
         String url = InformixAgent.jdbcUrl(params);
 
         Assertions.assertEquals(
-            "jdbc:informix-sqli://172.26.128.159:20013/testdb:INFORMIXSERVER=ol_informix1410;CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8",
+            "jdbc:informix-sqli://172.26.128.159:20013/testdb:INFORMIXSERVER=ol_informix1410;CLIENT_LOCALE=en_US.utf8",
+            url
+        );
+    }
+
+    @Test
+    void preservesManualUrlParametersWithoutAddingLocaleDefaults() {
+        String url = InformixAgent.jdbcUrl(
+            new ConnectParams(
+                "172.26.128.159",
+                20013,
+                "testdb",
+                "",
+                "",
+                "DELIMIDENT=y",
+                "",
+                false
+            )
+        );
+
+        Assertions.assertEquals(
+            "jdbc:informix-sqli://172.26.128.159:20013/testdb:INFORMIXSERVER=informix;DELIMIDENT=y",
+            url
+        );
+    }
+
+    @Test
+    void recognizesInformixServerParameterIgnoringCaseAndWhitespace() {
+        String url = InformixAgent.jdbcUrl(
+            new ConnectParams(
+                "172.26.128.159",
+                20013,
+                "testdb",
+                "",
+                "",
+                "informixserver = ol_informix1410;DELIMIDENT=y",
+                "",
+                false
+            )
+        );
+
+        Assertions.assertEquals(
+            "jdbc:informix-sqli://172.26.128.159:20013/testdb:informixserver = ol_informix1410;DELIMIDENT=y",
             url
         );
     }
@@ -112,7 +154,7 @@ class InformixAgentTest {
         );
 
         Assertions.assertEquals(
-            "jdbc:informix-sqli://informix-host:9088/sysmaster:INFORMIXSERVER=informix;CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8",
+            "jdbc:informix-sqli://informix-host:9088/sysmaster:INFORMIXSERVER=informix",
             url
         );
     }

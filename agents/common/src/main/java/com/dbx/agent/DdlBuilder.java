@@ -2,8 +2,10 @@ package com.dbx.agent;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -106,20 +108,35 @@ public final class DdlBuilder {
         }
 
         List<String> primaryKeys = new ArrayList<>();
-        for (ColumnInfo column : columns) {
-            if (column.getIs_primary_key()) {
-                primaryKeys.add(quoteIdent(column.getName(), useBacktick));
+        for (IndexInfo index : indexes) {
+            if (!index.getIs_primary() || index.getColumns().isEmpty()) {
+                continue;
+            }
+            for (String column : index.getColumns()) {
+                primaryKeys.add(quoteIdent(column, useBacktick));
+            }
+            break;
+        }
+        if (primaryKeys.isEmpty()) {
+            for (ColumnInfo column : columns) {
+                if (column.getIs_primary_key()) {
+                    primaryKeys.add(quoteIdent(column.getName(), useBacktick));
+                }
             }
         }
         if (!primaryKeys.isEmpty()) {
             columnLines.add("  PRIMARY KEY (" + join(primaryKeys, ", ") + ")");
         }
 
-        for (ForeignKeyInfo fk : foreignKeys) {
+        for (ForeignKeyGroup foreignKey : groupForeignKeys(foreignKeys)) {
+            String constraint = notBlank(foreignKey.name)
+                ? "CONSTRAINT " + quoteIdent(foreignKey.name, useBacktick) + " "
+                : "";
             columnLines.add(
-                "  CONSTRAINT " + quoteIdent(fk.getName(), useBacktick)
-                    + " FOREIGN KEY (" + quoteIdent(fk.getColumn(), useBacktick) + ") "
-                    + "REFERENCES " + quoteIdent(fk.getRef_table(), useBacktick) + "(" + quoteIdent(fk.getRef_column(), useBacktick) + ")"
+                "  " + constraint
+                    + "FOREIGN KEY (" + joinQuoted(foreignKey.columns, useBacktick) + ") "
+                    + "REFERENCES " + quoteIdent(foreignKey.refTable, useBacktick)
+                    + "(" + joinQuoted(foreignKey.refColumns, useBacktick) + ")"
             );
         }
 
@@ -200,6 +217,50 @@ public final class DdlBuilder {
         }
 
         return ddl.toString();
+    }
+
+    private static List<ForeignKeyGroup> groupForeignKeys(List<ForeignKeyInfo> foreignKeys) {
+        List<ForeignKeyGroup> result = new ArrayList<>();
+        Map<String, ForeignKeyGroup> namedGroups = new LinkedHashMap<>();
+        for (ForeignKeyInfo foreignKey : foreignKeys) {
+            ForeignKeyGroup group = null;
+            if (notBlank(foreignKey.getName()) && notBlank(foreignKey.getRef_table())) {
+                String groupKey = foreignKey.getName() + "\u0000" + foreignKey.getRef_table();
+                group = namedGroups.get(groupKey);
+                if (group == null) {
+                    group = new ForeignKeyGroup(foreignKey.getName(), foreignKey.getRef_table());
+                    namedGroups.put(groupKey, group);
+                    result.add(group);
+                }
+            }
+            if (group == null) {
+                group = new ForeignKeyGroup(foreignKey.getName(), foreignKey.getRef_table());
+                result.add(group);
+            }
+            group.columns.add(foreignKey.getColumn());
+            group.refColumns.add(foreignKey.getRef_column());
+        }
+        return result;
+    }
+
+    private static String joinQuoted(List<String> values, boolean useBacktick) {
+        List<String> quotedValues = new ArrayList<>();
+        for (String value : values) {
+            quotedValues.add(quoteIdent(value, useBacktick));
+        }
+        return join(quotedValues, ", ");
+    }
+
+    private static final class ForeignKeyGroup {
+        private final String name;
+        private final String refTable;
+        private final List<String> columns = new ArrayList<>();
+        private final List<String> refColumns = new ArrayList<>();
+
+        private ForeignKeyGroup(String name, String refTable) {
+            this.name = name;
+            this.refTable = refTable;
+        }
     }
 
     private static String quoteIdent(String identifier, boolean useBacktick) {

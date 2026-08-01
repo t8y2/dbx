@@ -14,17 +14,15 @@ describe("KvKeyBrowser node export", () => {
   it("delegates etcd directory export to a fixed-revision recursive scan", () => {
     expect(etcdBrowserSource).toContain("exportScope: exportEtcdNodeScope");
     expect(etcdBrowserSource).toContain("const scan = await scanConnection(connectionId, request.path)");
-    expect(etcdBrowserSource).toContain("isKeyInKvExportScope(displayKey(keyValue(entry), entry.key), request)");
+    expect(etcdBrowserSource).toContain("isKeyInKvExportScope(displayKey(keyValue(entry)), request)");
     expect(etcdBrowserSource).toContain("const missingValue = entries.find((entry) => !entry.value)");
   });
 
-  it("keeps mirror deletes inside the exported directory and compares canonical Key bytes", () => {
-    expect(etcdBrowserSource).toContain("if (!isKeyInKvExportScope(shown, mirrorScope)");
-    expect(etcdBrowserSource).toContain("sourceKeys.has(kvValueByteIdentity(bytes))");
+  it("compares canonical Key bytes without exposing mirror-delete operations", () => {
     expect(etcdBrowserSource).toContain("id: `source:${kvValueByteIdentity(source.key)}`");
     expect(etcdBrowserSource).not.toContain("id: source.key.data");
-    expect(etcdBrowserSource).toContain('const mirrorDeleteAvailable = computed(() => transferBundle.value?.scopeKind === "prefix")');
-    expect(etcdBrowserSource).toContain(':disabled="!mirrorDeleteAvailable || transferLoading || transferApplying"');
+    expect(etcdBrowserSource).not.toContain("mirrorDeletes");
+    expect(etcdBrowserSource).not.toContain('operation: "delete"');
   });
 
   it("snapshots the target and invalidates stale transfer previews", () => {

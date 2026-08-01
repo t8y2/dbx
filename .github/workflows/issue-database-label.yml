@@ -3,9 +3,18 @@ name: Issue Triage Labels
 on:
   issues:
     types: [opened, edited, reopened]
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/database-issue-catalog.mjs
+      - .github/scripts/label-issue-database.mjs
+      - .github/workflows/issue-database-label.yml
+      - apps/desktop/src/types/database.ts
+      - crates/dbx-core/assets/database-drivers.manifest.json
+  workflow_dispatch:
 
 concurrency:
-  group: issue-database-label-${{ github.event.issue.number }}
+  group: issue-database-label-${{ github.event_name }}-${{ github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -15,7 +24,7 @@ permissions:
 jobs:
   label:
     runs-on: ubuntu-latest
-    if: ${{ !github.event.issue.pull_request }}
+    if: ${{ github.event_name == 'issues' && !github.event.issue.pull_request }}
     steps:
       - uses: actions/checkout@v5
 
@@ -28,3 +37,20 @@ jobs:
         run: node .github/scripts/label-issue-database.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sync:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'issues' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Synchronize database labels
+        run: node .github/scripts/label-issue-database.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_DATABASE_LABELS: "1"

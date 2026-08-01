@@ -1,0 +1,139 @@
+---
+title: 专项工作台
+description: 使用 DBX 管理 Redis、MongoDB、搜索与向量数据库、HBase、消息队列、etcd、ZooKeeper 和 Nacos。
+---
+
+除了 SQL 编辑器和数据表格，DBX 还会根据连接类型打开专项工作台。它们直接使用对应系统的对象模型和管理 API，例如 Redis Key、MongoDB 文档、向量集合、消息队列 Topic、etcd Key、ZooKeeper ZNode 和 Nacos 配置。
+
+<Callout type="info">专项能力按数据库类型、服务端版本、驱动和当前账号权限动态开放。界面没有显示某个入口时，先查看 [数据库支持](/cn/docs/databases)、连接测试结果和账号权限。</Callout>
+
+## 工作台总览
+
+| 类别 | 连接类型 | 主要入口 |
+| --- | --- | --- |
+| 键值与文档 | Redis、MongoDB | Key/文档浏览、筛选、编辑、命令或聚合流程 |
+| 搜索与文档索引 | Elasticsearch、Easysearch、Manticore Search | 索引/文档浏览和对应请求入口 |
+| 向量数据库 | Qdrant、Milvus、Weaviate、ChromaDB | Collection 浏览、向量检索、Upsert、删除和请求预览 |
+| 宽表与列族 | HBase | Namespace、表结构、Column Family 和行数据浏览 |
+| 消息队列 | Pulsar、Kafka、RocketMQ、RabbitMQ | Topic、订阅/消费者、消息、监控、权限、策略和管理 API |
+| 注册与配置中心 | etcd、ZooKeeper、Nacos | Key/ZNode、集群状态、访问控制、配置、服务和实例 |
+| 运行状态 | MySQL、PostgreSQL、Redis、etcd、Nacos 等 | Dashboard、进程/会话、指标和数据库专属管理视图 |
+
+## Redis 与 MongoDB
+
+Redis 和 MongoDB 有独立的详细文档：
+
+<Cards>
+  <Card title="Redis 浏览器" href="/cn/docs/redis">
+    浏览和搜索 Key，编辑多种数据类型，执行命令，查看统计与 Slowlog。
+  </Card>
+  <Card title="MongoDB 浏览器" href="/cn/docs/mongodb">
+    浏览集合和文档，筛选、分页、编辑、管理索引，并处理 GridFS 数据。
+  </Card>
+</Cards>
+
+连接只读时，DBX 会禁用或拒绝 Redis、MongoDB 和 GridFS 中的修改操作。危险 Redis 命令还会经过独立的命令安全分类。
+
+## 搜索与文档索引
+
+Elasticsearch、Easysearch 和 Manticore Search 使用面向索引与文档的浏览方式。DBX 会根据驱动返回的对象结构展示索引或集合，并提供浏览、查询和查看文档的入口。
+
+使用时需要注意：
+
+- Elasticsearch 和 Easysearch 的地址通常是 HTTP/HTTPS 服务端点，不是传统数据库 TCP 端口
+- TLS、代理和认证方式取决于连接类型及服务端配置
+- 文档查询和写入能力会随驱动、服务端版本和账号权限变化
+- 结构对比、SQL 文件执行等 SQL 工作流只在对应引擎确实支持时开放
+
+## 向量数据库
+
+Qdrant、Milvus、Weaviate 和 ChromaDB 会打开向量集合工作台。根据引擎能力，可以：
+
+- 浏览 Collection 和记录
+- 查看集合维度或 Schema 信息
+- 输入向量并执行 Top K 相似度检索
+- 预览或编辑原始请求
+- Upsert 向量、Payload/Metadata 或文档
+- 按 ID 或请求条件删除记录
+
+不同产品的 API、集合模型和检索参数并不相同。DBX 会生成对应引擎的请求模板，但向量维度、字段名、距离度量和索引设置仍应以目标数据库定义为准。
+
+<Callout type="warn">向量 Upsert 和删除属于写入操作。生产连接建议同时使用数据库账号权限、DBX 只读/生产保护和人工请求审查。</Callout>
+
+## HBase
+
+HBase 工作台围绕 Namespace、表、Column Family 和行键组织。根据 Agent 与服务端能力，可以浏览表结构和行数据，并在非只读连接上使用创建、修改、截断或删除等管理入口。
+
+HBase 的扫描范围和过滤条件会直接影响服务端负载。处理大表时应限制行键范围、分页大小和返回列，避免把全表扫描当作普通数据表格浏览。
+
+## 消息队列
+
+Pulsar、Kafka、RocketMQ 和 RabbitMQ 共用消息队列控制台框架，但每个系统只显示自身支持的面板。常见能力包括：
+
+- Topic、Namespace、Tenant 或 Virtual Host 浏览与管理
+- Subscription、Consumer Group、Producer 和 Client 查看
+- 消息查询、发送和消息轨迹
+- Broker 或集群监控
+- Permission、Policy 和配额等管理入口
+- Raw API，用于查看或调用驱动公开的底层管理请求
+
+例如，Pulsar 更强调 Tenant、Namespace 和 Subscription；Kafka 使用 Topic、Consumer Group 和 Broker 视角；RocketMQ 提供消息与轨迹相关入口；RabbitMQ 使用 Virtual Host、Exchange/Queue、连接、Policy 和 Permission 模型。
+
+<Callout type="info">消息队列面板根据 Agent 返回的 capability 动态显示。服务端版本、管理 API、账号权限或未配置的管理端口都可能让某些标签页不可用。</Callout>
+
+## etcd、ZooKeeper 与 Nacos
+
+### etcd
+
+etcd 提供 Key 浏览器、集群 Dashboard 和访问控制工作台。可用能力包括前缀浏览、值查看/编辑、租约相关信息、成员与健康状态、指标，以及用户和角色管理。
+
+### ZooKeeper
+
+ZooKeeper 使用 ZNode 树展示层级数据。可以浏览路径、查看节点内容，并在权限允许且连接非只读时创建、修改或删除节点。
+
+### Nacos
+
+Nacos 工作台覆盖配置和服务两个主要视图，并可管理 Namespace。根据连接和控制台 API 能力，还可以使用：
+
+- 配置创建、编辑、删除和全文搜索
+- 配置历史、版本对比与回滚
+- 批量导入、导出和跨 Namespace 复制
+- 服务、实例、权重和健康信息
+- Dashboard 与 Raw API
+
+Nacos 的配置历史可能依赖额外的控制台地址和凭据。连接成功但历史入口不可用时，检查连接表单中的控制台设置。
+
+## Dashboard 与管理视图
+
+部分连接会在对象树或标签页中提供运行状态页面，例如：
+
+- MySQL 和 PostgreSQL 的 Dashboard 或会话/进程视图
+- Redis 实例信息、统计和 Slowlog
+- etcd 集群成员、数据库大小、Raft/租约相关指标
+- Nacos 命名空间、配置、服务和实例统计
+- 消息队列 Broker、Topic、客户端和消费状态
+
+这些页面用于排查和观察，不等同于长期监控系统。需要告警、历史趋势和容量规划时，仍应使用 Prometheus、Grafana 或厂商监控平台。
+
+## 安全与兼容边界
+
+- 专项工作台会尊重连接只读；MCP 暴露的专项命令还受全局 MCP 策略限制。
+- 生产环境保护对 DBX 识别到的写入继续生效，但数据库账号权限仍是最终边界。
+- 驱动只会公开能够可靠实现的 capability，同一类系统的标签页可能不同。
+- 管理 API 和数据协议可能使用不同端口，例如 RabbitMQ Management API、Nacos 控制台 API。
+- Docker/Web 中的文件路径和网络可达性属于服务器环境，不是浏览器电脑。
+
+<Cards>
+  <Card title="查看数据库矩阵" href="/cn/docs/databases">
+    确认连接类型、默认端口、驱动架构和高级功能覆盖范围。
+  </Card>
+  <Card title="配置驱动" href="/cn/docs/driver-management">
+    安装或更新 Agent/JDBC 驱动，并处理运行时依赖。
+  </Card>
+  <Card title="设置写入保护" href="/cn/docs/production-safety">
+    为专项系统配置只读连接、生产保护和 MCP 权限。
+  </Card>
+  <Card title="排查连接网络" href="/cn/docs/ssh-tunnel">
+    配置 TLS、SSH、SOCKS5、HTTP 代理或 HTTP 隧道。
+  </Card>
+</Cards>

@@ -17,6 +17,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
     "xugu": "drivers/xugu",
+    "rabbitmq": "drivers/rabbitmq",
 }
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {

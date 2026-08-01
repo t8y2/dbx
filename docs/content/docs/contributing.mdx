@@ -253,6 +253,15 @@ docs/content/docs/meta.json
 docs/content/docs/meta.cn.json
 ```
 
+Run the fast content check and then the full documentation build before submitting:
+
+```bash
+pnpm --dir docs content:check
+make docs-build
+```
+
+`content:check` verifies bilingual page pairs, navigation coverage and ordering, frontmatter, duplicate titles, and internal links. `make docs-build` runs the check again and validates the Next.js production build.
+
 ### Path B: Change the Desktop Frontend
 
 Frontend code lives in `apps/desktop/src/`. Run the full desktop app or start only the web frontend:

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount, onMounted, nextTick, type Component } from "vue";
-import { ChevronRight } from "@lucide/vue";
+import { Check, ChevronRight } from "@lucide/vue";
 import { shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
 import { registerGlobalContextMenu, type ContextMenuRegistration } from "@/components/ui/customContextMenuRegistry";
 
@@ -11,6 +11,7 @@ export interface ContextMenuItem {
   separator?: boolean;
   icon?: Component;
   iconClass?: string;
+  checked?: boolean;
   // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
   shortcut?: string;
   variant?: "default" | "destructive";
@@ -283,6 +284,7 @@ onBeforeUnmount(() => {
               <component :is="item.icon" v-if="item.icon" :class="['size-4', item.iconClass]" />
             </span>
             <span class="flex-1 whitespace-nowrap">{{ item.label }}</span>
+            <Check v-if="item.checked" class="ml-4 size-4 shrink-0 text-primary" />
             <span v-if="item.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(item.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>
@@ -313,6 +315,7 @@ onBeforeUnmount(() => {
               <component :is="child.icon" v-if="child.icon" :class="['size-4', child.iconClass]" />
             </span>
             <span class="flex-1 whitespace-nowrap">{{ child.label }}</span>
+            <Check v-if="child.checked" class="ml-4 size-4 shrink-0 text-primary" />
             <span v-if="child.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(child.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>

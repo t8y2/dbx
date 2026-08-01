@@ -1,102 +1,153 @@
 ---
-title: Schema Browser
-description: Browse connections, databases, schemas, tables, columns, and Redis keyspaces from the sidebar.
+title: Schema Browser and Object Tree
+description: Organize connections, search database objects, open data and structure, and run database-specific actions from the DBX sidebar.
 ---
 
-The schema browser is the left-side workspace in DBX. Use it to understand what exists in a connection and to open data, inspect structure, or run context-specific actions.
+The object tree is the main navigation surface in DBX. It displays more than databases, schemas, tables, and columns: it also manages connection groups, visible scope, object search, pins, copy/paste, schema actions, specialized workspaces, and administration views.
 
-## Object Hierarchy
+## Connection and Object Hierarchy
 
-The sidebar organizes objects by database hierarchy:
+A typical relational hierarchy looks like this:
 
 ```text
-Connection
-  └── Database
-        └── Schema
-              └── Tables / Views
-                    └── Columns (type, constraints, defaults)
+Connection group
+ └── Connection
+      └── Catalog / database
+           └── Schema
+                └── Table / view / routine / other object
+                     └── Column / index / foreign key / trigger
 ```
 
-Expand or collapse nodes to drill down. Click a table to open its data. Column entries show type, constraints, defaults, and related attributes when available.
+The actual hierarchy follows the database model:
 
-## Database-Specific Trees
+| Type | Example tree |
+| --- | --- |
+| MySQL-compatible | Connection → database → table/view → column/index/foreign key/trigger |
+| PostgreSQL, Oracle, SQL Server, and others | Connection → database or service → schema → object |
+| Doris / StarRocks | Catalog → database → table when multiple catalogs exist; flat when only `internal` exists |
+| Redis | Connection → Redis DB, with paged keys in the dedicated browser |
+| MongoDB | Connection → database → collections, indexes, and GridFS buckets |
+| Elasticsearch / Easysearch | Connection → indexes and other document objects |
+| HBase, vector, message queue, etcd, ZooKeeper, Nacos | System-specific objects that open [Specialized Workspaces](/en/docs/specialized-workspaces) |
 
-| Connection Type      | Browser Model                                                                                                                  |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Relational databases | Connection, database, schema, tables/views, columns, indexes, foreign keys, triggers, and routines where metadata is available |
-| Redis                | Redis databases and keys, with value editors for String, Hash, List, Set, Sorted Set, and Stream                               |
-| MongoDB              | Databases, collections, and paginated document browsing                                                                        |
-| Object browser       | Views, procedures, and functions when the database exposes source metadata                                                     |
-| Saved SQL            | Folders and reusable SQL files in the sidebar library                                                                          |
+## Connection Groups and Bulk Management
 
-## Search
+- Create nested groups with custom subgroup names
+- Drag connections into groups or use copy/paste and bulk movement
+- Multi-select connections and use the toolbar for grouping, copying, disconnecting, and other batch actions
+- Configure connection colors, notes, pins, read-only state, and production scope
+- Copy a connection name or duplicate the full connection as a new entry
+- Inspect host, port, database type, and other summaries in connection tooltips
 
-Sidebar search helps locate objects when a connection contains many tables:
+Supported connection imports can retain group information. When sidebar layouts move between devices, DBX remaps connection IDs.
 
-- Table names
-- View names
-- Column names
-- Parts of database object paths
+## Expand, Collapse, and Pin
 
-<Callout type="info">For large schemas, search works best with visible objects and cached metadata. Objects that were just refreshed or not yet expanded may need metadata loading before they are fully matched.</Callout>
+- Click a node to expand or collapse it
+- Use **Expand all** or **Collapse all** for the current tree scope
+- Pin frequent connections, databases, schemas, tables, or Nacos namespaces
+- Keep the active database or important row visible while scrolling long lists
+- Let open tabs select or reveal the related tree object
 
-## Pinning
+Pins improve navigation but do not mark production. Configure read-only and production state separately under [Production and Write Safety](/en/docs/production-safety).
 
-Pin frequently used connections, databases, or tables to reduce repeated navigation through deep trees. Pinning is useful for:
+## Search and Filtering
 
-- High-frequency query tables
-- Objects related to the current iteration
-- Production connections that should stand out
-- Tables repeatedly checked during debugging
+Object-tree search can match:
 
-## Context Menus
+- Connections, groups, databases, catalogs, and schemas
+- Tables, views, columns, indexes, and selected database-specific objects
+- Object paths, column comments, and table comments
+- Loaded metadata and table lists that support server-side filtering
 
-Different node types expose different actions:
+Some searches pass the keyword to the driver with debouncing, avoiding a full table load first. You can also restrict search by node type or use local table search inside the active database.
 
-| Node       | Common Actions                                                      |
-| ---------- | ------------------------------------------------------------------- |
-| Connection | Refresh metadata, duplicate connection, disconnect, edit connection |
-| Database   | Create database, drop database, export database                     |
-| Schema     | Create schema, drop schema                                          |
-| Table      | Open data, open structure, import data, copy table name, drop table |
-| Column     | Copy column name, inspect column details                            |
+Visible-scope settings can hide databases, schemas, system schemas, or tables with configured prefixes. Newly created databases or schemas can be added to the visible list automatically.
 
-<Callout type="warn">Dropping databases, schemas, or tables may be irreversible. Confirm the active connection and back up data when needed.</Callout>
+<Callout type="info">Search results depend on account visibility and loaded metadata. Refresh the related node after creating, deleting, or renaming an object.</Callout>
 
-## Column Comments
+## Metadata Display
 
-When the database supports column comments, DBX displays them next to columns. This is especially helpful when you are reading an unfamiliar schema or legacy database.
+Depending on database and settings, the tree can show:
 
-## Connection Colors
+- Table and column comments
+- Column type, nullability, default, and constraint summaries
+- Object counts and loading state
+- Table type plus catalog, schema, and database path
+- MongoDB collection metadata
+- Database-specific object types and status
 
-Connection colors help separate environments:
+Object metadata display is configurable. In large schemas, show only the extra information you need to reduce visual noise and metadata requests.
 
-| Environment | Suggested Color |
-| ----------- | --------------- |
-| Local       | Gray or green   |
-| Test        | Blue or purple  |
-| Staging     | Yellow          |
-| Production  | Red             |
+## Open Data, Structure, and Source
 
-Colors appear beside connection names in the sidebar and in tabs, reducing the chance of operating on the wrong environment.
+| Action | Result |
+| --- | --- |
+| Open table | Opens the [Data Grid](/en/docs/data-grid) |
+| View structure | Opens columns, indexes, foreign keys, triggers, and DDL tabs |
+| Edit table structure | Opens the [Table Structure Editor](/en/docs/table-structure) |
+| View DDL | Reads database- or driver-generated object definition |
+| Open source | Shows view, procedure, function, trigger, or other source in a side panel or editor |
+| Locate query object | Finds the table at the editor cursor or drags table/column references into SQL |
+| Open specialized object | Opens Redis, MongoDB, vector, HBase, MQ, etcd, ZooKeeper, or Nacos workspaces |
 
-## Redis Browser
+Table, object, and data tabs use distinct identities so same-named objects do not incorrectly reuse a data tab.
 
-Redis connections use a browser designed for key-value data:
+## Context Menus and Batch Actions
 
-- Keys are displayed in a table for easier scanning
-- Pagination avoids loading large keyspaces at once
-- Values can be viewed and edited directly
-- String, Hash, List, Set, Sorted Set, and Stream are supported
+Context menus are generated from node type and database capabilities. Common actions include:
 
-For large Redis keyspaces, use search and pagination together instead of expanding too much data at once.
+- Create, rename, or delete databases and schemas and edit supported comments, charsets, or collations
+- Create, copy, paste, rename, truncate, or drop tables
+- Copy/paste table structure or data across databases when the target driver supports it
+- Open data, structure, DDL, source, ER diagram, field lineage, schema diff, and database search
+- Import data, transfer data, execute SQL files, export databases, or back up supported file databases
+- Generate `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and other SQL templates
+- Manage indexes, triggers, routines, extensions, users, jobs, and database-specific objects
+- Open dashboards, processes/sessions, or specialized administration pages
 
-## Feature Boundaries
+Destructive actions are grouped more explicitly and appear or require confirmation based on read-only state, production scope, and database capability.
 
-| Feature           | Supported Types                                                                                                                                                                                                                       |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Schema-aware tree | PostgreSQL, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, JDBC, H2, Snowflake, Trino, DB2, TDengine                                                                                                          |
-| ER diagram        | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, DB2                                                                                                           |
-| Database search   | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DuckDB, ClickHouse, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, TDengine |
+## Copy, Paste, and Drag
 
-If an action is missing from a node menu, the active database type may not expose the required metadata or safe SQL generation path.
+- Copy connection, database, schema, table, column, or selected table names
+- Choose database/schema qualification and identifier quoting where supported
+- Drag tables or columns into the SQL editor to generate references
+- Copy a table and paste into a compatible target to start structure or data transfer
+- Reveal local file databases in the operating-system file manager
+
+Cross-database copying involves type mapping, defaults, constraints, and identity semantics. Review [Data Transfer](/en/docs/data-transfer) and generated SQL first.
+
+## Database-Specific Hierarchies
+
+DBX does not force every system into a relational tree. For example:
+
+- SQL Server can expose linked servers and database objects
+- Doris / StarRocks support external catalogs and three-part names for external tables
+- MongoDB exposes collections, indexes, and GridFS
+- Elasticsearch / Easysearch model indexes as first-class objects
+- Dameng, Oracle, PostgreSQL, and others can expose routines, jobs, extensions, or administration objects
+- etcd, Nacos, message queues, and vector databases open dedicated workspaces from tree nodes
+
+## Safety and Performance Boundaries
+
+- The tree shows only objects visible to the current account; missing objects often indicate database permissions
+- Large schemas use lazy loading, caching, and server-side filtering; avoid expanding everything without a purpose
+- System schemas, object counts, and extra metadata increase request volume and can be disabled
+- Drop, truncate, cross-database paste, and administration actions may be irreversible; review backups and scope first
+- Read-only connections hide or reject multiple mutation entry points, but database privileges remain the final boundary
+
+<Cards>
+  <Card title="Browse all objects" href="/en/docs/object-browser">
+    Use list or grid views for tables, views, routines, and statistics.
+  </Card>
+  <Card title="Edit table structure" href="/en/docs/table-structure">
+    Change columns and indexes and review DDL before execution.
+  </Card>
+  <Card title="Search the database" href="/en/docs/object-browser">
+    Locate objects by type, name, and metadata in large databases.
+  </Card>
+  <Card title="Manage specialized systems" href="/en/docs/specialized-workspaces">
+    Open Redis, MongoDB, vector, MQ, etcd, ZooKeeper, and Nacos workspaces.
+  </Card>
+</Cards>

@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { shouldLoadTableStructureTriggers, visibleTableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 
 describe("table structure metadata loading", () => {
-  it("does not request triggers while opening the default columns tab", () => {
-    expect(visibleTableStructureRefreshScope("columns").triggers).toBe(false);
-  });
-
-  it("requests triggers when the structure editor opens on the trigger tab", () => {
-    expect(visibleTableStructureRefreshScope("triggers").triggers).toBe(true);
+  it.each([
+    ["columns", { columns: true, indexes: false, foreignKeys: false, triggers: false, tableComment: true }],
+    ["indexes", { columns: true, indexes: true, foreignKeys: false, triggers: false, tableComment: true }],
+    ["foreignKeys", { columns: true, indexes: false, foreignKeys: true, triggers: false, tableComment: true }],
+    ["triggers", { columns: false, indexes: false, foreignKeys: false, triggers: true, tableComment: true }],
+    ["ddl", { columns: false, indexes: false, foreignKeys: false, triggers: false, tableComment: false }],
+  ] as const)("requests only the metadata required by the %s tab", (tab, expected) => {
+    expect(visibleTableStructureRefreshScope(tab)).toEqual(expected);
   });
 
   it("loads trigger metadata once when the trigger tab becomes visible", () => {

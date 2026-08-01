@@ -1314,6 +1314,8 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         columns,
         column_types: Vec::new(),
         column_sortables: Vec::new(),
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows,
         affected_rows,
         execution_time_ms: 0,

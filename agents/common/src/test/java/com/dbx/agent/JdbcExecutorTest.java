@@ -20,19 +20,58 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.rowset.serial.SerialBlob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcExecutorTest {
     @Test
-    void stringResultValueFormatsBlobWithoutUsingStringConversion() throws Exception {
+    void blobResultValuesPreferBlobObjectsWhenGetBytesFails() throws Exception {
         ResultSet rs = resultSet(
-            new byte[]{0x01, 0x2A, (byte) 0xFF},
-            () -> {
-                throw new AssertionError("BLOB columns should not be read with getString");
-            }
+            new SerialBlob(new byte[]{0x01, 0x2A, (byte) 0xFF}),
+            null,
+            null,
+            false,
+            new SQLException("ORA-00932: expected NUMBER got BLOB")
         );
 
+        assertEquals("0x012aff", JdbcExecutor.INSTANCE.defaultResultValue(rs, 1, Types.BLOB));
         assertEquals("0x012aff", JdbcExecutor.stringResultValue(rs, 1, Types.BLOB));
+    }
+
+    @Test
+    void blobResultValuesFallBackToBytesWhenObjectIsUnavailable() throws Exception {
+        ResultSet rs = resultSet(null, new byte[]{0x0A, 0x0B}, null, false, null);
+
+        assertEquals("0x0a0b", JdbcExecutor.INSTANCE.defaultResultValue(rs, 1, Types.BLOB));
+        assertEquals("0x0a0b", JdbcExecutor.stringResultValue(rs, 1, Types.BLOB));
+    }
+
+    @Test
+    void blobResultValuesPreserveSqlNullWithoutReadingBytes() throws Exception {
+        ResultSet rs = resultSet(
+            null,
+            null,
+            null,
+            true,
+            new SQLException("getBytes should not be called for SQL NULL")
+        );
+
+        assertNull(JdbcExecutor.INSTANCE.defaultResultValue(rs, 1, Types.BLOB));
+        assertNull(JdbcExecutor.stringResultValue(rs, 1, Types.BLOB));
+    }
+
+    @Test
+    void binaryResultValuesContinueReadingBytesDirectly() throws Exception {
+        ResultSet rs = resultSet(
+            new SerialBlob(new byte[]{0x01}),
+            new byte[]{0x02},
+            null,
+            false,
+            null
+        );
+
+        assertEquals("0x02", JdbcExecutor.INSTANCE.defaultResultValue(rs, 1, Types.BINARY));
+        assertEquals("0x02", JdbcExecutor.stringResultValue(rs, 1, Types.BINARY));
     }
 
     @Test
@@ -262,12 +301,26 @@ class JdbcExecutorTest {
     }
 
     private static ResultSet resultSet(Object objectValue, StringSupplier stringSupplier, boolean wasNull) {
+        byte[] bytesValue = objectValue instanceof byte[] ? (byte[]) objectValue : null;
+        return resultSet(objectValue, bytesValue, stringSupplier, wasNull, null);
+    }
+
+    private static ResultSet resultSet(
+        Object objectValue,
+        byte[] bytesValue,
+        StringSupplier stringSupplier,
+        boolean wasNull,
+        SQLException getBytesFailure
+    ) {
         InvocationHandler handler = (Object unused, Method method, Object[] args) -> {
             switch (method.getName()) {
                 case "getObject":
                     return objectValue;
                 case "getBytes":
-                    return objectValue instanceof byte[] ? objectValue : null;
+                    if (getBytesFailure != null) {
+                        throw getBytesFailure;
+                    }
+                    return bytesValue;
                 case "getString":
                     return stringSupplier == null ? null : stringSupplier.get();
                 case "wasNull":

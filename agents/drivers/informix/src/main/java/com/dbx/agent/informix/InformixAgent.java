@@ -50,18 +50,12 @@ public final class InformixAgent extends AbstractJdbcAgent {
         String informixServer = params.getInformix_server();
         informixServer = informixServer == null ? "" : informixServer.trim();
         if (informixServer.isEmpty()) {
-            informixServer = containsIgnoreCase(extraParams, "INFORMIXSERVER=") ? "" : defaultInformixServer(params.getHost());
+            informixServer = hasUrlParameter(extraParams, "INFORMIXSERVER") ? "" : defaultInformixServer(params.getHost());
         }
         String serverParam = informixServer.isEmpty() ? "" : "INFORMIXSERVER=" + informixServer;
 
-        // Add CLIENT_LOCALE and DB_LOCALE defaults if not already specified
-        if (!containsIgnoreCase(extraParams, "CLIENT_LOCALE=")) {
-            String localeParam = "CLIENT_LOCALE=en_US.utf8";
-            extraParams = extraParams.isEmpty() ? localeParam : extraParams + ";" + localeParam;
-        }
-        if (!containsIgnoreCase(extraParams, "DB_LOCALE=")) {
-            String localeParam = "DB_LOCALE=en_US.utf8";
-            extraParams = extraParams.isEmpty() ? localeParam : extraParams + ";" + localeParam;
+        if (extraParams.isEmpty()) {
+            extraParams = "CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8";
         }
 
         List<String> jdbcParams = new ArrayList<>();
@@ -526,8 +520,18 @@ public final class InformixAgent extends AbstractJdbcAgent {
         return false;
     }
 
-    private static boolean containsIgnoreCase(String value, String needle) {
-        return value.toLowerCase(Locale.ROOT).contains(needle.toLowerCase(Locale.ROOT));
+    private static boolean hasUrlParameter(String urlParams, String parameterName) {
+        for (String urlParam : urlParams.split(";")) {
+            int separator = urlParam.indexOf('=');
+            if (separator < 0) {
+                continue;
+            }
+            String key = urlParam.substring(0, separator).trim();
+            if (key.equalsIgnoreCase(parameterName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void main(String[] args) {

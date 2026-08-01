@@ -23,6 +23,15 @@ describe("AppTabBar HBase presentation", () => {
   it("uses the table icon in regular, pinned, and overflow tab surfaces", () => {
     expect(tabBarSource).toContain('if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;');
     expect(tabBarSource.match(/tab\.mode === 'hbase'/g)).toHaveLength(2);
-    expect(tabBarSource).toContain('tab.mode === "hbase" || tab.mode === "objects"');
+    expect(tabBarSource).toContain('tab.mode === "hbase" || tab.mode === "structure"');
+  });
+});
+
+describe("AppTabBar objects presentation", () => {
+  it("uses an amber icon color on regular, pinned, and overflow tab surfaces", () => {
+    expect(tabBarSource).toContain('if (tab.mode === "objects") return "text-amber-500 dark:text-amber-400";');
+    expect(tabBarSource).toContain('if (tab.mode === "objects") return TableProperties;');
+    expect(tabBarSource.match(/:class="tabIconClass\(tab\)"/g)).toHaveLength(2);
+    expect(tabBarSource.match(/tabMenuIcon\(tab\).*tabIconClass\(tab\)/g)).toHaveLength(2);
   });
 });

@@ -29,3 +29,14 @@ test("bumps DuckDB after its initial release", () => {
 
   assert.equal(result.versions.duckdb, "0.1.1");
 });
+
+test("bumps the native RabbitMQ agent from its Go directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { rabbitmq: "0.1.0" },
+    changedFiles: ["agents/drivers/rabbitmq/main.go"],
+    moduleExists: (path) => path === "agents/drivers/rabbitmq",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.rabbitmq, "0.1.1");
+});

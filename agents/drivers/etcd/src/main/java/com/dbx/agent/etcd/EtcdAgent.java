@@ -1,12 +1,21 @@
 package com.dbx.agent.etcd;
 
 import com.dbx.agent.AgentProtocol;
+import com.dbx.agent.MultiSessionJsonRpcServer;
+import com.dbx.agent.SessionRpcHandler;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.WireFormat;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import io.grpc.MethodDescriptor;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.netty.GrpcSslContexts;
+import io.grpc.stub.ClientCalls;
 import io.etcd.jetcd.ByteSequence;
+import io.etcd.jetcd.Auth;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.ClientBuilder;
 import io.etcd.jetcd.Cluster;
@@ -20,6 +29,7 @@ import io.etcd.jetcd.cluster.MemberListResponse;
 import io.etcd.jetcd.kv.TxnResponse;
 import io.etcd.jetcd.lease.LeaseGrantResponse;
 import io.etcd.jetcd.lease.LeaseTimeToLiveResponse;
+import io.etcd.jetcd.api.VertxLeaseGrpc;
 import io.etcd.jetcd.maintenance.AlarmMember;
 import io.etcd.jetcd.maintenance.AlarmResponse;
 import io.etcd.jetcd.maintenance.StatusResponse;
@@ -36,15 +46,21 @@ import io.etcd.jetcd.options.PutOption;
 import io.etcd.jetcd.options.WatchOption;
 import io.etcd.jetcd.watch.WatchEvent;
 import io.etcd.jetcd.watch.WatchResponse;
+import io.etcd.jetcd.auth.Permission;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import java.io.ByteArrayInputStream;
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
@@ -64,6 +80,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.UUID;
 
 public final class EtcdAgent {
     private static final Gson GSON = new Gson();
@@ -79,33 +97,77 @@ public final class EtcdAgent {
         AgentProtocol.CAPABILITY_KV_CAS,
         AgentProtocol.CAPABILITY_KV_LIST_VALUES,
         AgentProtocol.CAPABILITY_KV_STATUS,
-        AgentProtocol.CAPABILITY_KV_HISTORY
+        AgentProtocol.CAPABILITY_KV_HISTORY,
+        AgentProtocol.CAPABILITY_ETCD_COMPACTION,
+        AgentProtocol.CAPABILITY_ETCD_DEFRAG,
+        AgentProtocol.CAPABILITY_ETCD_WATCH,
+        AgentProtocol.CAPABILITY_ETCD_LEASE,
+        AgentProtocol.CAPABILITY_ETCD_AUTH,
+        AgentProtocol.CAPABILITY_MULTI_SESSION
     ));
-    private static Client client;
-    private static KV kv;
-    private static List<String> connectedEndpoints = Collections.emptyList();
+    private static final int MAX_WATCHES = 4;
+    private static final int MAX_WATCH_BATCHES = 256;
+    private static final int MAX_WATCH_EVENTS = 10_000;
+    static final long MAX_WATCH_BUFFER_BYTES = 8L * 1024 * 1024;
+    static final long MAX_SESSION_WATCH_BUFFER_BYTES = 16L * 1024 * 1024;
+    private static final int MAX_LEASE_ATTACHED_KEYS = 256;
+    private static final int DEFAULT_LEASE_LIST_LIMIT = 100;
+    private static final int MAX_LEASE_LIST_LIMIT = 200;
+    private static final int LEASE_LIST_CONCURRENCY = 8;
+    private static final int LEASE_LIST_DEADLINE_SECONDS = 5;
+    private static final MethodDescriptor.Marshaller<byte[]> BYTE_ARRAY_MARSHALLER = new MethodDescriptor.Marshaller<>() {
+        @Override
+        public InputStream stream(byte[] value) {
+            return new ByteArrayInputStream(value);
+        }
+
+        @Override
+        public byte[] parse(InputStream stream) {
+            try {
+                return stream.readAllBytes();
+            } catch (IOException error) {
+                throw new IllegalStateException("Failed to read etcd gRPC response", error);
+            }
+        }
+    };
+    private static final MethodDescriptor<byte[], byte[]> LEASES_METHOD = MethodDescriptor.<byte[], byte[]>newBuilder()
+        .setType(MethodDescriptor.MethodType.UNARY)
+        .setFullMethodName(MethodDescriptor.generateFullMethodName("etcdserverpb.Lease", "LeaseLeases"))
+        .setRequestMarshaller(BYTE_ARRAY_MARSHALLER)
+        .setResponseMarshaller(BYTE_ARRAY_MARSHALLER)
+        .build();
+    private static final ThreadLocal<EtcdSessionState> CURRENT_SESSION = new ThreadLocal<>();
+    private static final EtcdSessionState LEGACY_SESSION = new EtcdSessionState();
 
     private EtcdAgent() {
     }
 
     private static Object handshakeResult() {
-        return new HandshakeResult(AgentProtocol.PROTOCOL_VERSION, AgentProtocol.PROTOCOL_VERSION, CAPABILITIES);
+        return new HandshakeResult(AgentProtocol.MULTI_SESSION_PROTOCOL_VERSION, AgentProtocol.MULTI_SESSION_PROTOCOL_VERSION, CAPABILITIES);
     }
 
     private static Object connect(JsonObject params) throws Exception {
+        EtcdSessionState state = sessionState();
         JsonObject connection = connectionObject(params);
         Client nextClient = buildClient(connection);
-        nextClient.getKVClient().get(byteSequence("\0")).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        try {
+            probeClient(nextClient, endpoints(connection));
+        } catch (Exception error) {
+            nextClient.close();
+            throw error;
+        }
         closeClient();
-        client = nextClient;
-        kv = client.getKVClient();
-        connectedEndpoints = endpoints(connection);
+        state.client = nextClient;
+        state.kv = nextClient.getKVClient();
+        state.connectedEndpoints = endpoints(connection);
         return Collections.singletonMap("ok", true);
     }
 
     static Client buildClient(JsonObject connection) throws Exception {
         List<String> endpoints = endpoints(connection);
-        ClientBuilder builder = Client.builder().endpoints(endpoints.toArray(String[]::new));
+        ClientBuilder builder = Client.builder()
+            .endpoints(endpoints.toArray(String[]::new))
+            .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds(connection)));
         String username = stringOrEmpty(connection, "username");
         String password = stringOrEmpty(connection, "password");
         if (!username.isBlank()) {
@@ -116,6 +178,46 @@ public final class EtcdAgent {
             builder.sslContext(sslContext(connection));
         }
         return builder.build();
+    }
+
+    static int connectTimeoutSeconds(JsonObject connection) {
+        return Math.min(300, Math.max(1, intOrDefault(connection, "connect_timeout_secs", RPC_TIMEOUT_SECONDS)));
+    }
+
+    private static Map<String, Object> validateConnectedClient() throws Exception {
+        EtcdSessionState state = sessionState();
+        Client active = requireClient();
+        return probeClient(active, state.connectedEndpoints);
+    }
+
+    private static Map<String, Object> probeClient(Client candidate, List<String> endpoints) throws Exception {
+        Maintenance maintenance = candidate.getMaintenanceClient();
+        Exception lastFailure = null;
+        for (String endpoint : endpoints) {
+            try {
+                maintenance.statusMember(endpoint).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("ok", true);
+                result.put("endpoint", endpoint);
+                return result;
+            } catch (Exception error) {
+                Throwable cause = rootCause(error);
+                // A restricted etcd user may not be allowed to call Maintenance.Status.
+                // PERMISSION_DENIED still proves that the channel reached an etcd server.
+                if (Status.fromThrowable(cause).getCode() == Status.Code.PERMISSION_DENIED) {
+                    Map<String, Object> result = new LinkedHashMap<>();
+                    result.put("ok", true);
+                    result.put("endpoint", endpoint);
+                    result.put("limited", true);
+                    return result;
+                }
+                lastFailure = error;
+            }
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+        throw new IllegalStateException("No etcd endpoint configured");
     }
 
     static List<String> endpoints(JsonObject connection) {
@@ -408,7 +510,7 @@ public final class EtcdAgent {
         if (requestedEnd != null && requestedEnd > 0) {
             latestOption.withRevision(requestedEnd);
         }
-        GetResponse latest = kv.get(key, latestOption.build()).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        GetResponse latest = sessionState().kv.get(key, latestOption.build()).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         long endRevision = requestedEnd == null ? latest.getHeader().getRevision() : requestedEnd;
         long targetKeyRevision = latest.getKvs().isEmpty()
             ? endRevision
@@ -428,7 +530,7 @@ public final class EtcdAgent {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         CountDownLatch created = new CountDownLatch(1);
         CountDownLatch completed = new CountDownLatch(1);
-        Watch watch = client.getWatchClient();
+        Watch watch = sessionState().client.getWatchClient();
         WatchOption option = WatchOption.newBuilder()
             .withRevision(startRevision)
             .withPrevKV(true)
@@ -552,10 +654,10 @@ public final class EtcdAgent {
 
     private static Object status() throws Exception {
         requireKv();
-        Maintenance maintenance = client.getMaintenanceClient();
-        Cluster cluster = client.getClusterClient();
+        Maintenance maintenance = sessionState().client.getMaintenanceClient();
+        Cluster cluster = sessionState().client.getClusterClient();
         Map<Long, Member> membersById = new HashMap<>();
-        List<String> endpoints = new ArrayList<>(connectedEndpoints);
+        List<String> endpoints = new ArrayList<>(sessionState().connectedEndpoints);
         try {
             MemberListResponse memberList = cluster.listMember().get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             for (Member member : memberList.getMembers()) {
@@ -588,7 +690,7 @@ public final class EtcdAgent {
             .withRange(ByteSequence.from(new byte[] {0}))
             .withCountOnly(true)
             .build();
-        GetResponse countResponse = kv.get(ByteSequence.from(new byte[] {0}), countOption)
+        GetResponse countResponse = sessionState().kv.get(ByteSequence.from(new byte[] {0}), countOption)
             .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
         List<Map<String, Object>> statusMembers = new ArrayList<>();
@@ -661,10 +763,628 @@ public final class EtcdAgent {
         return result;
     }
 
+    private static Object compact(JsonObject params) throws Exception {
+        long revision = requiredPositiveLong(params, "revision");
+        try {
+            requireKv().get(ByteSequence.from(new byte[] {0}), GetOption.newBuilder()
+                .withRange(ByteSequence.from(new byte[] {0}))
+                .withCountOnly(true)
+                .withRevision(revision)
+                .build())
+                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception error) {
+            Throwable cause = rootCause(error);
+            if (cause instanceof io.etcd.jetcd.common.exception.CompactedException compacted) {
+                throw new IllegalArgumentException(
+                    "ETCD_INVALID_REVISION: revision was already compacted at " + compacted.getCompactedRevision()
+                );
+            }
+            throw error;
+        }
+        GetResponse current = requireKv().get(ByteSequence.from(new byte[] {0}), GetOption.newBuilder()
+            .withRange(ByteSequence.from(new byte[] {0})).withCountOnly(true).build())
+            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (revision > current.getHeader().getRevision()) {
+            throw new IllegalArgumentException("ETCD_INVALID_REVISION: revision is newer than the current revision");
+        }
+        requireKv().compact(revision).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return Map.of("revision", longString(revision));
+    }
+
+    private static Object defrag(JsonObject params) throws Exception {
+        JsonElement endpointsValue = params.get("endpoints");
+        if (endpointsValue == null || !endpointsValue.isJsonArray() || endpointsValue.getAsJsonArray().isEmpty()) {
+            throw new IllegalArgumentException("ETCD_DEFRAG_TARGET_REQUIRED: at least one endpoint is required");
+        }
+        Maintenance maintenance = requireClient().getMaintenanceClient();
+        List<Map<String, Object>> members = new ArrayList<>();
+        List<String> remaining = new ArrayList<>();
+        for (JsonElement value : endpointsValue.getAsJsonArray()) {
+            String endpoint = value.getAsString();
+            if (!endpoint.isBlank() && !remaining.contains(endpoint)) remaining.add(endpoint);
+        }
+        while (!remaining.isEmpty()) {
+            String endpoint = nextDefragEndpoint(maintenance, remaining);
+            long started = System.nanoTime();
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("endpoint", endpoint);
+            try {
+                maintenance.defragmentMember(endpoint).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                row.put("status", "succeeded");
+                row.put("durationMs", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+            } catch (Exception error) {
+                row.put("status", "failed");
+                row.put("durationMs", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+                row.put("error", safeMessage(rootCause(error)));
+                members.add(row);
+                appendUnexecutedDefragMembers(members, remaining, endpoint);
+                break;
+            }
+            members.add(row);
+            remaining.remove(endpoint);
+        }
+        return Map.of("members", members);
+    }
+
+    static void appendUnexecutedDefragMembers(
+        List<Map<String, Object>> members,
+        List<String> remaining,
+        String failedEndpoint
+    ) {
+        for (String endpoint : remaining) {
+            if (endpoint.equals(failedEndpoint)) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("endpoint", endpoint);
+            row.put("status", "not_executed");
+            row.put("durationMs", null);
+            row.put("error", null);
+            members.add(row);
+        }
+    }
+
+    /** Re-evaluate leadership before each member so a leader change is not defragmented early. */
+    private static String nextDefragEndpoint(Maintenance maintenance, List<String> remaining) throws Exception {
+        String leaderEndpoint = null;
+        for (String endpoint : remaining) {
+            try {
+                StatusResponse status = maintenance.statusMember(endpoint).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                if (status.getHeader().getMemberId() == status.getLeader()) {
+                    leaderEndpoint = endpoint;
+                    break;
+                }
+            } catch (Exception ignored) {
+                // The following defragment call reports this member as the failed step.
+            }
+        }
+        for (String endpoint : remaining) {
+            if (!endpoint.equals(leaderEndpoint)) return endpoint;
+        }
+        return leaderEndpoint == null ? remaining.get(0) : leaderEndpoint;
+    }
+
+    private static Object watchStart(JsonObject params) throws Exception {
+        EtcdSessionState session = sessionState();
+        if (session.watches.size() >= MAX_WATCHES) {
+            throw new IllegalStateException("ETCD_WATCH_LIMIT: at most " + MAX_WATCHES + " watches are allowed per connection");
+        }
+        ByteSequence key = keyBytes(params);
+        String scope = stringOrDefault(params, "scope", "key");
+        if (!"key".equals(scope) && !"prefix".equals(scope)) {
+            throw new IllegalArgumentException("ETCD_WATCH_SCOPE_INVALID: scope must be key or prefix");
+        }
+        Long requestedRevision = longOrNull(params, "startRevision");
+        long startedRevision;
+        if (requestedRevision != null && requestedRevision > 0) {
+            startedRevision = requestedRevision;
+        } else {
+            GetResponse response = requireKv().get(ByteSequence.from(new byte[] {0}), GetOption.newBuilder()
+                .withRange(ByteSequence.from(new byte[] {0})).withCountOnly(true).build())
+                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            startedRevision = response.getHeader().getRevision() + 1;
+        }
+        String watchId = UUID.randomUUID().toString();
+        EtcdWatchState state = new EtcdWatchState(watchId, session);
+        WatchOption.Builder option = WatchOption.newBuilder().withRevision(startedRevision)
+            .withPrevKV(boolOrDefault(params, "includePrevKv", false));
+        if ("prefix".equals(scope)) option.withRange(prefixEnd(key));
+        try {
+            Watch.Watcher watcher = requireClient().getWatchClient().watch(key, option.build(), new Watch.Listener() {
+                @Override
+                public void onNext(WatchResponse response) {
+                    if (response.getEvents().isEmpty()) return;
+                    List<Map<String, Object>> events = new ArrayList<>();
+                    long bufferedBytes = 128;
+                    for (WatchEvent event : response.getEvents()) {
+                        KeyValue item = event.getKeyValue();
+                        KeyValue previous = event.getPrevKV();
+                        bufferedBytes += watchEventBufferBytes(item, previous);
+                        if (bufferedBytes > MAX_WATCH_BUFFER_BYTES) {
+                            state.overflow();
+                            return;
+                        }
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("eventType", event.getEventType() == WatchEvent.EventType.DELETE ? "delete" : "put");
+                        row.put("revision", longString(item.getModRevision()));
+                        row.put("key", displayBytes(item.getKey().getBytes()));
+                        row.put("keyBytes", bytesObject(item.getKey().getBytes()));
+                        row.put("value", event.getEventType() == WatchEvent.EventType.DELETE ? null : valueObject(item.getValue().getBytes()));
+                        row.put("previousValue", previous != null && previous.getVersion() > 0 ? valueObject(previous.getValue().getBytes()) : null);
+                        row.put("metadata", event.getEventType() == WatchEvent.EventType.DELETE && previous != null ? metadata(previous) : metadata(item));
+                        events.add(row);
+                    }
+                    state.append(response.getHeader().getRevision(), events, bufferedBytes);
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                    Throwable cause = rootCause(error);
+                    if (cause instanceof io.etcd.jetcd.common.exception.CompactedException compacted) {
+                        state.fail("compacted", "ETCD_COMPACTED", compacted.getCompactedRevision());
+                    } else {
+                        state.fail("error", safeMessage(cause), null);
+                    }
+                }
+
+                @Override
+                public void onCompleted() {
+                    state.fail("closed", "watch closed", null);
+                }
+            });
+            state.setWatcher(watcher);
+            session.watches.put(watchId, state);
+        } catch (Exception error) {
+            state.close();
+            throw error;
+        }
+        return Map.of("watchId", watchId, "startedRevision", longString(startedRevision));
+    }
+
+    private static Object watchPoll(JsonObject params) throws Exception {
+        return pollWatchState(sessionState(), stringOrEmpty(params, "watchId"));
+    }
+
+    static Map<String, Object> pollWatchState(EtcdSessionState session, String watchId) {
+        EtcdWatchState state = session.watches.get(watchId);
+        if (state == null) throw new IllegalStateException("ETCD_WATCH_NOT_FOUND: watch does not exist");
+        Map<String, Object> result = state.poll();
+        if (result.containsKey("terminal") && session.watches.remove(watchId, state)) {
+            state.close();
+        }
+        return result;
+    }
+
+    private static Object watchStop(JsonObject params) {
+        EtcdWatchState state = sessionState().watches.remove(stringOrEmpty(params, "watchId"));
+        if (state != null) state.close();
+        return Map.of("stopped", true);
+    }
+
+    private static Object leaseList(JsonObject params) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(LEASE_LIST_DEADLINE_SECONDS);
+        int limit = Math.min(Math.max(1, intOrDefault(params, "limit", DEFAULT_LEASE_LIST_LIMIT)), MAX_LEASE_LIST_LIMIT);
+        String continuation = stringOrNull(params, "continuation");
+        Long afterLeaseId = continuation == null || continuation.isBlank()
+            ? null
+            : Long.parseUnsignedLong(continuation);
+        boolean partial = false;
+        List<Long> leaseIds;
+        try {
+            leaseIds = clusterLeaseIds(remainingMillis(deadlineNanos));
+            sessionState().knownLeases.addAll(leaseIds);
+        } catch (ReflectiveOperationException error) {
+            leaseIds = new ArrayList<>(sessionState().knownLeases);
+            partial = true;
+        } catch (java.util.concurrent.TimeoutException error) {
+            leaseIds = new ArrayList<>(sessionState().knownLeases);
+            partial = true;
+        } catch (StatusRuntimeException error) {
+            if (error.getStatus().getCode() != Status.Code.UNIMPLEMENTED
+                && error.getStatus().getCode() != Status.Code.DEADLINE_EXCEEDED) {
+                throw error;
+            }
+            leaseIds = new ArrayList<>(sessionState().knownLeases);
+            partial = true;
+        }
+        leaseIds = leasePageIds(leaseIds, afterLeaseId, limit + 1);
+        boolean hasMore = leaseIds.size() > limit;
+        List<Long> pageIds = new ArrayList<>(leaseIds.subList(0, Math.min(limit, leaseIds.size())));
+
+        List<Map<String, Object>> leases = new ArrayList<>();
+        Long lastProcessedId = null;
+        boolean deadlineReached = false;
+        outer:
+        for (int offset = 0; offset < pageIds.size(); offset += LEASE_LIST_CONCURRENCY) {
+            List<Long> chunkIds = pageIds.subList(offset, Math.min(offset + LEASE_LIST_CONCURRENCY, pageIds.size()));
+            Map<Long, CompletableFuture<LeaseTimeToLiveResponse>> requests = new LinkedHashMap<>();
+            for (Long id : chunkIds) {
+                requests.put(id, requireClient().getLeaseClient().timeToLive(id, LeaseOption.DEFAULT));
+            }
+            for (Map.Entry<Long, CompletableFuture<LeaseTimeToLiveResponse>> request : requests.entrySet()) {
+                try {
+                    LeaseTimeToLiveResponse response = request.getValue().get(
+                        remainingMillis(deadlineNanos),
+                        TimeUnit.MILLISECONDS
+                    );
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", longString(response.getID()));
+                    row.put("ttl", response.getTTL());
+                    row.put("grantedTtl", response.getGrantedTTL());
+                    leases.add(row);
+                    lastProcessedId = request.getKey();
+                } catch (java.util.concurrent.TimeoutException error) {
+                    requests.values().forEach(future -> future.cancel(true));
+                    partial = true;
+                    deadlineReached = true;
+                    break outer;
+                } catch (Exception error) {
+                    Throwable cause = rootCause(error);
+                    if (Status.fromThrowable(cause).getCode() == Status.Code.NOT_FOUND) {
+                        sessionState().knownLeases.remove(request.getKey());
+                    } else {
+                        partial = true;
+                    }
+                    lastProcessedId = request.getKey();
+                }
+            }
+        }
+        String nextContinuation = null;
+        if (deadlineReached && !pageIds.isEmpty()) {
+            nextContinuation = unsignedLongString(lastProcessedId != null ? lastProcessedId : afterLeaseId != null ? afterLeaseId : 0L);
+        } else if (hasMore && !pageIds.isEmpty()) {
+            nextContinuation = unsignedLongString(pageIds.get(pageIds.size() - 1));
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("leases", leases);
+        result.put("partial", partial);
+        result.put("nextContinuation", nextContinuation);
+        return result;
+    }
+
+    static List<Long> leasePageIds(List<Long> leaseIds, Long afterLeaseId, int fetchLimit) {
+        return leaseIds.stream()
+            .sorted(Long::compareUnsigned)
+            .filter(id -> afterLeaseId == null || Long.compareUnsigned(id, afterLeaseId) > 0)
+            .limit(Math.max(0, fetchLimit))
+            .toList();
+    }
+
+    private static long remainingMillis(long deadlineNanos) throws java.util.concurrent.TimeoutException {
+        long remaining = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+        if (remaining <= 0) throw new java.util.concurrent.TimeoutException("ETCD_LEASE_LIST_TIMEOUT");
+        return remaining;
+    }
+
+    private static List<Long> clusterLeaseIds(long timeoutMillis) throws Exception {
+        VertxLeaseGrpc.LeaseVertxStub stub = leaseStub(requireClient().getLeaseClient());
+        byte[] response = ClientCalls.blockingUnaryCall(
+            stub.getChannel(),
+            LEASES_METHOD,
+            stub.getCallOptions().withDeadlineAfter(timeoutMillis, TimeUnit.MILLISECONDS),
+            new byte[0]
+        );
+        return leaseIdsFromResponse(response);
+    }
+
+    static List<Long> leaseIdsFromResponse(byte[] response) throws IOException {
+        List<Long> ids = new ArrayList<>();
+        CodedInputStream input = CodedInputStream.newInstance(response);
+        while (!input.isAtEnd()) {
+            int tag = input.readTag();
+            if (tag == 0) break;
+            if (WireFormat.getTagFieldNumber(tag) != 2 || WireFormat.getTagWireType(tag) != WireFormat.WIRETYPE_LENGTH_DELIMITED) {
+                input.skipField(tag);
+                continue;
+            }
+            CodedInputStream lease = CodedInputStream.newInstance(input.readByteArray());
+            while (!lease.isAtEnd()) {
+                int leaseTag = lease.readTag();
+                if (leaseTag == 0) break;
+                if (WireFormat.getTagFieldNumber(leaseTag) == 1 && WireFormat.getTagWireType(leaseTag) == WireFormat.WIRETYPE_VARINT) {
+                    ids.add(lease.readInt64());
+                } else {
+                    lease.skipField(leaseTag);
+                }
+            }
+        }
+        return ids;
+    }
+
+    private static Object leaseGet(JsonObject params) throws Exception {
+        long id = requiredPositiveLong(params, "id");
+        LeaseOption option = boolOrDefault(params, "includeKeys", false) ? LeaseOption.newBuilder().withAttachedKeys().build() : LeaseOption.DEFAULT;
+        LeaseTimeToLiveResponse response = requireClient().getLeaseClient().timeToLive(id, option)
+            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        sessionState().knownLeases.add(id);
+        List<Map<String, Object>> keys = new ArrayList<>();
+        List<ByteSequence> attachedKeys = response.getKeys();
+        for (int index = 0; index < attachedKeys.size() && index < MAX_LEASE_ATTACHED_KEYS; index++) {
+            keys.add(bytesObject(attachedKeys.get(index).getBytes()));
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", longString(response.getID()));
+        result.put("ttl", response.getTTL());
+        result.put("grantedTtl", response.getGrantedTTL());
+        result.put("keys", keys);
+        result.put("truncated", attachedKeys.size() > MAX_LEASE_ATTACHED_KEYS);
+        return result;
+    }
+
+    private static Object leaseGrant(JsonObject params) throws Exception {
+        long ttl = requiredPositiveLong(params, "ttl");
+        Long requestedId = longOrNull(params, "id");
+        if (requestedId != null && requestedId < 0) throw new IllegalArgumentException("id must be a positive integer or 0");
+        LeaseGrantResponse response = requestedId == null || requestedId == 0
+            ? requireClient().getLeaseClient().grant(ttl).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            : grantLeaseWithRequestedId(ttl, requestedId);
+        sessionState().knownLeases.add(response.getID());
+        return Map.of("id", longString(response.getID()), "ttl", response.getTTL());
+    }
+
+    private static LeaseGrantResponse grantLeaseWithRequestedId(long ttl, long requestedId) throws Exception {
+        Lease lease = requireClient().getLeaseClient();
+        try {
+            VertxLeaseGrpc.LeaseVertxStub stub = leaseStub(lease);
+            io.etcd.jetcd.api.LeaseGrantResponse response = stub
+                .withDeadlineAfter(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .leaseGrant(io.etcd.jetcd.api.LeaseGrantRequest.newBuilder().setTTL(ttl).setID(requestedId).build())
+                .toCompletionStage()
+                .toCompletableFuture()
+                .get(RPC_TIMEOUT_SECONDS + 1L, TimeUnit.SECONDS);
+            return new LeaseGrantResponse(response);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("Custom Lease ID is unavailable in the installed Jetcd version", error);
+        }
+    }
+
+    private static VertxLeaseGrpc.LeaseVertxStub leaseStub(Lease lease) throws ReflectiveOperationException {
+        Field stubField = lease.getClass().getDeclaredField("stub");
+        stubField.setAccessible(true);
+        return (VertxLeaseGrpc.LeaseVertxStub) stubField.get(lease);
+    }
+
+    private static Object leaseKeepAlive(JsonObject params) throws Exception {
+        long id = requiredPositiveLong(params, "id");
+        long ttl = requireClient().getLeaseClient().keepAliveOnce(id).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS).getTTL();
+        sessionState().knownLeases.add(id);
+        return Map.of("id", longString(id), "ttl", ttl);
+    }
+
+    private static Object leaseRevoke(JsonObject params) throws Exception {
+        long id = requiredPositiveLong(params, "id");
+        requireClient().getLeaseClient().revoke(id).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        sessionState().knownLeases.remove(id);
+        return Map.of("id", longString(id), "revoked", true);
+    }
+
+    private static Object authUserList() throws Exception {
+        return Map.of("users", requireClient().getAuthClient().userList().get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS).getUsers());
+    }
+
+    private static Object authUserGet(JsonObject params) throws Exception {
+        String user = requiredString(params, "user");
+        return Map.of("user", user, "roles", requireClient().getAuthClient().userGet(byteSequence(user))
+            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS).getRoles());
+    }
+
+    private static Object authUserAdd(JsonObject params) throws Exception {
+        requireClient().getAuthClient().userAdd(byteSequence(requiredString(params, "user")), byteSequence(requiredString(params, "password")))
+            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return Map.of("created", true);
+    }
+
+    private static Object authUserDelete(JsonObject params) throws Exception {
+        requireClient().getAuthClient().userDelete(byteSequence(requiredString(params, "user"))).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return Map.of("deleted", true);
+    }
+
+    private static Object authUserChangePassword(JsonObject params) throws Exception {
+        requireClient().getAuthClient().userChangePassword(byteSequence(requiredString(params, "user")), byteSequence(requiredString(params, "password")))
+            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return Map.of("changed", true);
+    }
+
+    private static Object authUserRole(JsonObject params, boolean grant) throws Exception {
+        Auth auth = requireClient().getAuthClient();
+        ByteSequence user = byteSequence(requiredString(params, "user"));
+        ByteSequence role = byteSequence(requiredString(params, "role"));
+        if (grant) auth.userGrantRole(user, role).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        else auth.userRevokeRole(user, role).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return Map.of("updated", true);
+    }
+
+    private static Object authRoleList() throws Exception {
+        return Map.of("roles", requireClient().getAuthClient().roleList().get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS).getRoles());
+    }
+
+    private static Object authRoleGet(JsonObject params) throws Exception {
+        String role = requiredString(params, "role");
+        List<Map<String, Object>> permissions = new ArrayList<>();
+        for (Permission permission : requireClient().getAuthClient().roleGet(byteSequence(role)).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS).getPermissions()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("access", permission.getPermType().name().toLowerCase());
+            item.put("key", bytesObject(permission.getKey().getBytes()));
+            item.put("rangeEnd", bytesObject(permission.getRangeEnd().getBytes()));
+            byte[] keyBytes = permission.getKey().getBytes();
+            byte[] rangeEndBytes = permission.getRangeEnd().getBytes();
+            String resource = keyBytes.length == 1 && keyBytes[0] == 0
+                && rangeEndBytes.length == 1 && rangeEndBytes[0] == 0
+                ? "all"
+                : rangeEndBytes.length == 0 ? "key" : "prefix";
+            item.put("resource", resource);
+            permissions.add(item);
+        }
+        return Map.of("role", role, "permissions", permissions);
+    }
+
+    private static Object authRoleAdd(JsonObject params) throws Exception {
+        requireClient().getAuthClient().roleAdd(byteSequence(requiredString(params, "role"))).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return Map.of("created", true);
+    }
+
+    private static Object authRoleDelete(JsonObject params) throws Exception {
+        requireClient().getAuthClient().roleDelete(byteSequence(requiredString(params, "role"))).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return Map.of("deleted", true);
+    }
+
+    private static Object authRolePermission(JsonObject params, boolean grant) throws Exception {
+        Auth auth = requireClient().getAuthClient();
+        ByteSequence role = byteSequence(requiredString(params, "role"));
+        String resource = stringOrDefault(params, "resource", "key");
+        boolean all = "all".equals(resource);
+        boolean prefix = "prefix".equals(resource);
+        ByteSequence key = all ? ByteSequence.from(new byte[] {0}) : keyBytes(params);
+        ByteSequence rangeEnd = all
+            ? ByteSequence.from(new byte[] {0})
+            : prefix ? prefixEnd(key) : ByteSequence.from(new byte[0]);
+        if (grant) {
+            Permission.Type access = Permission.Type.valueOf(requiredString(params, "access").toUpperCase());
+            auth.roleGrantPermission(role, key, rangeEnd, access).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } else {
+            auth.roleRevokePermission(role, key, rangeEnd).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        }
+        return Map.of("updated", true);
+    }
+
+    private static long requiredPositiveLong(JsonObject params, String field) {
+        Long value = longOrNull(params, field);
+        if (value == null || value <= 0) throw new IllegalArgumentException("ETCD_INVALID_" + field.toUpperCase() + ": a positive integer is required");
+        return value;
+    }
+
+    private static String requiredString(JsonObject params, String field) {
+        String value = stringOrNull(params, field);
+        if (value == null || value.isBlank()) throw new IllegalArgumentException("ETCD_" + field.toUpperCase() + "_REQUIRED");
+        return value;
+    }
+
+    static long watchEventBufferBytes(KeyValue item, KeyValue previous) {
+        long bytes = 512L + estimatedBufferedBytes(item.getKey().size());
+        bytes += estimatedBufferedBytes(item.getValue().size());
+        if (previous != null && previous.getVersion() > 0) {
+            bytes += estimatedBufferedBytes(previous.getValue().size());
+        }
+        return bytes;
+    }
+
+    static long estimatedBufferedBytes(int sourceBytes) {
+        return Math.max(0L, sourceBytes) * 4L;
+    }
+
+    static final class BufferedWatchBatch {
+        private final Map<String, Object> payload;
+        private final long bufferedBytes;
+
+        private BufferedWatchBatch(Map<String, Object> payload, long bufferedBytes) {
+            this.payload = payload;
+            this.bufferedBytes = bufferedBytes;
+        }
+    }
+
+    static final class EtcdWatchState {
+        private final String watchId;
+        private final EtcdSessionState session;
+        private final Deque<BufferedWatchBatch> batches = new ArrayDeque<>();
+        private int eventCount;
+        private long bufferedBytes;
+        private String terminalReason;
+        private String terminalMessage;
+        private Long compactedRevision;
+        private Watch.Watcher watcher;
+
+        EtcdWatchState(String watchId, EtcdSessionState session) {
+            this.watchId = watchId;
+            this.session = session;
+        }
+
+        synchronized void append(long revision, List<Map<String, Object>> events, long batchBytes) {
+            if (terminalReason != null) return;
+            if (batches.size() >= MAX_WATCH_BATCHES
+                || eventCount + events.size() > MAX_WATCH_EVENTS
+                || batchBytes > MAX_WATCH_BUFFER_BYTES
+                || bufferedBytes + batchBytes > MAX_WATCH_BUFFER_BYTES
+                || !session.reserveWatchBuffer(batchBytes)) {
+                overflow();
+                return;
+            }
+            Map<String, Object> batch = new LinkedHashMap<>();
+            batch.put("revision", longString(revision));
+            batch.put("events", events);
+            batches.addLast(new BufferedWatchBatch(batch, batchBytes));
+            eventCount += events.size();
+            bufferedBytes += batchBytes;
+        }
+
+        synchronized void overflow() {
+            if (terminalReason != null) return;
+            terminalReason = "overflow";
+            terminalMessage = "ETCD_WATCH_OVERFLOW: the event buffer reached its byte or event limit";
+            closeWatcher();
+        }
+
+        private synchronized void fail(String reason, String message, Long compacted) {
+            if (terminalReason == null) {
+                terminalReason = reason;
+                terminalMessage = message;
+                compactedRevision = compacted;
+            }
+        }
+
+        synchronized Map<String, Object> poll() {
+            List<Map<String, Object>> page = new ArrayList<>();
+            while (!batches.isEmpty() && page.size() < 64) {
+                BufferedWatchBatch batch = batches.removeFirst();
+                eventCount -= ((List<?>) batch.payload.get("events")).size();
+                bufferedBytes -= batch.bufferedBytes;
+                session.releaseWatchBuffer(batch.bufferedBytes);
+                page.add(batch.payload);
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("watchId", watchId);
+            result.put("batches", page);
+            if (terminalReason != null && batches.isEmpty()) {
+                Map<String, Object> terminal = new LinkedHashMap<>();
+                terminal.put("reason", terminalReason);
+                terminal.put("message", terminalMessage);
+                terminal.put("compactedRevision", compactedRevision == null ? null : longString(compactedRevision));
+                result.put("terminal", terminal);
+            }
+            return result;
+        }
+
+        private synchronized void close() {
+            fail("stopped", "watch stopped", null);
+            clearBuffered();
+            closeWatcher();
+        }
+
+        private void clearBuffered() {
+            if (bufferedBytes > 0) session.releaseWatchBuffer(bufferedBytes);
+            batches.clear();
+            eventCount = 0;
+            bufferedBytes = 0;
+        }
+
+        private synchronized void setWatcher(Watch.Watcher createdWatcher) {
+            if (terminalReason != null) {
+                createdWatcher.close();
+            } else {
+                watcher = createdWatcher;
+            }
+        }
+
+        private void closeWatcher() {
+            if (watcher != null) {
+                watcher.close();
+                watcher = null;
+            }
+        }
+    }
+
     private static Object dispatch(String method, JsonObject params) throws Exception {
         return switch (method) {
             case AgentProtocol.METHOD_HANDSHAKE -> handshakeResult();
             case AgentProtocol.METHOD_CONNECT, AgentProtocol.METHOD_TEST_CONNECTION -> connect(params);
+            case AgentProtocol.METHOD_VALIDATE_CONNECTION -> validateConnectedClient();
             case AgentProtocol.KV_METHOD_LIST_PREFIX -> listPrefix(params);
             case AgentProtocol.KV_METHOD_GET -> get(params);
             case AgentProtocol.KV_METHOD_PUT -> put(params);
@@ -672,6 +1392,29 @@ public final class EtcdAgent {
             case AgentProtocol.KV_METHOD_RENAME -> rename(params);
             case AgentProtocol.KV_METHOD_HISTORY -> history(params);
             case AgentProtocol.KV_METHOD_STATUS -> status();
+            case AgentProtocol.ETCD_METHOD_COMPACT -> compact(params);
+            case AgentProtocol.ETCD_METHOD_DEFRAG -> defrag(params);
+            case AgentProtocol.ETCD_METHOD_WATCH_START -> watchStart(params);
+            case AgentProtocol.ETCD_METHOD_WATCH_POLL -> watchPoll(params);
+            case AgentProtocol.ETCD_METHOD_WATCH_STOP -> watchStop(params);
+            case AgentProtocol.ETCD_METHOD_LEASE_LIST -> leaseList(params);
+            case AgentProtocol.ETCD_METHOD_LEASE_GET -> leaseGet(params);
+            case AgentProtocol.ETCD_METHOD_LEASE_GRANT -> leaseGrant(params);
+            case AgentProtocol.ETCD_METHOD_LEASE_KEEPALIVE -> leaseKeepAlive(params);
+            case AgentProtocol.ETCD_METHOD_LEASE_REVOKE -> leaseRevoke(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_USER_LIST -> authUserList();
+            case AgentProtocol.ETCD_METHOD_AUTH_USER_GET -> authUserGet(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_USER_ADD -> authUserAdd(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_USER_DELETE -> authUserDelete(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_USER_CHANGE_PASSWORD -> authUserChangePassword(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_USER_GRANT_ROLE -> authUserRole(params, true);
+            case AgentProtocol.ETCD_METHOD_AUTH_USER_REVOKE_ROLE -> authUserRole(params, false);
+            case AgentProtocol.ETCD_METHOD_AUTH_ROLE_LIST -> authRoleList();
+            case AgentProtocol.ETCD_METHOD_AUTH_ROLE_GET -> authRoleGet(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_ROLE_ADD -> authRoleAdd(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_ROLE_DELETE -> authRoleDelete(params);
+            case AgentProtocol.ETCD_METHOD_AUTH_ROLE_GRANT_PERMISSION -> authRolePermission(params, true);
+            case AgentProtocol.ETCD_METHOD_AUTH_ROLE_REVOKE_PERMISSION -> authRolePermission(params, false);
             case AgentProtocol.METHOD_DISCONNECT -> {
                 closeClient();
                 yield Collections.singletonMap("ok", true);
@@ -697,6 +1440,7 @@ public final class EtcdAgent {
         response.addProperty("jsonrpc", "2.0");
         response.add("id", id);
 
+        CURRENT_SESSION.set(LEGACY_SESSION);
         try {
             Object result = dispatch(method, params);
             response.add("result", GSON.toJsonTree(result));
@@ -705,6 +1449,8 @@ public final class EtcdAgent {
             error.addProperty("code", -1);
             error.addProperty("message", e.getMessage() == null ? "Unknown error" : e.getMessage());
             response.add("error", error);
+        } finally {
+            CURRENT_SESSION.remove();
         }
 
         return GSON.toJson(response);
@@ -716,27 +1462,39 @@ public final class EtcdAgent {
     }
 
     private static KV requireKv() {
+        KV kv = sessionState().kv;
         if (kv == null) {
             throw new IllegalStateException("Not connected");
         }
         return kv;
     }
 
+    private static EtcdSessionState sessionState() {
+        EtcdSessionState state = CURRENT_SESSION.get();
+        if (state == null) throw new IllegalStateException("No active etcd Agent session");
+        return state;
+    }
+
     private static Client requireClient() {
+        Client client = sessionState().client;
         if (client == null) throw new IllegalStateException("Not connected");
         return client;
     }
 
     private static void closeClient() {
-        if (kv != null) {
-            kv.close();
-            kv = null;
+        EtcdSessionState state = sessionState();
+        for (EtcdWatchState watch : state.watches.values()) watch.close();
+        state.watches.clear();
+        state.knownLeases.clear();
+        if (state.kv != null) {
+            state.kv.close();
+            state.kv = null;
         }
-        if (client != null) {
-            client.close();
-            client = null;
+        if (state.client != null) {
+            state.client.close();
+            state.client = null;
         }
-        connectedEndpoints = Collections.emptyList();
+        state.connectedEndpoints = Collections.emptyList();
     }
 
     private static ByteSequence byteSequence(String value) {
@@ -913,19 +1671,7 @@ public final class EtcdAgent {
     }
 
     public static void main(String[] args) throws Exception {
-        System.out.println("{\"ready\":true}");
-        System.out.flush();
-
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-        while (true) {
-            String line = reader.readLine();
-            if (line == null) {
-                break;
-            }
-
-            System.out.println(handleRequest(line));
-            System.out.flush();
-        }
+        MultiSessionJsonRpcServer.forSessionHandlers(EtcdSessionHandler::new).run();
     }
 
     private static final class HandshakeResult {
@@ -937,6 +1683,76 @@ public final class EtcdAgent {
             this.protocolVersion = protocolVersion;
             this.agentProtocolVersion = agentProtocolVersion;
             this.capabilities = capabilities;
+        }
+    }
+
+    static final class EtcdSessionState {
+        private Client client;
+        private KV kv;
+        private List<String> connectedEndpoints = Collections.emptyList();
+        private final Map<String, EtcdWatchState> watches = new ConcurrentHashMap<>();
+        private final Set<Long> knownLeases = ConcurrentHashMap.newKeySet();
+        private long watchBufferedBytes;
+
+        private synchronized boolean reserveWatchBuffer(long bytes) {
+            if (bytes < 0 || watchBufferedBytes + bytes > MAX_SESSION_WATCH_BUFFER_BYTES) return false;
+            watchBufferedBytes += bytes;
+            return true;
+        }
+
+        private synchronized void releaseWatchBuffer(long bytes) {
+            watchBufferedBytes = Math.max(0, watchBufferedBytes - Math.max(0, bytes));
+        }
+
+        synchronized long watchBufferedBytes() {
+            return watchBufferedBytes;
+        }
+
+        void addWatch(String watchId, EtcdWatchState watch) {
+            watches.put(watchId, watch);
+        }
+
+        int watchCount() {
+            return watches.size();
+        }
+    }
+
+    private static final class EtcdSessionHandler implements SessionRpcHandler {
+        private final EtcdSessionState state = new EtcdSessionState();
+
+        @Override
+        public Object handshake() {
+            return handshakeResult();
+        }
+
+        @Override
+        public Object connect(JsonObject params) throws Exception {
+            return withSession(() -> EtcdAgent.connect(params));
+        }
+
+        @Override
+        public Object handle(String method, JsonObject params) throws Exception {
+            return withSession(() -> dispatch(method, params));
+        }
+
+        @Override
+        public void close() {
+            try {
+                withSession(() -> {
+                    closeClient();
+                    return null;
+                });
+            } catch (Exception ignored) {
+            }
+        }
+
+        private <T> T withSession(Callable<T> task) throws Exception {
+            CURRENT_SESSION.set(state);
+            try {
+                return task.call();
+            } finally {
+                CURRENT_SESSION.remove();
+            }
         }
     }
 }

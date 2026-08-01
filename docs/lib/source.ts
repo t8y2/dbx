@@ -16,6 +16,7 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "schema-browser": "Network",
   redis: "KeyRound",
   mongodb: "Braces",
+  "specialized-workspaces": "Blocks",
   "object-browser": "Package",
   "schema-diff": "GitCompareArrows",
   "data-transfer": "ArrowRightLeft",
@@ -24,6 +25,7 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "table-import": "Upload",
   "sql-file": "FileCode2",
   "database-export": "Download",
+  "database-backup": "DatabaseBackup",
   "sql-snippets": "ScrollText",
   "ai-assistant": "Bot",
   cli: "Terminal",
@@ -38,6 +40,7 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "config-export": "FileUp",
   "cloud-sync": "CloudUpload",
   "ssh-tunnel": "ShieldCheck",
+  "production-safety": "ShieldAlert",
 };
 
 export const source = loader({

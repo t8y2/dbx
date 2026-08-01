@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildHoverTableSql, hoverTableMatchesScope, reformatHoverDdl, sanitizeHoverDdl, scopeHoverTables } from "@/lib/editor/hoverTableSql";
+import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, reformatHoverDdl, sanitizeHoverDdl, scopeHoverTables } from "@/lib/editor/hoverTableSql";
 import type { ColumnInfo, IndexInfo } from "@/types/database";
 
 type ColumnOverride = Partial<ColumnInfo> & { name: string; data_type: string };
@@ -207,6 +207,27 @@ describe("buildHoverTableSql", () => {
 });
 
 describe("reformatHoverDdl", () => {
+  it("removes the PostgreSQL access-control tail from canonical display DDL", () => {
+    const displayDdl = `CREATE TABLE "public"."users" (
+  "id" bigint NOT NULL
+);
+
+ALTER TABLE "public"."users" OWNER TO "app_owner";
+
+SET ROLE "app_owner";
+GRANT SELECT ON TABLE "public"."users" TO "reporter";
+RESET ROLE;`;
+
+    expect(ddlForHoverPreview(displayDdl)).toBe(`CREATE TABLE "public"."users" (
+  "id" bigint NOT NULL
+);`);
+  });
+
+  it("keeps non-PostgreSQL and structural companion statements unchanged", () => {
+    const ddl = "CREATE TABLE t (id int);\nCREATE INDEX ix_t_id ON t (id);";
+    expect(ddlForHoverPreview(ddl)).toBe(ddl);
+  });
+
   it("preserves sanitized raw MySQL DDL when table options are present", () => {
     const raw = `CREATE TABLE \`users\` (
   \`id\` int(11) unsigned NOT NULL AUTO_INCREMENT COMMENT '主键',

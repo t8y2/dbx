@@ -83,6 +83,20 @@ class EwkbWktDecoderTest {
     }
 
     @Test
+    void spatialDecodeSeparatesSridFromVisibleWkt() {
+        SpatialValue value = EwkbWktDecoder.decodeSpatial("SRID=3857;POINT(1 2)");
+        assertEquals("POINT(1 2)", value.getWkt());
+        assertEquals(3857, value.getSrid());
+    }
+
+    @Test
+    void spatialDecodeRetainsEwkbSrid() {
+        SpatialValue value = EwkbWktDecoder.decodeSpatial(hex("0101000020E6100000C520B07268195D404E62105839F44340"));
+        assertEquals("POINT(116.397 39.908)", value.getWkt());
+        assertEquals(4326, value.getSrid());
+    }
+
+    @Test
     void truncatedBytesFallBackToHex() {
         // First few bytes of a valid point but truncated mid-coordinate.
         byte[] raw = hex("0101000020E6100000C520B072");

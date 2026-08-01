@@ -1774,6 +1774,9 @@ pub fn format_grid_sql_literal(
         return number.to_string();
     }
     if let Some(arr) = value.as_array() {
+        if let Some(element_type) = postgres_json_array_element_type(database_type, column_info) {
+            return format_postgres_json_array_sql_literal(arr, element_type);
+        }
         if matches!(database_type, Some(DatabaseType::ClickHouse) | Some(DatabaseType::Databend)) {
             return format_ch_array_sql_literal(arr);
         }
@@ -1784,6 +1787,11 @@ pub fn format_grid_sql_literal(
         if let Some(literal) = format_mysql_binary_literal_text(&text) {
             // DBX result values expose binary columns as prefixed hex; keep them
             // as MySQL hex literals so copied INSERT/UPDATE SQL round-trips bytes.
+            return literal;
+        }
+    }
+    if is_oracle_raw_literal_column(database_type, column_info) {
+        if let Some(literal) = format_oracle_raw_literal_text(&text) {
             return literal;
         }
     }
@@ -1848,6 +1856,44 @@ pub fn format_grid_sql_literal(
     };
     let escaped = format!("'{escaped_text}'");
     escaped
+}
+
+fn postgres_json_array_element_type(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> Option<&'static str> {
+    if database_type != Some(DatabaseType::Postgres) {
+        return None;
+    }
+    match column_info?.data_type.trim().to_ascii_lowercase().as_str() {
+        "json[]" | "_json" => Some("json"),
+        "jsonb[]" | "_jsonb" => Some("jsonb"),
+        _ => None,
+    }
+}
+
+fn format_postgres_json_array_sql_literal(arr: &[Value], element_type: &str) -> String {
+    if arr.is_empty() {
+        return format!("ARRAY[]::{element_type}[]");
+    }
+    let elements = arr
+        .iter()
+        .map(|value| {
+            if value.is_null() {
+                return "NULL".to_string();
+            }
+            let json = match value {
+                Value::String(text) => serde_json::from_str::<Value>(text)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|_| Value::String(text.clone()).to_string()),
+                _ => value.to_string(),
+            };
+            let escaped = json.replace('\\', "\\\\").replace('\'', "''");
+            format!("E'{escaped}'::{element_type}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("ARRAY[{elements}]")
 }
 
 fn format_sqlserver_unicode_literal(text: &str) -> String {
@@ -2077,6 +2123,24 @@ fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
     let hex = trimmed.strip_prefix("0x")?;
     if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
         Some(if hex.is_empty() { "X''".to_string() } else { trimmed.to_string() })
+    } else {
+        None
+    }
+}
+
+fn is_oracle_raw_literal_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    is_oracle_temporal_literal_database(database_type)
+        && column_info.map(|column| is_oracle_raw_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_oracle_raw_column_type(data_type: &str) -> bool {
+    data_type.trim().split(['(', ':', ' ']).next().is_some_and(|base| base.eq_ignore_ascii_case("raw"))
+}
+
+fn format_oracle_raw_literal_text(text: &str) -> Option<String> {
+    let hex = text.strip_prefix("0x")?;
+    if hex.len() % 2 == 0 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(format!("HEXTORAW('{hex}')"))
     } else {
         None
     }
@@ -2934,6 +2998,78 @@ mod tests {
             deleted_rows: vec![],
             new_rows: vec![],
         }
+    }
+
+    #[test]
+    fn postgres_keyless_update_preserves_jsonb_array_elements() {
+        let endpoints =
+            json!([r#"{"port":10031,"type":"admin_web"}"#, r#""quoted""#, r#"[1,true,{"nested":null}]"#, null]);
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "services".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("id", "integer", false, None),
+                    column("name", "text", false, None),
+                    column("endpoints", "jsonb[]", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string(), "endpoints".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("before"), endpoints]],
+            dirty_rows: vec![(0, vec![(1, json!("after"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 1);
+        let statement = &result.statements[0];
+        assert!(statement.starts_with("UPDATE \"public\".\"services\" SET \"name\" = 'after' WHERE "));
+        assert!(statement.contains("\"endpoints\" = ARRAY["));
+        assert!(statement.contains("admin_web"));
+        assert!(statement.contains(r#"E'"quoted"'::jsonb"#), "{statement}");
+        assert!(statement.contains("NULL]"));
+        assert!(!statement.contains('\u{1}'));
+    }
+
+    #[test]
+    fn postgres_json_array_literals_preserve_json_documents_and_nulls() {
+        let value = json!([r#"{"object":true}"#, r#""text""#, "[1,2]", "plain text", "null", null]);
+        let json_column = column("payload", "json[]", true, None);
+        let jsonb_column = column("payload", "jsonb[]", true, None);
+        let text_column = column("payload", "text[]", true, None);
+        let integer_column = column("payload", "integer[]", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Postgres), Some(&json_column)),
+            r#"ARRAY[E'{"object":true}'::json, E'"text"'::json, E'[1,2]'::json, E'"plain text"'::json, E'null'::json, NULL]"#
+        );
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Postgres), Some(&jsonb_column)),
+            r#"ARRAY[E'{"object":true}'::jsonb, E'"text"'::jsonb, E'[1,2]'::jsonb, E'"plain text"'::jsonb, E'null'::jsonb, NULL]"#
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!([]), Some(DatabaseType::Postgres), Some(&jsonb_column)),
+            "ARRAY[]::jsonb[]"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!(["first", null, "second"]),
+                Some(DatabaseType::Postgres),
+                Some(&text_column)
+            ),
+            r#"'{"first",NULL,"second"}'"#
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!([1, null, 2]), Some(DatabaseType::Postgres), Some(&integer_column)),
+            "'{1,NULL,2}'"
+        );
     }
 
     #[test]
@@ -4747,6 +4883,51 @@ mod tests {
                 "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_AT\") VALUES (1, TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'));"
             ]
         );
+    }
+
+    #[test]
+    fn prepares_oracle_raw_update_with_hex_literals() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "RAW_VALUES".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "RAW(16)", false, None), column("PAYLOAD", "RAW(16)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "PAYLOAD".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("0x00112233445566778899aabbccddeeff"), json!("0xaabb")]],
+            dirty_rows: vec![(0, vec![(1, json!("0xccdd"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"APP\".\"RAW_VALUES\" SET \"PAYLOAD\" = HEXTORAW('ccdd') WHERE \"ID\" = HEXTORAW('00112233445566778899aabbccddeeff');"
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_raw_literals_require_valid_even_length_hex() {
+        let raw = column("ID", "RAW(16)", false, None);
+        let text = column("ID", "VARCHAR2(64)", false, None);
+        let blob = column("ID", "BLOB", false, None);
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(format_grid_sql_literal(&json!("0x00aB"), Some(database_type), Some(&raw)), "HEXTORAW('00aB')");
+            assert_eq!(format_grid_sql_literal(&json!("0xabc"), Some(database_type), Some(&raw)), "'0xabc'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00gg"), Some(database_type), Some(&raw)), "'0x00gg'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&text)), "'0x00ab'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&blob)), "'0x00ab'");
+        }
     }
 
     #[test]

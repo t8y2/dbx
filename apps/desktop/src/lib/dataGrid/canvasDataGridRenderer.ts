@@ -70,8 +70,7 @@ export interface DrawCanvasDataGridOptions {
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
   infiniteScrollEnabled: boolean;
-  pageSize: number;
-  currentPage: number;
+  pageOffset: number;
   frozenColumnCount?: number;
   columnAligns?: readonly ("left" | "right")[];
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
@@ -144,8 +143,13 @@ export function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWi
   return result;
 }
 
-export function canvasDataGridActionReservedWidth(canQuickDownload: boolean): number {
-  return (canQuickDownload ? 44 : 22) + 6;
+export function canvasDataGridActionReservedWidth(canQuickDownload: boolean, canNavigateForeignKey = false): number {
+  return canvasDataGridActionOverlayWidth(canQuickDownload, canNavigateForeignKey) + 6;
+}
+
+/** 悬浮按钮组宽度：每个按钮 20px + 2px 间距（detail 按钮始终存在） */
+export function canvasDataGridActionOverlayWidth(canQuickDownload: boolean, canNavigateForeignKey = false): number {
+  return 22 + (canQuickDownload ? 22 : 0) + (canNavigateForeignKey ? 22 : 0);
 }
 
 export function resolveCanvasCellTextLayout(options: { drawX: number; colWidth: number; dpr: number; isRightAlign: boolean; reservedWidth?: number }): { textAnchorX: number; maxWidth: number } {
@@ -267,8 +271,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     cellIsSelected,
     cellCanHover,
     infiniteScrollEnabled,
-    pageSize,
-    currentPage,
+    pageOffset,
     frozenColumnCount = 0,
     columnAligns,
     rightAlignedActionCell,
@@ -362,13 +365,18 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.font = item.status === "new" || item.status === "edited" || item.status === "draft" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
     const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+    ctx.clip();
     if (item.isDraft) {
       ctx.fillText("*", rowNumberTextX, textY);
     } else if (infiniteScrollEnabled) {
       ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
     } else {
-      ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
+      ctx.fillText(String(item.displayIndex + 1 + pageOffset), rowNumberTextX, textY);
     }
+    ctx.restore();
     ctx.font = normalFont;
 
     ctx.strokeStyle = theme.border;

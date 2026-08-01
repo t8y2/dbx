@@ -17,6 +17,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "mq-tenant",
   "etcd-root",
   "etcd-dashboard",
+  "etcd-access-control",
   "zookeeper-root",
   "mongo-gridfs",
   "mongo-bucket",

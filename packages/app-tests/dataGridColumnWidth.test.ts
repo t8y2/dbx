@@ -7,8 +7,8 @@ test("default data grid column width remains compact for long values", () => {
     sampleValues: ["x".repeat(120)],
   });
 
-  // standard: valueTextLimit=40, so 120 chars truncated to 40 → 40×8+24=344
-  expect(width).toBe(344);
+  // standard: valueTextLimit=40, so 120 chars truncated to 40 → 40×8+24+12=356
+  expect(width).toBe(356);
 });
 
 test("auto-fit data grid column width expands long values beyond default width", () => {
@@ -19,7 +19,7 @@ test("auto-fit data grid column width expands long values beyond default width",
     valueTextLimit: DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT,
   });
 
-  expect(width).toBeGreaterThan(344);
+  expect(width).toBeGreaterThan(356);
 });
 
 test("auto-fit data grid column width stays bounded for very long values", () => {

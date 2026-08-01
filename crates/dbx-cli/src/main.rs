@@ -903,6 +903,8 @@ mod tests {
                 columns: Vec::new(),
                 column_types: Vec::new(),
                 column_sortables: Vec::new(),
+                spatial_columns: vec![],
+                spatial_values: vec![],
                 rows: Vec::new(),
                 affected_rows: 2,
                 execution_time_ms: 0,

@@ -21,8 +21,11 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -77,7 +80,14 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         // Connector/J's Statement timeout does not update OceanBase's stricter
         // session variable, so synchronize both limits before every execution.
         try (var stmt = connection.createStatement()) {
-            stmt.execute(queryTimeoutSql(timeoutSecs));
+            try {
+                stmt.execute(queryTimeoutSql(timeoutSecs));
+            } catch (SQLException error) {
+                if (isReadOnlyTransactionError(error)) {
+                    return;
+                }
+                throw error;
+            }
             queryTimeoutChanged = true;
         }
     }
@@ -111,6 +121,41 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             throw new IllegalArgumentException("Query timeout cannot be negative: " + timeoutSecs);
         }
         return "ALTER SESSION SET ob_query_timeout = " + timeoutSecs * MICROS_PER_SECOND;
+    }
+
+    private static boolean isReadOnlyTransactionError(SQLException error) {
+        Deque<Throwable> pending = new ArrayDeque<>();
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        pending.add(error);
+        while (!pending.isEmpty()) {
+            Throwable current = pending.removeFirst();
+            if (!seen.add(current)) {
+                continue;
+            }
+            if (current instanceof SQLException) {
+                SQLException sqlError = (SQLException) current;
+                String message = sqlError.getMessage();
+                if ("25006".equals(sqlError.getSQLState())
+                    || sqlError.getErrorCode() == 1456
+                    || message != null && containsReadOnlyTransactionCode(message)) {
+                    return true;
+                }
+                SQLException next = sqlError.getNextException();
+                if (next != null) {
+                    pending.addLast(next);
+                }
+            }
+            Throwable cause = current.getCause();
+            if (cause != null) {
+                pending.addLast(cause);
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsReadOnlyTransactionCode(String message) {
+        String normalized = message.toUpperCase(Locale.ROOT);
+        return normalized.contains("OBE-01456") || normalized.contains("ORA-01456");
     }
 
     @Override

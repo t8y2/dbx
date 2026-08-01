@@ -43,8 +43,25 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
     default: defineComponent({
       name: "DataGridStub",
       inheritAttrs: false,
-      setup(_, { expose, slots }) {
+      props: {
+        result: { type: Object, required: true },
+        connectionId: { type: String, default: "" },
+        database: { type: String, default: "" },
+        columnLayoutScopeKey: { type: String, default: "" },
+      },
+      setup(props, { expose, slots }) {
         expose({
+          visibleColumnCount: 2,
+          displayableColumnCount: 2,
+          hiddenColumnCount: 0,
+          orderedColumnLayoutOptions: [],
+          filteredColumnLayoutOptions: () => [],
+          toggleColumnVisibility: vi.fn(),
+          showAllColumns: vi.fn(),
+          invertColumnVisibility: vi.fn(),
+          hasCustomColumnOrder: false,
+          moveDisplayableColumn: vi.fn(),
+          resetColumnOrder: vi.fn(),
           nullColumnsHidden: false,
           canToggleAllNullColumns: false,
           allNullColumnCount: 0,
@@ -53,13 +70,21 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         return () =>
           h(
             "div",
-            { "data-testid": "data-grid" },
-            slots["search-bar"]?.({
-              localFilterCount: 0,
-              hasLocalColumnFilters: false,
-              localFilterSummaries: [],
-              clearLocalFilter: vi.fn(),
-            }),
+            {
+              "data-testid": "data-grid",
+              "data-connection-id": props.connectionId,
+              "data-database": props.database,
+              "data-column-layout-scope-key": props.columnLayoutScopeKey,
+              "data-result-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
+            },
+            [
+              slots["search-bar"]?.({
+                localFilterCount: 0,
+                hasLocalColumnFilters: false,
+                localFilterSummaries: [],
+                clearLocalFilter: vi.fn(),
+              }),
+            ],
           );
       },
     }),
@@ -145,9 +170,12 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import DocumentBrowser from "@/components/document/DocumentBrowser.vue";
+import { documentDataGridColumnLayoutScopeKey, loadDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import { documentGridColumnVisibilityScopeKey } from "@/lib/document/documentGridColumnVisibilityStorage";
 
 let app: App<Element> | null = null;
 let root: HTMLDivElement | null = null;
+let storedValues: Map<string, string>;
 
 async function flushUi() {
   for (let index = 0; index < 4; index++) {
@@ -182,6 +210,12 @@ async function setSearchInput(value: string) {
 }
 
 beforeEach(async () => {
+  storedValues = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => storedValues.get(key) ?? null,
+    setItem: (key: string, value: string) => storedValues.set(key, value),
+    removeItem: (key: string) => storedValues.delete(key),
+  });
   backend.getColumns.mockReset();
   backend.documentFindDocuments.mockReset();
   backend.cancelQuery.mockReset();
@@ -219,9 +253,44 @@ afterEach(() => {
   root?.remove();
   root = null;
   document.body.innerHTML = "";
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("DocumentBrowser Elasticsearch field search", () => {
+  it("migrates hidden columns and passes a stable index layout scope without changing the query result", async () => {
+    app?.unmount();
+    const legacyScopeKey = documentGridColumnVisibilityScopeKey({
+      databaseType: "elasticsearch",
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+    });
+    const layoutScopeKey = documentDataGridColumnLayoutScopeKey({
+      databaseType: "elasticsearch",
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+    });
+    storedValues.set(`dbx-document-grid-column-visibility:v1:${legacyScopeKey}`, JSON.stringify(["title"]));
+
+    app = createApp(DocumentBrowser, {
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+      databaseType: "elasticsearch",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const dataGrid = root!.querySelector<HTMLElement>('[data-testid="data-grid"]')!;
+    expect(dataGrid.dataset.connectionId).toBe("connection-1");
+    expect(dataGrid.dataset.database).toBe("");
+    expect(dataGrid.dataset.columnLayoutScopeKey).toBe(layoutScopeKey);
+    expect(dataGrid.dataset.resultHiddenColumnKeys).toBe("[]");
+    expect(loadDataGridColumnLayout(layoutScopeKey)).toEqual({ orderKeys: [], hiddenKeys: ["title"] });
+  });
+
   it("searches, selects, updates the query type, and clears the search when closed", async () => {
     root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
     await flushUi();

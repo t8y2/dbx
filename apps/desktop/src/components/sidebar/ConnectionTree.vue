@@ -1039,7 +1039,7 @@ function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: Qu
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean }) {
-  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "zookeeper-root") return;
+  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root") return;
   const connId = target.connectionId;
   if (!connId) return;
 
@@ -1597,6 +1597,7 @@ function copySelectedSidebarNames(): boolean {
             database: node.database!,
             schema: connectionObjectTreeNodeSchema(store.getConfig(node.connectionId!), node.database!, node.schema),
             tableName: node.label,
+            tableComment: node.comment,
           })),
         }
       : null;
@@ -1788,7 +1789,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <TreeItem
               :node="item.node"
               :depth="item.depth"
-              :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameGroupId === item.node.id"
               :highlighted="highlightedNodeId === item.node.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
@@ -1799,7 +1800,14 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           </template>
         </RecycleScroller>
         <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
-          <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
+          <TreeItem
+            :node="stickyNode.node"
+            :depth="stickyNode.depth"
+            :reorder-disabled="true"
+            :reference-drag-disabled="true"
+            :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+            @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+          />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -1828,7 +1836,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
               :key="item.id"
               :node="item.node"
               :depth="item.depth"
-              :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameGroupId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"

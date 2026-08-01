@@ -1,7 +1,23 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildXlsxWorkbook, buildXlsxWorkbookMulti } from "../../apps/desktop/src/lib/export/xlsxExport.ts";
+import { buildXlsxWorkbook, buildXlsxWorkbookMulti, buildXlsxWorkbookMultiWithMaxRows } from "../../apps/desktop/src/lib/export/xlsxExport.ts";
 import { buildXlsxSqlWorksheet } from "../../apps/desktop/src/lib/export/xlsxSqlSheet.ts";
+
+function readStoredZipEntry(workbook: Uint8Array, entryPath: string): string {
+  const view = new DataView(workbook.buffer, workbook.byteOffset, workbook.byteLength);
+  let offset = 0;
+  while (offset + 30 <= workbook.length && view.getUint32(offset, true) === 0x04034b50) {
+    const compressedSize = view.getUint32(offset + 18, true);
+    const fileNameLength = view.getUint16(offset + 26, true);
+    const extraLength = view.getUint16(offset + 28, true);
+    const fileNameStart = offset + 30;
+    const dataStart = fileNameStart + fileNameLength + extraLength;
+    const fileName = new TextDecoder().decode(workbook.subarray(fileNameStart, fileNameStart + fileNameLength));
+    if (fileName === entryPath) return new TextDecoder().decode(workbook.subarray(dataStart, dataStart + compressedSize));
+    offset = dataStart + compressedSize;
+  }
+  throw new Error(`Missing ZIP entry: ${entryPath}`);
+}
 
 test("builds an xlsx workbook zip with worksheet data", () => {
   const workbook = buildXlsxWorkbook({
@@ -62,6 +78,60 @@ test("builds a result workbook with a separate SQL worksheet", () => {
   assert.match(text, /name="SQL"/);
   assert.match(text, /xl\/worksheets\/sheet2\.xml/);
   assert.match(text, /SELECT id, name FROM users WHERE active = true/);
+});
+
+test("web in-memory XLSX export splits oversized worksheets", () => {
+  const workbook = buildXlsxWorkbookMultiWithMaxRows(
+    [
+      {
+        sheetName: "Result",
+        columns: ["id", "name"],
+        rows: [
+          [1, "row_1"],
+          [2, "row_2"],
+          [3, "row_3"],
+          [4, "row_4"],
+          [5, "row_5"],
+        ],
+      },
+    ],
+    2,
+  );
+
+  const workbookXml = readStoredZipEntry(workbook, "xl/workbook.xml");
+  assert.match(workbookXml, /name="Result"/);
+  assert.match(workbookXml, /name="Result \(2\)"/);
+  assert.match(workbookXml, /name="Result \(3\)"/);
+
+  const sheet1 = readStoredZipEntry(workbook, "xl/worksheets/sheet1.xml");
+  const sheet2 = readStoredZipEntry(workbook, "xl/worksheets/sheet2.xml");
+  const sheet3 = readStoredZipEntry(workbook, "xl/worksheets/sheet3.xml");
+  assert.match(sheet1, /row_1/);
+  assert.match(sheet1, /row_2/);
+  assert.doesNotMatch(sheet1, /row_3/);
+  assert.match(sheet2, /row_3/);
+  assert.match(sheet2, /row_4/);
+  assert.doesNotMatch(sheet2, /row_5/);
+  assert.match(sheet3, /row_5/);
+  assert.equal(sheet1.match(/<row r="/g)?.length, 3);
+  assert.equal(sheet2.match(/<row r="/g)?.length, 3);
+  assert.equal(sheet3.match(/<row r="/g)?.length, 2);
+});
+
+test("web in-memory XLSX export handles a realistic large result", () => {
+  const rowCount = 20_001;
+  const rows = Array.from({ length: rowCount }, (_, index) => [index + 1, `user_${index + 1}`, `user_${index + 1}@example.com`, index % 2 === 0, `note-${String(index + 1).padStart(6, "0")}-${"x".repeat(48)}`]);
+  const workbook = buildXlsxWorkbookMultiWithMaxRows([{ sheetName: "Users", columns: ["id", "name", "email", "active", "notes"], rows }], 10_000);
+
+  const workbookXml = readStoredZipEntry(workbook, "xl/workbook.xml");
+  assert.equal(workbookXml.match(/<sheet /g)?.length, 3);
+  assert.match(workbookXml, /name="Users \(3\)"/);
+  assert.match(readStoredZipEntry(workbook, "xl/worksheets/sheet1.xml"), /user_10000@example\.com/);
+  assert.match(readStoredZipEntry(workbook, "xl/worksheets/sheet2.xml"), /user_20000@example\.com/);
+  const finalSheet = readStoredZipEntry(workbook, "xl/worksheets/sheet3.xml");
+  assert.match(finalSheet, /user_20001@example\.com/);
+  assert.equal(finalSheet.match(/<row r="/g)?.length, 2);
+  assert.ok(workbook.byteLength > 5_000_000);
 });
 
 test("maps multiple result statements and splits SQL at the Excel cell limit", () => {
@@ -130,24 +200,7 @@ test("numeric right-align style is applied consistently across cross-database nu
   // Ensures the front-end XLSX classifier covers the same cross-database
   // numeric types as the Rust classifier and the grid (ClickHouse wide
   // integers, Oracle/Dameng binary floats, SQL Server internal names, etc.).
-  const columnTypes = [
-    "Int16",
-    "Int32",
-    "Int64",
-    "Int128",
-    "UInt256",
-    "Decimal128(18, 2)",
-    "Float16",
-    "BINARY_FLOAT",
-    "BINARY_DOUBLE",
-    "decimaln",
-    "numericn",
-    "intn",
-    "floatn",
-    "moneyn",
-    "smallmoneyn",
-    "varchar(50)",
-  ];
+  const columnTypes = ["Int16", "Int32", "Int64", "Int128", "UInt256", "Decimal128(18, 2)", "Float16", "BINARY_FLOAT", "BINARY_DOUBLE", "decimaln", "numericn", "intn", "floatn", "moneyn", "smallmoneyn", "varchar(50)"];
   const workbook = buildXlsxWorkbook({
     sheetName: "CrossDb",
     columns: columnTypes.map((t) => t.toLowerCase()),

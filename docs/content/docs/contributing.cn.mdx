@@ -253,6 +253,15 @@ docs/content/docs/meta.json
 docs/content/docs/meta.cn.json
 ```
 
+提交前先运行快速内容检查，再执行完整文档构建：
+
+```bash
+pnpm --dir docs content:check
+make docs-build
+```
+
+`content:check` 会检查中英文页面配对、导航覆盖与顺序、frontmatter、重复标题和站内链接。`make docs-build` 会再次运行该检查并验证 Next.js 生产构建。
+
 ### 路线 B：修改桌面前端
 
 前端代码位于 `apps/desktop/src/`。开发时可以运行完整桌面版，也可以只运行 Web 前端：

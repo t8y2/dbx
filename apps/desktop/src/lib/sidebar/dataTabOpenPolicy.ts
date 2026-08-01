@@ -2,6 +2,7 @@ import { matchesModifierOnlyShortcut, type ShortcutLikeEvent } from "@/lib/edito
 import type { QueryTab, TreeNodeType } from "@/types/database";
 
 export type DataTabOpenMode = "default" | "new-tab";
+export type DataTabReuseScope = "none" | "same-table" | "database";
 
 type DataTabLike = Pick<QueryTab, "id" | "mode" | "connectionId" | "database" | "schema" | "title" | "tableMeta" | "tableMetaUpdatedAt">;
 
@@ -34,7 +35,8 @@ function isSameDatabase(tab: DataTabLike, target: Pick<DataTabTarget, "connectio
 }
 
 function isSameTable(tab: DataTabLike, target: DataTabTarget): boolean {
-  return isSameDatabase(tab, target) && (tab.tableMeta?.catalog || "") === (target.catalog || "") && (tab.schema || tab.tableMeta?.schema || "") === (target.schema || "") && (tab.tableMeta?.tableName || tab.title) === target.tableName;
+  const tabSchema = tab.schema || (target.schema ? tab.tableMeta?.schema : undefined) || "";
+  return isSameDatabase(tab, target) && (tab.tableMeta?.catalog || "") === (target.catalog || "") && tabSchema === (target.schema || "") && (tab.tableMeta?.tableName || tab.title) === target.tableName;
 }
 
 export function canApplyDataTabMetadata(tab: DataTabLike | undefined, target: DataTabTarget, signal?: AbortSignal): boolean {
@@ -46,12 +48,12 @@ export function dataTabMetadataNeedsRefresh(tab: DataTabLike, maxAgeMs: number, 
   return now - tab.tableMetaUpdatedAt >= maxAgeMs;
 }
 
-export function findExistingDataTabCandidate<T extends DataTabLike>(tabs: T[], target: DataTabTarget, options: { openMode: DataTabOpenMode; reuseDataTab: boolean }): ExistingDataTabCandidate<T> | undefined {
-  if (options.openMode === "new-tab") return undefined;
+export function findExistingDataTabCandidate<T extends DataTabLike>(tabs: T[], target: DataTabTarget, options: { openMode: DataTabOpenMode; reuseScope: DataTabReuseScope }): ExistingDataTabCandidate<T> | undefined {
+  if (options.openMode === "new-tab" || options.reuseScope === "none") return undefined;
 
   const sameTable = tabs.find((tab) => isSameTable(tab, target));
   if (sameTable) return { tab: sameTable, match: "same-table" };
-  if (!options.reuseDataTab) return undefined;
+  if (options.reuseScope === "same-table") return undefined;
 
   const sameDatabase = tabs.find((tab) => isSameDatabase(tab, target));
   return sameDatabase ? { tab: sameDatabase, match: "database" } : undefined;

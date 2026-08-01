@@ -1,33 +1,58 @@
 ---
-title: SQL Formatter
-description: Configure SQL formatting options, import and export JSON config, and customize JSON config editor shortcuts.
+title: SQL Formatting
+description: Format a selection or the full editor with database-aware syntax, then manage the current formatter options and JSON config.
 ---
 
-DBX SQL formatter settings live in **Settings → SQL Formatter**.
+DBX chooses a formatter dialect from the active connection and writes the result back to the query editor. When text is selected, only that range is formatted; otherwise DBX formats the entire editor.
 
-- `options` controls formatting output such as keyword case, indentation, line breaks, and parameter types.
-- `editor` controls shortcuts used inside the SQL formatter JSON config editor.
+Use the **Format SQL** toolbar button or the configurable formatting command documented under [Keyboard Shortcuts](/en/docs/keyboard-shortcuts).
 
-## Form And JSON
+<Callout type="info">
+  Formatting only rewrites text and never executes SQL. Unsupported syntax returns an error and leaves the original text unchanged. One formatting operation accepts at most `1,000,000` characters.
+</Callout>
 
-Use the form for common options. Use JSON mode to copy, paste, import, export, or edit the full config.
+## Dialect Selection
 
-When the JSON config is valid, DBX syncs it back to the form. Invalid JSON shows an error and cannot be applied.
+DBX currently uses dedicated formatter grammars for:
 
-## Shortcut Platform
+| Connection type | Formatter dialect |
+| --- | --- |
+| MySQL | MySQL |
+| PostgreSQL, openGauss, GaussDB, KingBase, Redshift, and related profiles | PostgreSQL |
+| SQLite, Turso, rqlite, and Cloudflare D1 | SQLite |
+| SQL Server | Transact-SQL |
+| ClickHouse | ClickHouse |
+| Other SQL databases | Generic SQL, with one PostgreSQL-grammar retry when needed |
 
-The config file can store Windows, Linux, and macOS shortcuts at the same time.
+The MongoDB query editor uses a separate Mongo Shell formatter rather than this SQL dialect mapping.
 
-The form only shows the current system column. For example, macOS shows only macOS shortcuts. Import and export still preserve all platform keys.
+## Configure Formatting Options
 
-## Full Template JSON
+Open **Settings → SQL Formatter**. Form mode exposes:
+
+| Option | Values or behavior |
+| --- | --- |
+| Keyword, data type, function, and identifier case | `upper`, `lower`, or `preserve` |
+| Indent style | `standard`, `tabularLeft`, or `tabularRight` |
+| Indentation | Spaces or tabs |
+| Tab width | `2` or `4` |
+| Logical operator newline | Before or after the operator |
+| Expression width | `50`, `80`, or `120` |
+| Lines between queries | `0`, `1`, or `2` |
+| Dense operators | Reduces spaces around operators |
+| Newline before semicolon | Places a statement-ending semicolon on a new line |
+| Parameter types | Recognizes positional, numbered, named, quoted, or custom-regex parameters |
+
+**Restore Defaults** restores the formatter settings defined by the current DBX build. Click **Apply** in the settings dialog to persist changes.
+
+## JSON Mode and Import / Export
+
+JSON mode is useful for exact editing, copying, or moving formatter settings. The current file contains only `version`, `formatter`, and `options`:
 
 ```json
 {
   "version": 1,
   "formatter": "sql-formatter",
-  "name": "DBX SQL Formatter Config",
-  "description": "SQL formatter options and SQL formatter JSON config editor shortcut template.",
   "options": {
     "keywordCase": "upper",
     "dataTypeCase": "preserve",
@@ -37,189 +62,52 @@ The form only shows the current system column. For example, macOS shows only mac
     "useTabs": false,
     "tabWidth": 2,
     "logicalOperatorNewline": "before",
-    "expressionWidth": 80,
+    "expressionWidth": 50,
     "linesBetweenQueries": 1,
     "denseOperators": false,
     "newlineBeforeSemicolon": false,
     "paramTypes": null
-  },
-  "editor": {
-    "scope": "sqlFormatterConfigJsonEditor",
-    "platforms": ["windows", "linux", "macos"],
-    "shortcuts": [
-      {
-        "id": "find",
-        "action": "openSearchPanel",
-        "label": "Find",
-        "keys": {
-          "windows": "Ctrl+F",
-          "linux": "Ctrl+F",
-          "macos": "Cmd+F"
-        },
-        "enabled": true
-      },
-      {
-        "id": "replace",
-        "action": "openSearchPanel",
-        "label": "Replace",
-        "keys": {
-          "windows": "Ctrl+H",
-          "linux": "Ctrl+H",
-          "macos": "Cmd+Option+F"
-        },
-        "enabled": true
-      },
-      {
-        "id": "indentMore",
-        "action": "indentMore",
-        "label": "Indent more",
-        "keys": {
-          "windows": "Tab",
-          "linux": "Tab",
-          "macos": "Tab"
-        },
-        "enabled": true
-      },
-      {
-        "id": "indentLess",
-        "action": "indentLess",
-        "label": "Indent less",
-        "keys": {
-          "windows": "Shift+Tab",
-          "linux": "Shift+Tab",
-          "macos": "Shift+Tab"
-        },
-        "enabled": true
-      },
-      {
-        "id": "duplicateLine",
-        "action": "copyLineDown",
-        "label": "Duplicate current line",
-        "keys": {
-          "windows": "Ctrl+D",
-          "linux": "Ctrl+D",
-          "macos": "Cmd+D"
-        },
-        "enabled": true
-      },
-      {
-        "id": "deleteLine",
-        "action": "deleteLine",
-        "label": "Delete current line",
-        "keys": {
-          "windows": "Ctrl+Shift+K",
-          "linux": "Ctrl+Shift+K",
-          "macos": "Cmd+Shift+K"
-        },
-        "enabled": true
-      },
-      {
-        "id": "moveLineUp",
-        "action": "moveLineUp",
-        "label": "Move line up",
-        "keys": {
-          "windows": "Alt+Up",
-          "linux": "Alt+Up",
-          "macos": "Option+Up"
-        },
-        "enabled": true
-      },
-      {
-        "id": "moveLineDown",
-        "action": "moveLineDown",
-        "label": "Move line down",
-        "keys": {
-          "windows": "Alt+Down",
-          "linux": "Alt+Down",
-          "macos": "Option+Down"
-        },
-        "enabled": true
-      },
-      {
-        "id": "copyLineUp",
-        "action": "copyLineUp",
-        "label": "Copy line up",
-        "keys": {
-          "windows": "Shift+Alt+Up",
-          "linux": "Shift+Alt+Up",
-          "macos": "Shift+Option+Up"
-        },
-        "enabled": true
-      },
-      {
-        "id": "copyLineDown",
-        "action": "copyLineDown",
-        "label": "Copy line down",
-        "keys": {
-          "windows": "Shift+Alt+Down",
-          "linux": "Shift+Alt+Down",
-          "macos": "Shift+Option+Down"
-        },
-        "enabled": true
-      },
-      {
-        "id": "undo",
-        "action": "undo",
-        "label": "Undo",
-        "keys": {
-          "windows": "Ctrl+Z",
-          "linux": "Ctrl+Z",
-          "macos": "Cmd+Z"
-        },
-        "enabled": true
-      },
-      {
-        "id": "redo",
-        "action": "redo",
-        "label": "Redo",
-        "keys": {
-          "windows": "Ctrl+Y",
-          "linux": "Ctrl+Shift+Z",
-          "macos": "Cmd+Shift+Z"
-        },
-        "enabled": true
-      },
-      {
-        "id": "selectAll",
-        "action": "selectAll",
-        "label": "Select all",
-        "keys": {
-          "windows": "Ctrl+A",
-          "linux": "Ctrl+A",
-          "macos": "Cmd+A"
-        },
-        "enabled": true
-      },
-      {
-        "id": "formatJson",
-        "action": "formatJson",
-        "label": "Format JSON config",
-        "keys": {
-          "windows": "Shift+Alt+F",
-          "linux": "Shift+Alt+F",
-          "macos": "Shift+Cmd+F"
-        },
-        "enabled": true
-      },
-      {
-        "id": "applyConfig",
-        "action": "applyJsonDraft",
-        "label": "Apply JSON config",
-        "keys": {
-          "windows": "Ctrl+S",
-          "linux": "Ctrl+S",
-          "macos": "Cmd+S"
-        },
-        "enabled": true
-      }
-    ]
   }
 }
 ```
 
-## Compatibility
+The JSON editor validates the draft continuously. DBX blocks apply or import when:
 
-- `version` is currently `1`.
-- `formatter` is currently `sql-formatter`.
-- `params` replacement is not executed by SQL formatting. Use `paramTypes` when parameter recognition is needed.
-- Legacy templates that use `openReplacePanel` for the `replace` action are accepted and normalized on import.
+- the text is not valid JSON;
+- `version` is not `1`;
+- `formatter` is not `sql-formatter`;
+- `options` contains an unknown field; or
+- a value is outside the range accepted by the current build.
+
+**Export Config** downloads `dbx-sql-formatter.json`. Import replaces only SQL formatter options; it does not change connections, editor shortcuts, or other DBX settings. Use [Configuration Cloud Sync](/en/docs/cloud-sync) when you need a broader settings migration.
+
+## Parameter Recognition
+
+Set `paramTypes` to `null` to use the formatter defaults. Configure additional parameter syntax with an object such as:
+
+```json
+{
+  "positional": true,
+  "numbered": ["?", "$"],
+  "named": [":", "@", "$"],
+  "quoted": [":", "@", "$"],
+  "custom": [
+    { "regex": "@\\{[^}]+\\}" }
+  ]
+}
+```
+
+- `numbered` accepts only `?`, `:`, and `$`.
+- `named` and `quoted` accept only `:`, `@`, and `$`.
+- Each `custom` item may contain only a non-empty, valid `regex`.
+
+DBX always adds recognition for `${name}` and `#{name}` variables so those templates do not cause formatter parse failures. A non-null legacy `params` option is no longer used for text substitution; configure `paramTypes` instead.
+
+<Cards>
+  <Card title="Query Editor" href="/en/docs/query-editor">
+    Learn how formatting, compression, execution scope, and completion work.
+  </Card>
+  <Card title="SQL Snippets" href="/en/docs/sql-snippets">
+    Build reusable SQL templates with tab-stop placeholders.
+  </Card>
+</Cards>

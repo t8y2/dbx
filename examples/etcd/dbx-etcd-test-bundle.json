@@ -1,0 +1,84 @@
+{
+  "format": "dbx-etcd-bundle",
+  "version": 1,
+  "exportedAt": "2026-07-28T00:00:00.000Z",
+  "prefix": "",
+  "scopeKind": "prefix",
+  "entries": [
+    {
+      "key": { "encoding": "utf8", "data": "test/app/config" },
+      "value": { "encoding": "utf8", "data": "{\"app\":\"orders\",\"environment\":\"test\",\"debug\":true,\"logLevel\":\"debug\"}" },
+      "formatHint": "json"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "test/app/feature-flags" },
+      "value": { "encoding": "utf8", "data": "{\"newCheckout\":true,\"searchV2\":true,\"betaBanner\":true}" },
+      "formatHint": "json"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "test/app/version" },
+      "value": { "encoding": "utf8", "data": "2026.07.28-test" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "test/database/primary" },
+      "value": { "encoding": "utf8", "data": "postgresql://test-user:test-password@postgres.test.local:5432/orders" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "test/redis/endpoint" },
+      "value": { "encoding": "utf8", "data": "redis://redis.test.local:6379/0" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "pre/app/config" },
+      "value": { "encoding": "utf8", "data": "{\"app\":\"orders\",\"environment\":\"pre\",\"debug\":false,\"logLevel\":\"info\"}" },
+      "formatHint": "json"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "pre/app/feature-flags" },
+      "value": { "encoding": "utf8", "data": "{\"newCheckout\":true,\"searchV2\":false,\"betaBanner\":false}" },
+      "formatHint": "json"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "pre/app/version" },
+      "value": { "encoding": "utf8", "data": "2026.07.28-rc.1" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "pre/database/primary" },
+      "value": { "encoding": "utf8", "data": "postgresql://orders-pre@postgres.pre.local:5432/orders" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "pre/redis/endpoint" },
+      "value": { "encoding": "utf8", "data": "redis://redis.pre.local:6379/0" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "prod/app/config" },
+      "value": { "encoding": "utf8", "data": "{\"app\":\"orders\",\"environment\":\"prod\",\"debug\":false,\"logLevel\":\"warn\"}" },
+      "formatHint": "json"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "prod/app/feature-flags" },
+      "value": { "encoding": "utf8", "data": "{\"newCheckout\":false,\"searchV2\":false,\"betaBanner\":false}" },
+      "formatHint": "json"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "prod/app/version" },
+      "value": { "encoding": "utf8", "data": "2026.07.15" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "prod/database/primary" },
+      "value": { "encoding": "utf8", "data": "postgresql://orders-prod@postgres.prod.local:5432/orders" },
+      "formatHint": "text"
+    },
+    {
+      "key": { "encoding": "utf8", "data": "prod/redis/endpoint" },
+      "value": { "encoding": "utf8", "data": "redis://redis.prod.local:6379/0" },
+      "formatHint": "text"
+    }
+  ]
+}

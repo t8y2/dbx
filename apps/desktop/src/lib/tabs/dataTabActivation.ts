@@ -12,8 +12,9 @@ export function canActivateExistingDataTableTab(tab: QueryTab, options: { activa
   return !!tab.result || !!tab.results?.length;
 }
 
-export function dataTableDoubleClickAction(tab: QueryTab | undefined, activation: "single" | "double"): DataTableDoubleClickAction {
+export function dataTableDoubleClickAction(tab: QueryTab | undefined, activation: "single" | "double", reuseDataTab = true): DataTableDoubleClickAction {
   if (activation === "single") return "none";
+  if (!reuseDataTab) return "open";
   if (!tab) return activation === "double" ? "open" : "none";
   if (!canActivateExistingDataTableTab(tab)) return "open";
   return "activate";

@@ -1,33 +1,58 @@
 ---
 title: SQL 格式化
-description: 配置 SQL 格式化选项、导入导出 JSON 配置，并定制 JSON 配置编辑器快捷键。
+description: 使用数据库方言格式化所选 SQL 或整个编辑器，并管理当前版本的格式化选项和 JSON 配置。
 ---
 
-DBX 的 SQL 格式化配置位于**设置 → SQL 格式化**。配置分为两部分：
+DBX 会根据当前连接选择接近的 SQL 方言，并把格式化结果写回查询编辑器。选中一段 SQL 时只格式化选区；没有选区时格式化整个编辑器。
 
-- `options`：控制 SQL 格式化结果，例如关键字大小写、缩进、操作符换行和参数类型。
-- `editor`：控制 SQL 格式化 JSON 配置编辑器中的快捷键。
+你可以使用编辑器工具栏的 **格式化 SQL** 按钮，或使用[快捷键](/cn/docs/keyboard-shortcuts)中配置的格式化命令。
 
-## 表单与 JSON
+<Callout type="info">
+  SQL 格式化只重排文本，不会执行 SQL。无法解析的语法会返回错误并保留原内容；单次格式化最多处理 `1,000,000` 个字符。
+</Callout>
 
-表单模式适合修改常用选项。JSON 模式适合复制、粘贴、导入或批量修改完整配置。
+## 方言选择
 
-JSON 配置合法时，DBX 会把配置同步回表单；配置无效时，会显示具体错误并阻止应用。
+DBX 当前对以下方言使用专用格式化语法：
 
-## 快捷键平台
+| 连接类型 | 格式化方言 |
+| --- | --- |
+| MySQL | MySQL |
+| PostgreSQL、openGauss、GaussDB、KingBase、Redshift 等兼容连接 | PostgreSQL |
+| SQLite、Turso、rqlite、Cloudflare D1 | SQLite |
+| SQL Server | Transact-SQL |
+| ClickHouse | ClickHouse |
+| 其他 SQL 数据库 | 通用 SQL；必要时再尝试 PostgreSQL 语法 |
 
-快捷键配置文件可以同时保存 Windows、Linux 和 macOS 三个平台的按键。
+MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本页的 SQL 方言映射。
 
-表单中只显示当前系统的平台列。例如在 macOS 上只显示 macOS 快捷键，避免三端配置同时挤在一个表格里。导入和导出仍会保留完整三端配置，便于在不同系统间迁移。
+## 配置格式化选项
 
-## 完整模板 JSON
+前往 **设置 → SQL 格式化**。表单模式提供以下选项：
+
+| 选项 | 可用值或作用 |
+| --- | --- |
+| 关键字、数据类型、函数、标识符大小写 | `upper`、`lower`、`preserve` |
+| 缩进样式 | `standard`、`tabularLeft`、`tabularRight` |
+| 缩进字符 | 空格或 Tab |
+| Tab 宽度 | `2` 或 `4` |
+| 逻辑操作符换行 | 操作符之前或之后 |
+| 表达式宽度 | `50`、`80` 或 `120` |
+| 查询间空行 | `0`、`1` 或 `2` |
+| 紧凑操作符 | 减少操作符周围的空格 |
+| 分号前换行 | 把语句结尾分号放到新行 |
+| 参数类型 | 识别位置参数、编号参数、命名参数、引号参数或自定义正则参数 |
+
+**恢复默认值**会恢复当前代码定义的默认格式化设置。设置窗口中的改动需要点击 **应用** 才会持久化。
+
+## JSON 模式与导入导出
+
+JSON 模式适合精确编辑、复制或迁移格式化器配置。当前配置文件只包含 `version`、`formatter` 和 `options`：
 
 ```json
 {
   "version": 1,
   "formatter": "sql-formatter",
-  "name": "DBX SQL 格式化配置",
-  "description": "SQL 格式化选项，以及 SQL 格式化 JSON 配置编辑器快捷键模板。",
   "options": {
     "keywordCase": "upper",
     "dataTypeCase": "preserve",
@@ -37,189 +62,52 @@ JSON 配置合法时，DBX 会把配置同步回表单；配置无效时，会�
     "useTabs": false,
     "tabWidth": 2,
     "logicalOperatorNewline": "before",
-    "expressionWidth": 80,
+    "expressionWidth": 50,
     "linesBetweenQueries": 1,
     "denseOperators": false,
     "newlineBeforeSemicolon": false,
     "paramTypes": null
-  },
-  "editor": {
-    "scope": "sqlFormatterConfigJsonEditor",
-    "platforms": ["windows", "linux", "macos"],
-    "shortcuts": [
-      {
-        "id": "find",
-        "action": "openSearchPanel",
-        "label": "查找",
-        "keys": {
-          "windows": "Ctrl+F",
-          "linux": "Ctrl+F",
-          "macos": "Cmd+F"
-        },
-        "enabled": true
-      },
-      {
-        "id": "replace",
-        "action": "openSearchPanel",
-        "label": "替换",
-        "keys": {
-          "windows": "Ctrl+H",
-          "linux": "Ctrl+H",
-          "macos": "Cmd+Option+F"
-        },
-        "enabled": true
-      },
-      {
-        "id": "indentMore",
-        "action": "indentMore",
-        "label": "增加缩进",
-        "keys": {
-          "windows": "Tab",
-          "linux": "Tab",
-          "macos": "Tab"
-        },
-        "enabled": true
-      },
-      {
-        "id": "indentLess",
-        "action": "indentLess",
-        "label": "减少缩进",
-        "keys": {
-          "windows": "Shift+Tab",
-          "linux": "Shift+Tab",
-          "macos": "Shift+Tab"
-        },
-        "enabled": true
-      },
-      {
-        "id": "duplicateLine",
-        "action": "copyLineDown",
-        "label": "复制当前行",
-        "keys": {
-          "windows": "Ctrl+D",
-          "linux": "Ctrl+D",
-          "macos": "Cmd+D"
-        },
-        "enabled": true
-      },
-      {
-        "id": "deleteLine",
-        "action": "deleteLine",
-        "label": "删除当前行",
-        "keys": {
-          "windows": "Ctrl+Shift+K",
-          "linux": "Ctrl+Shift+K",
-          "macos": "Cmd+Shift+K"
-        },
-        "enabled": true
-      },
-      {
-        "id": "moveLineUp",
-        "action": "moveLineUp",
-        "label": "当前行上移",
-        "keys": {
-          "windows": "Alt+Up",
-          "linux": "Alt+Up",
-          "macos": "Option+Up"
-        },
-        "enabled": true
-      },
-      {
-        "id": "moveLineDown",
-        "action": "moveLineDown",
-        "label": "当前行下移",
-        "keys": {
-          "windows": "Alt+Down",
-          "linux": "Alt+Down",
-          "macos": "Option+Down"
-        },
-        "enabled": true
-      },
-      {
-        "id": "copyLineUp",
-        "action": "copyLineUp",
-        "label": "向上复制当前行",
-        "keys": {
-          "windows": "Shift+Alt+Up",
-          "linux": "Shift+Alt+Up",
-          "macos": "Shift+Option+Up"
-        },
-        "enabled": true
-      },
-      {
-        "id": "copyLineDown",
-        "action": "copyLineDown",
-        "label": "向下复制当前行",
-        "keys": {
-          "windows": "Shift+Alt+Down",
-          "linux": "Shift+Alt+Down",
-          "macos": "Shift+Option+Down"
-        },
-        "enabled": true
-      },
-      {
-        "id": "undo",
-        "action": "undo",
-        "label": "撤销",
-        "keys": {
-          "windows": "Ctrl+Z",
-          "linux": "Ctrl+Z",
-          "macos": "Cmd+Z"
-        },
-        "enabled": true
-      },
-      {
-        "id": "redo",
-        "action": "redo",
-        "label": "重做",
-        "keys": {
-          "windows": "Ctrl+Y",
-          "linux": "Ctrl+Shift+Z",
-          "macos": "Cmd+Shift+Z"
-        },
-        "enabled": true
-      },
-      {
-        "id": "selectAll",
-        "action": "selectAll",
-        "label": "全选",
-        "keys": {
-          "windows": "Ctrl+A",
-          "linux": "Ctrl+A",
-          "macos": "Cmd+A"
-        },
-        "enabled": true
-      },
-      {
-        "id": "formatJson",
-        "action": "formatJson",
-        "label": "格式化 JSON 配置",
-        "keys": {
-          "windows": "Shift+Alt+F",
-          "linux": "Shift+Alt+F",
-          "macos": "Shift+Cmd+F"
-        },
-        "enabled": true
-      },
-      {
-        "id": "applyConfig",
-        "action": "applyJsonDraft",
-        "label": "应用 JSON 配置",
-        "keys": {
-          "windows": "Ctrl+S",
-          "linux": "Ctrl+S",
-          "macos": "Cmd+S"
-        },
-        "enabled": true
-      }
-    ]
   }
 }
 ```
 
-## 兼容说明
+JSON 编辑器会实时校验配置。以下情况会阻止应用或导入：
 
-- `version` 当前固定为 `1`。
-- `formatter` 当前固定为 `sql-formatter`。
-- `params` 参数替换不会被 SQL 格式化执行；需要参数识别时使用 `paramTypes`。
-- 旧模板中的 `replace` 动作如果写成 `openReplacePanel`，导入时会自动兼容并归一化。
+- JSON 语法错误；
+- `version` 不是 `1`；
+- `formatter` 不是 `sql-formatter`；
+- `options` 中包含未知字段；
+- 字段值不在当前代码允许的范围内。
+
+点击 **导出配置** 会下载 `dbx-sql-formatter.json`。导入只替换 SQL 格式化选项，不会修改连接、编辑器快捷键或其他 DBX 设置。完整设置迁移请参阅[配置云同步](/cn/docs/cloud-sync)。
+
+## 参数识别
+
+`paramTypes` 为 `null` 时使用格式化器默认识别规则。需要额外语法时，可以配置：
+
+```json
+{
+  "positional": true,
+  "numbered": ["?", "$"],
+  "named": [":", "@", "$"],
+  "quoted": [":", "@", "$"],
+  "custom": [
+    { "regex": "@\\{[^}]+\\}" }
+  ]
+}
+```
+
+- `numbered` 只接受 `?`、`:`、`$`；
+- `named` 和 `quoted` 只接受 `:`、`@`、`$`；
+- `custom` 中每项只能包含非空且合法的 `regex`。
+
+DBX 始终额外识别 `${name}` 和 `#{name}` 形式的变量，避免这类模板变量导致格式化解析失败。旧配置中的非空 `params` 字段不再用于文本替换，应改用 `paramTypes`。
+
+<Cards>
+  <Card title="查询编辑器" href="/cn/docs/query-editor">
+    了解格式化、压缩、执行范围和自动补全。
+  </Card>
+  <Card title="SQL 代码片段" href="/cn/docs/sql-snippets">
+    使用可跳转占位符创建可复用 SQL 模板。
+  </Card>
+</Cards>

@@ -63,6 +63,25 @@ test("document save uses shared identity plan and write helpers", () => {
   assert.doesNotMatch(source, /async function replaceDocumentStoreDocument/);
 });
 
+test("document table wires on-demand exact total counting for estimated mongo totals", () => {
+  const source = documentBrowserSource();
+  assert.match(source, /:count-total-rows="countExactDocumentTotal"/);
+  assert.match(source, /:inexact-total-row-count-mode="documentStoreProvider\.kind === 'mongodb' \? 'estimated' : 'at-least'"/);
+  assert.match(source, /async function countExactDocumentTotal/);
+  assert.match(source, /const request = loadedDocumentQueryTotalCountRequest/);
+  assert.match(source, /if \(!request \|\| !isCurrentDocumentQueryTotalCountRequest\(request\)\) return undefined;/);
+  assert.match(source, /api\.mongoCountDocuments\(request\.connectionId, request\.database, request\.collection, request\.filter, "accurate"\)/);
+  assert.equal(source.match(/if \(!isCurrentDocumentQueryTotalCountRequest\(request\)\) return undefined;/g)?.length, 2);
+  assert.match(source, /"accurate"/);
+});
+
+test("document pagination commits page index with fetched rows", () => {
+  const source = documentBrowserSource();
+  assert.match(source, /async function load\(options: \{ page\?: number \} = \{\}\)/);
+  assert.match(source, /void load\(\{ page: nextPage \}\)/);
+  assert.match(source, /if \(options\.page !== undefined\) page\.value = options\.page;/);
+});
+
 test("document query inputs apply on Enter and reserve Shift+Enter for newlines", () => {
   const source = documentBrowserSource();
   assert.equal(source.match(/@keydown\.enter\.exact\.prevent="applyFilter"/g)?.length, 2);

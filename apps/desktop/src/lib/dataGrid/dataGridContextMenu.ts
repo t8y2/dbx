@@ -16,6 +16,7 @@ export type DataGridContextMenuItem = {
   separator?: boolean;
   icon?: Component;
   iconClass?: string;
+  checked?: boolean;
   shortcut?: string;
   variant?: "default" | "destructive";
   visible?: boolean;
@@ -128,6 +129,7 @@ export function createDataGridCellContextMenuItems(options: {
   icons: Pick<DataGridContextMenuIcons, "cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose">;
   actions: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", () => void>;
   downloadItem?: DataGridContextMenuItem | null;
+  foreignKeyItem?: DataGridContextMenuItem | null;
   copySubmenu: DataGridContextMenuItem;
   clearSelectionItem?: DataGridContextMenuItem;
   generateSubmenu?: DataGridContextMenuItem;
@@ -137,6 +139,7 @@ export function createDataGridCellContextMenuItems(options: {
     if (options.hasColumn) {
       items.push({ label: options.labels.cellDetails, action: options.actions.cellDetails, icon: options.icons.cellDetails });
       if (options.downloadItem) items.push(options.downloadItem);
+      if (options.foreignKeyItem) items.push(options.foreignKeyItem);
       items.push({ label: options.labels.columnDetails, action: options.actions.columnDetails, icon: options.icons.columnDetails });
     }
     items.push({ label: options.labels.rowDetails, action: options.actions.rowDetails, icon: options.icons.rowDetails }, { label: "", separator: true });

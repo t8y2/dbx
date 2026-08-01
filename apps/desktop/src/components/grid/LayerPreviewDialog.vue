@@ -4,6 +4,10 @@ import { useI18n } from "vue-i18n";
 import { Camera, Loader2, Map, Maximize2, Minimize2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { renderGeometryFeaturesIndependently } from "@/lib/dataGrid/geometryLayerPreview";
+import { prepareCoordsToLatLng, type CoordinateToLatLng } from "@/lib/dataGrid/geometryProjection";
+import { getSpatialReference, SHORTLIST_SRIDS } from "@/lib/dataGrid/spatialReferenceCatalog";
+import type { GeoJsonGeometry } from "@/lib/dataGrid/geometryPreview";
 import "leaflet/dist/leaflet.css";
 import type L from "leaflet";
 
@@ -20,7 +24,23 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const mapContainer = ref<HTMLDivElement>();
 const mapError = ref<string>("");
+const isLoadingMap = ref(false);
 const isExporting = ref(false);
+const skippedFeatureCount = ref(0);
+
+// ── Effective SRID (detected default + manual override) ─────────────────────
+const detectedSrid = ref<number | null>(null);
+const selectedSrid = ref<number>(4326);
+const customSridInput = ref<string>("");
+const showCustomSrid = ref(false);
+
+const sridOptions = computed(() => SHORTLIST_SRIDS.map((srid) => ({ srid, label: getSpatialReference(srid)?.label ?? `EPSG:${srid}` })));
+const effectiveSrid = computed(() => selectedSrid.value);
+const spatialSourceLabel = computed(() => {
+  if (selectedSrid.value !== (detectedSrid.value ?? 4326)) return t("grid.layerPreviewCrsManual");
+  if (detectedSrid.value != null) return t("grid.layerPreviewCrsDetected");
+  return t("grid.layerPreviewCrsAssumed");
+});
 
 // ── Resize / maximise ──────────────────────────────────────────────────────
 const customSize = ref<{ w: number; h: number } | null>(null);
@@ -87,18 +107,34 @@ function onResizePointerUp() {
 // ── Leaflet ───────────────────────────────────────────────────────────────
 let _L: typeof L | null = null;
 let map: L.Map | null = null;
-let geoLayer: L.GeoJSON | null = null;
+let geoLayer: L.FeatureGroup | null = null;
 let labelLayer: L.LayerGroup | null = null;
 let tileLayer: L.TileLayer | null = null;
 let mapResizeObserver: ResizeObserver | null = null;
 let _geojsonData: any = null;
+let mapGeneration = 0;
+let coordinateConverters = new globalThis.Map<number, CoordinateToLatLng>();
+
+interface PreviewFeature {
+  type: "Feature";
+  geometry: GeoJsonGeometry | null;
+  properties?: Record<string, unknown> | null;
+}
+
+/**
+ * SRID a feature should be projected with: a manual CRS override applies to
+ * every feature; otherwise each feature uses its own per-cell SRID, falling
+ * back to the detected/selected one when unknown.
+ */
+function featureSrid(feature: PreviewFeature): number {
+  const manualSrid = selectedSrid.value !== (detectedSrid.value ?? null) ? selectedSrid.value : null;
+  return manualSrid ?? (typeof feature.properties?._srid === "number" ? feature.properties._srid : effectiveSrid.value);
+}
 
 async function loadLeaflet(): Promise<typeof L> {
   if (!_L) {
-    console.log("[LayerPreview] dynamic import leaflet…");
     const mod = await import("leaflet");
     _L = mod.default as unknown as typeof L;
-    console.log("[LayerPreview] leaflet loaded, L.version =", (_L as any).version);
   }
   return _L;
 }
@@ -184,7 +220,7 @@ function updateLabels() {
   for (const f of features) {
     const value = f.properties?.[prop];
     if (value == null) continue;
-    const coords = getLabelCoords(f.geometry);
+    const coords = getLabelCoords(f.geometry, featureSrid(f));
     if (!coords) continue;
     const icon = L.divIcon({
       className: "layer-preview-label",
@@ -196,22 +232,44 @@ function updateLabels() {
   }
 }
 
-function getLabelCoords(geom: any): [number, number] | null {
-  if (!geom) return null;
-  if (geom.type === "Point") return [geom.coordinates[1], geom.coordinates[0]];
-  if (geom.type === "MultiPoint") return [geom.coordinates[0][1], geom.coordinates[0][0]];
-  // For lines/polygons, label at the centroid (midpoint)
-  const coords = geom.coordinates?.flat(Infinity).filter((n: any) => typeof n === "number");
-  if (!coords || coords.length < 2) return null;
-  // Collect all [lng, lat] pairs
-  const pts: [number, number][] = [];
-  const flat = geom.coordinates?.flat(Infinity) ?? [];
-  for (let i = 0; i + 1 < flat.length; i += 2) {
-    if (typeof flat[i] === "number" && typeof flat[i + 1] === "number") pts.push([flat[i], flat[i + 1]]);
+function collectCoordinatePairs(geometry: any): [number, number][] {
+  const pairs: [number, number][] = [];
+  const visit = (value: any) => {
+    if (!Array.isArray(value)) return;
+    if (value.length >= 2 && typeof value[0] === "number" && typeof value[1] === "number") {
+      pairs.push([value[0], value[1]]);
+      return;
+    }
+    value.forEach(visit);
+  };
+  if (geometry?.type === "GeometryCollection") {
+    for (const child of geometry.geometries ?? []) pairs.push(...collectCoordinatePairs(child));
+  } else {
+    visit(geometry?.coordinates);
   }
+  return pairs;
+}
+
+function geometryCoordinatesAreValid(geometry: any, srid: number, converter: (coord: [number, number]) => L.LatLng): boolean {
+  const coordinates = collectCoordinatePairs(geometry);
+  if (coordinates.length === 0) return false;
+  return coordinates.every(([x, y]) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if (srid === 4326 && (x < -180 || x > 180 || y < -90 || y > 90)) return false;
+    if (srid === 3857 && (Math.abs(x) > 20037508.342789244 || Math.abs(y) > 20037508.342789244)) return false;
+    const latlng = converter([x, y]);
+    return Number.isFinite(latlng.lat) && Number.isFinite(latlng.lng) && latlng.lat >= -90 && latlng.lat <= 90 && latlng.lng >= -180 && latlng.lng <= 180;
+  });
+}
+
+function getLabelCoords(geom: any, srid: number): [number, number] | null {
+  const converter = coordinateConverters.get(srid) ?? null;
+  if (!geom || !converter || !geometryCoordinatesAreValid(geom, srid, converter)) return null;
+  const pts = collectCoordinatePairs(geom);
   if (pts.length === 0) return null;
-  const avgLng = pts.reduce((s, p) => s + p[0], 0) / pts.length;
-  const avgLat = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+  const projected = pts.map((coord) => converter(coord));
+  const avgLng = projected.reduce((sum, point) => sum + point.lng, 0) / projected.length;
+  const avgLat = projected.reduce((sum, point) => sum + point.lat, 0) / projected.length;
   return [avgLat, avgLng];
 }
 
@@ -249,17 +307,13 @@ async function initMap() {
     return;
   }
   cleanupMap();
+  const generation = mapGeneration;
   mapError.value = "";
-
-  // Remove the "Loading map…" placeholder so Leaflet can take over.
-  const placeholder = container.querySelector("[data-map-placeholder]");
-  if (placeholder) placeholder.remove();
+  isLoadingMap.value = true;
 
   try {
-    console.log("[LayerPreview] container offset:", container.offsetWidth, "x", container.offsetHeight);
     const L = await loadLeaflet();
-    const rect = container.getBoundingClientRect();
-    console.log("[LayerPreview] container getBoundingClientRect:", rect.width, "x", rect.height);
+    if (generation !== mapGeneration || !props.open) return;
 
     map = L.map(container, {
       zoomControl: true,
@@ -267,7 +321,6 @@ async function initMap() {
       center: [35, 110],
       zoom: 4,
     });
-    console.log("[LayerPreview] L.map created");
     map.invalidateSize();
 
     tileLayer = L.tileLayer(selectedBasemap.value.url, {
@@ -277,9 +330,9 @@ async function initMap() {
     }).addTo(map);
     // Sync ID ref
     selectedBasemapId.value = selectedBasemap.value.id;
-    console.log("[LayerPreview] tileLayer added");
-    addGeoJsonToMap();
-    parseLabelProperties(_geojsonData);
+    await addGeoJsonToMap(generation);
+    if (generation !== mapGeneration || !map) return;
+    if (_geojsonData) parseLabelProperties(_geojsonData);
 
     mapResizeObserver = new ResizeObserver(() => {
       map?.invalidateSize();
@@ -289,20 +342,24 @@ async function initMap() {
       map?.invalidateSize();
     }, 500);
   } catch (err) {
-    console.error("[LayerPreview] initMap error:", err);
-    mapError.value = String(err);
+    if (generation === mapGeneration) {
+      console.error("[LayerPreview] initMap error:", err);
+      mapError.value = String(err);
+    }
+  } finally {
+    if (generation === mapGeneration) isLoadingMap.value = false;
   }
 }
 
-function addGeoJsonToMap() {
+async function addGeoJsonToMap(generation: number) {
   if (!map || geoLayer) return;
   try {
     _geojsonData = JSON.parse(props.geojson);
   } catch {
     console.warn("[LayerPreview] invalid geojson JSON");
+    mapError.value = t("grid.layerPreviewNoGeometryData");
     return;
   }
-  console.log("[LayerPreview] GeoJSON type:", _geojsonData.type, "features:", _geojsonData.features?.length);
 
   let data = _geojsonData;
   if (data.type === "Feature") data = { type: "FeatureCollection", features: [data] };
@@ -313,31 +370,118 @@ function addGeoJsonToMap() {
     };
   if (!data.features?.length) {
     console.warn("[LayerPreview] no features");
+    mapError.value = t("grid.layerPreviewNoGeometryData");
     return;
   }
 
-  geoLayer = _L!
-    .geoJSON(data, {
-      style: {
-        color: "#ff6600",
-        weight: 3,
-        opacity: 0.95,
-        fillColor: "#ff6600",
-        fillOpacity: 0.25,
-      },
-      pointToLayer: pointToCircleFeature,
-      onEachFeature: (feature, layer) => {
-        layer.bindPopup(popupContent(feature));
-      },
-    })
-    .addTo(map);
+  detectedSrid.value = typeof data.detectedSrid === "number" ? data.detectedSrid : null;
+  selectedSrid.value = detectedSrid.value ?? 4326;
+  _geojsonData = data;
 
-  const bounds = geoLayer.getBounds();
-  console.log("[LayerPreview] geoLayer added, bounds:", bounds.toBBoxString(), "valid:", bounds.isValid());
-  if (bounds.isValid()) {
-    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
-    console.log("[LayerPreview] fitBounds done, zoom:", map.getZoom());
+  await renderLayer(generation);
+}
+
+async function renderLayer(generation: number) {
+  if (!map || !_geojsonData || !_L) return;
+  skippedFeatureCount.value = 0;
+  const leaflet = _L;
+  const data = _geojsonData;
+
+  try {
+    const features = (data.features ?? []) as PreviewFeature[];
+    const sridsNeeded = new Set<number>();
+    for (const feature of features) {
+      const srid = featureSrid(feature);
+      if (Number.isInteger(srid) && srid > 0) sridsNeeded.add(srid);
+    }
+    const converters = new globalThis.Map<number, CoordinateToLatLng>();
+    for (const srid of sridsNeeded) {
+      const converter = await prepareCoordsToLatLng(srid, leaflet);
+      if (converter) converters.set(srid, converter);
+    }
+    if (generation !== mapGeneration || !map) return;
+    if (converters.size === 0) {
+      mapError.value = t("grid.layerPreviewUnsupportedCrs", { srid: effectiveSrid.value });
+      return;
+    }
+    coordinateConverters = converters;
+
+    geoLayer = leaflet.featureGroup().addTo(map);
+    const summary = renderGeometryFeaturesIndependently(
+      features,
+      (feature) => {
+        const geometry = feature.geometry;
+        const srid = featureSrid(feature);
+        const converter = converters.get(srid) ?? null;
+        if (!geometry || !converter || !geometryCoordinatesAreValid(geometry, srid, converter)) {
+          return null;
+        }
+        const layer = leaflet.geoJSON(feature as unknown as Parameters<(typeof L)["geoJSON"]>[0], {
+          coordsToLatLng: (coords) => converter([coords[0], coords[1]]),
+          style: {
+            color: "#ff6600",
+            weight: 3,
+            opacity: 0.95,
+            fillColor: "#ff6600",
+            fillOpacity: 0.25,
+          },
+          pointToLayer: pointToCircleFeature,
+          onEachFeature: (sourceFeature, layer) => layer.bindPopup(popupContent(sourceFeature)),
+        });
+        return { layer, srid };
+      },
+      (layer) => layer.addTo(geoLayer!),
+      (error) => console.warn("[LayerPreview] skipped invalid feature", error),
+    );
+    skippedFeatureCount.value = summary.skipped;
+    if (summary.rendered === 0) {
+      mapError.value = t("grid.layerPreviewNoSupportedCrs");
+      return;
+    }
+
+    const bounds = geoLayer.getBounds();
+    if (bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+    }
+  } catch (err) {
+    if (generation === mapGeneration) {
+      console.error("[LayerPreview] renderLayer error:", err);
+      mapError.value = String(err);
+    }
   }
+}
+
+async function applySrid(next: number) {
+  selectedSrid.value = next;
+  mapError.value = "";
+  if (!map) return;
+  mapGeneration++;
+  const generation = mapGeneration;
+  if (geoLayer) {
+    map.removeLayer(geoLayer);
+    geoLayer = null;
+  }
+  if (labelLayer) {
+    map.removeLayer(labelLayer);
+    labelLayer = null;
+  }
+  await renderLayer(generation);
+  if (generation === mapGeneration && labelProperty.value) updateLabels();
+}
+
+function onSridSelect(value: string) {
+  if (value === "custom") {
+    showCustomSrid.value = true;
+    return;
+  }
+  showCustomSrid.value = false;
+  void applySrid(Number(value));
+}
+
+function onCustomSridSubmit() {
+  const srid = Number.parseInt(customSridInput.value, 10);
+  if (!Number.isInteger(srid) || srid <= 0) return;
+  void applySrid(srid);
 }
 
 function switchBasemap(basemap: BasemapOption) {
@@ -360,6 +504,7 @@ watch(selectedBasemapId, (id) => {
 });
 
 function cleanupMap() {
+  mapGeneration++;
   mapResizeObserver?.disconnect();
   mapResizeObserver = null;
   labelLayer = null;
@@ -370,7 +515,14 @@ function cleanupMap() {
     map = null;
   }
   _geojsonData = null;
+  coordinateConverters = new globalThis.Map();
+  detectedSrid.value = null;
+  selectedSrid.value = 4326;
+  showCustomSrid.value = false;
+  customSridInput.value = "";
   labelProperty.value = "";
+  isLoadingMap.value = false;
+  skippedFeatureCount.value = 0;
 }
 
 function close() {
@@ -418,11 +570,9 @@ async function saveAsImage() {
 watch(
   () => props.open,
   async (open) => {
-    console.log("[LayerPreview] open prop changed:", open);
     if (open) {
       await nextTick();
       if (!mapContainer.value) await nextTick();
-      console.log("[LayerPreview] after nextTick, mapContainer in DOM:", !!mapContainer.value);
       await initMap();
     } else {
       cleanupMap();
@@ -438,31 +588,43 @@ onBeforeUnmount(() => cleanupMap());
   <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
     <DialogContent :show-close-button="false" :style="contentStyle" class="layer-preview-dialog flex w-[96vw] max-w-[1800px] h-[88vh] max-h-[960px] min-w-[640px] min-h-[400px] flex-col gap-0 overflow-hidden rounded-lg border p-0 shadow-2xl" @escape-key-down="close">
       <!-- Header -->
-      <div class="flex h-12 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
-        <div class="flex min-w-0 shrink-0 items-center gap-2">
+      <div class="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-2">
+        <div class="flex min-w-32 flex-1 items-center gap-2">
           <Map class="h-4 w-4 shrink-0 text-muted-foreground" />
           <DialogTitle class="truncate text-sm font-semibold">{{ dialogTitle }}</DialogTitle>
         </div>
 
+        <!-- SRID selector (built-in shortlist + custom EPSG) -->
+        <select class="h-6 max-w-44 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none" :value="showCustomSrid ? 'custom' : String(selectedSrid)" @change="onSridSelect(($event.target as HTMLSelectElement).value)">
+          <option v-for="opt in sridOptions" :key="opt.srid" :value="String(opt.srid)">{{ opt.label }}</option>
+          <option v-if="!sridOptions.some((o) => o.srid === selectedSrid)" :value="String(selectedSrid)">
+            {{ getSpatialReference(selectedSrid)?.label ?? `EPSG:${selectedSrid}` }}
+          </option>
+          <option value="custom">{{ t("grid.layerPreviewCustomCrs") }}</option>
+        </select>
+        <input v-if="showCustomSrid" v-model="customSridInput" type="number" inputmode="numeric" :placeholder="t('grid.layerPreviewCustomCrsPlaceholder')" class="h-6 w-24 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none" @keyup.enter="onCustomSridSubmit" />
+        <span class="shrink-0 text-[11px] text-muted-foreground">{{ spatialSourceLabel }}</span>
+        <span v-if="skippedFeatureCount > 0" class="shrink-0 text-[11px] text-amber-600">
+          {{ t("grid.layerPreviewSkipped", { count: skippedFeatureCount }) }}
+        </span>
+
         <!-- Label property selector -->
-        <select v-if="labelProperties.length" v-model="labelProperty" class="h-6 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none" @change="onLabelPropertyChange">
-          <option value="">{{ t("grid.layerPreviewLabelNone") }}</option>
+        <select v-if="labelProperties.length" v-model="labelProperty" class="h-6 max-w-40 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none" @change="onLabelPropertyChange">
+          <option value="">{{ t("grid.layerPreviewLabel") }}</option>
           <option v-for="p in labelProperties" :key="p" :value="p">
             {{ p }}
           </option>
         </select>
 
-        <div class="flex flex-1" />
-
         <!-- Basemap selector -->
-        <select v-model="selectedBasemapId" class="h-6 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none">
+        <select v-model="selectedBasemapId" class="ml-auto h-6 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none">
           <option v-for="bm in basemaps" :key="bm.id" :value="bm.id">
             {{ bm.label }}
           </option>
         </select>
 
         <!-- Save as image -->
-        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="t('grid.layerPreviewExportImage')" :disabled="isExporting" @click="saveAsImage">
+        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="t('grid.layerPreviewExport')" :disabled="isExporting" @click="saveAsImage">
           <Camera v-if="!isExporting" class="h-3.5 w-3.5" />
           <Loader2 v-else class="h-3.5 w-3.5 animate-spin" />
         </Button>
@@ -480,10 +642,10 @@ onBeforeUnmount(() => cleanupMap());
 
       <!-- Map -->
       <div ref="mapContainer" class="relative w-full flex-1" style="min-height: 200px" data-map-container>
-        <div class="absolute inset-0 z-10 flex items-center justify-center text-xs text-muted-foreground pointer-events-none" data-map-placeholder>Loading map…</div>
-      </div>
-      <div v-if="mapError" class="absolute inset-0 flex items-center justify-center bg-background/80 p-4 text-sm text-destructive">
-        {{ mapError }}
+        <div v-if="isLoadingMap" class="absolute inset-0 z-10 flex items-center justify-center bg-background/70 text-xs text-muted-foreground pointer-events-none" data-map-placeholder>{{ t("grid.layerPreviewLoading") }}</div>
+        <div v-if="mapError" class="absolute inset-0 z-20 flex items-center justify-center bg-background/90 p-4 text-sm text-destructive">
+          {{ mapError }}
+        </div>
       </div>
 
       <!-- Resize handles -->

@@ -118,12 +118,14 @@ This guide gets you through three things:
 
 ## Desktop Or Docker
 
-| Mode         | Best For                                                              | Backend Path                           | Storage                                |
-| ------------ | --------------------------------------------------------------------- | -------------------------------------- | -------------------------------------- |
-| Desktop      | Daily local work, local files, native windows, DBX UI opened from MCP | Tauri commands calling the Rust core   | Local app data directory               |
-| Docker / Web | Self-hosted access from a server or browser                           | HTTP routes calling the same Rust core | Docker volume or server data directory |
+| Mode | Best For | Storage | Important Boundary |
+| --- | --- | --- | --- |
+| Desktop | Daily local work, local database files, the complete workbench | Local app data directory | Supports the local SQL file tree/library, desktop deep links, and OS file integration |
+| Docker / Web | Self-hosting on a server and remote browser access | Docker volume or server data directory | Paths belong to the server; some local-file and desktop integrations are unavailable |
 
-<Callout type="info">The core database features are shared, but desktop-only integrations such as opening DBX windows from MCP require the desktop app to be running.</Callout>
+Desktop and Web share most database workflows and the Rust core, but their local integrations are not identical. For SQLite, DuckDB, Access, external SQL files, or local directories, verify which machine owns the file; Docker normally requires mounting the directory into the container.
+
+<Callout type="info">MCP tools that open a table or display results in the desktop UI require DBX Desktop to be running. Query-only MCP tools can read the local DBX data directory directly or connect to a DBX Web/Docker backend.</Callout>
 
 ## Create Your First Connection
 
@@ -170,10 +172,14 @@ This guide gets you through three things:
 
 ## Reduce Production Mistakes
 
-- Give production connections a distinct name, for example `prod-orders`.
-- Use connection colors so production, staging, and local databases are visually different.
-- Use visible database filtering when a server contains many databases but you only need a few.
+- Give production connections a distinct name such as `prod-orders`, and use colors, groups, and notes to describe their purpose.
+- For query-only access, combine a database read-only account with DBX **Read-only connection**.
+- Enable **Production protection** for the whole connection or selected databases; DBX requires a fresh explicit confirmation for writes.
+- When one server contains many databases or schemas, show only the objects you currently need.
 - Review generated SQL before applying edits, imports, transfers, SQL files, or schema sync operations.
+- Put MCP connections behind an allowlist and prefer Read only or Data read/write instead of enabling Full access by default.
+
+See [Production and Write Safety](/en/docs/production-safety) for complete behavior and recommended configurations.
 
 ## What To Try Next
 

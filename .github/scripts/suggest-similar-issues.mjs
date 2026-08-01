@@ -2,6 +2,8 @@
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 
+import { databaseIssueDrivers } from "./database-issue-catalog.mjs";
+
 const API_VERSION = "2022-11-28";
 const COMMENT_MARKER = "<!-- dbx-similar-issues -->";
 const MAX_QUERY_LENGTH = 480;
@@ -85,26 +87,7 @@ const identifierQueryNoiseTokens = new Set([
 ]);
 
 const cjkSegmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
-const driverManifest = JSON.parse(
-  fs.readFileSync(new URL("../../crates/dbx-core/assets/database-drivers.manifest.json", import.meta.url), "utf8"),
-);
-const extraDatabaseAliases = {
-  mysql: ["mariadb", "percona", "tidb"],
-  postgres: ["postgresql", "pgsql", "hologres"],
-  sqlserver: ["sql server", "mssql"],
-  mongodb: ["mongo"],
-  dameng: ["dm8", "达梦"],
-  kingbase: ["kingbasees", "人大金仓", "金仓"],
-  highgo: ["瀚高"],
-  yashandb: ["崖山"],
-  opengauss: ["open gauss"],
-  "oceanbase-oracle": ["oceanbase oracle"],
-  gbase: ["gbase8a", "gbase8s"],
-};
-const databaseDrivers = driverManifest.drivers.map((driver) => ({
-  dbType: driver.dbType,
-  aliases: [driver.dbType, driver.label, ...(extraDatabaseAliases[driver.dbType] || [])],
-}));
+const databaseDrivers = databaseIssueDrivers;
 
 function loadIssue() {
   if (process.env.GITHUB_EVENT_PATH && fs.existsSync(process.env.GITHUB_EVENT_PATH)) {

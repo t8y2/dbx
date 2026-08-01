@@ -212,6 +212,10 @@ describe("DataGridPagination", () => {
     expect(previousPage).toHaveBeenCalledOnce();
     expect(nextPage).toHaveBeenCalledOnce();
     expect(lastPage).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ loading: true });
+    const busyNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
+    expect(busyNavigation.map((node) => node.props.disabled)).toEqual([true, true, true, true]);
   });
 
   it("hides pagination controls when the data source does not support paging", () => {

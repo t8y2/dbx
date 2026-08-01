@@ -6,6 +6,7 @@ public final class PostgresLikeAgentProfile {
     private final int defaultPort;
     private final String catalogSchema;
     private final String catalogPrefix;
+    private final boolean mapCatalogAttributeArraysInJava;
 
     public PostgresLikeAgentProfile(String driverClass, String urlTemplate) {
         this(driverClass, urlTemplate, 0, "pg_catalog", "pg_");
@@ -27,6 +28,17 @@ public final class PostgresLikeAgentProfile {
         String catalogSchema,
         String catalogPrefix
     ) {
+        this(driverClass, urlTemplate, defaultPort, catalogSchema, catalogPrefix, false);
+    }
+
+    private PostgresLikeAgentProfile(
+        String driverClass,
+        String urlTemplate,
+        int defaultPort,
+        String catalogSchema,
+        String catalogPrefix,
+        boolean mapCatalogAttributeArraysInJava
+    ) {
         this.driverClass = driverClass;
         this.urlTemplate = urlTemplate;
         this.defaultPort = defaultPort;
@@ -35,6 +47,7 @@ public final class PostgresLikeAgentProfile {
         // the full metadata implementation for each compatible database.
         this.catalogSchema = catalogSchema;
         this.catalogPrefix = catalogPrefix;
+        this.mapCatalogAttributeArraysInJava = mapCatalogAttributeArraysInJava;
     }
 
     public String getDriverClass() {
@@ -59,6 +72,21 @@ public final class PostgresLikeAgentProfile {
 
     public String getToastTemporarySchemaPrefix() {
         return catalogPrefix + "toast_temp_";
+    }
+
+    public PostgresLikeAgentProfile withCatalogAttributeArraysMappedInJava() {
+        return new PostgresLikeAgentProfile(
+            driverClass,
+            urlTemplate,
+            defaultPort,
+            catalogSchema,
+            catalogPrefix,
+            true
+        );
+    }
+
+    public boolean mapsCatalogAttributeArraysInJava() {
+        return mapCatalogAttributeArraysInJava;
     }
 
     public String catalogRelation(String name) {

@@ -85,6 +85,25 @@ test("double activation opens a missing table without a first-click snapshot", (
   assert.equal(dataTableDoubleClickAction(undefined, "double"), "open");
 });
 
+test("double activation opens a new table when data tab reuse is disabled", () => {
+  assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "double", false), "open");
+  assert.equal(
+    dataTableDoubleClickAction(
+      dataTab({
+        result: {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      }),
+      "double",
+      false,
+    ),
+    "open",
+  );
+});
+
 test("double activation reuses loading and successful tabs without refreshing", () => {
   assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "double"), "activate");
   assert.equal(

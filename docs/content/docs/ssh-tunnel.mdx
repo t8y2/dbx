@@ -5,6 +5,10 @@ description: Connect to private databases through SSH tunnels, HTTP tunnels, SOC
 
 <Callout type="info">DBX can open connection layers for databases that are not directly reachable. Configure them from the connection dialog's **Tunnel / Proxy** tab.</Callout>
 
+<Callout type="warning">
+  Tunnels run where the DBX backend runs. On Desktop, local paths and temporary listeners belong to your computer. In Docker/Web, paths, network egress, and temporary listeners belong to the server or container, not the computer running the browser.
+</Callout>
+
 DBX supports three tunnel / proxy types:
 
 | Type        | Use When                                                                 |
@@ -13,7 +17,19 @@ DBX supports three tunnel / proxy types:
 | Proxy       | Your network requires SOCKS5 or HTTP CONNECT proxy access.               |
 | HTTP tunnel | Only a web server can reach the database, and SSH/VPN is not available. |
 
-For network databases, DBX opens a local port and points the database driver at that port. The tunnel / proxy layer then forwards the database protocol bytes to the real target.
+For network databases, DBX opens a temporary port in its current runtime and points the database driver at that port. The tunnel / proxy layer forwards protocol bytes to the real target. A connection may combine multiple transport layers, which DBX establishes in the order shown in the connection dialog.
+
+## Per-Connection and Shared Profiles
+
+Configure a layer directly under a connection's **Tunnel / Proxy** tab, or create reusable profiles under **Settings → Tunnels**:
+
+- Shared profiles support SSH, SOCKS5 / HTTP CONNECT proxies, and HTTP tunnels.
+- Multiple database connections can reference the same profile.
+- Editing a profile changes every referencing connection the next time it connects.
+- The SSH test verifies reachability and authentication. The proxy test performs a proxy handshake and may use an optional target `host:port`.
+- HTTP tunnels open lazily only when real target traffic starts, so there is no standalone HTTP-tunnel profile test.
+
+Detach a profile from an individual connection when that connection needs different credentials or a custom layer order.
 
 ## SSH Tunnel
 
@@ -26,11 +42,11 @@ SSH tunnels are built in. You do not need to create a manual terminal port forwa
 | SSH User        | Username for SSH authentication                                               |
 | Connect Timeout | Maximum time DBX waits while opening the SSH connection; default is 5 seconds |
 
-<Tabs groupId="ssh-auth" items={['Private Key (Recommended)', 'Private Key + Password', 'Password']}>
+<Tabs groupId="ssh-auth" items={['Private Key (Recommended)', 'Private Key + Password', 'Password', 'No Credential']}>
   <Tab value="Private Key (Recommended)">
-    Select a private key file (for example `~/.ssh/id_rsa` or `~/.ssh/id_ed25519`):
+    Enter a private key file that the DBX backend can read, for example `~/.ssh/id_rsa` or `~/.ssh/id_ed25519`:
 
-    - **Key Path** — Browse and select your key file.
+    - **Key Path** — Desktop can browse local files. Web requires a server- or container-side path entered manually.
     - **Key Passphrase** — Enter the passphrase if your key is encrypted.
 
     Key authentication is more secure than password authentication.
@@ -48,13 +64,25 @@ SSH tunnels are built in. You do not need to create a manual terminal port forwa
   <Tab value="Password">
     Enter your SSH password directly. This works on servers that allow password authentication.
   </Tab>
+  <Tab value="No Credential">
+    Uses only SSH `none` authentication and sends no password or private key. This is intended for SSH proxies or special gateways that explicitly allow credential-free login. A rejection does not fall back to another method.
+  </Tab>
 </Tabs>
+
+### Host-Key Verification
+
+DBX verifies the SSH host key before it sends a credential. Trusted keys come from the system `known_hosts` files and DBX's own `known_hosts` under the data directory:
+
+- An unknown host prompts you to review and explicitly accept its fingerprint.
+- You can trust it for the current connection only or remember it in DBX's `known_hosts`.
+- DBX rejects a changed key for a previously known host.
+- If the confirmation UI is unavailable, times out, or rejects the key, the connection fails without sending a password or private key.
 
 ### Expose Tunnel to LAN
 
-<Callout type="warn">Enabling LAN exposure means other devices on the same network can access the forwarded database port through your machine. Only enable this on trusted networks.</Callout>
+<Callout type="warn">LAN exposure changes the SSH listener from `127.0.0.1` to `0.0.0.0`. This expands the attack surface of the DBX runtime and should only be used on trusted networks with appropriate firewall rules.</Callout>
 
-By default, the SSH tunnel listens on `localhost` only. Enable LAN exposure to bind to `0.0.0.0`, which is useful for temporary team sharing or multi-device access.
+On Desktop, this may make the temporary port reachable through your computer. In Docker/Web, the listener is inside the server or container; external reachability still depends on published ports, container networking, and the host firewall.
 
 ## Proxy
 
@@ -65,6 +93,8 @@ DBX supports:
 - SOCKS5 proxy
 - HTTP CONNECT proxy
 - Optional proxy username and password
+
+A shared proxy profile may include an optional test target such as `mysql.internal:3306`. Without one, the test verifies only the proxy endpoint and credentials. Use the database connection test to verify the complete route.
 
 ## HTTP Tunnel
 
@@ -110,7 +140,7 @@ DBX database driver
 
 The request protocol is short HTTP polling:
 
-1. DBX starts a local TCP listener.
+1. DBX starts a TCP listener in its current runtime.
 2. The database driver connects to that local port.
 3. DBX sends `open` to `dbx_tunnel.php` with a session id, target host, target port, and connect timeout.
 4. The PHP script validates the token and allow-list, then starts a worker that opens a TCP socket to the database.
@@ -128,10 +158,13 @@ This does not require DBX Web and does not use WebSocket.
 - Restrict public access to the script path where possible.
 - HTTP tunnel is convenient, but it is usually slower than direct TCP, VPN, or SSH because it forwards bytes through HTTP polling and a server-side queue.
 - If combined with other layers, HTTP tunnel must be the first tunnel / proxy layer because it is the outermost network boundary.
+- The script can reach target hosts from the private network. Deploy and operate it with the least-exposure and credential guidance under [Production Safety](/en/docs/production-safety).
 
 ## File Databases
 
 SQLite and Access connections are file-based and do not use tunnel / proxy layers. DuckDB usually uses a local file as well, so only configure tunnel / proxy layers when the selected driver profile uses a network endpoint.
+
+An Oracle TNS descriptor may contain multiple failover addresses. DBX does not rewrite that descriptor through one temporary endpoint, so TNS mode cannot be combined with SSH, proxy, or HTTP tunnel layers. Use Service Name or SID mode when a tunnel is required.
 
 <Cards>
   <Card title="Create a Connection" href="/en/docs/getting-started">
@@ -139,5 +172,8 @@ SQLite and Access connections are file-based and do not use tunnel / proxy layer
   </Card>
   <Card title="Database Support" href="/en/docs/databases">
     Check which database profiles are file-based, native, compatibility-based, or plugin-backed.
+  </Card>
+  <Card title="Production Safety" href="/en/docs/production-safety">
+    Plan least privilege, network exposure, read-only protection, and production writes.
   </Card>
 </Cards>

@@ -1,5 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import {
+  documentDataGridColumnLayoutScopeKey,
+  loadDataGridColumnLayout,
+  loadDataGridColumnOrder,
+  loadTableDataGridColumnOrder,
+  notifyTableDataGridColumnOrderChanged,
+  removeDataGridColumnOrder,
+  removeTableDataGridColumnOrder,
+  saveDataGridColumnLayout,
+  saveTableDataGridColumnOrder,
+  TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT,
+  tableDataGridColumnOrderScopeKey,
+} from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -55,5 +67,57 @@ describe("table data grid column order storage", () => {
     const event = dispatchEvent.mock.calls[0]?.[0] as CustomEvent;
     expect(event.type).toBe(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT);
     expect(event.detail).toEqual({ scopeKey: "table-scope" });
+  });
+});
+
+describe("data grid column layout storage", () => {
+  beforeEach(installLocalStorage);
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses a stable document scope without query or result column signatures", () => {
+    expect(
+      documentDataGridColumnLayoutScopeKey({
+        databaseType: "elasticsearch",
+        connectionId: "connection-1",
+        database: "database-name",
+        collection: "order_index_v1",
+      }),
+    ).toBe(["document", "elasticsearch", "connection-1", "database-name", "order_index_v1"].join("\u0001"));
+  });
+
+  it("stores order and hidden keys without dropping fields absent from the current page", () => {
+    const layout = {
+      orderKeys: ["_id", "status", "orderNo", "goodsList"],
+      hiddenKeys: ["goodsList"],
+    };
+
+    saveDataGridColumnLayout("document-layout", layout);
+
+    expect(loadDataGridColumnLayout("document-layout", ["_id", "orderNo", "status", "createTime"])).toEqual(layout);
+  });
+
+  it("keeps hidden keys when only the saved order is reset", () => {
+    saveDataGridColumnLayout("combined-layout", { orderKeys: ["status", "_id"], hiddenKeys: ["goodsList"] });
+
+    removeDataGridColumnOrder("combined-layout");
+
+    expect(loadDataGridColumnOrder("combined-layout", [])).toEqual([]);
+    expect(loadDataGridColumnLayout("combined-layout")).toEqual({ orderKeys: [], hiddenKeys: ["goodsList"] });
+  });
+
+  it("loads the previous order-only payload format", () => {
+    localStorage.setItem(
+      "dbx-data-grid-column-layout:legacy-layout",
+      JSON.stringify({
+        version: 1,
+        columnSignature: "id\0name",
+        order: ["name", "id"],
+      }),
+    );
+
+    expect(loadDataGridColumnLayout("legacy-layout", ["id", "name"])).toEqual({
+      orderKeys: ["name", "id"],
+      hiddenKeys: [],
+    });
   });
 });

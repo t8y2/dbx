@@ -64,7 +64,6 @@ const patterns: [RegExp, string][] = [
   [/^Unsupported SOCKS bound address type: (\d+)$/, "settings.tunnelsSocksUnsupportedAddrType"],
 
   // Query result export limits (crates/dbx-core/src/query_result_export.rs)
-  [/^XLSX supports at most ([\d,]+) data rows\. Use CSV export for the full result\.$/, "exportProgress.xlsxRowLimit"],
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
   [/^Streaming export needs a result-set session, but this driver returned no session_id\.$/, "exportProgress.agentSessionMissing"],
 
@@ -105,7 +104,6 @@ const paramNames: Record<string, string | string[]> = {
   "settings.tunnelsSocksUnsupportedAuth": "method",
   "settings.tunnelsSocksConnectRejected": "code",
   "settings.tunnelsSocksUnsupportedAddrType": "type",
-  "exportProgress.xlsxRowLimit": "limit",
   "driverStore.jreDirRemoveFailedWindows": ["path", "error"],
   "driverStore.jreDirRemoveFailed": ["path", "error"],
   "driverStore.jreInUseByDrivers": ["jre", "drivers"],

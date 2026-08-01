@@ -52,18 +52,19 @@ describe("dataTabOpenPolicy", () => {
     const existing = dataTab("users", "users");
     existing.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
 
-    expect(findExistingDataTabCandidate([existing], usersTarget, { openMode: "new-tab", reuseDataTab: true })).toBeUndefined();
-    expect(findExistingDataTabCandidate([existing], usersTarget, { openMode: "new-tab", reuseDataTab: false })).toBeUndefined();
+    expect(findExistingDataTabCandidate([existing], usersTarget, { openMode: "new-tab", reuseScope: "database" })).toBeUndefined();
+    expect(findExistingDataTabCandidate([existing], usersTarget, { openMode: "new-tab", reuseScope: "none" })).toBeUndefined();
   });
 
-  it("preserves same-table activation and configured database-tab reuse for ordinary opens", () => {
+  it("applies none, same-table, and database reuse scopes independently", () => {
     const sameTable = dataTab("users", "users");
     sameTable.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
     const otherTable = dataTab("orders", "orders");
 
-    expect(findExistingDataTabCandidate([sameTable], usersTarget, { openMode: "default", reuseDataTab: false })).toEqual({ tab: sameTable, match: "same-table" });
-    expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseDataTab: true })).toEqual({ tab: otherTable, match: "database" });
-    expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseDataTab: false })).toBeUndefined();
+    expect(findExistingDataTabCandidate([sameTable], usersTarget, { openMode: "default", reuseScope: "none" })).toBeUndefined();
+    expect(findExistingDataTabCandidate([sameTable], usersTarget, { openMode: "default", reuseScope: "same-table" })).toEqual({ tab: sameTable, match: "same-table" });
+    expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseScope: "same-table" })).toBeUndefined();
+    expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseScope: "database" })).toEqual({ tab: otherTable, match: "database" });
   });
 
   it("allows metadata to update a tab that still points to the requested table", () => {
@@ -79,7 +80,17 @@ describe("dataTabOpenPolicy", () => {
     tab.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
 
     expect(canApplyDataTabMetadata(tab, usersTarget, new AbortController().signal)).toBe(true);
-    expect(findExistingDataTabCandidate([tab], usersTarget, { openMode: "default", reuseDataTab: false })).toEqual({ tab, match: "same-table" });
+    expect(findExistingDataTabCandidate([tab], usersTarget, { openMode: "default", reuseScope: "same-table" })).toEqual({ tab, match: "same-table" });
+  });
+
+  it("ignores metadata query schemas for database-scoped tables", () => {
+    const tab = dataTab("users", "users");
+    tab.schema = undefined;
+    tab.tableMeta = { schema: "app", tableName: "users", columns: [], primaryKeys: [] };
+    const mysqlTarget = { connectionId: "conn", database: "app", tableName: "users" };
+
+    expect(canApplyDataTabMetadata(tab, mysqlTarget, new AbortController().signal)).toBe(true);
+    expect(findExistingDataTabCandidate([tab], mysqlTarget, { openMode: "default", reuseScope: "same-table" })).toEqual({ tab, match: "same-table" });
   });
 
   it("rejects metadata after its request is cancelled", () => {

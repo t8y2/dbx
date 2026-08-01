@@ -58,6 +58,60 @@ describe("connectionStore pinned tree node removal", () => {
     expect(store.isTreeNodePinned(replacement)).toBe(false);
   });
 
+  it("recounts parent objectCount from remaining children when a child is removed", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const view1 = {
+      id: "conn:db:public:v1",
+      label: "v1",
+      type: "view" as const,
+      connectionId: "conn",
+      database: "db",
+      schema: "public",
+    };
+    const view2 = {
+      id: "conn:db:public:v2",
+      label: "v2",
+      type: "view" as const,
+      connectionId: "conn",
+      database: "db",
+      schema: "public",
+    };
+    const loadMore = {
+      id: "conn:db:public:__views:__load_more",
+      label: "Load more",
+      type: "load-more" as const,
+      connectionId: "conn",
+      database: "db",
+    };
+    const viewsGroup: TreeNode = {
+      id: "conn:db:public:__views",
+      label: "Views",
+      type: "group-views",
+      connectionId: "conn",
+      database: "db",
+      schema: "public",
+      objectCount: 99,
+      children: [view1, view2, loadMore],
+    };
+    store.treeNodes = [
+      {
+        id: "conn",
+        label: "Connection",
+        type: "connection",
+        connectionId: "conn",
+        children: [viewsGroup],
+      },
+    ];
+
+    store.removeTreeNode(view1.id);
+
+    expect(viewsGroup.children?.map((child) => child.id)).toEqual([view2.id, loadMore.id]);
+    expect(viewsGroup.objectCount).toBe(1);
+  });
+
   it("serializes desktop pin saves so an older reorder cannot overwrite the latest one", async () => {
     const savePinnedTreeNodeIds = vi.fn().mockResolvedValue(undefined);
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));

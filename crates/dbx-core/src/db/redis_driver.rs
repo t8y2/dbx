@@ -2358,6 +2358,18 @@ where
     })
 }
 
+/// Read only a key's TTL without loading its value or collection members.
+///
+/// Redis returns `-2` for a missing key and `-1` for a key without an expiry;
+/// callers preserve those sentinel values so the UI can update its detail view
+/// without an additional round trip.
+pub async fn get_ttl<C>(con: &mut C, key: &[u8]) -> Result<i64, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    redis::cmd("TTL").arg(key).query_async(con).await.map_err(|e| e.to_string())
+}
+
 fn redis_value_matches_query(value: &RedisValue, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {

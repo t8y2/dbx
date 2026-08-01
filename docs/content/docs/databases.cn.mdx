@@ -1,203 +1,113 @@
 ---
 title: 数据库支持
-description: 了解 DBX 可以连接哪些数据库，以及每类高级功能支持哪些引擎。
+description: 了解 DBX 的连接 profile、驱动运行时、专用工作区和按能力启用的高级功能。
 ---
 
-<Callout type="info">DBX 主应用会尽量使用 Rust 原生驱动。部分数据库通过 MySQL 或 PostgreSQL 兼容协议连接，部分数据库通过 Agent 驱动或可选的 [JDBC 插件](/cn/docs/plugins) 扩展。</Callout>
+DBX 的新建连接窗口提供 70+ 数据库和服务 profile。Profile 决定默认端口、表单字段、图标和驱动入口，但“能建立连接”不等于“支持所有高级功能”。
+
+<Callout type="info">当前版本的连接选择器和 `crates/dbx-core/assets/database-drivers.manifest.json` 是数据库类型与能力的权威来源。文档不维护容易过期的全量静态矩阵。</Callout>
 
 ## 连接类型
 
-新建连接窗口会提供带默认端口和驱动标签的预设类型。
+### SQL 和兼容协议
 
-| 分组                | 类型                                                                                                             | 说明                                                         |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| 核心 SQL 数据库     | MySQL、PostgreSQL、SQLite、DuckDB、ClickHouse、SQL Server、Oracle、Redshift、DM、GaussDB、KWDB、Teradata、Vertica、Exasol、Firebird、SAP HANA、崖山 YashanDB、GBase | 直接出现在 DBX 连接选择器中                                  |
-| 文档、键值、向量与配置服务 | Redis、MongoDB、Elasticsearch、Easysearch、Qdrant、Milvus、Weaviate、ChromaDB、etcd、Apache ZooKeeper、Nacos         | 根据数据模型使用专门浏览器、管理控制台或查询流程，不完全等同于关系型表格 |
-| MySQL 兼容类型      | MariaDB、TiDB、OceanBase、Doris、SelectDB、StarRocks、Manticore Search、GoldenDB、TDSQL、PolarDB、GreatSQL、自定义 MySQL | 复用 MySQL 风格连接能力                                      |
-| PostgreSQL 兼容类型 | openGauss、KingBase、HighGo、Vastbase、CockroachDB、自定义 PostgreSQL                                             | 复用 PostgreSQL 风格连接能力                                 |
-| 文件型数据库        | SQLite、DuckDB、Microsoft Access、RQLite、Turso                                                                   | 选择本地数据库文件或 HTTP 端点，不填写主机和端口             |
-| 时序与边缘数据库    | Cloudflare D1、InfluxDB、IoTDB、TDengine、Databend、QuestDB                                                       | 托管 SQLite、时序、IoT 或边缘场景                            |
-| 分析与消息服务      | Apache Spark、Dremio、Apache Pulsar、Apache Kafka、Apache RocketMQ、RabbitMQ                                                                  | 用于分布式分析、消息和流管理场景                             |
-| Agent/JDBC 扩展类型 | H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、OSCAR、XuguDB、UXDB、Databricks、IRIS、JDBC | 功能覆盖取决于对应驱动路径                                   |
+- MySQL、PostgreSQL、SQLite、SQL Server、ClickHouse、Oracle、Redshift 等核心 SQL 数据库
+- MariaDB、TiDB、OceanBase、Doris、SelectDB、StarRocks、Manticore Search、GoldenDB 等 MySQL 协议或语法兼容 profile
+- openGauss、GaussDB、KingBase、HighGo、Vastbase、CockroachDB 等 PostgreSQL 兼容 profile
+- DM、KWDB、YashanDB、GBase、Teradata、Vertica、Exasol、Firebird、SAP HANA 等厂商数据库
+- Snowflake、Trino、PrestoSQL、Hive、Spark、DB2、Informix、Databricks、BigQuery 等 Agent/JDBC 分析数据库
 
-## 默认端口
+兼容协议只说明连接和部分方言可以复用。数据库版本、系统表、DDL、权限和管理接口不同，DBX 会用独立 profile 或能力覆盖避免错误地启用功能。
 
-| 类型                                        | 默认端口 |
-| ------------------------------------------- | -------: |
-| MySQL / MariaDB / GoldenDB / TDSQL / PolarDB / GreatSQL |     3306 |
-| PostgreSQL / openGauss / GaussDB / Vastbase |     5432 |
-| Redis                                       |     6379 |
-| MongoDB                                     |    27017 |
-| ClickHouse                                  |     8123 |
-| SQL Server                                  |     1433 |
-| Oracle                                      |     1521 |
-| Elasticsearch / Easysearch                  |     9200 |
-| Qdrant                                      |     6333 |
-| Milvus                                      |    19530 |
-| Weaviate                                    |     8080 |
-| ChromaDB                                    |     8000 |
-| TiDB                                        |     4000 |
-| OceanBase                                   |     2881 |
-| Doris / SelectDB / StarRocks / Databend     |     9030 |
-| Manticore Search                            |     9306 |
-| Redshift                                    |     5439 |
-| CockroachDB                                 |    26257 |
-| DM                                          |     5236 |
-| KingBase                                    |    54321 |
-| HighGo                                      |     5866 |
-| UXDB                                        |    52025 |
-| KWDB                                        |    26257 |
-| 崖山 YashanDB                               |     1688 |
-| GBase                                       |     5258 |
-| Firebird                                    |     3050 |
-| Teradata                                    |     1025 |
-| Vertica                                     |     5433 |
-| Exasol                                      |     8563 |
-| SAP HANA                                    |    39015 |
-| Databricks                                  |      443 |
-| Cloudflare D1 REST API                      |      443 |
-| InfluxDB                                    |     8086 |
-| IoTDB                                       |     6667 |
-| etcd                                        |     2379 |
-| Apache ZooKeeper                            |     2181 |
-| Nacos                                       |     8848 |
-| Nacos 控制台/admin API                      |     8085 |
-| IRIS                                        |     1972 |
-| RQLite                                      |     4001 |
-| H2                                          |     9092 |
-| Snowflake                                   |      443 |
-| Trino                                       |     8080 |
-| PrestoSQL                                   |     8080 |
-| Hive                                        |    10000 |
-| Apache Spark                                |    10015 |
-| DB2                                         |    50000 |
-| Informix                                    |     9088 |
-| Dremio                                      |    31010 |
-| Neo4j                                       |     7687 |
-| Cassandra                                   |     9042 |
-| BigQuery                                    |      443 |
-| Kylin                                       |     7070 |
-| SunDB                                       |    22000 |
-| OSCAR                                       |     2003 |
-| TDengine                                    |     6041 |
-| XuguDB                                      |     5138 |
-| QuestDB                                     |     8812 |
-| Apache Pulsar Admin API                     |     8080 |
-| Apache Kafka                                |     9092 |
-| Apache RocketMQ NameServer                  |     9876 |
-| RabbitMQ AMQP                               |     5672 |
+### 文件、边缘和托管数据库
 
-<Callout type="info">SQLite、DuckDB、Access 和 JDBC 在不需要网络端口时，会在连接模型中保存为端口 `0`。</Callout>
+- SQLite、DuckDB、Microsoft Access
+- Cloudflare D1、Turso、RQLite
+- H2 和通过 JDBC URL 访问的本地数据库
 
-## 本地数据库测试环境
+Desktop 的文件路径属于本机。Docker/Web 的文件路径属于服务器容器或宿主机挂载目录；浏览器电脑上的路径不会自动映射到服务器。
 
-DBX 为 ClickHouse、MariaDB、MongoDB、MySQL、PostgreSQL 和 Redis 维护了固定版本、可重复创建的 Docker Compose 配方。需要干净的本地实例验证连接、驱动行为或 Bug 修复时可以直接使用。命令、安全默认值和支持版本请参阅[数据库测试实验室](/cn/docs/database-lab)。
+### 专用数据模型和服务
 
-## 功能矩阵
+- Redis、MongoDB
+- Elasticsearch、Easysearch、Manticore Search
+- Qdrant、Milvus、Weaviate、ChromaDB
+- HBase
+- Pulsar、Kafka、RocketMQ、RabbitMQ
+- etcd、ZooKeeper、Nacos
+- InfluxDB、IoTDB、TDengine 和其它时序/IoT profile
 
-DBX 只会在具备足够元数据和 SQL 生成能力的数据库上启用高级功能。
+这些连接使用键值、文档、搜索、向量、消息或配置中心工作区，不应套用关系型表格和 SQL 的全部概念。入口详见 [专用工作区](/cn/docs/specialized-workspaces)。
 
-| 功能                | 支持类型                                                                                                                                                                                                                                                 |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Schema 感知树       | PostgreSQL、SQL Server、Oracle、Redshift、DM、GaussDB、KWDB、KingBase、HighGo、UXDB、Vastbase、JDBC、H2、Snowflake、Trino、DB2、TDengine、XuguDB、Teradata、Vertica、Exasol、Firebird、SAP HANA、YashanDB、GBase                              |
-| ER 图               | MySQL、PostgreSQL、SQLite、Cloudflare D1、SQL Server、Oracle、Redshift、DM、GaussDB、KWDB、KingBase、HighGo、UXDB、Vastbase、GoldenDB、Access、H2、DB2、Teradata、Vertica、Firebird、Exasol、GBase、YashanDB                                      |
-| 数据库搜索          | MySQL、PostgreSQL、SQLite、SQL Server、Oracle、Redshift、DuckDB、ClickHouse、DM、GaussDB、KWDB、KingBase、HighGo、UXDB、Vastbase、GoldenDB、Access、H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、TDengine、XuguDB、Databricks、Teradata、Vertica |
-| 表数据导入          | MySQL、PostgreSQL、SQLite、Cloudflare D1、DuckDB、ClickHouse、SQL Server、Oracle、Doris、StarRocks、Redshift、DM、GaussDB、KWDB、KingBase、HighGo、UXDB、Vastbase、GoldenDB、Access、Databend                                                      |
-| 几何字段地图预览    | PostgreSQL、HighGo、KingBase、Vastbase、openGauss、GaussDB（PostGIS `geometry` / `geography` 列在结果集中以 WKT 显示，并提供网格工具栏的"地图预览"按钮）                                                                                       |
-| 表结构编辑器        | MySQL、PostgreSQL、SQLite、SQL Server、KWDB、UXDB                                                                                                                                                                                              |
-| 创建数据库          | MySQL、PostgreSQL、SQL Server、ClickHouse、Oracle、DM、GaussDB、KWDB、Doris、StarRocks、Redshift、Teradata、Vertica                                                                                                                           |
-| 字段血缘            | MySQL、PostgreSQL、SQLite、Cloudflare D1、SQL Server、Oracle、Redshift、DM、GaussDB、KWDB                                                                                                                                                     |
-| 数据传输            | MySQL、PostgreSQL、SQLite、Cloudflare D1、SQL Server、Oracle、ClickHouse、DuckDB、DM、GaussDB、KWDB                                                                                                                                           |
-| 不支持 SQL 文件执行 | Redis、MongoDB、Elasticsearch、Easysearch、etcd、Nacos                                                                                                                                                                                        |
+## 驱动运行时
 
-<Callout type="warn">如果某个数据库可以连接，但没有出现在某个功能行中，该功能可能会被隐藏或受限。这是为了避免 DBX 生成无法可靠审查的 SQL。</Callout>
+| 运行方式 | 说明 | 典型边界 |
+| --- | --- | --- |
+| 内置原生 | Rust 驱动编译进 DBX | 安装后可直接使用 |
+| 原生 Agent / sidecar | DBX 管理独立 Go/Rust/外部进程 | 需要匹配平台文件；DuckDB、Oracle、KingBase、XuguDB、RabbitMQ 等路径可能使用独立运行时 |
+| JDBC Agent | Java Agent 加厂商 JDBC 驱动 | 需要 JRE、Agent 和可合法获取的厂商 JAR |
+| JDBC 插件 | 可选通用 JDBC 扩展 | 未识别数据库按通用 JDBC 能力运行 |
 
-## 连接选项
+驱动的安装、更新、离线包和运行时监控见 [驱动管理](/cn/docs/driver-management)；自定义 JDBC 见 [JDBC 插件](/cn/docs/plugins)。
 
-大多数网络数据库支持主机、端口、用户名、密码、默认数据库、URL 参数、SSL、连接颜色和隧道/代理设置。文件型数据库会改为选择本地文件。
+## 能力等级
 
-DBX 也可以解析常见连接 URL，例如 MySQL、PostgreSQL、Redis、MongoDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、DM、GaussDB、KWDB、openGauss、TDengine、XuguDB、Access、Teradata、Vertica、Firebird、Exasol、GBase、YashanDB、SAP HANA、InfluxDB、QuestDB、IoTDB、etcd、Nacos、RQLite 和 Databricks。
+DBX 驱动清单使用从连接到操作的能力等级，并允许按数据库覆盖单项能力：
 
-### Easysearch
+| 能力层 | 含义 |
+| --- | --- |
+| Connect | 建立连接并执行该 profile 支持的基础查询 |
+| Browse | 浏览数据库、Schema、表或专用对象 |
+| Understand | 增加对象源码、搜索、关系理解等只读能力 |
+| Operate | 增加表数据编辑等受控写入能力 |
 
-DBX 提供独立的 Easysearch 连接类型，默认端口为 `9200`，通过 Elasticsearch 兼容的 HTTP REST API 连接。它复用 DBX 已有的 Elasticsearch 文档引擎，支持索引与文档浏览、Query DSL、REST 请求、常用 SQL 查询、分页与计数、文档增删改以及批量写入流程。
+具体功能还由独立 capability 控制，例如：
 
-Easysearch 官方兼容基线面向 Elasticsearch 7.10 API 和生态，但这不表示所有 Elasticsearch 版本、X-Pack、ES|QL 或其他专有扩展都完全等价。HTTPS 实例请启用 SSL；使用自签名证书的测试环境也走同一 TLS 连接路径。
+- Schema 搜索和 ER 图
+- 表数据编辑和表结构编辑
+- 表导入和数据传输
+- SQL 文件执行
+- 字段血缘和执行计划
+- 创建数据库、用户管理和驱动管理
 
-### Cloudflare D1
+因此菜单是否出现比“数据库名称是否在支持列表中”更能反映当前路径。缺少入口时，应检查 DBX 版本、数据库 profile、驱动模式和已安装组件。
 
-新建 **Cloudflare D1** 连接时填写 Account ID、D1 Database ID（UUID）和 API Token。浏览元数据和查询至少需要 `D1 Read` 权限；插入、更新、DDL、导入或传输还需要 `D1 Write` 权限。DBX 会直接调用 Cloudflare HTTPS API，因此该类型不提供 SSH 或代理传输层。
+## 功能边界
 
-### Nacos 控制台
+### SQL 文件和关系型工具
 
-Nacos 连接会打开专用管理控制台，用于管理命名空间、配置、服务、实例、配置历史和 Raw API 请求。创建连接时请填写 Nacos 控制台/admin API 地址。Nacos 3 Docker 部署通常使用 `8085` 暴露控制台；旧版本也可能与服务端口共用 `8848`。
+Redis、MongoDB、搜索、向量、HBase、配置中心和消息队列工作区不会使用关系型 SQL 文件执行。部分 SQL 数据库只支持查询和浏览，不支持结构编辑、表导入或数据传输。
 
-### ClickHouse TLS
+### 导入和传输
 
-ClickHouse 连接支持 TLS 加密。创建 ClickHouse 连接时，启用 TLS 开关即可通过 HTTPS 而非 HTTP 进行连接。建议对生产环境的 ClickHouse 实例或 ClickHouse Cloud 部署启用此选项。
+[表数据导入](/cn/docs/table-import) 与 [数据传输](/cn/docs/data-transfer) 都按 capability 过滤连接。跨引擎路径还受类型映射、键、identity、Schema 和目标 DDL 能力限制。
 
-### GaussDB 原生驱动
+### 备份和导出
 
-GaussDB 和 openGauss 现在使用原生 Rust 驱动（`rust-gaussdb`）而非 ODBC。之前使用 PostgreSQL 兼容路径的连接会自动迁移到 GaussDB 驱动。原生驱动提供更好的类型处理和针对 GaussDB 的元数据支持。
+- [数据库导出](/cn/docs/database-export) 是能力驱动的逻辑 SQL 导出
+- [数据库备份](/cn/docs/database-backup) 当前只在 Desktop 为 MySQL 和 PostgreSQL 提供定时一致性备份
+- 云同步和配置导出只迁移 DBX 配置，不会备份业务数据库
 
-### DuckDB 文件与内存模式
+### Desktop 和 Docker/Web
 
-DuckDB 连接支持两种模式：
+两种运行方式共享大部分 Rust 核心查询、元数据和安全策略，但并非功能完全相同。Desktop 才有本地 SQL 文件目录、系统文件选择、Deep Link、本机 CLI Agent 和定时数据库备份；Web 文件、驱动和 Agent 都位于服务器数据目录。
 
-- **文件模式**：选择 `.db` 或 `.duckdb` 文件进行持久化存储
-- **内存模式**：使用内存数据库进行临时分析。连接关闭后数据会丢失。
+## 默认端口和连接 URL
 
-可以直接从连接表单创建新的 DuckDB 数据库文件，只需输入尚不存在的文件路径即可。
+连接 profile 会填入常见默认端口，例如 MySQL `3306`、PostgreSQL `5432`、Redis `6379`、MongoDB `27017`、SQL Server `1433`、Oracle `1521`、Elasticsearch `9200`、RabbitMQ AMQP `5672`。这些只是默认值，可以按部署修改。
 
-### DuckDB 连接初始化脚本
+RabbitMQ 等服务可能同时有业务端口和管理 API 端口；自定义 AMQP 端口不能用于推断 Management API 端口。SSH 隧道、HTTP 代理、TLS SNI 和实际拨号目标也应分别确认。
 
-DuckDB 连接支持在每次建立连接后执行一段 SQL 脚本，在连接对话框的**初始化脚本**中配置。典型用途包括加载扩展、创建密钥、调整会话参数以及附加额外的数据目录：
+DBX 可以解析许多常见 DSN/URL，但不同数据库版本和云厂商参数差异很大。连接测试成功后仍应检查实际数据库、Schema、SSL 和权限范围。
 
-```sql
-INSTALL quack;
-LOAD quack;
-ATTACH 'quack:analytics-host' AS remote (TOKEN 'your_token');
-```
+## 本地测试环境
 
-也可以附加 [DuckLake](https://ducklake.select/) 数据目录：
+仓库提供 ClickHouse、MariaDB、MongoDB、MySQL、PostgreSQL 和 Redis 的固定 Docker Compose 测试环境，适合验证连接、驱动行为和回归。详见 [数据库测试实验室](/cn/docs/database-lab)。
 
-```sql
-INSTALL ducklake;
-LOAD ducklake;
-ATTACH 'ducklake:/data/lake/meta.ducklake' AS lake (DATA_PATH '/data/lake/files');
-```
-
-- 脚本中 ATTACH 的数据库（本地文件、DuckLake、远程 Quack 服务等）会像配置的附加数据库一样显示在侧边栏，并在每次重连时自动重新附加。建议显式指定 `AS 别名`，保持目录名稳定。
-- 语句按顺序执行；某条语句失败时连接会失败，并提示失败语句的序号和引擎报错，方便定位修改。
-- 脚本在每次建立新连接时都会执行，请优先使用可重复执行的语句，并在引擎或扩展支持时使用 `IF NOT EXISTS` 等保护条件。
-- 初始化脚本与连接密码同等对待：保存在本地密钥存储中，不会写入明文配置文件，云同步时只进入加密的敏感载荷——上例中 Quack 的 `TOKEN` 这类敏感内容不会出现在公开同步快照或导出里。
-
-### SQLite 内存模式
-
-SQLite 连接可以使用 `:memory:` 作为文件路径，创建临时的内存数据库。适用于快速实验或临时数据转换。
-
-### Doris / StarRocks 多 Catalog
-
-Doris 与 StarRocks 作为 MPP 引擎，通过 Catalog 联邦访问外部数据源（`SHOW CATALOGS`）。DBX 会列出当前用户有权限读取的所有 Catalog，并以 `Catalog → 数据库 → 表` 的树形结构展示：
-
-- 内置的 `internal` Catalog 展示引擎自身的数据库与表。
-- 外部 Catalog（Hive、Iceberg、Hudi、Paimon、JDBC 等）同样列出其数据库与表。无权限访问的 Catalog 会被静默跳过。
-- 当只存在 `internal` Catalog 时，侧边栏保持扁平结构（不出现 Catalog 分组层），单 Catalog 部署不受影响。
-
-从外部 Catalog 打开表时，数据预览使用三段式 `catalog.database.table` 名称，无需在会话中执行 `SWITCH`。外部 Catalog 仅支持表与视图——存储过程、序列、触发器、外键均不可用。
-
-## 扩展支持
-
-当目标数据库不在内置类型中，或团队必须使用厂商 JDBC 驱动时，可以使用 [JDBC 插件](/cn/docs/plugins)。JDBC 会把厂商驱动 JAR 放在 DBX 主应用之外，由你决定安装哪些驱动文件。
+## 相关页面
 
 <Cards>
-  <Card title="创建连接" href="/cn/docs/getting-started">
-    安装 DBX、选择数据库类型并测试第一个连接。
-  </Card>
-  <Card title="JDBC 插件" href="/cn/docs/plugins">
-    安装可选 JDBC 插件并导入厂商驱动 JAR。
-  </Card>
-  <Card title="隧道/代理" href="/cn/docs/ssh-tunnel">
-    连接私有网络、跳板机、代理或 HTTP 隧道脚本后的数据库。
-  </Card>
+  <Card title="专用工作区" href="/cn/docs/specialized-workspaces">查看非关系型、搜索、向量、消息和配置中心界面。</Card>
+  <Card title="驱动管理" href="/cn/docs/driver-management">安装和诊断原生 Agent、sidecar、JDBC Agent 和 JRE。</Card>
+  <Card title="生产环境安全" href="/cn/docs/production-safety">了解数据库权限、只读保护、生产保护和自动化边界。</Card>
 </Cards>

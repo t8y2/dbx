@@ -104,6 +104,41 @@ describe("buildSnippetItems", () => {
     expect(snippet?.apply).toBe("SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;");
   });
 
+  it("ranks an exact snippet prefix ahead of an exact function name", () => {
+    const items = buildSqlCompletionItems("sf", 2, {
+      databaseType: "oracle",
+      snippets: [{ id: "custom-sf", label: "select * from table", prefix: "sf", body: "SELECT *\nFROM table;" }],
+      objects: [{ name: "SF", type: "function" }],
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ label: "select * from table", type: "snippet", exactMatch: true }));
+    expect(items.findIndex((item) => item.label === "SF" && item.type === "function")).toBeGreaterThan(0);
+  });
+
+  it("ranks an exact snippet prefix ahead of an exact keyword", () => {
+    const items = buildSqlCompletionItems("select", 6, {
+      snippets: [{ id: "custom-select", label: "select all rows", prefix: "select", body: "SELECT *\nFROM table;" }],
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ label: "select all rows", type: "snippet", exactMatch: true }));
+    expect(items.findIndex((item) => item.label === "SELECT" && item.type === "keyword")).toBeGreaterThan(0);
+  });
+
+  it("keeps the real keyword first after typing past a snippet prefix", () => {
+    const items = buildSqlCompletionItems("sele", 4, {
+      snippets: [{ id: "custom-sel", label: "select all rows", prefix: "sel", body: "SELECT *\nFROM table;" }],
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ label: "SELECT", type: "keyword" }));
+    expect(items.find((item) => item.label === "select all rows" && item.type === "snippet")?.exactMatch).not.toBe(true);
+  });
+
   it("preserves a customized built-in select body instead of replacing it with a dialect default", () => {
     const customized = { ...BUILTIN_SELECT, body: "SELECT *\nFROM table\nLIMIT 7;" };
     const items = buildSnippetItemsForTest("sel", [customized], undefined, "oracle");

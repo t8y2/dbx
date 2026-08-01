@@ -284,6 +284,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         connectionId,
         database,
         schema: node.schema || undefined,
+        identifierQuote: connectionStore.connectionIdentifierQuote(connectionId),
         tableName: node.label,
         filePath: outputPath,
         format,

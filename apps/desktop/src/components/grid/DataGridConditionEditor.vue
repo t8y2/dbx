@@ -94,11 +94,13 @@ const previewStyle = computed<CSSProperties>(() => {
 });
 const previewArrowStyle = computed<CSSProperties>(() => ({ top: `${historyPreview.value?.arrowTop ?? 0}px` }));
 
-function createTextProbe(input: HTMLTextAreaElement, wrap: boolean) {
+function createTextProbe(input: HTMLTextAreaElement, wrap: boolean, options: { width?: number; textIndent?: number } = {}) {
   const probe = document.createElement(wrap ? "div" : "span");
   const style = window.getComputedStyle(input);
+  const width = options.width ?? input.clientWidth;
+  const textIndent = options.textIndent !== undefined ? `${options.textIndent}px` : style.textIndent;
   probe.textContent = input.value || input.placeholder || "";
-  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${input.clientWidth}px;white-space:pre-wrap;overflow-wrap:normal;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
+  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${width}px;white-space:pre-wrap;overflow-wrap:anywhere;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};text-indent:${textIndent};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
   document.body.appendChild(probe);
   return probe;
 }
@@ -111,8 +113,8 @@ function shouldExpand(input: HTMLTextAreaElement) {
   return should;
 }
 
-function measureExpandedHeight(input: HTMLTextAreaElement) {
-  const probe = createTextProbe(input, true);
+function measureExpandedHeight(input: HTMLTextAreaElement, rect: typeof expandedRect.value) {
+  const probe = createTextProbe(input, true, { width: Math.max(1, rect.width - 8), textIndent: rect.prefix });
   const style = window.getComputedStyle(input);
   const lineHeight = Number.parseFloat(style.lineHeight) || 24;
   const contentHeight = probe.scrollHeight;
@@ -121,11 +123,30 @@ function measureExpandedHeight(input: HTMLTextAreaElement) {
   return Math.min(Math.max(56, lineHeight * 2.5, contentHeight), Math.min(260, availableHeight));
 }
 
+function maxExpandedHeight() {
+  const input = inputRef.value;
+  const top = input?.getBoundingClientRect().top ?? expandedRect.value.top;
+  return Math.min(260, Math.max(56, window.innerHeight - top - 12));
+}
+
+function fitExpandedHeightToOverlay() {
+  const overlay = overlayRef.value;
+  if (!overlay) return;
+  const overflow = overlay.scrollHeight - overlay.clientHeight;
+  if (overflow > 4) {
+    expandedHeight.value = Math.min(maxExpandedHeight(), expandedHeight.value + overflow);
+  } else if (overflow <= 0) {
+    overlay.scrollTop = 0;
+  }
+}
+
 function measureExpandedRect(input: HTMLTextAreaElement) {
   const inputRect = input.getBoundingClientRect();
   const control = controlRef.value;
   const controlRect = control?.getBoundingClientRect() ?? inputRect;
   const controlsRect = control?.firstElementChild?.getBoundingClientRect() ?? controlRect;
+  const label = control?.querySelector<HTMLElement>(".data-grid-topbar-condition-label");
+  const labelPrefix = label ? label.scrollWidth + 4 : 0;
   const horizontalInset = 8;
   return {
     left: controlRect.left - horizontalInset,
@@ -133,7 +154,7 @@ function measureExpandedRect(input: HTMLTextAreaElement) {
     width: controlRect.width + horizontalInset * 2,
     controlsTop: Math.max(0, controlsRect.top - controlRect.top),
     inputTop: Math.max(0, inputRect.top - controlRect.top),
-    prefix: Math.max(0, inputRect.left - controlRect.left),
+    prefix: Math.max(0, inputRect.left - controlRect.left, labelPrefix),
     suffix: Math.max(28, controlRect.right - inputRect.right),
   };
 }
@@ -172,8 +193,10 @@ function resizeEditor(forceExpand = false) {
     const focused = document.activeElement === input || overlayFocused;
     const nextExpanded = focused && shouldExpand(input) && (forceExpand || expanded.value);
     if (nextExpanded) {
-      expandedRect.value = measureExpandedRect(input);
-      expandedHeight.value = measureExpandedHeight(input);
+      const nextRect = measureExpandedRect(input);
+      expandedRect.value = nextRect;
+      expandedHeight.value = measureExpandedHeight(input, nextRect);
+      void nextTick(fitExpandedHeightToOverlay);
     }
     expanded.value = nextExpanded;
     updateSuggestionPosition();
@@ -181,15 +204,25 @@ function resizeEditor(forceExpand = false) {
       void nextTick(() => {
         const overlay = overlayRef.value;
         if (!overlay || composing.value) return;
-        syncSelection(input);
-        overlay.focus();
-        overlay.setSelectionRange(selectionStart.value, selectionEnd.value);
+        const start = selectionStart.value;
+        const end = selectionEnd.value;
+        overlay.setSelectionRange(start, end);
+        overlay.focus({ preventScroll: true });
+        overlay.setSelectionRange(start, end);
+        selectionStart.value = start;
+        selectionEnd.value = end;
+        scheduleCaretIntoView();
       });
     }
     if (!nextExpanded && overlayFocused && !composing.value) {
       void nextTick(() => {
-        input.focus();
-        input.setSelectionRange(selectionStart.value, selectionEnd.value);
+        const start = selectionStart.value;
+        const end = selectionEnd.value;
+        input.focus({ preventScroll: true });
+        input.setSelectionRange(start, end);
+        selectionStart.value = start;
+        selectionEnd.value = end;
+        scheduleCaretIntoView();
       });
     }
   });
@@ -220,7 +253,14 @@ function focus(select = false) {
 
 function scrollCaretIntoView() {
   const target = activeEditor.value;
-  if (!target || target.scrollHeight <= target.clientHeight) return;
+  if (!target) return;
+  const hasVerticalOverflow = target.scrollHeight > target.clientHeight + 4;
+  const hasHorizontalOverflow = target.scrollWidth > target.clientWidth + 1;
+  if (!hasVerticalOverflow && !hasHorizontalOverflow) {
+    target.scrollTop = 0;
+    target.scrollLeft = 0;
+    return;
+  }
   const style = window.getComputedStyle(target);
   const probe = document.createElement("div");
   const caretMarker = document.createElement("span");
@@ -232,19 +272,40 @@ function scrollCaretIntoView() {
   document.body.appendChild(probe);
   const lineHeight = Number.parseFloat(style.lineHeight) || 24;
   const caretTop = caretMarker.offsetTop;
+  const caretLeft = caretMarker.offsetLeft;
   const topPadding = Number.parseFloat(style.paddingTop) || 0;
   const bottomPadding = Number.parseFloat(style.paddingBottom) || 0;
+  const leftPadding = Number.parseFloat(style.paddingLeft) || 0;
+  const rightPadding = Number.parseFloat(style.paddingRight) || 0;
   const visibleTop = target.scrollTop + topPadding;
   const visibleBottom = target.scrollTop + target.clientHeight - bottomPadding;
-  if (caretTop < visibleTop) target.scrollTop = Math.max(0, caretTop - topPadding);
-  else if (caretTop + lineHeight > visibleBottom) target.scrollTop = caretTop + lineHeight + bottomPadding - target.clientHeight;
+  const visibleLeft = target.scrollLeft + leftPadding;
+  const visibleRight = target.scrollLeft + target.clientWidth - rightPadding;
+  if (hasVerticalOverflow) {
+    if (caretTop < visibleTop) target.scrollTop = Math.max(0, caretTop - topPadding);
+    else if (caretTop + lineHeight > visibleBottom) target.scrollTop = caretTop + lineHeight + bottomPadding - target.clientHeight;
+  } else {
+    target.scrollTop = 0;
+  }
+  if (hasHorizontalOverflow) {
+    if (caretLeft < visibleLeft) target.scrollLeft = Math.max(0, caretLeft - leftPadding);
+    else if (caretLeft > visibleRight) target.scrollLeft = caretLeft + rightPadding - target.clientWidth;
+  } else {
+    target.scrollLeft = 0;
+  }
   probe.remove();
+}
+
+function scheduleCaretIntoView() {
+  void nextTick(() => {
+    requestAnimationFrame(() => scrollCaretIntoView());
+  });
 }
 
 function focusAfterAccept() {
   void nextTick(() => {
     focus();
-    void nextTick(scrollCaretIntoView);
+    scheduleCaretIntoView();
   });
 }
 
@@ -280,6 +341,7 @@ function onInput(event: Event) {
   syncSelection(event.currentTarget as HTMLTextAreaElement);
   resizeEditor(true);
   updateSuggestionPosition();
+  scheduleCaretIntoView();
 }
 
 async function applyCondition() {
@@ -592,6 +654,12 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   transform: translateX(-4px);
 }
 
+.data-grid-topbar-condition-label--floating.data-grid-topbar-condition-label--compact {
+  max-width: 5rem;
+  opacity: 1;
+  transform: translateX(0);
+}
+
 .data-grid-topbar-condition-input,
 .data-grid-condition-suggestion-field {
   font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
@@ -681,7 +749,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   overflow-x: hidden;
   overflow-y: auto;
   white-space: pre-wrap;
-  overflow-wrap: normal;
+  overflow-wrap: anywhere;
   border: 0;
   border-radius: 0;
   background: transparent;

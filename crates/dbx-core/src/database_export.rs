@@ -10,8 +10,9 @@ use crate::mysql_ddl_normalize::DdlNormalizeOptions;
 use crate::object_source_sql::build_export_object_source_sql;
 use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{
-    format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra, quote_identifier,
-    quote_postgres_string_literal, selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
+    format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra,
+    is_mysql_generated_column_extra, quote_identifier, quote_postgres_string_literal,
+    selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
     wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::ObjectSourceKind;
@@ -305,7 +306,7 @@ fn format_export_sql_literal_for_database(value: &Value, database_type: Option<D
         return number.to_string();
     }
     if let Some(value) = value.as_bool() {
-        if database_type == Some(DatabaseType::Dameng) {
+        if matches!(database_type, Some(DatabaseType::Dameng) | Some(DatabaseType::SqlServer)) {
             return if value { "1" } else { "0" }.to_string();
         }
         return if value { "TRUE" } else { "FALSE" }.to_string();
@@ -796,11 +797,12 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         .iter()
         .enumerate()
         .filter(|(index, column)| {
-            !is_internal_export_column(options.database_type, column)
-                && !is_postgres_tsvector_export_column(
-                    options.database_type,
-                    options.column_types.get(*index).and_then(|value| value.as_deref()),
-                )
+            is_export_insert_column(
+                options.database_type,
+                column,
+                options.column_types.get(*index).and_then(|value| value.as_deref()),
+                options.column_extras.get(*index).and_then(|value| value.as_deref()),
+            )
         })
         .collect::<Vec<_>>();
     if insert_columns.is_empty() {
@@ -868,6 +870,17 @@ fn is_postgres_tsvector_export_column(database_type: Option<DatabaseType>, colum
                 normalized == "tsvector" || normalized.ends_with(".tsvector")
             })
             .unwrap_or(false)
+}
+
+fn is_export_insert_column(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    column_type: Option<&str>,
+    column_extra: Option<&str>,
+) -> bool {
+    !is_internal_export_column(database_type, column)
+        && !is_postgres_tsvector_export_column(database_type, column_type)
+        && (database_type != Some(DatabaseType::Mysql) || !is_mysql_generated_column_extra(column_extra))
 }
 
 fn is_postgres_json_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
@@ -1283,9 +1296,59 @@ fn write_database_export_rows(
     schema: &str,
     db_type: &DatabaseType,
 ) -> Result<(), String> {
-    let mut insert_sql =
-        crate::transfer::generate_insert_typed(columns, column_types, rows, table, schema, db_type, None);
-    if *db_type == DatabaseType::Dameng && selected_columns_include_identity_extras(columns, column_extras) {
+    let insert_indices = columns
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| {
+            is_export_insert_column(
+                Some(*db_type),
+                column,
+                column_types.get(*index).and_then(|value| value.as_deref()),
+                column_extras.get(*index).and_then(|value| value.as_deref()),
+            )
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if insert_indices.is_empty() {
+        return Ok(());
+    }
+    let filtered_columns;
+    let filtered_column_types;
+    let filtered_column_extras;
+    let filtered_rows;
+    let (insert_columns, insert_column_types, insert_column_extras, insert_rows) = if insert_indices.len()
+        == columns.len()
+    {
+        (columns, column_types, column_extras, rows)
+    } else {
+        filtered_columns = insert_indices.iter().map(|index| columns[*index].clone()).collect::<Vec<_>>();
+        filtered_column_types =
+            insert_indices.iter().map(|index| column_types.get(*index).cloned().unwrap_or(None)).collect::<Vec<_>>();
+        filtered_column_extras =
+            insert_indices.iter().map(|index| column_extras.get(*index).cloned().unwrap_or(None)).collect::<Vec<_>>();
+        filtered_rows = rows
+            .iter()
+            .map(|row| insert_indices.iter().map(|index| row.get(*index).cloned().unwrap_or(Value::Null)).collect())
+            .collect::<Vec<Vec<Value>>>();
+        (
+            filtered_columns.as_slice(),
+            filtered_column_types.as_slice(),
+            filtered_column_extras.as_slice(),
+            filtered_rows.as_slice(),
+        )
+    };
+    let mut insert_sql = crate::transfer::generate_insert_typed(
+        insert_columns,
+        insert_column_types,
+        insert_rows,
+        table,
+        schema,
+        db_type,
+        None,
+    );
+    if *db_type == DatabaseType::Dameng
+        && selected_columns_include_identity_extras(insert_columns, insert_column_extras)
+    {
         insert_sql = wrap_dameng_identity_insert_sql(&insert_sql, table, schema);
     }
     if insert_sql.is_empty() {
@@ -2172,10 +2235,10 @@ mod tests {
         format_export_table_ddl, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
         generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
         is_postgres_extension_member_routine, mysql_database_export_preamble, normalize_export_table_ddl,
-        record_export_error, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
-        DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions, ExportedTableSql,
-        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE,
-        DATABASE_EXPORT_ROW_LIMIT,
+        record_export_error, write_database_export_rows, BuildDatabaseSqlExportOptions,
+        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions,
+        ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::models::connection::DatabaseType;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
@@ -2308,7 +2371,6 @@ mod tests {
     #[test]
     fn concurrent_prefetch_only_allowed_for_multi_connection_pools() {
         use crate::connection::PoolKind;
-        use std::sync::Arc;
 
         // ChClient::new 只构造 HTTP 客户端，不发起连接
         let clickhouse = PoolKind::ClickHouse(crate::db::clickhouse_driver::ChClient::new(
@@ -2320,8 +2382,7 @@ mod tests {
         assert!(concurrent_metadata_prefetch_allowed(Some(&clickhouse)));
 
         // Agent（JDBC sidecar）请求超时覆盖排队时间，必须回退串行
-        let agent =
-            PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(crate::db::agent_driver::AgentDriverClient::test_stub())));
+        let agent = PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub());
         assert!(!concurrent_metadata_prefetch_allowed(Some(&agent)));
 
         assert!(!concurrent_metadata_prefetch_allowed(None));
@@ -2445,6 +2506,45 @@ mod tests {
         assert_eq!(format_export_sql_literal(&json!(42)), "42");
         assert_eq!(format_export_sql_literal(&json!(true)), "TRUE");
         assert_eq!(format_export_sql_literal(&json!("O'Hara")), "'O''Hara'");
+    }
+
+    #[test]
+    fn database_specific_boolean_export_literals() {
+        let sqlserver_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            table_name: Some("flags".to_string()),
+            qualified_table_name: None,
+            columns: vec!["typed_true".to_string(), "untyped_false".to_string(), "typed_null".to_string()],
+            column_types: vec![Some("bit".to_string()), None, Some("bit".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(true), json!(false), Value::Null]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+        let postgres_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("flags".to_string()),
+            qualified_table_name: None,
+            columns: vec!["enabled".to_string(), "disabled".to_string(), "unknown".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(true), json!(false), Value::Null]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sqlserver_statements,
+            vec!["INSERT INTO [dbo].[flags] ([typed_true], [untyped_false], [typed_null]) VALUES (1, 0, NULL);"]
+        );
+        assert_eq!(
+            postgres_statements,
+            vec![
+                "INSERT INTO \"public\".\"flags\" (\"enabled\", \"disabled\", \"unknown\") VALUES (TRUE, FALSE, NULL);"
+            ]
+        );
     }
 
     #[test]
@@ -2924,6 +3024,97 @@ mod tests {
         .unwrap();
 
         assert_eq!(statements, vec!["INSERT INTO \"public\".\"articles\" (\"id\", \"title\") VALUES (1, 'Hello');"]);
+    }
+
+    #[test]
+    fn mysql_generated_columns_are_omitted_from_sql_inserts_but_kept_in_ddl() {
+        let ddl = "CREATE TABLE `orders` (`id` bigint AUTO_INCREMENT, `quantity` int, `unit_price` decimal(10,2), `virtual_total` decimal(10,2) GENERATED ALWAYS AS ((`quantity` * `unit_price`)) VIRTUAL, `stored_total` decimal(10,2) GENERATED ALWAYS AS ((`quantity` * `unit_price`)) STORED);";
+        let sql = build_database_sql_export(BuildDatabaseSqlExportOptions {
+            database_name: "shop".to_string(),
+            exported_at: Some("2026-07-30T00:00:00.000Z".to_string()),
+            tables: vec![ExportedTableSql {
+                display_name: "orders".to_string(),
+                database_type: Some(DatabaseType::Mysql),
+                schema: None,
+                table_name: Some("orders".to_string()),
+                qualified_table_name: None,
+                ddl: Some(ddl.to_string()),
+                columns: vec![
+                    "id".to_string(),
+                    "quantity".to_string(),
+                    "unit_price".to_string(),
+                    "virtual_total".to_string(),
+                    "stored_total".to_string(),
+                    "created_at".to_string(),
+                ],
+                column_types: vec![
+                    Some("bigint".to_string()),
+                    Some("int".to_string()),
+                    Some("decimal(10,2)".to_string()),
+                    Some("decimal(10,2)".to_string()),
+                    Some("decimal(10,2)".to_string()),
+                    Some("timestamp".to_string()),
+                ],
+                column_extras: vec![
+                    Some("auto_increment".to_string()),
+                    None,
+                    None,
+                    Some("VIRTUAL GENERATED".to_string()),
+                    Some("stored generated".to_string()),
+                    Some("DEFAULT_GENERATED".to_string()),
+                ],
+                rows: vec![vec![json!(7), json!(2), json!(3.5), json!(7.0), json!(7.0), json!("2026-07-30 08:00:00")]],
+                truncated: false,
+            }],
+            row_limit_per_table: Some(DATABASE_EXPORT_ROW_LIMIT),
+            insert_batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+            connection_id: None,
+            database: None,
+            schema: None,
+            omit_auto_increment: false,
+        })
+        .unwrap();
+
+        assert!(sql.contains(ddl));
+        assert!(sql.contains(
+            "INSERT INTO `orders` (`id`, `quantity`, `unit_price`, `created_at`) VALUES (7, 2, 3.5, '2026-07-30 08:00:00');"
+        ));
+        assert!(!sql.contains("INSERT INTO `orders` (`id`, `quantity`, `unit_price`, `virtual_total`"));
+    }
+
+    #[test]
+    fn mysql_database_export_file_rows_omit_generated_columns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        write_database_export_rows(
+            &mut file,
+            &[vec![json!(7), json!(2), json!(7.0), json!("2026-07-30 08:00:00")]],
+            &["id".to_string(), "quantity".to_string(), "virtual_total".to_string(), "created_at".to_string()],
+            &[
+                Some("bigint".to_string()),
+                Some("int".to_string()),
+                Some("decimal(10,2)".to_string()),
+                Some("timestamp".to_string()),
+            ],
+            &[
+                Some("auto_increment".to_string()),
+                None,
+                Some("VIRTUAL GENERATED".to_string()),
+                Some("DEFAULT_GENERATED".to_string()),
+            ],
+            "orders",
+            "shop",
+            &DatabaseType::Mysql,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `orders` (`id`, `quantity`, `created_at`) VALUES\n(7, 2, '2026-07-30 08:00:00');\n\n"
+        );
     }
 
     #[test]

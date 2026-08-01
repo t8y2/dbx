@@ -1,51 +1,91 @@
 ---
 title: Field Lineage
-description: Trace where columns come from, how they are referenced, and which relationships may exist.
+description: Analyze upstream, downstream, and potential column impact from foreign keys, view definitions, query history, and matching names.
 ---
 
-Field Lineage helps answer a common question: where does a column's data come from, and what might depend on it? Use it to understand complex schemas, inspect impact, and read legacy structures.
+Field lineage helps answer where a column comes from, where it is used, and what a change might affect. DBX combines database metadata with local query history and labels evidence strength instead of treating every matching name as a confirmed dependency.
 
-<Callout type="info">Field Lineage is enabled for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, and GaussDB. Other engines may not expose enough relationship metadata for DBX to build useful lineage.</Callout>
+## Open Lineage
 
-## What It Helps With
+Open field lineage from a column node, table structure, or related context menu. The active column becomes the target, and results list related tables, columns, views, or historical SQL.
 
-- Before changing a column, see which tables, views, or queries may depend on it
-- Understand relationships in an unfamiliar database
-- Trace where report fields may originate
-- Discover possible relationships that are not declared as foreign keys
+## Relationship Sources and Confidence
 
-## Relationship Sources
+| Source | Default confidence | Meaning |
+| --- | --- | --- |
+| Foreign key | Certain | The database declares a constraint between the current and target columns |
+| View definition | Likely or possible | Confidence is higher when view source references both the target table and column |
+| Query history | Likely or possible | Historical SQL is stronger evidence when both table and column are present |
+| Same-name column | Possible | Name-based inference only and requires business confirmation |
 
-| Source            | Confidence    | Details                                                                      |
-| ----------------- | ------------- | ---------------------------------------------------------------------------- |
-| Foreign keys      | High          | Constraints declared in the database                                         |
-| Views             | High          | Field mappings analyzed from view definitions                                |
-| Query history     | Medium        | Relationships inferred from executed SQL, including `JOIN` and `WHERE` usage |
-| Same-name columns | Low to medium | Possible relationships inferred from similar column names                    |
+The UI distinguishes **Certain**, **Likely**, and **Possible**. Filter lower-confidence results to focus on foreign keys and explicit source references first.
 
-<Callout type="info">Field Lineage is an analysis aid, not a strongly governed lineage platform. For critical decisions, confirm results with database constraints, view definitions, and application code.</Callout>
+## Search and Filters
 
-## Navigation
+- Search tables, columns, views, or SQL fragments
+- Filter by confidence
+- See displayed and total relationship counts
+- Copy table or column names
+- Open target table data or structure
+- Reveal the related object in the tree
 
-- Search by table or column name
-- Filter relationships by confidence
-- Click a table or column to open data or structure views
-- Start from one column and inspect upstream or downstream relationships
+Lineage loads foreign keys, view source, and related metadata according to database capability. Initial analysis can take time in large schemas.
 
-## Recommendations
+## Query History as Evidence
 
-- Treat foreign key and view relationships as the strongest signals
-- Review query-history and same-name inferences carefully
-- Before changing a column, combine lineage with schema diff and application code search
-- For important business fields, add database constraints or documentation comments where possible
+DBX uses executed queries as supporting evidence, including:
 
-## Related Features
+- Fields that appear together in a `JOIN`
+- Target columns referenced in `WHERE`, `SELECT`, or expressions
+- Historical repair or reporting SQL that uses a matching field
+
+History only represents SQL executed or saved in DBX. It does not cover all application code, ETL, BI, or other clients.
+
+<Callout type="warn">Query history can contain sensitive table names, predicates, and literals. Review privacy before demonstrating lineage, exporting logs, or sharing screenshots.</Callout>
+
+## View and Source Analysis
+
+View relationships use definitions returned by the database. Confidence can be lower with:
+
+- Dynamic SQL or generated procedure text
+- Ambiguous tables or columns without explicit schema
+- `SELECT *`, complex subqueries, or vendor extensions
+- Databases that do not return complete view source
+
+Open a view result and inspect source in [Object Browser](/en/docs/object-browser) for manual confirmation.
+
+## Workflows
+
+### Before Changing a Column
+
+1. Review confirmed foreign-key relationships
+2. Inspect likely views and historical SQL
+3. Validate possible same-name relationships with business context
+4. Continue searching application repositories, ETL, and BI assets
+5. Use [Schema Diff](/en/docs/schema-diff) to review target-environment changes
+
+### Understanding an Unfamiliar Database
+
+Start with primary keys, business identifiers, user IDs, or time columns and follow related tables and views. Column comments and object source are usually stronger evidence than name matching alone.
+
+## Support and Boundaries
+
+- Lineage requires foreign keys, view source, or parseable query history, so coverage varies by database
+- Without declared foreign keys, DBX can only provide view, history, and same-name clues
+- Results are not a strongly consistent data-governance graph and do not include every application, message flow, ETL, or BI system
+- Deleting history or clearing local data reduces the query-history source
+- Use the [Database Support](/en/docs/databases) matrix for current engine coverage
+
+<Callout type="info">Important schema changes still need database constraints, source review, application-code search, and business-owner confirmation. Lineage narrows the investigation; it does not replace impact analysis.</Callout>
 
 <Cards>
-  <Card title="Schema Browser" href="/en/docs/schema-browser">
-    Inspect tables, columns, foreign keys, and comments.
+  <Card title="Schema browser" href="/en/docs/schema-browser">
+    Inspect columns, foreign keys, comments, and object hierarchy.
   </Card>
-  <Card title="Schema Diff" href="/en/docs/schema-diff">
-    Compare structure differences across environments.
+  <Card title="Object source" href="/en/docs/object-browser">
+    Inspect view, procedure, function, and trigger definitions.
+  </Card>
+  <Card title="Schema diff" href="/en/docs/schema-diff">
+    Review environment differences and deployment scripts.
   </Card>
 </Cards>

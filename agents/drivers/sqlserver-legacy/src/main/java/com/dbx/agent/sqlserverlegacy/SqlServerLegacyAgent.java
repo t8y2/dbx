@@ -1,6 +1,7 @@
 package com.dbx.agent.sqlserverlegacy;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
+import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ForeignKeyInfo;
@@ -93,6 +94,47 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             }
             return null;
         });
+    }
+
+    @Override
+    public List<ColumnInfo> getColumns(String schema, String table) {
+        return super.getColumns(metadataSchema(schema, table), table);
+    }
+
+    @Override
+    public List<IndexInfo> listIndexes(String schema, String table) {
+        return super.listIndexes(metadataSchema(schema, table), table);
+    }
+
+    @Override
+    public List<ForeignKeyInfo> listForeignKeys(String schema, String table) {
+        return super.listForeignKeys(metadataSchema(schema, table), table);
+    }
+
+    private String metadataSchema(String schema, String table) {
+        if (schema != null && !schema.trim().isEmpty()) {
+            return schema;
+        }
+        return unchecked(() -> {
+            try (PreparedStatement statement = requireConnection().prepareStatement(unqualifiedObjectSchemaSql())) {
+                statement.setString(1, table);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    return normalizeMetadataSchema(schema, resultSet.next() ? resultSet.getString("schema_name") : null);
+                }
+            }
+        });
+    }
+
+    static String unqualifiedObjectSchemaSql() {
+        return "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), "
+            + "NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name";
+    }
+
+    static String normalizeMetadataSchema(String schema, String defaultSchema) {
+        if (schema != null && !schema.trim().isEmpty()) {
+            return schema;
+        }
+        return defaultSchema == null || defaultSchema.trim().isEmpty() ? "dbo" : defaultSchema;
     }
 
     @Override

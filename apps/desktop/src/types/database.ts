@@ -371,6 +371,11 @@ export interface DatabaseStorageInfo {
   size_bytes: number | null;
 }
 
+export interface SqlServerCompletionContext {
+  default_schema: string;
+  supports_session_database_switch: boolean;
+}
+
 export interface SchemaInfo {
   name: string;
   comment?: string | null;
@@ -558,6 +563,14 @@ export interface OwnerInfo {
 
 export interface QueryResult {
   columns: string[];
+  /** One SRID per geometry/geography column (first non-null observed). */
+  spatial_columns?: SpatialColumn[];
+  /**
+   * Per-cell SRID metadata, parallel to `rows`: spatial_values[row][column] is
+   * that cell's geometry SRID, or null for non-spatial cells / unknown SRIDs.
+   * Every geometry value keeps its own SRID so mixed-SRID results stay correct.
+   */
+  spatial_values?: (number | null)[][];
   /** Internal marker for a result built by appending a page to existing rows. */
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
@@ -630,6 +643,11 @@ export interface BatchSqlExecution {
   startedAt: number;
   finishedAt?: number;
   items: BatchStatementExecutionItem[];
+}
+
+export interface SpatialColumn {
+  column_index: number;
+  srid: number | null;
 }
 
 export interface QueryResultRun {
@@ -787,6 +805,7 @@ export type TreeNodeType =
   | "nacos-namespace"
   | "etcd-root"
   | "etcd-dashboard"
+  | "etcd-access-control"
   | "zookeeper-root"
   | "mongo-db"
   | "mongo-gridfs"
@@ -979,6 +998,7 @@ export interface QueryTab {
     | "hbase"
     | "etcd"
     | "etcd-dashboard"
+    | "etcd-access-control"
     | "zookeeper"
     | "mq"
     | "mqtt"

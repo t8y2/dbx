@@ -71,6 +71,7 @@ import {
   buildEmptyTableSql,
   buildTruncateTableSql,
   collectDuplicateTableColumnComments,
+  duplicateTableStructureRequiresScript,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   type TableAdminSqlOptions,
@@ -241,7 +242,7 @@ const batchEmptyPlan = ref<BatchTableEmptyPlanItem<ObjectBrowserRow>[]>([]);
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
-const pasteTableEntries = ref<{ sourceName: string; targetName: string; schema?: string }[]>([]);
+const pasteTableEntries = ref<{ sourceName: string; targetName: string; schema?: string; tableComment?: string | null }[]>([]);
 const pasteTableDataCopySupported = computed(() => supportsWholeRowTableDataCopy(effectiveDatabaseType.value));
 const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   select: 34,
@@ -1876,6 +1877,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", co
       connectionId: props.connection.id,
       database: props.database,
       schema,
+      identifierQuote: connectionStore.connectionIdentifierQuote(props.connection.id),
       tableName: row.name,
       filePath,
       format,
@@ -1909,7 +1911,7 @@ function requestDuplicateStructure(row: ObjectBrowserRow) {
   showDuplicateDialog.value = true;
 }
 
-async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, sourceColumns?: ColumnInfo[]) {
+async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
   let columns = sourceColumns;
   if (effectiveDatabaseType.value === "dameng" && !columns) {
     try {
@@ -1924,9 +1926,10 @@ async function buildDuplicateStructurePlan(sourceName: string, targetName: strin
     schema,
     sourceName,
     targetName,
+    tableComment,
     columnComments,
   });
-  return { sql, sourceColumns: columns, executeAsScript: columnComments.length > 0 };
+  return { sql, sourceColumns: columns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
 
 function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
@@ -1940,7 +1943,7 @@ async function confirmDuplicateStructure() {
   showDuplicateDialog.value = false;
   try {
     const schema = row.schema || selectedSchema.value;
-    const plan = await buildDuplicateStructurePlan(row.name, newName, schema);
+    const plan = await buildDuplicateStructurePlan(row.name, newName, schema, row.comment);
     const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
     if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
@@ -1961,6 +1964,7 @@ function copySelectedTablesToClipboard() {
       database: props.database,
       schema: normalizeObjectBrowserTableClipboardSchema(row.schema || selectedSchema.value),
       tableName: row.name,
+      tableComment: row.comment,
     })),
   };
   toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
@@ -2030,6 +2034,7 @@ function copySingleTableToClipboard(row: ObjectBrowserRow) {
         database: props.database,
         schema: normalizeObjectBrowserTableClipboardSchema(row.schema || selectedSchema.value),
         tableName: row.name,
+        tableComment: row.comment,
       },
     ],
   };
@@ -2051,6 +2056,7 @@ function openPasteTableDialog() {
     sourceName: entry.tableName,
     targetName: `${entry.tableName}_copy`,
     schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database, entry.connectionId),
+    tableComment: entry.tableComment,
   }));
   showPasteDialog.value = true;
 }
@@ -2089,7 +2095,7 @@ async function confirmPasteTable() {
     try {
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
-        const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, sourceColumns);
+        const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, entry.tableComment, sourceColumns);
         sourceColumns = plan.sourceColumns;
         const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
         if (!executed) {

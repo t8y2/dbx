@@ -542,6 +542,7 @@ mod tests {
             AiProvider::Gemini,
             AiProvider::Deepseek,
             AiProvider::Qwen,
+            AiProvider::MiniMax,
             AiProvider::Ollama,
         ] {
             let config = make_config(provider.clone());

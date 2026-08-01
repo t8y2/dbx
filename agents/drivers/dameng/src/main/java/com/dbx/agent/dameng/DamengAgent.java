@@ -23,6 +23,7 @@ import java.io.Reader;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -193,31 +194,121 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (!constraints.includesTableLikeTypes()) {
             return List.of();
         }
+        RuntimeException permissionError;
         try {
             return executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
-            if (needsMaterializedViewClassification(constraints)) {
-                try {
-                    return executeConstrainedTables(
-                        buildAccessibleConstrainedTablesQuery(schema, constraints),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to owner-local and raw catalog fallbacks.
-                }
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
             }
-            if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
-                try {
-                    return executeConstrainedTables(
-                        buildConstrainedTablesQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to the raw catalog path below.
-                }
-            }
-            return executeRawConstrainedTables(schema, constraints);
+            permissionError = e;
         }
+        if (needsMaterializedViewClassification(constraints)) {
+            try {
+                return executeConstrainedTables(
+                    buildAccessibleConstrainedTablesQuery(schema, constraints),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
+            try {
+                return executeConstrainedTables(
+                    buildConstrainedTablesQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        try {
+            return executeRawConstrainedTables(schema, constraints);
+        } catch (RuntimeException e) {
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
+            }
+            permissionError.addSuppressed(e);
+        }
+        try {
+            return executeJdbcMetadataTables(schema, constraints);
+        } catch (RuntimeException e) {
+            e.addSuppressed(permissionError);
+            throw e;
+        }
+    }
+
+    private List<TableInfo> executeJdbcMetadataTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            DatabaseMetaData metadata = requireConnected().getMetaData();
+            String schemaPattern = escapeJdbcMetadataPattern(metadata, schema);
+            List<String> supportedTypes = damengTableObjectTypes(constraints);
+            List<TableInfo> result = new ArrayList<>();
+            try (ResultSet rs = metadata.getTables(null, schemaPattern, "%", null)) {
+                while (rs.next()) {
+                    String name = rs.getString("TABLE_NAME");
+                    String tableType = normalizeObjectType(rs.getString("TABLE_TYPE"));
+                    if (name == null || name.isBlank() || !supportedTypes.contains(tableType)) {
+                        continue;
+                    }
+                    if ("TABLE".equals(tableType) && name.startsWith("MTAB$_")) {
+                        continue;
+                    }
+                    result.add(new TableInfo(name, tableType, rs.getString("REMARKS")));
+                }
+            }
+            result.sort((left, right) -> left.getName().compareToIgnoreCase(right.getName()));
+            return constraints.filterTables(result);
+        });
+    }
+
+    private static String escapeJdbcMetadataPattern(DatabaseMetaData metadata, String value) throws SQLException {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        String escape = metadata.getSearchStringEscape();
+        if (escape == null || escape.isEmpty()) {
+            return value;
+        }
+        return value
+            .replace(escape, escape + escape)
+            .replace("_", escape + "_")
+            .replace("%", escape + "%");
+    }
+
+    private static boolean isDamengMetadataPermissionError(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (!(current instanceof SQLException sqlError)) {
+                continue;
+            }
+            for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                String message = candidate.getMessage();
+                if (message == null) {
+                    continue;
+                }
+                String normalized = message.toLowerCase(Locale.ROOT);
+                boolean metadataObject = normalized.contains("all_objects")
+                    || normalized.contains("sysobjects")
+                    || normalized.contains("all_dependencies")
+                    || normalized.contains("all_tab_comments");
+                boolean permissionDenied = normalized.contains("权限")
+                    || normalized.contains("privilege")
+                    || normalized.contains("permission denied")
+                    || normalized.contains("access denied")
+                    || normalized.contains("not authorized");
+                if (metadataObject && permissionDenied) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private List<TableInfo> executeConstrainedTables(MetadataQuery query, MetadataListConstraints constraints) {

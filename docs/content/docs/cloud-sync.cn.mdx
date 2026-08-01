@@ -1,11 +1,13 @@
 ---
-title: 云同步与备份
-description: 使用 WebDAV、GitHub Gist 或 Gitee 代码片段同步 DBX 连接、设置和 SQL 库。
+title: DBX 配置云同步
+description: 使用 WebDAV、GitHub Gist 或 Gitee 代码片段同步 DBX 连接、设置和保存的 SQL。
 ---
 
 <Callout type="info">
 DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照，上传到 WebDAV 或私有代码片段，并在另一台设备恢复。
 </Callout>
+
+<Callout type="warn">云同步备份的是 DBX 配置，不会读取或备份连接中的业务数据库。表结构和数据请使用 [数据库导出](/cn/docs/database-export)；Desktop 定时 MySQL/PostgreSQL 备份请使用 [数据库备份](/cn/docs/database-backup)。</Callout>
 
 在 **设置 → 同步** 中选择同步方式：
 

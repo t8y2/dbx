@@ -20,6 +20,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
             native_source.write_bytes(b"MZtest-agent")
             duckdb_source = release_dir / "dbx-agent-duckdb-macos-aarch64"
             duckdb_source.write_bytes(b"\xcf\xfa\xed\xfetest-duckdb-agent")
+            rabbitmq_source = release_dir / "dbx-agent-rabbitmq-linux-x64"
+            rabbitmq_source.write_bytes(b"\x7fELFtest-rabbitmq-agent")
             java_source = release_dir / "dbx-agent-h2.jar"
             java_source.write_bytes(b"test-jar")
             versions = {
@@ -28,13 +30,15 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "xugu": "0.1.20",
                 "kingbase": "0.1.34",
                 "duckdb": "0.1.0",
+                "rabbitmq": "0.1.0",
             }
 
             renamed = version_agent_artifacts(release_dir, versions)
             versioned_java = release_dir / "dbx-agent-h2-0.2.5.jar"
             versioned_native = release_dir / "dbx-agent-kingbase-0.1.34-windows-x64.exe"
             versioned_duckdb = release_dir / "dbx-agent-duckdb-0.1.0-macos-aarch64"
-            self.assertEqual(renamed, [versioned_java, versioned_native, versioned_duckdb])
+            versioned_rabbitmq = release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64"
+            self.assertEqual(renamed, [versioned_java, versioned_native, versioned_duckdb, versioned_rabbitmq])
 
             registry = {
                 "jres": {"21": {"version": "21", "platforms": {}}},
@@ -72,6 +76,19 @@ class DriverReleasePackagesTest(unittest.TestCase):
                             }
                         },
                     },
+                    "rabbitmq": {
+                        "version": "0.1.0",
+                        "label": "RabbitMQ",
+                        "min_app_version": "0.6.0",
+                        "jre": "21",
+                        "jar": {"url": "https://example.com/legacy-placeholder.jar", "size": 0},
+                        "native": {
+                            "linux-x64": {
+                                "url": f"https://example.com/{versioned_rabbitmq.name}",
+                                "size": versioned_rabbitmq.stat().st_size,
+                            }
+                        },
+                    },
                 },
             }
             (release_dir / "agent-registry.json").write_text(json.dumps(registry), encoding="utf-8")
@@ -84,12 +101,14 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     release_dir / "dbx-agent-h2-0.2.5.tar.zst",
                     release_dir / "dbx-agent-kingbase-0.1.34-windows-x64.tar.zst",
                     release_dir / "dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
+                    release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64.tar.zst",
                 ],
             )
             package_cases = [
                 (outputs[0], "h2", versioned_java, "jar", None),
                 (outputs[1], "kingbase", versioned_native, "native", "windows-x64"),
                 (outputs[2], "duckdb", versioned_duckdb, "native", "macos-aarch64"),
+                (outputs[3], "rabbitmq", versioned_rabbitmq, "native", "linux-x64"),
             ]
             for output, driver_name, source, artifact_type, platform in package_cases:
                 tar_bytes = subprocess.run(
@@ -116,6 +135,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 (final_registry["drivers"]["h2"]["jar"], outputs[0]),
                 (final_registry["drivers"]["kingbase"]["native"]["windows-x64"], outputs[1]),
                 (final_registry["drivers"]["duckdb"]["native"]["macos-aarch64"], outputs[2]),
+                (final_registry["drivers"]["rabbitmq"]["native"]["linux-x64"], outputs[3]),
             ]
             for artifact, output in release_artifacts:
                 self.assertEqual(artifact["url"], f"https://example.com/{output.name}")
@@ -124,7 +144,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 self.assertEqual(len(artifact["sha256"]), 64)
 
             removed = remove_raw_driver_artifacts(release_dir)
-            self.assertEqual(removed, [versioned_duckdb, versioned_java, versioned_native])
+            self.assertEqual(removed, [versioned_duckdb, versioned_java, versioned_native, versioned_rabbitmq])
             self.assertTrue(all(output.is_file() for output in outputs))
 
     def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:

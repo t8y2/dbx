@@ -324,6 +324,22 @@ fn elasticsearch_document_path(index: &str, id: &str, routing: Option<&str>) -> 
     elasticsearch_path_with_routing_refresh(base, routing)
 }
 
+fn elasticsearch_update_document_path(
+    index: &str,
+    id: &str,
+    document_type: Option<&str>,
+    routing: Option<&str>,
+) -> String {
+    let document_type = document_type.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("_doc");
+    let base = format!(
+        "/{}/{}/{}",
+        elasticsearch_path_segment(index),
+        elasticsearch_path_segment(document_type),
+        elasticsearch_path_segment(id)
+    );
+    elasticsearch_path_with_routing_refresh(base, routing)
+}
+
 /// Auto-id index path: `POST /{index}/_doc` with optional custom routing.
 fn elasticsearch_auto_id_document_path(index: &str, routing: Option<&str>) -> String {
     let base = format!("/{}/_doc", elasticsearch_path_segment(index));
@@ -531,6 +547,8 @@ impl<'de> Deserialize<'de> for HitsTotal {
 struct SearchHit {
     #[serde(rename = "_id")]
     id: String,
+    #[serde(rename = "_type")]
+    document_type: Option<String>,
     #[serde(rename = "_routing")]
     routing: Option<String>,
     #[serde(rename = "_source")]
@@ -622,6 +640,9 @@ fn search_response_to_document_result(result: SearchResponse) -> Result<Document
                 _ => serde_json::Map::new(),
             };
             doc.insert("_id".to_string(), serde_json::Value::String(hit.id));
+            if let Some(document_type) = hit.document_type.filter(|value| value != "_doc") {
+                doc.insert("_type".to_string(), serde_json::Value::String(document_type));
+            }
             if let Some(routing) = hit.routing {
                 doc.insert("_routing".to_string(), serde_json::Value::String(routing));
             }
@@ -903,9 +924,9 @@ pub async fn update_document(
     doc_json: &str,
     routing: Option<&str>,
 ) -> Result<u64, String> {
-    let (doc, routing) = elasticsearch_document_body_and_routing_from_json(doc_json, routing)?;
+    let (doc, routing, document_type) = elasticsearch_update_document_body_and_metadata(doc_json, routing)?;
 
-    let path = elasticsearch_document_path(index, id, routing.as_deref());
+    let path = elasticsearch_update_document_path(index, id, document_type.as_deref(), routing.as_deref());
     let resp = client.put(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !client.response_status(&resp).is_success() {
@@ -914,6 +935,24 @@ pub async fn update_document(
     }
 
     Ok(1)
+}
+
+fn elasticsearch_update_document_body_and_metadata(
+    doc_json: &str,
+    routing: Option<&str>,
+) -> Result<(serde_json::Value, Option<String>, Option<String>), String> {
+    let (mut doc, routing) = elasticsearch_document_body_and_routing_from_json(doc_json, routing)?;
+    let document_type = match &mut doc {
+        serde_json::Value::Object(map) => map.remove("_type").and_then(|value| match value {
+            serde_json::Value::String(value) => {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            _ => None,
+        }),
+        _ => None,
+    };
+    Ok((doc, routing, document_type))
 }
 
 fn elasticsearch_document_body_and_routing_from_json(
@@ -1254,6 +1293,8 @@ fn parse_elasticsearch_response_with_sql_parser(
                 columns,
                 column_types: Vec::new(),
                 column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
                 rows,
                 affected_rows: row_count,
                 execution_time_ms: start.elapsed().as_millis(),
@@ -1277,6 +1318,8 @@ fn parse_elasticsearch_response_with_sql_parser(
             columns,
             column_types,
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows,
             affected_rows: row_count,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1446,6 +1489,8 @@ fn raw_json_response_result(
         columns: vec!["status".to_string(), "response".to_string()],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(body_text.into())]],
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1510,6 +1555,8 @@ fn parse_elasticsearch_rest_response_with_sql_parser(
         columns: vec!["response".to_string()],
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows,
         affected_rows,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1941,6 +1988,8 @@ pub(crate) fn parse_tabular_sql_response(
         columns: column_names,
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: result_rows,
         affected_rows: total_key
             .and_then(|key| body.get(key))
@@ -2294,6 +2343,19 @@ mod tests {
     }
 
     #[test]
+    fn builds_legacy_elasticsearch_update_path_from_document_type() {
+        assert_eq!(
+            super::elasticsearch_update_document_path("orders/2026", "a%b/c", Some("legacy/order"), Some("tenant/a&b")),
+            "/orders%2F2026/legacy%2Forder/a%25b%2Fc?routing=tenant%2Fa%26b&refresh=true"
+        );
+        assert_eq!(
+            super::elasticsearch_update_document_path("orders", "1", Some("_doc"), None),
+            "/orders/_doc/1?refresh=true"
+        );
+        assert_eq!(super::elasticsearch_update_document_path("orders", "1", None, None), "/orders/_doc/1?refresh=true");
+    }
+
+    #[test]
     fn builds_elasticsearch_auto_id_document_path_with_routing() {
         assert_eq!(
             super::elasticsearch_auto_id_document_path("orders/2026", Some("tenant/a&b")),
@@ -2644,6 +2706,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.hits.hits[0].routing.as_deref(), Some("tenant-1"));
+    }
+
+    #[test]
+    fn preserves_legacy_elasticsearch_document_type_metadata() {
+        let response: SearchResponse = serde_json::from_value(json!({
+            "hits": {
+                "total": { "value": 2, "relation": "eq" },
+                "hits": [
+                    { "_id": "legacy-1", "_type": "order", "_source": { "name": "Legacy" } },
+                    { "_id": "modern-1", "_type": "_doc", "_source": { "name": "Modern" } }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let result = super::search_response_to_document_result(response).unwrap();
+
+        assert_eq!(result.documents[0]["_type"], json!("order"));
+        assert!(result.documents[1].get("_type").is_none());
     }
 
     #[test]
@@ -3224,6 +3305,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_document_uses_legacy_type_path_without_storing_metadata() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("PUT /orders/order/abc?routing=tenant-1&refresh=true "));
+            assert!(request.ends_with(r#"{"name":"Alice"}"#));
+            assert!(!request.contains(r#""_type""#));
+            assert!(!request.contains(r#""_routing""#));
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::update_document(
+            &client,
+            "orders",
+            "abc",
+            r#"{"_id":"abc","_type":"order","_routing":"tenant-1","name":"Alice"}"#,
+            None,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn execute_rest_search_preserves_full_json_response() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3351,6 +3463,19 @@ mod tests {
 
         assert_eq!(doc, json!({ "name": "Alice" }));
         assert_eq!(routing.as_deref(), Some("tenant-1"));
+    }
+
+    #[test]
+    fn update_document_body_extracts_legacy_type_metadata() {
+        let (doc, routing, document_type) = super::elasticsearch_update_document_body_and_metadata(
+            r#"{"_id":"abc","_type":"order","_routing":"tenant-1","name":"Alice"}"#,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(doc, json!({ "name": "Alice" }));
+        assert_eq!(routing.as_deref(), Some("tenant-1"));
+        assert_eq!(document_type.as_deref(), Some("order"));
     }
 
     #[test]

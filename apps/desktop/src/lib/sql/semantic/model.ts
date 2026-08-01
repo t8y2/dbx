@@ -25,6 +25,7 @@ const ALIAS_BLACKLIST = new Set([...FROM_CLAUSE_BOUNDARIES, "on", "join", "strai
 const TABLE_TARGET_MODIFIERS = new Set(["lateral", "only"]);
 const TABLE_FUNCTION_INTRODUCERS = new Set(["from", "join", "straight_join", "apply"]);
 const TOP_LEVEL_STATEMENT_WORDS = new Set(["select", "insert", "delete", "merge", "create", "alter", "drop", "truncate", "call", "exec", "execute", "grant", "revoke"]);
+const SQLSERVER_DEFAULT_SCHEMA = "dbo";
 const SQLSERVER_UPDATE_STATISTICS_SCOPES = new Set(["all", "index", "table"]);
 
 interface ParseState {
@@ -91,10 +92,12 @@ function readQualifiedName(tokens: readonly SqlSemanticToken[], startIndex: numb
       break;
     }
     index += 2;
-    if (!tokenIsIdentifier(tokens[index]) && !(dialect.id === "sqlserver" && tokens[index]?.text === ".")) return null;
-    if (dialect.id === "sqlserver") {
+    if (dialect.id === "sqlserver" && tokens[index]?.text === ".") {
+      const omittedSchema = tokens[index];
+      parts.push({ raw: "", name: SQLSERVER_DEFAULT_SCHEMA, span: omittedSchema.span });
       while (tokens[index]?.text === ".") index += 1;
     }
+    if (!tokenIsIdentifier(tokens[index])) return null;
   }
   if (parts.length === 0) return null;
   return {
@@ -597,13 +600,13 @@ function trailingIdentifier(tokens: readonly SqlSemanticToken[], cursor: number,
 }
 
 function previousWord(tokens: readonly SqlSemanticToken[], cursor: number): string {
-  const before = tokens.filter((item) => item.span.end <= cursor && item.kind === "word");
-  return before[before.length - 1]?.normalized ?? "";
+  const before = tokens.filter((item) => item.span.end <= cursor && item.kind !== "comment");
+  return nearestPreviousSyntaxWord(before);
 }
 
 function wordBeforePosition(tokens: readonly SqlSemanticToken[], position: number): string {
-  const before = tokens.filter((item) => item.span.end <= position && item.kind === "word");
-  return before[before.length - 1]?.normalized ?? "";
+  const before = tokens.filter((item) => item.span.end <= position && item.kind !== "comment");
+  return nearestPreviousSyntaxWord(before);
 }
 
 function wordBeforeTrailingIdentifier(tokens: readonly SqlSemanticToken[], cursor: number, trailing: TrailingIdentifier): string {
@@ -619,7 +622,24 @@ function wordBeforeTrailingIdentifier(tokens: readonly SqlSemanticToken[], curso
     identifiersToSkip -= 1;
     index -= 1;
   }
-  return before[index]?.kind === "word" ? before[index].normalized : "";
+  return nearestPreviousSyntaxWord(before.slice(0, index + 1));
+}
+
+/**
+ * Scans backward from the end of `before` for the nearest unquoted syntax word.
+ * A quoted identifier is a barrier: its object name must not participate in
+ * keyword comparisons even when it is named `from`, `join`, or `update`.
+ */
+function nearestPreviousSyntaxWord(tokens: readonly SqlSemanticToken[]): string {
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    const item = tokens[index];
+    if (!item) continue;
+    if (item.kind === "word") return item.normalized;
+    if (item.kind === "quoted_identifier") return "";
+    if (item.text === "." || item.kind === "comment") continue;
+    break;
+  }
+  return "";
 }
 
 function isTableListContinuation(tokens: readonly SqlSemanticToken[], position: number): boolean {

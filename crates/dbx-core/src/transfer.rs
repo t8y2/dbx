@@ -442,7 +442,7 @@ fn qualify_cross_family_view_target(sql: &str, target_family: &TransferObjectFam
     let mut out = create_re
         .replace_all(sql, |caps: &regex::Captures| {
             let name = &caps[2];
-            if caps.get(1).map_or(false, |m| !m.as_str().is_empty()) {
+            if caps.get(1).is_some_and(|m| !m.as_str().is_empty()) {
                 caps[0].to_string()
             } else {
                 format!("CREATE VIEW {open}{target_schema}{close}.{open}{name}{close}")
@@ -457,7 +457,7 @@ fn qualify_cross_family_view_target(sql: &str, target_family: &TransferObjectFam
     out = ref_re
         .replace_all(&out, |caps: &regex::Captures| {
             let name = &caps[3];
-            if caps.get(2).map_or(false, |m| !m.as_str().is_empty()) {
+            if caps.get(2).is_some_and(|m| !m.as_str().is_empty()) {
                 caps[0].to_string()
             } else {
                 format!("{} {open}{target_schema}{close}.{open}{name}{close}", &caps[1])
@@ -506,7 +506,7 @@ fn rewrite_identifiers_to_target(sql: &str, target: &TransferObjectFamily) -> St
     };
     let re = Regex::new(pattern).unwrap();
     re.replace_all(sql, |caps: &regex::Captures| {
-        let name = caps.get(1).and_then(|m| Some(m.as_str())).or_else(|| caps.get(2).map(|m| m.as_str())).unwrap_or("");
+        let name = caps.get(1).map(|m| m.as_str()).or_else(|| caps.get(2).map(|m| m.as_str())).unwrap_or("");
         format!("{open}{name}{close}")
     })
     .to_string()
@@ -914,7 +914,6 @@ pub fn oracle_object_source_query(kind: &TransferObjectKind, schema: &str, name:
 
 /// Rewrite `"SCHEMA"."NAME"` occurrences in Oracle/DM metadata DDL from
 /// source_schema to target_schema.
-
 pub fn sqlserver_object_source_query(kind: &TransferObjectKind, schema: &str, name: &str) -> Result<String, String> {
     match kind {
         TransferObjectKind::View
@@ -1910,12 +1909,10 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                     } else {
                         "1".to_string()
                     }
+                } else if column_type.is_some_and(is_mysql_bit_type) {
+                    "b'0'".to_string()
                 } else {
-                    if column_type.is_some_and(is_mysql_bit_type) {
-                        "b'0'".to_string()
-                    } else {
-                        "0".to_string()
-                    }
+                    "0".to_string()
                 }
             }
             DatabaseType::SqlServer | DatabaseType::Dameng => {
@@ -4401,7 +4398,7 @@ where
             };
             // skip if the target already has it
             let exists_sql = target_object_exists_sql(&DatabaseType::Mysql, target_db, &name, &kind)?;
-            let exists = execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.first().is_some();
+            let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
             if exists {
                 outcome.skipped.push(format!("{kind:?}:{name}"));
                 progress(&mut outcome, TransferStatus::Running, None);
@@ -4470,7 +4467,7 @@ where
             };
             // skip if the target already has it (ALL_OBJECTS works for both Oracle and Dameng)
             let exists_sql = target_object_exists_sql(&DatabaseType::Oracle, &target_schema, &name, &kind)?;
-            let exists = execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.first().is_some();
+            let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
             if exists {
                 outcome.skipped.push(format!("{kind:?}:{name}"));
                 progress(&mut outcome, TransferStatus::Running, None);
@@ -4540,7 +4537,7 @@ where
                 });
             };
             let exists_sql = target_object_exists_sql(&DatabaseType::SqlServer, &target_schema, &name, &kind)?;
-            let exists = execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.first().is_some();
+            let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
             if exists {
                 outcome.skipped.push(format!("{kind:?}:{name}"));
                 progress(&mut outcome, TransferStatus::Running, None);
@@ -4631,7 +4628,7 @@ where
                 });
             };
             let exists_sql = target_object_exists_sql(&target_db_type, &target_schema, &name, &kind)?;
-            let exists = execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.first().is_some();
+            let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
             if exists {
                 outcome.skipped.push(format!("{kind:?}:{name}"));
                 progress(&mut outcome, TransferStatus::Running, None);
@@ -6210,7 +6207,7 @@ where
         };
         let exists_sql =
             target_object_exists_sql(&DatabaseType::Postgres, &request.target_schema, &object.name, &object_kind)?;
-        let exists = execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.first().is_some();
+        let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
         if exists {
             outcome.skipped.push(format!("{object_kind:?}:{}", object.name));
             continue;
@@ -6264,7 +6261,7 @@ where
             &view.view_name,
             &TransferObjectKind::MaterializedView,
         )?;
-        let exists = execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.first().is_some();
+        let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
         if exists {
             outcome.skipped.push(format!("MaterializedView:{}", view.view_name));
             continue;
@@ -6302,7 +6299,7 @@ where
             &trigger.trigger_name,
             &TransferObjectKind::Trigger,
         )?;
-        let exists = execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.first().is_some();
+        let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
         if exists {
             outcome.skipped.push(format!("Trigger:{}", trigger.trigger_name));
             continue;

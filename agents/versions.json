@@ -42,6 +42,6 @@
   "zookeeper": "0.1.14",
   "kafka": "0.1.5",
   "rocketmq": "0.1.0",
-  "rabbitmq": "0.1.0",
+  "rabbitmq": "0.1.1",
   "sqlserver-legacy": "0.1.7"
 }

@@ -319,17 +319,7 @@ fn elasticsearch_query_value(value: &str) -> String {
     utf8_percent_encode(value, ELASTICSEARCH_QUERY_VALUE_ENCODE_SET).to_string()
 }
 
-fn elasticsearch_document_path(index: &str, id: &str, routing: Option<&str>) -> String {
-    let base = format!("/{}/_doc/{}", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
-    elasticsearch_path_with_routing_refresh(base, routing)
-}
-
-fn elasticsearch_update_document_path(
-    index: &str,
-    id: &str,
-    document_type: Option<&str>,
-    routing: Option<&str>,
-) -> String {
+fn elasticsearch_document_path(index: &str, id: &str, document_type: Option<&str>, routing: Option<&str>) -> String {
     let document_type = document_type.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("_doc");
     let base = format!(
         "/{}/{}/{}",
@@ -926,7 +916,7 @@ pub async fn update_document(
 ) -> Result<u64, String> {
     let (doc, routing, document_type) = elasticsearch_update_document_body_and_metadata(doc_json, routing)?;
 
-    let path = elasticsearch_update_document_path(index, id, document_type.as_deref(), routing.as_deref());
+    let path = elasticsearch_document_path(index, id, document_type.as_deref(), routing.as_deref());
     let resp = client.put(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !client.response_status(&resp).is_success() {
@@ -981,8 +971,14 @@ fn elasticsearch_routing_from_value(value: &serde_json::Value) -> Option<String>
     }
 }
 
-pub async fn delete_document(client: &EsClient, index: &str, id: &str, routing: Option<&str>) -> Result<u64, String> {
-    let path = elasticsearch_document_path(index, id, routing);
+pub async fn delete_document(
+    client: &EsClient,
+    index: &str,
+    id: &str,
+    document_type: Option<&str>,
+    routing: Option<&str>,
+) -> Result<u64, String> {
+    let path = elasticsearch_document_path(index, id, document_type, routing);
     let resp = client.delete(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !client.response_status(&resp).is_success() {
@@ -2334,25 +2330,16 @@ mod tests {
     }
 
     #[test]
-    fn builds_elasticsearch_document_path_with_routing() {
+    fn builds_elasticsearch_document_path_with_type_and_routing() {
         assert_eq!(
-            super::elasticsearch_document_path("orders/2026", "a%b/c", Some("tenant/a&b")),
-            "/orders%2F2026/_doc/a%25b%2Fc?routing=tenant%2Fa%26b&refresh=true"
-        );
-        assert_eq!(super::elasticsearch_document_path("orders", "1", None), "/orders/_doc/1?refresh=true");
-    }
-
-    #[test]
-    fn builds_legacy_elasticsearch_update_path_from_document_type() {
-        assert_eq!(
-            super::elasticsearch_update_document_path("orders/2026", "a%b/c", Some("legacy/order"), Some("tenant/a&b")),
+            super::elasticsearch_document_path("orders/2026", "a%b/c", Some("legacy/order"), Some("tenant/a&b")),
             "/orders%2F2026/legacy%2Forder/a%25b%2Fc?routing=tenant%2Fa%26b&refresh=true"
         );
         assert_eq!(
-            super::elasticsearch_update_document_path("orders", "1", Some("_doc"), None),
+            super::elasticsearch_document_path("orders", "1", Some("_doc"), None),
             "/orders/_doc/1?refresh=true"
         );
-        assert_eq!(super::elasticsearch_update_document_path("orders", "1", None, None), "/orders/_doc/1?refresh=true");
+        assert_eq!(super::elasticsearch_document_path("orders", "1", None, None), "/orders/_doc/1?refresh=true");
     }
 
     #[test]
@@ -3336,6 +3323,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_document_uses_legacy_type_path() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("DELETE /orders/order/abc?routing=tenant-1&refresh=true "));
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::delete_document(&client, "orders", "abc", Some("order"), Some("tenant-1")).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn execute_rest_search_preserves_full_json_response() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3437,7 +3444,7 @@ mod tests {
         let name_index = sql_result.columns.iter().position(|column| column == "name").unwrap();
         assert_eq!(sql_result.rows[0][name_index], json!("Notebook Pro"));
 
-        super::delete_document(&client, &index, &id, None).await.unwrap();
+        super::delete_document(&client, &index, &id, None, None).await.unwrap();
         let delete = super::execute_rest_query(&client, &format!("DELETE /{index}")).await.unwrap();
         assert_eq!(delete.rows[0][0], json!(200));
     }

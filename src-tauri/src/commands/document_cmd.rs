@@ -147,15 +147,17 @@ pub async fn document_delete_document(
     collection: String,
     id: String,
     routing: Option<String>,
+    document_type: Option<String>,
 ) -> Result<u64, String> {
     ensure_connection_writable(&state, &connection_id, "Delete").await?;
-    dbx_core::document_ops::delete_document_core(
+    dbx_core::document_ops::delete_document_core_with_type(
         &state,
         &connection_id,
         &database,
         &collection,
         &id,
         routing.as_deref(),
+        document_type.as_deref(),
     )
     .await
 }

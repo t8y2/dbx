@@ -8,11 +8,17 @@ interface DiagramCanvas {
   height: number;
 }
 
+export interface TableDiagramRelationshipLayout {
+  path: string;
+  sourceCardinality: DiagramPosition;
+  targetCardinality: DiagramPosition;
+}
+
 export interface TableDiagramSvgOptions {
   tables: DiagramTable[];
   relationships: DiagramRelationship[];
   positions: Record<string, DiagramPosition>;
-  relationshipPaths: Record<string, string>;
+  relationshipLayouts: Record<string, TableDiagramRelationshipLayout>;
   canvas: DiagramCanvas;
   cardWidth: number;
   cardHeaderHeight: number;
@@ -45,12 +51,22 @@ function svgText(
     anchor?: "start" | "middle" | "end";
     family?: string;
     decoration?: string;
+    stroke?: string;
+    strokeWidth?: number;
+    paintOrder?: string;
+    attributes?: Record<string, string>;
   } = {},
 ): string {
   const attrs = [`x="${svgNumber(x)}"`, `y="${svgNumber(y)}"`, `fill="${options.fill ?? "#18181b"}"`, `font-size="${options.size ?? 12}"`, `font-family="${options.family ?? "Arial, Helvetica, sans-serif"}"`, 'dominant-baseline="middle"'];
   if (options.weight) attrs.push(`font-weight="${options.weight}"`);
   if (options.anchor) attrs.push(`text-anchor="${options.anchor}"`);
   if (options.decoration) attrs.push(`text-decoration="${options.decoration}"`);
+  if (options.stroke) attrs.push(`stroke="${options.stroke}"`);
+  if (options.strokeWidth) attrs.push(`stroke-width="${svgNumber(options.strokeWidth)}"`);
+  if (options.paintOrder) attrs.push(`paint-order="${options.paintOrder}"`);
+  for (const [name, value] of Object.entries(options.attributes ?? {})) {
+    attrs.push(`${name}="${escapeXml(value)}"`);
+  }
   return `<text ${attrs.join(" ")}>${escapeXml(label)}</text>`;
 }
 
@@ -69,14 +85,41 @@ function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
 }
 
 export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
-  const parts = [svgHeader(options.canvas), tableDiagramDefs(), '<g fill="none" stroke="#2563eb" stroke-opacity="0.58" stroke-width="1.6">'];
+  const parts = [svgHeader(options.canvas), tableDiagramDefs()];
 
   for (const relationship of options.relationships) {
-    const path = options.relationshipPaths[relationship.id];
-    if (!path) continue;
-    parts.push(`<path d="${escapeXml(path)}" marker-end="url(#dbx-diagram-arrow)">` + `<title>${escapeXml(`${relationship.sourceTable}.${relationship.sourceColumn} -> ${relationship.targetTable}.${relationship.targetColumn}`)}</title>` + "</path>");
+    const layout = options.relationshipLayouts[relationship.id];
+    if (!layout?.path) continue;
+    parts.push(`<g data-relationship-id="${escapeXml(relationship.id)}">`);
+    parts.push(
+      `<path d="${escapeXml(layout.path)}" fill="none" stroke="#2563eb" stroke-opacity="0.58" stroke-width="1.6" marker-end="url(#dbx-diagram-arrow)">` +
+        `<title>${escapeXml(`${relationship.sourceTable}.${relationship.sourceColumn} (${relationship.sourceCardinality}:${relationship.targetCardinality}) -> ${relationship.targetTable}.${relationship.targetColumn}`)}</title>` +
+        "</path>",
+    );
+    parts.push(
+      svgText(relationship.sourceCardinality, layout.sourceCardinality.x, layout.sourceCardinality.y, {
+        size: 12,
+        weight: "600",
+        anchor: "middle",
+        stroke: "#fafafa",
+        strokeWidth: 4,
+        paintOrder: "stroke",
+        attributes: { "data-cardinality-end": "source" },
+      }),
+    );
+    parts.push(
+      svgText(relationship.targetCardinality, layout.targetCardinality.x, layout.targetCardinality.y, {
+        size: 12,
+        weight: "600",
+        anchor: "middle",
+        stroke: "#fafafa",
+        strokeWidth: 4,
+        paintOrder: "stroke",
+        attributes: { "data-cardinality-end": "target" },
+      }),
+    );
+    parts.push("</g>");
   }
-  parts.push("</g>");
 
   for (const table of options.tables) {
     const position = options.positions[table.name] ?? { x: 0, y: 0 };

@@ -2744,6 +2744,7 @@ export default withEnglishFallback({
     cardinality: "カーディナリティ",
     cardinalityOneToMany: "1:N",
     cardinalityManyToOne: "N:1",
+    cardinalityManyToMany: "N:N",
     cardinalityOneToOne: "1:1",
     addRelationship: "関係を追加",
     removeRelationship: "関係を削除",

@@ -14,7 +14,7 @@ import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildDiagramJoinSql, buildDiagramRelationships, filterDiagramTables, layoutDiagramTables, normalizeCustomDiagramRelationship, type CustomDiagramRelationship, type DiagramPosition, type DiagramRelationship, type DiagramTable } from "@/lib/diagram/erDiagram";
 import { buildEngineeringDiagram } from "@/lib/diagram/engineeringDiagram";
-import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "@/lib/export/diagramSvgExport";
+import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName, type TableDiagramRelationshipLayout } from "@/lib/export/diagramSvgExport";
 import { clampDiagramZoom, zoomFromGestureScale, zoomFromWheelDelta } from "@/lib/diagram/diagramZoom";
 import { Copy, Download, KeyRound, Link2, Loader2, Maximize2, Network, Plus, RefreshCw, Search, Table2, Trash2, X, ZoomIn, ZoomOut } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
@@ -88,7 +88,7 @@ const relationshipDraft = ref({
   sourceColumn: "",
   targetTable: "",
   targetColumn: "",
-  cardinality: "one-to-many" as "one-to-one" | "one-to-many" | "many-to-one",
+  cardinality: "one-to-many" as "one-to-one" | "one-to-many" | "many-to-one" | "many-to-many",
 });
 
 const sqlConnections = computed(() => store.connections.filter((connection) => DIAGRAM_SQL_TYPES.has(connection.db_type)));
@@ -253,6 +253,7 @@ function defaultRelationshipName(relationship: Omit<CustomDiagramRelationship, "
 function relationshipCardinality(): Pick<CustomDiagramRelationship, "sourceCardinality" | "targetCardinality"> {
   if (relationshipDraft.value.cardinality === "one-to-one") return { sourceCardinality: "1", targetCardinality: "1" };
   if (relationshipDraft.value.cardinality === "many-to-one") return { sourceCardinality: "N", targetCardinality: "1" };
+  if (relationshipDraft.value.cardinality === "many-to-many") return { sourceCardinality: "N", targetCardinality: "N" };
   return { sourceCardinality: "1", targetCardinality: "N" };
 }
 
@@ -423,10 +424,16 @@ function candidateRouteXs(source: TableRect, target: TableRect): number[] {
   });
 }
 
-function relationshipPath(relationship: DiagramRelationship): string {
+function relationshipLayout(relationship: DiagramRelationship): TableDiagramRelationshipLayout {
   const source = getTableRect(relationship.sourceTable);
   const target = getTableRect(relationship.targetTable);
-  if (!source || !target) return "";
+  if (!source || !target) {
+    return {
+      path: "",
+      sourceCardinality: { x: 0, y: 0 },
+      targetCardinality: { x: 0, y: 0 },
+    };
+  }
 
   const y1 = columnAnchorY(relationship.sourceTable, relationship.sourceColumn);
   const y2 = columnAnchorY(relationship.targetTable, relationship.targetColumn);
@@ -444,8 +451,22 @@ function relationshipPath(relationship: DiagramRelationship): string {
 
   const x1 = routeSideX(source, routeX, 2);
   const x2 = routeSideX(target, routeX, 2);
-  return `M ${x1} ${y1} L ${routeX} ${y1} L ${routeX} ${y2} L ${x2} ${y2}`;
+  const cardinalityOffset = 14;
+  const cardinalityLift = 10;
+  return {
+    path: `M ${x1} ${y1} L ${routeX} ${y1} L ${routeX} ${y2} L ${x2} ${y2}`,
+    sourceCardinality: {
+      x: x1 + (routeX < source.x ? -cardinalityOffset : cardinalityOffset),
+      y: y1 - cardinalityLift,
+    },
+    targetCardinality: {
+      x: x2 + (routeX < target.x ? -cardinalityOffset : cardinalityOffset),
+      y: y2 - cardinalityLift,
+    },
+  };
 }
+
+const tableRelationshipLayouts = computed<Record<string, TableDiagramRelationshipLayout>>(() => Object.fromEntries(visibleRelationships.value.map((relationship) => [relationship.id, relationshipLayout(relationship)])));
 
 function engineeringEntityCenter(tableName: string): DiagramPosition {
   const entity = engineeringDiagram.value.entities.find((item) => item.name === tableName);
@@ -655,10 +676,6 @@ function resetZoomAndLayout() {
   resetLayout();
 }
 
-function tableRelationshipPaths(): Record<string, string> {
-  return Object.fromEntries(visibleRelationships.value.map((relationship) => [relationship.id, relationshipPath(relationship)]));
-}
-
 function currentDiagramSvg(): string {
   if (diagramMode.value === "engineering") {
     return buildEngineeringDiagramSvg(engineeringDiagram.value);
@@ -668,7 +685,7 @@ function currentDiagramSvg(): string {
     tables: visibleTables.value,
     relationships: visibleRelationships.value,
     positions: positions.value,
-    relationshipPaths: tableRelationshipPaths(),
+    relationshipLayouts: tableRelationshipLayouts.value,
     canvas: canvasSize.value,
     cardWidth: CARD_WIDTH,
     cardHeaderHeight: CARD_HEADER_HEIGHT,
@@ -941,6 +958,7 @@ onUnmounted(stopDrag);
                 <SelectContent>
                   <SelectItem value="one-to-many">{{ t("diagram.cardinalityOneToMany") }}</SelectItem>
                   <SelectItem value="many-to-one">{{ t("diagram.cardinalityManyToOne") }}</SelectItem>
+                  <SelectItem value="many-to-many">{{ t("diagram.cardinalityManyToMany") }}</SelectItem>
                   <SelectItem value="one-to-one">{{ t("diagram.cardinalityOneToOne") }}</SelectItem>
                 </SelectContent>
               </Select>
@@ -1026,9 +1044,39 @@ onUnmounted(stopDrag);
                         <path d="M 0 0 L 8 4 L 0 8 z" class="fill-primary/70" />
                       </marker>
                     </defs>
-                    <path v-for="relationship in visibleRelationships" :key="relationship.id" :d="relationshipPath(relationship)" class="fill-none stroke-primary/55" stroke-width="1.6" marker-end="url(#diagram-arrow)">
-                      <title>{{ relationshipTitle(relationship) }}</title>
-                    </path>
+                    <template v-for="relationship in visibleRelationships" :key="relationship.id">
+                      <path :d="tableRelationshipLayouts[relationship.id]?.path" class="fill-none stroke-primary/55" stroke-width="1.6" marker-end="url(#diagram-arrow)">
+                        <title>{{ relationshipTitle(relationship) }}</title>
+                      </path>
+                      <text
+                        :data-relationship-id="relationship.id"
+                        data-cardinality-end="source"
+                        :x="tableRelationshipLayouts[relationship.id]?.sourceCardinality.x"
+                        :y="tableRelationshipLayouts[relationship.id]?.sourceCardinality.y"
+                        text-anchor="middle"
+                        dominant-baseline="middle"
+                        paint-order="stroke"
+                        stroke-width="4"
+                        stroke-linejoin="round"
+                        class="fill-foreground stroke-background text-[12px] font-semibold"
+                      >
+                        {{ relationship.sourceCardinality }}
+                      </text>
+                      <text
+                        :data-relationship-id="relationship.id"
+                        data-cardinality-end="target"
+                        :x="tableRelationshipLayouts[relationship.id]?.targetCardinality.x"
+                        :y="tableRelationshipLayouts[relationship.id]?.targetCardinality.y"
+                        text-anchor="middle"
+                        dominant-baseline="middle"
+                        paint-order="stroke"
+                        stroke-width="4"
+                        stroke-linejoin="round"
+                        class="fill-foreground stroke-background text-[12px] font-semibold"
+                      >
+                        {{ relationship.targetCardinality }}
+                      </text>
+                    </template>
                   </svg>
 
                   <div

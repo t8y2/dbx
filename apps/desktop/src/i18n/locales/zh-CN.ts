@@ -2829,6 +2829,7 @@ export default withEnglishFallback({
     cardinality: "基数",
     cardinalityOneToMany: "1:N",
     cardinalityManyToOne: "N:1",
+    cardinalityManyToMany: "N:N",
     cardinalityOneToOne: "1:1",
     addRelationship: "添加关系",
     removeRelationship: "删除关系",

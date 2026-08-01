@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/diagram/engineeringDiagram.ts";
 import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "../../apps/desktop/src/lib/export/diagramSvgExport.ts";
-import { buildDiagramRelationships, type DiagramTable } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
+import { buildDiagramRelationships, normalizeCustomDiagramRelationship, type DiagramTable } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
 
 const tables: DiagramTable[] = [
   {
@@ -32,8 +32,12 @@ test("exports the table diagram as standalone SVG", () => {
       users: { x: 40, y: 40 },
       orders: { x: 360, y: 40 },
     },
-    relationshipPaths: {
-      [relationships[0].id]: "M 360 96 L 310 96",
+    relationshipLayouts: {
+      [relationships[0].id]: {
+        path: "M 360 96 L 310 96",
+        sourceCardinality: { x: 346, y: 86 },
+        targetCardinality: { x: 324, y: 86 },
+      },
     },
     canvas: { width: 720, height: 320 },
     cardWidth: 270,
@@ -45,10 +49,52 @@ test("exports the table diagram as standalone SVG", () => {
 
   assert.match(svg, /^<svg /);
   assert.match(svg, /<path d="M 360 96 L 310 96"/);
+  assert.match(svg, /data-cardinality-end="source"[^>]*>N<\/text>/);
+  assert.match(svg, /data-cardinality-end="target"[^>]*>1<\/text>/);
+  assert.match(svg, /orders\.user_id \(N:1\) -&gt; users\.id/);
   assert.match(svg, />users</);
   assert.match(svg, />orders</);
   assert.match(svg, />name &amp; note</);
   assert.doesNotMatch(svg, /<foreignObject/);
+});
+
+test("exports many-to-many cardinalities at both relationship endpoints", () => {
+  const customRelationship = {
+    ...normalizeCustomDiagramRelationship({
+      name: "users_orders",
+      sourceTable: "users",
+      sourceColumn: "id",
+      targetTable: "orders",
+      targetColumn: "id",
+      sourceCardinality: "N",
+      targetCardinality: "N",
+    }),
+    kind: "custom" as const,
+  };
+  const svg = buildTableDiagramSvg({
+    tables,
+    relationships: [customRelationship],
+    positions: {
+      users: { x: 40, y: 40 },
+      orders: { x: 360, y: 40 },
+    },
+    relationshipLayouts: {
+      [customRelationship.id]: {
+        path: "M 310 96 L 360 96",
+        sourceCardinality: { x: 324, y: 86 },
+        targetCardinality: { x: 346, y: 86 },
+      },
+    },
+    canvas: { width: 720, height: 320 },
+    cardWidth: 270,
+    cardHeaderHeight: 44,
+    columnRowHeight: 24,
+    maxVisibleColumns: 9,
+  });
+
+  assert.match(svg, /data-cardinality-end="source"[^>]*>N<\/text>/);
+  assert.match(svg, /data-cardinality-end="target"[^>]*>N<\/text>/);
+  assert.match(svg, /users\.id \(N:N\) -&gt; orders\.id/);
 });
 
 test("exports the engineering ER diagram with Chen-style shapes and cardinalities", () => {

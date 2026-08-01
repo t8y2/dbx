@@ -2680,6 +2680,7 @@ export default withEnglishFallback({
     cardinality: "Cardinalidade",
     cardinalityOneToMany: "1:N",
     cardinalityManyToOne: "N:1",
+    cardinalityManyToMany: "N:N",
     cardinalityOneToOne: "1:1",
     addRelationship: "Adicionar relacionamento",
     removeRelationship: "Remover relacionamento",

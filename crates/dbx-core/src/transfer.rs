@@ -392,10 +392,8 @@ pub fn convert_cross_family_object_ddl(
             TransferObjectFamily::SqlServer => {
                 sql = strip_sqlserver_sequence_as_type(&sql);
             }
-            TransferObjectFamily::Oracle => {
-                if target_family == &TransferObjectFamily::SqlServer {
-                    sql = sql.replace("NOCYCLE", "NO CYCLE").replace("NOCACHE", "NO CACHE");
-                }
+            TransferObjectFamily::Oracle if target_family == &TransferObjectFamily::SqlServer => {
+                sql = sql.replace("NOCYCLE", "NO CYCLE").replace("NOCACHE", "NO CACHE");
             }
             _ => {}
         },

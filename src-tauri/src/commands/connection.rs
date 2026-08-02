@@ -45,20 +45,18 @@ fn mark_mongo_legacy_driver(config: &mut ConnectionConfig) -> bool {
     changed
 }
 
-async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &ConnectionConfig) -> Result<(), String> {
+async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &ConnectionConfig) -> Result<bool, String> {
     if config.one_time {
-        return Ok(());
+        return Ok(true);
     }
-
-    let mut configs: Vec<ConnectionConfig> =
-        state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
-    let Some(saved_config) = configs.iter_mut().find(|saved_config| saved_config.id == config.id) else {
-        return Ok(());
-    };
-    if !mark_mongo_legacy_driver(saved_config) {
-        return Ok(());
-    }
-    save_connection_configs(state, &configs).await
+    state
+        .storage
+        .save_connection_driver_profile(
+            config,
+            Some(MONGO_LEGACY_DRIVER_PROFILE.to_string()),
+            Some(MONGO_LEGACY_DRIVER_LABEL.to_string()),
+        )
+        .await
 }
 
 async fn test_agent_connection(
@@ -162,7 +160,7 @@ async fn connect_agent_pool(
         }
     }
 
-    Ok(PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client))))
+    Ok(PoolKind::agent(client))
 }
 
 #[cfg(test)]
@@ -171,7 +169,8 @@ mod tests {
     use super::load_connection_configs;
     use super::{
         connect_sqlite_from_config, gaussdb_m_jdbc_command_config, mark_mongo_legacy_driver,
-        mongo_legacy_connect_params, save_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        mongo_legacy_connect_params, persist_mongo_legacy_driver_profile, save_connection_configs,
+        MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
@@ -406,6 +405,29 @@ mod tests {
         assert_eq!(config.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
         assert_eq!(config.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
         assert!(!mark_mongo_legacy_driver(&mut config));
+    }
+
+    #[tokio::test]
+    async fn persist_mongo_legacy_driver_profile_updates_only_the_target_connection() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-mongo-profile-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let mongo = mongodb_config();
+        let mut other = mongodb_config();
+        other.id = "other".to_string();
+        other.name = "Other MongoDB".to_string();
+        state.storage.save_connections(&[mongo.clone(), other.clone()]).await.unwrap();
+
+        persist_mongo_legacy_driver_profile(&state, &mongo).await.unwrap();
+
+        let saved = state.storage.load_connections().await.unwrap();
+        let updated = saved.iter().find(|config| config.id == mongo.id).unwrap();
+        assert_eq!(updated.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
+        assert_eq!(updated.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
+        assert_eq!(saved.iter().find(|config| config.id == other.id), Some(&other));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(feature = "sqlite-sqlcipher")]
@@ -1216,7 +1238,7 @@ pub async fn connect_db(
                     .await
                     .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                 state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+                PoolKind::agent(client)
             } else {
                 let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => {
@@ -1263,10 +1285,10 @@ pub async fn connect_db(
                         )
                     })?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
                     mark_mongo_legacy_driver(&mut connected_config);
                     connected_db_config = metadata_connection_config(&connected_config);
-                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
-                    PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+                    PoolKind::agent(client)
                 } else {
                     return Err(native_err);
                 }

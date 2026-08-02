@@ -4,6 +4,7 @@ import {
   dataGridToolbarCompactBreakpoint,
   dataGridToolbarIntervalOptions,
   isDataGridToolbarCompact,
+  selectDataGridToolbarAddRowItem,
   selectDataGridToolbarAutoRefreshInterval,
   selectDataGridToolbarCopyItem,
   selectDataGridToolbarExportItem,
@@ -134,5 +135,26 @@ describe("data grid toolbar capabilities", () => {
     await expect(selectDataGridToolbarCopyItem(capability, "sql-updates")).resolves.toBe(false);
     expect(onCopy).not.toHaveBeenCalled();
     expect(onSelect).toHaveBeenCalledWith("tsv");
+  });
+
+  it("routes add-row menu selections and rejects disabled or unknown items", async () => {
+    const onSelect = vi.fn();
+    const capability = {
+      label: "Add Row",
+      items: [
+        { value: "insert-multiple", label: "Insert Multiple Rows" },
+        { value: "position-above", label: "Place above selected row", disabled: true },
+        { value: "position-below", label: "Place below selected row", selected: true },
+        { value: "position-end", label: "Place at the end of data" },
+      ],
+      onTrigger: vi.fn(),
+      onSelect,
+    };
+
+    await expect(selectDataGridToolbarAddRowItem(capability, "position-below")).resolves.toBe(true);
+    await expect(selectDataGridToolbarAddRowItem(capability, "position-above")).resolves.toBe(false);
+    await expect(selectDataGridToolbarAddRowItem(capability, "unknown")).resolves.toBe(false);
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onSelect).toHaveBeenCalledWith("position-below");
   });
 });

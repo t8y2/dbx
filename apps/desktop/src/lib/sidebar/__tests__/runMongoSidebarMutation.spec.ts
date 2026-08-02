@@ -65,6 +65,31 @@ describe("runMongoSidebarMutation", () => {
     expect(onSuccess).toHaveBeenCalledWith(result);
   });
 
+  it("waits for asynchronous success work before clearing loading", async () => {
+    const loading = ref(false);
+    let releaseSuccess: () => void = () => {};
+    const successWork = new Promise<void>((resolve) => {
+      releaseSuccess = resolve;
+    });
+    const onSuccess = vi.fn(async () => successWork);
+
+    const pending = runMongoSidebarMutation({
+      connection: connection(),
+      database: "app",
+      reviewText: 'db.getCollection("users").createIndex({"email":1})',
+      source: "Object tree",
+      loading,
+      execute: async () => ({ name: "email_1" }),
+      onSuccess,
+    });
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    expect(loading.value).toBe(true);
+    releaseSuccess();
+    await pending;
+    expect(loading.value).toBe(false);
+  });
+
   it("does not execute or call onSuccess when production confirmation is cancelled", async () => {
     const loading = ref(false);
     const execute = vi.fn().mockResolvedValue(undefined);

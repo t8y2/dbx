@@ -1,5 +1,6 @@
 /// Shared WKB (Well-Known Binary) geometry parsing shared by PostgreSQL (EWKB)
-/// and MySQL (standard WKB). Parses WKB bytes into WKT (Well-Known Text) strings.
+/// and MySQL (standard WKB). Parses WKB bytes into WKT while retaining the
+/// top-level EWKB SRID when present.
 ///
 /// Supports: POINT, LINESTRING, POLYGON, MULTIPOINT, MULTILINESTRING,
 /// MULTIPOLYGON, GEOMETRYCOLLECTION, and their Z/M/ZM variants.
@@ -34,6 +35,12 @@ enum WkbGeometry {
     MultiLineString { dims: WkbDimensions, lines: Vec<Vec<Vec<f64>>> },
     MultiPolygon { dims: WkbDimensions, polygons: Vec<Vec<Vec<Vec<f64>>>> },
     GeometryCollection { dims: WkbDimensions, geometries: Vec<WkbGeometry> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecodedGeometry {
+    pub wkt: String,
+    pub srid: Option<u32>,
 }
 
 impl WkbGeometry {
@@ -211,7 +218,7 @@ fn parse_wkb_dimensions(type_word: u32) -> (u32, WkbDimensions, bool) {
     (base_type, dims, has_srid)
 }
 
-fn read_wkb_point_coords(reader: &mut WkbReader<'_>, dims: WkbDimensions, allow_empty_point: bool) -> Option<Vec<f64>> {
+fn read_wkb_point_coords(reader: &mut WkbReader<'_>, dims: WkbDimensions) -> Option<Option<Vec<f64>>> {
     let endian = match reader.read_u8()? {
         0 => WkbEndian::Big,
         1 => WkbEndian::Little,
@@ -226,10 +233,7 @@ fn read_wkb_point_coords(reader: &mut WkbReader<'_>, dims: WkbDimensions, allow_
         reader.read_u32(endian)?;
     }
     let coords = (0..parsed_dims.coordinate_len()).map(|_| reader.read_f64(endian)).collect::<Option<Vec<_>>>()?;
-    if allow_empty_point && coords.iter().all(|value| value.is_nan()) {
-        return None;
-    }
-    Some(coords)
+    Some((!coords.iter().all(|value| value.is_nan())).then_some(coords))
 }
 
 fn parse_wkb_points(reader: &mut WkbReader<'_>, endian: WkbEndian, dims: WkbDimensions) -> Option<Vec<Vec<f64>>> {
@@ -239,7 +243,7 @@ fn parse_wkb_points(reader: &mut WkbReader<'_>, endian: WkbEndian, dims: WkbDime
         .collect::<Option<Vec<_>>>()
 }
 
-fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<WkbGeometry> {
+fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<(WkbGeometry, Option<u32>)> {
     let endian = match reader.read_u8()? {
         0 => WkbEndian::Big,
         1 => WkbEndian::Little,
@@ -247,11 +251,9 @@ fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<WkbGeometry> {
     };
     let type_word = reader.read_u32(endian)?;
     let (base_type, dims, has_srid) = parse_wkb_dimensions(type_word);
-    if has_srid {
-        reader.read_u32(endian)?;
-    }
+    let srid = has_srid.then(|| reader.read_u32(endian)).flatten().filter(|value| *value != 0);
 
-    match base_type {
+    let geometry = match base_type {
         1 => {
             let coords = (0..dims.coordinate_len()).map(|_| reader.read_f64(endian)).collect::<Option<Vec<_>>>()?;
             let coords = if coords.iter().all(|value| value.is_nan()) { None } else { Some(coords) };
@@ -265,14 +267,13 @@ fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<WkbGeometry> {
         }
         4 => {
             let count = usize::try_from(reader.read_u32(endian)?).ok()?;
-            let points =
-                (0..count).map(|_| Some(read_wkb_point_coords(reader, dims, true))).collect::<Option<Vec<_>>>()?;
+            let points = (0..count).map(|_| read_wkb_point_coords(reader, dims)).collect::<Option<Vec<_>>>()?;
             Some(WkbGeometry::MultiPoint { dims, points })
         }
         5 => {
             let count = usize::try_from(reader.read_u32(endian)?).ok()?;
             let lines = (0..count)
-                .map(|_| match parse_wkb_geometry(reader)? {
+                .map(|_| match parse_wkb_geometry(reader)?.0 {
                     WkbGeometry::LineString { points, .. } => Some(points),
                     _ => None,
                 })
@@ -282,7 +283,7 @@ fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<WkbGeometry> {
         6 => {
             let count = usize::try_from(reader.read_u32(endian)?).ok()?;
             let polygons = (0..count)
-                .map(|_| match parse_wkb_geometry(reader)? {
+                .map(|_| match parse_wkb_geometry(reader)?.0 {
                     WkbGeometry::Polygon { rings, .. } => Some(rings),
                     _ => None,
                 })
@@ -291,11 +292,22 @@ fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<WkbGeometry> {
         }
         7 => {
             let count = usize::try_from(reader.read_u32(endian)?).ok()?;
-            let geometries = (0..count).map(|_| parse_wkb_geometry(reader)).collect::<Option<Vec<_>>>()?;
+            let geometries =
+                (0..count).map(|_| parse_wkb_geometry(reader).map(|parsed| parsed.0)).collect::<Option<Vec<_>>>()?;
             Some(WkbGeometry::GeometryCollection { dims, geometries })
         }
         _ => None,
+    }?;
+    Some((geometry, srid))
+}
+
+pub(crate) fn decode_wkb_geometry(raw: &[u8]) -> Option<DecodedGeometry> {
+    let mut reader = WkbReader::new(raw);
+    let (geometry, srid) = parse_wkb_geometry(&mut reader)?;
+    if reader.pos != raw.len() {
+        return None;
     }
+    Some(DecodedGeometry { wkt: geometry.to_wkt(), srid })
 }
 
 /// Parse WKB/EWKB bytes into a WKT (Well-Known Text) string.
@@ -303,10 +315,61 @@ fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<WkbGeometry> {
 /// Supports both standard WKB (MySQL) and Extended WKB (PostgreSQL/PostGIS).
 /// Returns `None` if the bytes cannot be parsed as valid WKB.
 pub(crate) fn wkb_to_wkt(raw: &[u8]) -> Option<String> {
-    let mut reader = WkbReader::new(raw);
-    let geometry = parse_wkb_geometry(&mut reader)?;
-    if reader.pos != raw.len() {
-        return None;
+    decode_wkb_geometry(raw).map(|geometry| geometry.wkt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let text = std::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(text, 16).unwrap()
+            })
+            .collect()
     }
-    Some(geometry.to_wkt())
+
+    #[test]
+    fn ewkb_decoder_retains_top_level_srid() {
+        let decoded = decode_wkb_geometry(&decode_hex("0101000020E6100000C520B07268195D404E62105839F44340")).unwrap();
+        assert_eq!(decoded.wkt, "POINT(116.397 39.908)");
+        assert_eq!(decoded.srid, Some(4326));
+    }
+
+    #[test]
+    fn standard_wkb_has_no_srid() {
+        let decoded = decode_wkb_geometry(&decode_hex("0101000000000000000000F03F0000000000000040")).unwrap();
+        assert_eq!(decoded.wkt, "POINT(1 2)");
+        assert_eq!(decoded.srid, None);
+    }
+
+    #[test]
+    fn big_endian_ewkb_retains_srid() {
+        let decoded = decode_wkb_geometry(&decode_hex("002000000100000F113FF00000000000004000000000000000")).unwrap();
+        assert_eq!(decoded.wkt, "POINT(1 2)");
+        assert_eq!(decoded.srid, Some(3857));
+    }
+
+    #[test]
+    fn ewkb_srid_zero_is_unknown() {
+        let decoded = decode_wkb_geometry(&decode_hex("010100002000000000000000000000F03F0000000000000040")).unwrap();
+        assert_eq!(decoded.wkt, "POINT(1 2)");
+        assert_eq!(decoded.srid, None);
+    }
+
+    #[test]
+    fn multipoint_preserves_valid_empty_points() {
+        let decoded =
+            decode_wkb_geometry(&decode_hex("0104000000010000000101000000000000000000F87F000000000000F87F")).unwrap();
+        assert_eq!(decoded.wkt, "MULTIPOINT(EMPTY)");
+    }
+
+    #[test]
+    fn multipoint_rejects_truncated_child_points() {
+        assert!(decode_wkb_geometry(&decode_hex("0104000000010000000101000000")).is_none());
+    }
 }

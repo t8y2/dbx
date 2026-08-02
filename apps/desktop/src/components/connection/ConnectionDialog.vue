@@ -38,6 +38,7 @@ import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/z
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
+import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
@@ -1482,7 +1483,7 @@ async function refreshLocalAgentDrivers(): Promise<AgentDriverInstallState[]> {
 }
 
 function beginAgentDriverInstall(driverKey: string, label: string) {
-  agentInstallOperationId.value = crypto.randomUUID();
+  agentInstallOperationId.value = uuid();
   agentInstallDriverKey.value = driverKey;
   agentInstallLabel.value = label;
   agentInstallProgress.value = null;
@@ -1502,7 +1503,7 @@ function finishAgentDriverInstall() {
 function failAgentDriverInstall(error: unknown) {
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
-  agentInstallError.value = translateBackendError(t, errorMessage(error));
+  agentInstallError.value = translateBackendError(t, error);
   showAgentInstallDialog.value = true;
 }
 
@@ -1559,7 +1560,7 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
-    testResult.value = { ok: false, message: errorMessage(error) };
+    testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
   }
@@ -1601,7 +1602,7 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
-    testResult.value = { ok: false, message: errorMessage(error) };
+    testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
   }
@@ -2884,7 +2885,7 @@ const mongoRetryWrites = computed({
   },
 });
 const mongoDriverMode = computed({
-  get: () => (form.value.driver_profile === "mongodb-legacy" ? "legacy" : "auto"),
+  get: () => (isMongoLegacyDriverProfile(form.value.driver_profile) ? "legacy" : "auto"),
   set: (value: string) => {
     form.value.driver_profile = value === "legacy" ? "mongodb-legacy" : "mongodb";
     form.value.driver_label = value === "legacy" ? "MongoDB (Legacy)" : "MongoDB";
@@ -3276,9 +3277,14 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else if (config.db_type === "mongodb") {
     config.connection_string = normalizeMongoConnectionString(config.connection_string?.trim() || "");
   }
-  if (config.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy") {
-    config.driver_profile = "mongodb";
-    config.driver_label = "MongoDB";
+  if (config.db_type === "mongodb") {
+    if (isMongoLegacyDriverProfile(config.driver_profile)) {
+      config.driver_profile = "mongodb-legacy";
+      config.driver_label = "MongoDB (Legacy)";
+    } else {
+      config.driver_profile = "mongodb";
+      config.driver_label = "MongoDB";
+    }
   }
   if (config.db_type === "mongodb") {
     const mongoTls = normalizeMongoTlsFormState(!!config.ssl, config.url_params, config.ca_cert_path);

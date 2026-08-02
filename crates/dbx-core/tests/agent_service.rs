@@ -25,6 +25,7 @@ fn registry_with_driver(db_type: &str, version: &str, jre: &str) -> AgentRegistr
             jre: jre.to_string(),
             jar: Some(ArtifactInfo {
                 url: format!("https://example.com/dbx-agent-{db_type}.jar"),
+                sha256: None,
                 size: 42,
                 format: None,
             }),
@@ -54,12 +55,18 @@ fn registry_with_native_driver(db_type: &str, version: &str, jre: &str) -> Agent
             jre: jre.to_string(),
             jar: Some(ArtifactInfo {
                 url: format!("https://example.com/dbx-agent-{db_type}-legacy-placeholder.jar"),
+                sha256: None,
                 size: 0,
                 format: None,
             }),
             native: [(
                 AgentManager::current_platform().to_string(),
-                ArtifactInfo { url: format!("https://example.com/dbx-agent-{db_type}"), size: 42, format: None },
+                ArtifactInfo {
+                    url: format!("https://example.com/dbx-agent-{db_type}"),
+                    sha256: None,
+                    size: 42,
+                    format: None,
+                },
             )]
             .into_iter()
             .collect(),

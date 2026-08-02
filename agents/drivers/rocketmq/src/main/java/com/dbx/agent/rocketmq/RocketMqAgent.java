@@ -43,6 +43,11 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * RocketMQ admin agent for DBX. Communicates with the Rust bridge via JSON-RPC
@@ -54,6 +59,8 @@ public final class RocketMqAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_LIST_LIMIT = 200;
+    private static final int CONSUMER_GROUP_ENRICH_CONCURRENCY = 8;
+    private static final long CONSUMER_GROUP_ENRICH_BUDGET_MS = 8_000;
     private static final String AUTO_CREATE_TOPIC_KEY = "TBW102";
     /** RocketMQ 5.x topic attribute key for message type (NORMAL/DELAY/FIFO/TRANSACTION). */
     private static final String TOPIC_MESSAGE_TYPE_ATTRIBUTE = "message.type";
@@ -946,6 +953,25 @@ public final class RocketMqAgent {
         return null;
     }
 
+    private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigs(
+        DefaultMQAdminExt admin, JsonObject conn) throws Exception {
+        Map<String, SubscriptionGroupConfig> configs = new TreeMap<>();
+        for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
+            try {
+                SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS);
+                if (wrapper == null || wrapper.getSubscriptionGroupTable() == null) {
+                    continue;
+                }
+                for (Map.Entry<String, SubscriptionGroupConfig> entry : wrapper.getSubscriptionGroupTable().entrySet()) {
+                    configs.putIfAbsent(entry.getKey(), entry.getValue());
+                }
+            } catch (Exception ignored) {
+                // Try next broker.
+            }
+        }
+        return configs;
+    }
+
     /**
      * DefaultMQAdminExt.examineConsumerConnectionInfo(group) picks a broker from route using
      * NameServer-registered addresses. Remap to the client-reachable host before querying.
@@ -1110,11 +1136,12 @@ public final class RocketMqAgent {
             limit = DEFAULT_LIST_LIMIT;
         }
 
+        Map<String, SubscriptionGroupConfig> configs = collectConsumerGroupConfigs(admin, conn);
         Set<String> groups = new TreeSet<>();
         if (!topicFilter.isBlank()) {
             groups.addAll(queryTopicConsumeByWhoRemapped(admin, conn, topicFilter));
         } else {
-            groups.addAll(collectAllConsumerGroups(admin, conn));
+            groups.addAll(configs.keySet());
         }
 
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -1135,13 +1162,11 @@ public final class RocketMqAgent {
         List<Map<String, Object>> page = paginate(rows, offset, limit);
         for (Map<String, Object> row : page) {
             String groupId = String.valueOf(row.get("groupId"));
-            SubscriptionGroupConfig config = findSubscriptionGroupConfig(admin, conn, groupId);
+            SubscriptionGroupConfig config = configs.get(groupId);
             row.put("groupType", classifyConsumerGroupType(groupId, config));
         }
         if (boolOrDefault(params, "enrich", false)) {
-            for (Map<String, Object> row : page) {
-                enrichConsumerGroupRow(admin, conn, String.valueOf(row.get("groupId")), row);
-            }
+            enrichConsumerGroupRows(admin, conn, page);
         }
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -1152,18 +1177,72 @@ public final class RocketMqAgent {
         return result;
     }
 
-    private static void enrichConsumerGroupRow(
-        DefaultMQAdminExt admin, JsonObject conn, String groupId, Map<String, Object> row) {
+    @FunctionalInterface
+    interface ConsumerConnectionLookup {
+        ConsumerConnection load(String groupId) throws Exception;
+    }
+
+    private static void enrichConsumerGroupRows(
+        DefaultMQAdminExt admin, JsonObject conn, List<Map<String, Object>> page) {
+        enrichConsumerGroupRows(
+            page,
+            groupId -> examineConsumerConnectionInfoRemapped(admin, conn, groupId),
+            CONSUMER_GROUP_ENRICH_CONCURRENCY,
+            CONSUMER_GROUP_ENRICH_BUDGET_MS
+        );
+    }
+
+    static void enrichConsumerGroupRows(
+        List<Map<String, Object>> page,
+        ConsumerConnectionLookup lookup,
+        int concurrency,
+        long budgetMs) {
+        if (page.isEmpty()) {
+            return;
+        }
+        int workers = Math.max(1, Math.min(concurrency, page.size()));
+        ExecutorService executor = Executors.newFixedThreadPool(workers, runnable -> {
+            Thread thread = new Thread(runnable, "dbx-rocketmq-consumer-enrich");
+            thread.setDaemon(true);
+            return thread;
+        });
+        List<Callable<Map<String, Object>>> tasks = new ArrayList<>(page.size());
+        for (Map<String, Object> row : page) {
+            tasks.add(() -> consumerGroupEnrichment(String.valueOf(row.get("groupId")), lookup));
+        }
+        List<Future<Map<String, Object>>> results = Collections.emptyList();
         try {
-            SubscriptionGroupConfig config = findSubscriptionGroupConfig(admin, conn, groupId);
-            row.put("groupType", classifyConsumerGroupType(groupId, config));
-            ConsumerConnection connection = examineConsumerConnectionInfoRemapped(admin, conn, groupId);
-            row.put("consumeType", connection.getConsumeType() != null ? connection.getConsumeType().name() : "UNKNOWN");
+            results = executor.invokeAll(tasks, Math.max(1, budgetMs), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            executor.shutdownNow();
+        }
+        for (int index = 0; index < page.size(); index++) {
+            Map<String, Object> row = page.get(index);
+            if (index < results.size() && !results.get(index).isCancelled()) {
+                try {
+                    row.putAll(results.get(index).get());
+                } catch (Exception ignored) {
+                    // Keep the base group row when enrichment fails.
+                }
+            }
+            row.putIfAbsent("memberCount", 0);
+            row.putIfAbsent("topics", Collections.emptyList());
+        }
+    }
+
+    private static Map<String, Object> consumerGroupEnrichment(
+        String groupId, ConsumerConnectionLookup lookup) {
+        Map<String, Object> enrichment = new LinkedHashMap<>();
+        try {
+            ConsumerConnection connection = lookup.load(groupId);
+            enrichment.put("consumeType", connection.getConsumeType() != null ? connection.getConsumeType().name() : "UNKNOWN");
             if (connection.getMessageModel() != null) {
-                row.put("messageModel", connection.getMessageModel().name());
+                enrichment.put("messageModel", connection.getMessageModel().name());
             }
             int memberCount = connection.getConnectionSet() == null ? 0 : connection.getConnectionSet().size();
-            row.put("memberCount", memberCount);
+            enrichment.put("memberCount", memberCount);
             List<String> topics = new ArrayList<>();
             if (connection.getSubscriptionTable() != null) {
                 for (SubscriptionData sub : connection.getSubscriptionTable().values()) {
@@ -1172,11 +1251,12 @@ public final class RocketMqAgent {
                     }
                 }
             }
-            row.put("topics", topics);
+            enrichment.put("topics", topics);
         } catch (Exception ignored) {
-            row.putIfAbsent("memberCount", 0);
-            row.putIfAbsent("topics", Collections.emptyList());
+            enrichment.put("memberCount", 0);
+            enrichment.put("topics", Collections.emptyList());
         }
+        return enrichment;
     }
 
     private static Object describeConsumerGroup(JsonObject params) throws Exception {
@@ -1745,21 +1825,6 @@ public final class RocketMqAgent {
             return admin.fetchTopicsByCLuster(cluster);
         }
         return admin.fetchAllTopicList();
-    }
-
-    private static Set<String> collectAllConsumerGroups(DefaultMQAdminExt admin, JsonObject conn) throws Exception {
-        Set<String> groups = new TreeSet<>();
-        for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
-            try {
-                SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS);
-                if (wrapper != null && wrapper.getSubscriptionGroupTable() != null) {
-                    groups.addAll(wrapper.getSubscriptionGroupTable().keySet());
-                }
-            } catch (Exception ignored) {
-                // Try next broker when Docker/internal broker addresses are unreachable.
-            }
-        }
-        return groups;
     }
 
     private static TopicConfig loadTopicConfig(DefaultMQAdminExt admin, String brokerAddr, String topic)

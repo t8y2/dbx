@@ -1,6 +1,6 @@
 ---
 title: DBX CLI
-description: 在终端、脚本、CI 和 Codex 中使用 DBX 连接。
+description: 使用原生 DBX CLI 在终端、脚本、CI 和 Codex 中读取连接、Schema、查询结果和 AI 上下文。
 ---
 
 <Callout type="info">DBX CLI 是独立命令行包，适合终端、脚本和 AI 编程助手工作流。它与 MCP Server 共享 DBX 连接存储和 SQL 安全规则。</Callout>
@@ -78,7 +78,30 @@ dbx capabilities
 dbx capabilities --json
 ```
 
-当前直接执行支持 PostgreSQL/Redshift、MySQL 兼容数据库（MySQL、Doris、StarRocks）和 SQLite。其它数据库类型会使用 DBX 桌面端 bridge 或 DBX Agent/JDBC 基础设施。
+当前原生直连清单由 CLI 二进制维护，包括 PostgreSQL、Redshift、MySQL、Doris、StarRocks、Manticore Search、SQLite、rqlite、KWDB 和 QuestDB。`dbx capabilities` 是当前版本的权威输出；其他类型需要运行中的 DBX Desktop bridge 或对应 Agent/外部驱动基础设施。
+
+## 执行模式
+
+### 本地存储
+
+默认情况下 CLI 读取与 Desktop/MCP 相同的 `dbx.db` 连接存储。设置 `DBX_DATA_DIR` 时应指向包含 `dbx.db` 的目录。
+
+- 原生直连类型可以在 Desktop 关闭时查询
+- bridge 类型需要 Desktop 正在运行，并能从数据目录中的 bridge 端口文件发现本地服务
+- Agent/JDBC、DuckDB 和其它外部驱动路径仍需要在 DBX 中安装匹配组件
+- `dbx open` 始终是 Desktop UI 操作，Desktop 未运行时返回 `DBX_NOT_RUNNING`
+
+### DBX Web / Docker
+
+设置 `DBX_WEB_URL` 后，CLI 改为使用部署的 DBX Web 后端，而不是读取本机连接存储：
+
+```bash
+DBX_WEB_URL=https://dbx.example.com \
+DBX_WEB_PASSWORD='your-login-password' \
+dbx connections list --json
+```
+
+`DBX_WEB_PASSWORD` 是 Web 登录密码。Web 模式中的连接、权限、驱动和文件路径都属于服务器环境；`dbx open` 仍需要本机 Desktop bridge，不应作为远程 Web 自动化入口。
 
 ## 默认连接
 
@@ -101,7 +124,7 @@ dbx query local "select id, name from users" --format csv
 
 ## 查询控制
 
-`dbx query` 执行单条 SQL，默认只读。
+`dbx query` 对 SQL 连接执行一条 SQL，对 MongoDB 连接接受受支持的 Mongo shell 命令。Redis 不通过这个命令执行，需使用 MCP Redis 工具或 DBX 专用工作区。默认只读。
 
 ```bash
 dbx query local "select * from users" --limit 50 --timeout 10s --json
@@ -115,7 +138,9 @@ dbx query local "select * from users" --limit 50 --timeout 10s --json
 dbx query local "update users set name = 'Ada' where id = 1" --allow-writes
 ```
 
-`DROP`、`TRUNCATE`、`ALTER` 等危险 SQL 需要同时显式使用 `--allow-writes` 和 `--allow-dangerous-sql`。
+`DROP`、`TRUNCATE`、`ALTER` 等危险 SQL 需要同时显式使用 `--allow-writes` 和 `--allow-dangerous-sql`。显式事务语句仍会被 CLI 阻止；需要多步固定 Session 时使用 [MCP 有状态会话](/cn/docs/mcp#有状态查询会话) 或 DBX 编辑器。
+
+生产数据库上的写入和 DDL 即使传入两个允许参数也会被阻止。CLI 使用连接/数据库生产识别、SQL 风险分类、连接只读保护和数据库权限形成多层边界；允许参数不是绕过生产保护的开关。
 
 ## 以短横线开头的 SQL
 

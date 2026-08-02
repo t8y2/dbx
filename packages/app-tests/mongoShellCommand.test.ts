@@ -9,6 +9,7 @@ import {
   mongoCountToQueryResult,
   mongoDistinctToQueryResult,
   mongoDocumentsToQueryResult,
+  mongoDroppedIndexesToQueryResult,
   mongoFindLogicalTotal,
   mongoIndexesToQueryResult,
   normalizeRustMongoCommand,
@@ -1053,6 +1054,17 @@ test("mongoDocumentsToQueryResult keeps aligned extended documents for copying",
   assert.deepEqual(result.mongo_documents, documents);
   assert.deepEqual(result.mongo_copy_documents, copyDocuments);
   assert.equal(mongoDocumentsToQueryResult(documents, 5, 1, []).mongo_copy_documents, undefined);
+});
+
+test("mongoDroppedIndexesToQueryResult exposes partial failures", () => {
+  const result = mongoDroppedIndexesToQueryResult(["email_1"], 5, [{ name: "missing_1", message: "index not found" }]);
+
+  assert.deepEqual(result.columns, ["name", "status", "message"]);
+  assert.deepEqual(result.rows, [
+    ["email_1", "dropped", null],
+    ["missing_1", "failed", "index not found"],
+  ]);
+  assert.equal(result.affected_rows, 1);
 });
 
 test("mongoDocumentsToQueryResult preserves an inexact total marker", () => {

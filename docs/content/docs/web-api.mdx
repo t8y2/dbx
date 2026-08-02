@@ -1,6 +1,6 @@
 ---
 title: Web API Reference
-description: HTTP API used by DBX Web and Docker deployments for automation and integrations.
+description: Internal HTTP APIs used by the DBX Web and Docker UI, including authentication, queries, background jobs, uploads, and downloads.
 ---
 
 <Callout type="warn">This API powers the DBX Web UI and internal tooling such as the MCP Web backend. It is not a separate public integration contract. Endpoints and payloads may change between releases. For scripting and agent workflows, prefer [@dbx-app/cli](/en/docs/cli) or [@dbx-app/mcp-server](/en/docs/mcp) when possible.</Callout>
@@ -71,6 +71,8 @@ Content-Type: application/json
 
 On success, the response sets `Set-Cookie: dbx_session=...`. Reuse that cookie on later requests.
 
+Five consecutive login failures trigger an approximately 60-second lockout. Sessions live in the current Web process and require login again after restart. The cookie is `HttpOnly`, uses `SameSite=Lax`, and follows `DBX_PUBLIC_BASE_PATH` for its path.
+
 ### Logout
 
 ```http
@@ -87,12 +89,18 @@ Cookie: dbx_session=...
 | `DBX_PORT` | Change the listen port (default `4224`) |
 | `DBX_DATA_DIR` | Data directory containing `dbx.db` |
 | `DBX_PUBLIC_BASE_PATH` | Serve DBX under a subpath such as `/dbx` |
+| `DBX_MAX_UPLOAD_MB` | Override the general request/upload limit; default 1024 MB |
+| `DBX_AGENT_DIR` | Override the Web Agent/driver directory; defaults to `agents` under the data directory |
+| `DBX_STATIC_DIR` | Override the Web static asset directory |
 
 ## Request Format
 
-- JSON request bodies use `camelCase` field names unless noted otherwise.
-- Query parameters for `GET` routes use `snake_case`, for example `connection_id`.
+- Field naming follows each Rust request type. Some bodies use `camelCase`, while connection configuration still contains `snake_case`; do not apply one naming convention to the whole API.
+- `GET` query parameters commonly use `snake_case`, such as `connection_id`, but the current route implementation remains authoritative.
 - Errors usually return JSON with an `error` field and an HTTP status code.
+- Long-running export, import, transfer, SQL-file, and AI operations commonly use a start request plus SSE progress and cancel/download routes rather than one synchronous response.
+
+Only the data-grid extractor currently exposes a tested, scoped OpenAPI document at `/api/query/data-grid-extractor-openapi.json`. It does not cover the complete DBX Web API or version the other routes.
 
 ## Connection APIs
 
@@ -308,6 +316,16 @@ When MCP runs against a deployed Web instance, set:
 ```
 
 The MCP server handles login and session cookies for you.
+
+CLI supports the same `DBX_WEB_URL` and `DBX_WEB_PASSWORD` variables. Both integrations reuse server-side connections, drivers, read-only protection, production protection, and database privileges, making them easier to maintain across DBX upgrades than copied internal route payloads.
+
+## Writes, Safety, and File Boundaries
+
+- API authentication proves only that the request belongs to a logged-in session; it does not replace database privileges
+- Query, import, and transfer paths continue to enforce connection read-only protection, while production and SQL-risk policy apply in their corresponding core paths
+- Browser-selected table-import and SQL files are uploaded into server temporary storage, not read from arbitrary client paths
+- Web exports create a temporary server file, return it through a download route, and then clean it up
+- Reverse proxies should preserve cookies and SSE streaming, allow appropriate long-running timeouts, and limit public exposure
 
 ## Example Scripts
 

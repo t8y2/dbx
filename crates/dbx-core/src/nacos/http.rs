@@ -150,8 +150,9 @@ impl NacosOpenApiAdmin {
     }
 
     fn auth_login_paths(&self) -> &'static [&'static str] {
-        const NACOS_PATHS: &[&str] = &["/v1/auth/login", "/v3/auth/user/login"];
-        const COMPATIBLE_PATHS: &[&str] = &["/v1/auth/login", "/v3/auth/user/login", "/rnacos/v1/auth/user/login"];
+        const NACOS_PATHS: &[&str] = &["/v1/auth/users/login", "/v1/auth/login", "/v3/auth/user/login"];
+        const COMPATIBLE_PATHS: &[&str] =
+            &["/v1/auth/users/login", "/v1/auth/login", "/v3/auth/user/login", "/rnacos/v1/auth/user/login"];
 
         match self.cfg.implementation.as_ref() {
             Some(NacosImplementation::Nacos) => NACOS_PATHS,
@@ -3283,13 +3284,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_nacos_v2_auth_failure_does_not_probe_rnacos() {
+    async fn explicit_nacos_v2_uses_canonical_auth_users_login() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert_eq!(read_request_target(&mut socket).await, "/gateway/nacos/v1/auth/login");
-            write_forbidden_response(&mut socket).await;
+            assert_eq!(read_request_target(&mut socket).await, "/gateway/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"nacos-token","tokenTtl":18000}"#).await;
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/gateway/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "nacos".to_string() };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        assert_eq!(admin.access_token().await.unwrap().as_deref(), Some("nacos-token"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_nacos_v2_auth_failure_does_not_probe_rnacos() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected_path in ["/gateway/nacos/v1/auth/users/login", "/gateway/nacos/v1/auth/login"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert_eq!(read_request_target(&mut socket).await, expected_path);
+                write_forbidden_response(&mut socket).await;
+            }
             assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
         });
         let mut config = test_admin_config(format!("http://{address}"));
@@ -3303,7 +3328,7 @@ mod tests {
         let error = admin.access_token().await.unwrap_err();
 
         assert!(error.starts_with("NACOS_ERROR[authFailed]:"));
-        assert!(error.contains("/v1/auth/login returned 403 Forbidden"));
+        assert!(error.contains("/v1/auth/users/login returned 403 Forbidden"));
         assert!(!error.contains("/rnacos/"));
         server.await.unwrap();
     }
@@ -3313,9 +3338,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert_eq!(read_request_target(&mut socket).await, "/gateway/nacos/v1/auth/login");
-            write_not_found_response(&mut socket).await;
+            for expected_path in ["/gateway/nacos/v1/auth/users/login", "/gateway/nacos/v1/auth/login"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert_eq!(read_request_target(&mut socket).await, expected_path);
+                write_not_found_response(&mut socket).await;
+            }
 
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/gateway/rnacos/v1/auth/user/login");
@@ -3339,6 +3366,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/gateway/nacos/v1/auth/users/login");
+            write_not_found_response(&mut socket).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/gateway/nacos/v1/auth/login");
             write_forbidden_response(&mut socket).await;
 
@@ -3357,6 +3388,7 @@ mod tests {
 
         assert!(error.starts_with("NACOS_ERROR[authFailed]:"));
         assert!(error.contains("/v1/auth/login returned 403 Forbidden"));
+        assert!(!error.contains("/v1/auth/users/login returned 404"));
         assert!(!error.contains("/rnacos/v1/auth/user/login returned 404"));
         server.await.unwrap();
     }

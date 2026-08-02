@@ -5,6 +5,10 @@ description: Install, access, and update the DBX web edition from the 1Panel app
 
 The 1Panel app store provides the official DBX Docker image, so you can install and update the DBX web edition without writing Docker commands manually.
 
+<Callout type="info">
+  1Panel installs DBX Web. Core database querying, object browsing, data editing, import/export, AI, and driver management run on the server. Local file pickers, deep links, the local CLI Agent, and scheduled Desktop database backups are not part of the Web runtime.
+</Callout>
+
 ## Optional server choice
 
 If you still need a server for DBX, you can take a look at [RainYun](https://www.rainyun.com/MTE5Mjc4Ng==_). RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services. Any server that meets the Docker and 1Panel requirements can host DBX as well.
@@ -50,13 +54,30 @@ Enter the **Access Password** from the installation form. If the page does not o
 
 ## Persistence and updates
 
-DBX application data is stored in the 1Panel app directory's `data` directory and mounted at `/app/data` inside the container. Restarting or updating the container preserves saved connections and other application data.
+DBX application data is stored in the 1Panel app directory's `data` directory and mounted at `/app/data` inside the container. It contains DBX's storage database, saved connections, plugins, drivers, and other persistent runtime state. Restarting or updating the container preserves that data as long as the mounted directory is not removed.
 
 To update DBX, open it under **Installed** apps in 1Panel, select an available version, and start the update. Confirm that the data directory is included in your server backup before updating.
 
 <Callout type="warn">
   Do not delete DBX's application data directory unless you intend to remove saved connections and other local data. Back up the directory before uninstalling the app.
 </Callout>
+
+<Callout type="warning">
+  Backing up `/app/data` protects DBX application configuration and runtime data only. It does not back up business data inside MySQL, PostgreSQL, or other target databases. Web does not provide Desktop's scheduled database-backup jobs; use native database backups, cloud snapshots, or a dedicated backup system.
+</Callout>
+
+DuckDB is not embedded in the `dbx-web` image. Install it separately from [Driver Manager](/en/docs/driver-management) after the first launch. The driver is stored under `/app/data/agents`, so it is preserved by the same data mount.
+
+## Web Paths and Files
+
+In a 1Panel deployment, the DBX backend reads the server or container filesystem:
+
+- An SSH private-key path must be readable inside the container, not merely available on the browser computer.
+- JDBC JARs, plugins, Agents, and downloaded drivers live in the server-side data directory.
+- Browser uploads are copied to a controlled server-side directory before a task reads them.
+- Database-file connections and server paths must be evaluated from the container's point of view.
+
+Do not enter a personal computer's absolute path simply because the UI is open in that computer's browser. See [What Is DBX?](/en/docs/what-is-dbx) for the full Desktop/Web boundary.
 
 ## Connect to a database
 
@@ -69,3 +90,22 @@ After signing in, click **New Connection** and enter the target database type, a
 <Callout type="info">
   `4224` is the DBX Web service port, not the target database port. Enter the database's own port when creating a MySQL, PostgreSQL, Redis, or other connection.
 </Callout>
+
+## Production Deployment Guidance
+
+- Use a long, unique access password instead of an example value.
+- Configure HTTPS through a 1Panel reverse proxy and restrict security-group and host-firewall exposure.
+- Pin a version when controlled upgrades matter; back up `/app/data` and read the [Changelog](/en/changelog) before updating.
+- Use a dedicated least-privilege database account and prefer read-only protection for production connections.
+- Review driver and plugin sources; do not place untrusted JARs or executables in the data directory.
+
+See [Production Safety](/en/docs/production-safety) for the database, write, AI, and API boundaries.
+
+<Cards>
+  <Card title="Driver Manager" href="/en/docs/driver-management">
+    Install DuckDB, JDBC, and Agent drivers needed by Web, and inspect their runtime state.
+  </Card>
+  <Card title="Database Backup" href="/en/docs/database-backup">
+    Understand Desktop scheduled-backup support and why Web deployments need an external backup plan.
+  </Card>
+</Cards>

@@ -1,89 +1,211 @@
 ---
-title: Schema Diff
-description: Compare two database schemas and generate reviewable sync SQL.
+title: Schema and Data Comparison
+description: Compare schemas or table data, review differences, type mappings, impact, and synchronization SQL, then deploy to a target environment.
 ---
 
-Schema Diff helps compare structure between database environments, such as development and production, staging and QA, or databases before and after a migration.
+DBX provides two comparison workflows:
 
-<Callout type="warn">Schema sync may include destructive operations such as dropping tables, dropping columns, or changing column types. Review generated SQL line by line, and back up production databases first.</Callout>
+- **Schema Diff** compares objects and DDL and generates a deployment script from source to target
+- **Data Compare** compares rows in one or more tables by key columns and generates selectable insert, update, and delete SQL
 
-## Use Cases
+Both treat the source as the desired state and the target as the environment to inspect or synchronize. Reversing them generates the opposite operations.
 
-- Check whether schema changes from development are already applied to production
-- Align staging, QA, and production environments
-- Generate migration SQL for team review
-- Compare tables, columns, indexes, and constraints between database versions
+<Callout type="warn">Comparison results and generated SQL require human review. Object drops, row deletes, type conversions, cross-dialect mappings, and bulk synchronization can be irreversible. Back up production and prepare rollback first.</Callout>
 
-## Workflow
+## Schema Diff Workflow
 
 <Steps>
   <Step>
-    ### Select the Source
+    ### Select or create a configuration
 
-    The source is usually the database whose structure is newer or considered correct.
-
-  </Step>
-  <Step>
-    ### Select the Target
-
-    The target is the database to inspect or sync. It can be on another server or even another database engine.
+    Choose a recent configuration or create, rename, or duplicate one. Configurations can be imported/exported as JSON to reuse source, target, and options.
 
   </Step>
   <Step>
-    ### Run the Comparison
+    ### Choose source and target
 
-    DBX reads table, column, and index metadata from both sides. The current comparison handles tables, not views.
-
-  </Step>
-  <Step>
-    ### Review Differences
-
-    Check missing tables, extra tables, column type changes, nullable changes, default value changes, added or removed indexes, and data risk.
+    Select connection, database, and schema for both sides. You can swap them, but must review deployment direction again afterward.
 
   </Step>
   <Step>
-    ### Generate Sync SQL
+    ### Configure comparison scope
 
-    DBX generates statements such as `CREATE TABLE`, `ALTER TABLE`, and `DROP TABLE`. Review them before execution.
+    Select tables, primary keys, foreign keys, unique keys, checks, views, functions, indexes, sequences, triggers, rules, owners, and other supported objects. Options depend on database type.
+
+  </Step>
+  <Step>
+    ### Compare and select objects
+
+    DBX reads metadata and DDL, builds an object tree, and marks creations, deletions, modifications, and dependencies. Select the objects that should actually deploy.
+
+  </Step>
+  <Step>
+    ### Review DDL and impact
+
+    Inspect source/target DDL, field mappings, deployment script, dependencies, potential conflicts, and impact report.
+
+  </Step>
+  <Step>
+    ### Export or deploy
+
+    Copy/export `.sql` or deploy to the target after final confirmation. When supported, use a transaction and inspect statement-level progress and results.
 
   </Step>
 </Steps>
 
-## Difference Types
+## Schema Difference Types
 
-| Type              | Meaning                                                                |
-| ----------------- | ---------------------------------------------------------------------- |
-| Source only       | The object is missing from the target and may need to be created       |
-| Target only       | The object exists only in the target; confirm usage before dropping it |
-| Column difference | Type, nullable flag, or default value differs                          |
-| Index difference  | Added or removed indexes, matched by index name                        |
+| Status | Meaning | Typical script |
+| --- | --- | --- |
+| Added in source | Target is missing the object | `CREATE` or add column/index/constraint |
+| Extra in target | Source does not contain the object | `DROP` or remove column/index/constraint |
+| Modified object | Definitions differ | `ALTER`, rebuild, or replace source |
+| Rename candidate | Names differ but structures are similar | Similarity-based rename suggestion requiring review |
+| Compatibility conflict | Source type or feature cannot map directly to target | Field mapping, downgrade, or manual migration |
 
-<Callout type="info">Schema Diff currently does not fully compare foreign keys, triggers, view definitions, column comments, or changed columns/uniqueness inside an index with the same name. Important migrations still need manual SQL review.</Callout>
+Filter and select operations in the object tree. An object is not dropped automatically just because it is extra in the target; it still requires selection and final confirmation.
 
-## Database Coverage
+## Comparison Options
 
-Schema Diff depends on table, column, and index metadata. It works best on relational engines where DBX can list structures consistently, such as MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, and GaussDB-family engines. Redis, MongoDB, Elasticsearch, and Easysearch use different data models and are not good targets for relational schema sync.
+### Object Scope
 
-## Before Running Sync SQL
+Depending on database, comparison can include:
 
-Before applying generated SQL, confirm:
+- Tables, columns, column order, and primary keys
+- Unique keys, foreign keys, checks, and exclusion constraints
+- Indexes, views, functions, sequences, triggers, and rules
+- Owners and sequence current values
 
-- The active connection color and environment name are correct
-- The target database has been backed up
-- `DROP`, `TRUNCATE`, and column type changes are intentional
-- The operation should run during a maintenance window
-- The SQL has been tested in a non-production environment
+Options load dialect-specific defaults. Objects without reliable metadata or synchronization SQL are hidden or shown as differences only.
 
-## Related Features
+### Table Filters
+
+- Include and exclude patterns
+- Priority when include and exclude both match
+- Batch mode and table-name patterns
+- System-object visibility
+
+Filtering controls comparison scope, not permissions. Objects the current account cannot read do not appear.
+
+### Rename Detection
+
+Enable column or table rename detection and configure a similarity threshold. Suggestions use structural similarity and do not understand business meaning; verify data, constraints, application code, and dependencies.
+
+### Cross-Dialect Field Mapping
+
+When source and target types differ, configure source dialect, target dialect, compatibility threshold, and field mappings:
+
+- Preserve parameters such as the length in `VARCHAR(255)`
+- Strip incompatible parameters
+- Supply custom target parameters
+
+Cross-engine comparison can only generate a best-effort compatible script. Charset, collation, identity, sequences, partitioning, storage engines, functions, and privileges often need manual migration design.
+
+## DDL, Dependencies, and Deployment Review
+
+For selected objects, review:
+
+- Source and target DDL
+- Per-object deployment SQL
+- The complete script for all selected objects
+- Dependencies and reverse dependencies
+- Field mappings and compatibility warnings
+- Create, modify, delete counts and impact summary
+- Optional rollback SQL when enabled and generatable
+
+The final deployment page repeats the target server, database, schema, database version, and statement count. Production protection requires explicit confirmation before execution.
+
+<Callout type="info">Run in transaction provides full rollback only when the target database and statements support transactional DDL. MySQL and other databases can implicitly commit DDL.</Callout>
+
+## Dialect Semantics
+
+DBX attempts to preserve database-specific semantics rather than normalizing everything to generic DDL, including:
+
+- PostgreSQL/openGauss schemas, sequences, owners, rules, and index features
+- MySQL-compatible charset, collation, identity, and index syntax
+- Oracle, Dameng, GaussDB, KingBase, and similar type and qualification behavior
+- Doris/StarRocks, ClickHouse, Elasticsearch/Easysearch, and others only within reliably supported structure scope
+
+A supported connection does not mean every object can compare or deploy. Use [Database Support](/en/docs/databases) and capability messages in the result.
+
+## Data Compare
+
+Data Compare is separate from Schema Diff and compares rows between source and target tables.
+
+<Steps>
+  <Step>
+    ### Choose source and target tables
+
+    Select connection, database, schema, and table. Batch mode can select multiple source tables and map them to same-named targets.
+
+  </Step>
+  <Step>
+    ### Choose key columns
+
+    Select a primary or business key that uniquely identifies rows. Incorrect keys can turn updates into apparent inserts and deletes.
+
+  </Step>
+  <Step>
+    ### Run comparison
+
+    DBX reads both sides and marks source-only, target-only, and changed rows. Batch mode shows current table, progress, and per-table failures.
+
+  </Step>
+  <Step>
+    ### Select differences
+
+    Filter additions, removals, and modifications and select the rows or fields to synchronize. A detail-preview limit controls displayed data volume.
+
+  </Step>
+  <Step>
+    ### Generate and execute synchronization SQL
+
+    DBX generates target-dialect `INSERT`, `UPDATE`, and `DELETE` statements. Review statement count and target before execution.
+
+  </Step>
+</Steps>
+
+### Data Difference Direction
+
+| Status | Meaning | Synchronization to target |
+| --- | --- | --- |
+| Added | Row exists only in source | Generate `INSERT` |
+| Removed | Row exists only in target | Generate `DELETE` |
+| Modified | Same key, different non-key columns | Generate `UPDATE` |
+| Same | Rows match | No statement |
+
+Delete synchronization is the highest-risk option. If target-local data is allowed, do not select removals.
+
+## Pre-Comparison Checklist
+
+- Source and target direction is correct
+- Accounts can read complete metadata, DDL, or table data
+- Filters and object selection include required dependencies
+- Key columns are unique and handle `NULL` correctly
+- Cross-dialect mappings preserve precision and meaning
+- Target read-only and production settings are correct
+- Backups exist and scripts were validated in a test environment
+
+## Known Boundaries
+
+- Dynamic SQL, procedure behavior, application code, and external ETL are outside schema comparison
+- Rename detection is a similarity suggestion, not a confirmed conclusion
+- Formatting differences can produce text changes with equivalent semantics
+- Data compare reads the selected scope and is not suitable for unfiltered huge tables
+- Transaction rollback depends on the target database
+- Configurations contain connection IDs and scope but not database passwords
 
 <Cards>
-  <Card title="Table Structure Editor" href="/en/docs/table-structure">
-    Edit one table visually and preview DDL before applying changes.
+  <Card title="Edit one table" href="/en/docs/table-structure">
+    Edit columns, indexes, foreign keys, and triggers visually.
   </Card>
-  <Card title="Database Export" href="/en/docs/database-export">
-    Export structure and data before high-risk sync operations.
+  <Card title="Back up the database" href="/en/docs/database-backup">
+    Create manual or scheduled logical backups before risky synchronization.
   </Card>
-  <Card title="Database Support" href="/en/docs/databases">
-    Check which engines support schema and structure workflows.
+  <Card title="Transfer data" href="/en/docs/data-transfer">
+    Use this when the goal is moving full tables rather than comparing rows.
+  </Card>
+  <Card title="Production safety" href="/en/docs/production-safety">
+    Review production confirmation for deployment and data synchronization.
   </Card>
 </Cards>

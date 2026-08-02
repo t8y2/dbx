@@ -1309,7 +1309,7 @@ async function newQuery() {
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
-          message: translateBackendError(t, e?.message || String(e)),
+          message: translateBackendError(t, e),
         }),
         5000,
       );
@@ -1329,6 +1329,12 @@ async function newQuery() {
     databaseType: effectiveDatabaseTypeForConnection(conn),
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
+  if (initialSql) {
+    const prefilledTab = queryStore.tabs.find((t) => t.id === tabId);
+    if (prefilledTab) {
+      prefilledTab.editorSelection = { anchor: initialSql.length, head: initialSql.length };
+    }
+  }
   try {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {
@@ -1338,7 +1344,7 @@ async function newQuery() {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1361,7 +1367,7 @@ async function openConnectionQuery(connectionId: string) {
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
-          message: translateBackendError(t, e?.message || String(e)),
+          message: translateBackendError(t, e),
         }),
         5000,
       );
@@ -1375,7 +1381,7 @@ async function openConnectionQuery(connectionId: string) {
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
-          message: translateBackendError(t, e?.message || String(e)),
+          message: translateBackendError(t, e),
         }),
         5000,
       );
@@ -1393,7 +1399,7 @@ async function openConnectionQuery(connectionId: string) {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1465,7 +1471,7 @@ async function onClickTable(table: SqlObjectNavigationTarget) {
   try {
     await openTableTarget(target, { tableInfoTab: "ddl" });
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1475,7 +1481,7 @@ async function onViewTableData(table: SqlObjectNavigationTarget) {
   try {
     await openTableTarget(target);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1503,7 +1509,7 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
     queryEditorObjectSourceTarget.value = { connectionId: target.connectionId, database: target.database, schema: target.schema, name: target.tableName, objectType, initialEditing };
     showQueryEditorObjectSourceDialog.value = true;
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1541,7 +1547,7 @@ async function changeActiveConnection(connectionId: string) {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -2393,6 +2399,7 @@ onUnmounted(() => {
                             connectionId: activeTab.connectionId,
                             database: activeTab.database,
                             schema: activeTab.schema,
+                            catalog: activeTab.catalog,
                             tableName: activeTab.structureTableName || '',
                           },
                           commentChanged,

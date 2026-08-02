@@ -45,6 +45,7 @@ import type {
   TunnelProfile,
 } from "@/types/database";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
@@ -98,6 +99,7 @@ import type {
   DocumentQueryResult,
   MongoDocumentResult,
   MongoCollectionStatsResult,
+  MongoDropIndexesResult,
   MongoGridFsBucketInfo,
   HistoryEntry,
   HistorySearchRequest,
@@ -223,19 +225,19 @@ async function post<T>(url: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
 async function get<T>(url: string): Promise<T> {
   const res = await fetch(apiUrl(url));
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
 async function del<T>(url: string): Promise<T> {
   const res = await fetch(apiUrl(url), { method: "DELETE" });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
@@ -245,8 +247,19 @@ async function put<T>(url: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
+}
+
+async function backendResponseError(response: Response): Promise<BackendErrorException> {
+  const text = await response.text();
+  let payload: unknown = text;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    // Preserve legacy plain-text responses at the same compatibility boundary.
+  }
+  return new BackendErrorException(payload);
 }
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
@@ -692,7 +705,7 @@ export async function getTableComment(_connectionId: string, _database: string, 
   throw new Error("Table comment lookup is not available in the web backend");
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[], filter?: string, limit?: number, offset?: number, catalog?: string): Promise<ObjectInfo[]> {
+export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string): Promise<ObjectInfo[]> {
   return get(
     `/api/schema/objects?${qs({
       connection_id: connectionId,
@@ -830,7 +843,7 @@ export async function executeQuery(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
-    executionMode?: "simple";
+    executionMode?: "simple" | "postgres_read_only_transaction";
   },
 ): Promise<QueryResult> {
   return post("/api/query/execute", {
@@ -880,7 +893,7 @@ export interface ExecuteMultiProgress {
   success: boolean;
   executionTimeMs: number;
   affectedRows: number;
-  error?: string;
+  error?: BackendError;
 }
 
 export async function executeMultiWithProgress(
@@ -918,7 +931,7 @@ export async function executeMultiWithProgress(
       success,
       executionTimeMs: result.execution_time_ms,
       affectedRows: result.affected_rows,
-      error: success ? undefined : String(result.rows[0]?.[0] ?? ""),
+      error: success ? undefined : result.error,
     });
   });
   return results;
@@ -1336,6 +1349,7 @@ export async function aiAgentStream(
   request: AiCompletionRequest,
   connectionId: string,
   database: string,
+  schema: string | undefined,
   dbType: string,
   onEvent: (event: import("@/lib/backend/tauri").AgentEvent) => void,
   mode?: string,
@@ -1343,6 +1357,7 @@ export async function aiAgentStream(
   confirmedWriteSql?: string,
   confirmedConnectionId?: string,
   confirmedDatabase?: string,
+  confirmedSchema?: string,
   signal?: AbortSignal,
 ): Promise<string> {
   const res = await fetch(apiUrl("/api/ai/agent-stream"), {
@@ -1353,12 +1368,14 @@ export async function aiAgentStream(
       request,
       connectionId,
       database,
+      schema,
       dbType,
       mode: mode || "ask",
       allowWriteSql,
       confirmedWriteSql,
       confirmedConnectionId,
       confirmedDatabase,
+      confirmedSchema,
     }),
     signal,
   });
@@ -1613,6 +1630,12 @@ export interface SnippetSyncConfig {
   provider: SnippetProvider;
   token?: string;
   snippetId?: string;
+  replaceLegacySnippet?: boolean;
+}
+
+export interface SnippetSyncSettings {
+  snippetId?: string;
+  legacyCleanupRequiredId?: string;
 }
 
 export interface SnippetSyncSummary {
@@ -1621,6 +1644,7 @@ export interface SnippetSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
+  legacyCleanupRequiredId?: string;
 }
 
 export interface SnippetDownloadResult {
@@ -1693,17 +1717,33 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   await post("/api/cloud-sync/snippet/forget-token", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncSettings(provider: SnippetProvider): Promise<SnippetSyncSettings> {
+  return post("/api/cloud-sync/snippet/settings", { provider });
+}
+
+export async function saveSnippetSyncId(provider: SnippetProvider, snippetId?: string): Promise<void> {
+  await post("/api/cloud-sync/snippet/save-id", { provider, snippetId });
+}
+
+export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Promise<SnippetSyncSettings> {
+  return post("/api/cloud-sync/snippet/retry-legacy-cleanup", { config });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
+    snippetPassphrase,
+    includeSecrets,
     secretsPassphrase,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
   return post("/api/cloud-sync/snippet/download", {
     config,
+    snippetPassphrase,
+    restoreSecrets,
     secretsPassphrase,
   });
 }
@@ -3066,7 +3106,7 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
   });
 }
 
-export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<{ dropped_names: string[]; affected_rows: number }> {
+export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return post("/api/mongo/drop-indexes", {
     connectionId,
     database,
@@ -3130,13 +3170,14 @@ export async function mongoDeleteDocument(connectionId: string, database: string
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
   return post("/api/document-store/delete-document", {
     connectionId,
     database,
     collection,
     id,
     routing,
+    documentType,
   });
 }
 
@@ -3248,6 +3289,7 @@ export async function checkMcpServerStatus(): Promise<import("@/lib/backend/taur
     bin_path: null,
     native_bin_path: null,
     script_path: null,
+    data_dir: null,
     install_command: "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org",
     update_command: "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org",
     error: "MCP Server status is only available in the desktop app.",

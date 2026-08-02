@@ -1302,6 +1302,7 @@ export interface SqlCompletionProviderInput {
   databaseType?: DatabaseType;
   currentSchema?: string;
   keywordCase?: SqlKeywordCase;
+  functionCase?: SqlKeywordCase;
   autoAliasTables?: boolean;
 }
 
@@ -1319,6 +1320,7 @@ export function buildSqlCompletionItems(
     databaseType?: DatabaseType;
     currentSchema?: string;
     keywordCase?: SqlKeywordCase;
+    functionCase?: SqlKeywordCase;
     autoAliasTables?: boolean;
   },
 ): SqlCompletionItem[] {
@@ -1361,7 +1363,7 @@ class SqlCompletionProvider {
         this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase, this.databaseType));
       }
       if (!preferReferencedColumns || context.suggestRoutines) {
-        const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType, context.openingParenAfterCursor);
+        const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType, context.openingParenAfterCursor, this.input.keywordCase, this.input.functionCase);
         this.items.push(...(preferReferencedColumns ? functionItems.filter((item) => item.label.toLowerCase().startsWith(context.prefix.toLowerCase())) : functionItems));
         if (isOracleLikeDatabase(this.databaseType)) {
           this.items.push(...buildOracleSystemValueItems(context.prefix, this.input.keywordCase));
@@ -1411,17 +1413,17 @@ class SqlCompletionProvider {
 
     const emptyTableNameCompletion = !context.prefix && (context.suggestTables || context.exclusiveTableSuggestions);
     if (!pendingJoinKeyword && !emptyTableNameCompletion && !context.tableAliasAfterCursor && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
-      this.items.push(...buildAliasItems(context, this.databaseType));
+      this.items.push(...buildAliasItems(context, this.databaseType, this.input.keywordCase));
     }
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
       this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect));
-      this.items.push(...buildTableItems(context, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType, this.input.currentSchema));
+      this.items.push(...buildTableItems(context, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType, this.input.currentSchema, this.input.keywordCase));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table"));
       }
       if (isOracleLikeDatabase(this.databaseType)) {
-        this.items.push(...buildOracleTableFunctionItems(context.prefix));
+        this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase));
       }
       if (this.input.schemas && this.input.schemas.length > 0) {
         this.items.push(...buildSchemaItems(context.prefix, this.input.schemas, this.dialect));
@@ -1444,7 +1446,7 @@ class SqlCompletionProvider {
     if (context.prefix) {
       for (const item of this.items) {
         // Alias snippets reuse the prefix as a label while applying alias SQL, so they are not exact name matches.
-        const isAliasSnippet = item.type === "snippet" && item.apply === formatAliasCompletionApply(item.label, this.databaseType);
+        const isAliasSnippet = item.type === "snippet" && item.apply === formatAliasCompletionApply(item.label, this.databaseType, this.input.keywordCase);
         const isExactLabelMatch = !isAliasSnippet && item.label.toLowerCase() === context.prefix.toLowerCase();
         const isExactSnippetPrefixMatch = item.type === "snippet" && item.filterText?.toLowerCase() === context.prefix.toLowerCase();
         if (isExactLabelMatch || isExactSnippetPrefixMatch) {
@@ -2865,6 +2867,7 @@ function buildTableItems(
   referencedTables: SqlCompletionReferencedTable[] = [],
   databaseType?: DatabaseType,
   currentSchema?: string,
+  keywordCase?: SqlKeywordCase,
 ): SqlCompletionItem[] {
   const { prefix } = context;
   const qualifierSchema = context.qualifier?.split(".").filter(Boolean).pop();
@@ -2894,7 +2897,7 @@ function buildTableItems(
         label: table.name,
         type: "table" as const,
         detail: table.detail ?? (table.schema ? `${table.schema}.${table.name}` : table.type),
-        apply: formatTableAliasApply(applyName, alias, databaseType),
+        apply: formatTableAliasApply(applyName, alias, databaseType, keywordCase),
         boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
         dedupeKey: table.applyName || ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
       };
@@ -3091,12 +3094,12 @@ function objectMatchesCompletionContext(object: SqlCompletionObject, context: Sq
   return matchesPrefix(object.name, context.prefix);
 }
 
-function buildOracleTableFunctionItems(prefix: string): SqlCompletionItem[] {
+function buildOracleTableFunctionItems(prefix: string, keywordCase?: SqlKeywordCase, functionCase?: SqlKeywordCase): SqlCompletionItem[] {
   const items = [
-    { label: "TABLE", detail: "Oracle table function", apply: "TABLE(${function_call})" },
-    { label: "THE", detail: "Oracle nested-table expression", apply: "THE(${subquery})" },
-    { label: "XMLTABLE", detail: "XML to relational rows", apply: "XMLTABLE(${xpath})" },
-    { label: "JSON_TABLE", detail: "JSON to relational rows", apply: "JSON_TABLE(${expr}, ${path})" },
+    { label: applySqlKeywordCase("TABLE", keywordCase), detail: "Oracle table function", apply: `${applySqlKeywordCase("TABLE", keywordCase)}(\${function_call})` },
+    { label: applySqlKeywordCase("THE", keywordCase), detail: "Oracle nested-table expression", apply: `${applySqlKeywordCase("THE", keywordCase)}(\${subquery})` },
+    { label: applySqlFunctionCase("XMLTABLE", functionCase), detail: "XML to relational rows", apply: `${applySqlFunctionCase("XMLTABLE", functionCase)}(\${xpath})` },
+    { label: applySqlFunctionCase("JSON_TABLE", functionCase), detail: "JSON to relational rows", apply: `${applySqlFunctionCase("JSON_TABLE", functionCase)}(\${expr}, \${path})` },
   ];
   return items
     .filter((item) => matchesPrefix(item.label, prefix))
@@ -3110,6 +3113,25 @@ function buildOracleTableFunctionItems(prefix: string): SqlCompletionItem[] {
 function applySqlKeywordCase(value: string, keywordCase?: SqlKeywordCase): string {
   if (keywordCase === "lower") return value.toLowerCase();
   return value.toUpperCase();
+}
+
+function applySqlFunctionCase(value: string, functionCase?: SqlKeywordCase): string {
+  if (functionCase === "lower") return value.toLowerCase();
+  if (functionCase === "upper") return value.toUpperCase();
+  return value;
+}
+
+const GENERATED_SQL_TEMPLATE_KEYWORDS_RE = /\b(?:AS|INTERVAL|OVER|PARTITION|BY|ORDER)\b/g;
+
+/**
+ * Applies the keyword preference to syntax embedded in built-in completion
+ * templates while keeping snippet placeholders intact.
+ */
+function applyGeneratedSqlTemplateKeywordCase(value: string, keywordCase?: SqlKeywordCase): string {
+  return value
+    .split(/(\$\{[^}]*\})/g)
+    .map((part) => (part.startsWith("${") ? part : part.replace(GENERATED_SQL_TEMPLATE_KEYWORDS_RE, (keyword) => applySqlKeywordCase(keyword, keywordCase))))
+    .join("");
 }
 
 function keywordJoiner(keywordCase?: SqlKeywordCase): string {
@@ -3353,13 +3375,13 @@ function buildComparisonValueItems(context: SqlCompletionContext, columnsByTable
 
   // Boolean-ish: tinyint or bit
   if (dt === "bit" || dt === "boolean" || dt === "bool") {
-    items.push({ label: "TRUE", type: "keyword" as const, detail: t?.booleanValue ?? "Boolean value", boost: 1700 }, { label: "FALSE", type: "keyword" as const, detail: t?.booleanValue ?? "Boolean value", boost: 1650 });
+    items.push({ label: applySqlKeywordCase("TRUE", keywordCase), type: "keyword" as const, detail: t?.booleanValue ?? "Boolean value", boost: 1700 }, { label: applySqlKeywordCase("FALSE", keywordCase), type: "keyword" as const, detail: t?.booleanValue ?? "Boolean value", boost: 1650 });
   }
 
   return items;
 }
 
-function buildAliasItems(context: SqlCompletionContext, databaseType?: DatabaseType): SqlCompletionItem[] {
+function buildAliasItems(context: SqlCompletionContext, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
   const items: SqlCompletionItem[] = [];
   const existingAliases = new Set(context.referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   const seen = new Set<string>(existingAliases);
@@ -3373,20 +3395,20 @@ function buildAliasItems(context: SqlCompletionContext, databaseType?: DatabaseT
       label: candidate,
       type: "snippet" as const,
       detail: `alias for ${ref.name}`,
-      apply: formatAliasCompletionApply(candidate, databaseType),
+      apply: formatAliasCompletionApply(candidate, databaseType, keywordCase),
       boost: 1600 - items.length,
     });
   }
   return items;
 }
 
-function formatTableAliasApply(tableName: string, alias: string, databaseType?: DatabaseType): string {
+function formatTableAliasApply(tableName: string, alias: string, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): string {
   if (!alias) return tableName;
-  return isOracleLikeDatabase(databaseType) ? `${tableName} ${alias}` : `${tableName} AS ${alias}`;
+  return isOracleLikeDatabase(databaseType) ? `${tableName} ${alias}` : `${tableName} ${applySqlKeywordCase("AS", keywordCase)} ${alias}`;
 }
 
-function formatAliasCompletionApply(alias: string, databaseType?: DatabaseType): string {
-  return isOracleLikeDatabase(databaseType) ? `${alias} ` : `AS ${alias} `;
+function formatAliasCompletionApply(alias: string, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): string {
+  return isOracleLikeDatabase(databaseType) ? `${alias} ` : `${applySqlKeywordCase("AS", keywordCase)} ${alias} `;
 }
 
 function generateAlias(tableName: string, existing = new Set<string>()): string {
@@ -4097,18 +4119,20 @@ function buildClickHouseFunctionItems(prefix: string, omitOpeningParen: boolean,
   });
 }
 
-function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<string, string>, databaseType?: DatabaseType, omitOpeningParen = false): SqlCompletionItem[] {
+function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<string, string>, databaseType?: DatabaseType, omitOpeningParen = false, keywordCase?: SqlKeywordCase, functionCase?: SqlKeywordCase): SqlCompletionItem[] {
   if (databaseType === "clickhouse") return buildClickHouseFunctionItems(prefix, omitOpeningParen);
   const items: SqlCompletionItem[] = [];
 
   for (const [name, parameters] of activeFunctionSignatures(databaseType).entries()) {
     if (!matchesPrefix(name, prefix)) continue;
-    const paramStr = parameters.length > 0 ? parameters.map((p) => `\${${p}}`).join(", ") : "";
+    const functionName = applySqlFunctionCase(name, functionCase);
+    const paramStr = parameters.length > 0 ? parameters.map((p) => `\${${applyGeneratedSqlTemplateKeywordCase(p, keywordCase)}}`).join(", ") : "";
+    const mysqlApply = databaseType === "mysql" ? MYSQL_FUNCTION_APPLY_TEMPLATES.get(name) : undefined;
     items.push({
-      label: name,
+      label: functionName,
       type: "function" as const,
       detail: functionDescriptions.get(name) ?? "function",
-      apply: (databaseType === "mysql" ? MYSQL_FUNCTION_APPLY_TEMPLATES.get(name) : undefined) ?? `${name}(${paramStr})`,
+      apply: mysqlApply ? `${functionName}${applyGeneratedSqlTemplateKeywordCase(mysqlApply.slice(name.length), keywordCase)}` : `${functionName}(${paramStr})`,
       boost: computeBoost(name, prefix) + 300,
     });
   }
@@ -4116,11 +4140,12 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
   // Window functions — complete with OVER() clause
   for (const name of WINDOW_FUNCTIONS) {
     if (!matchesPrefix(name, prefix)) continue;
+    const functionName = applySqlFunctionCase(name, functionCase);
     items.push({
-      label: name,
+      label: functionName,
       type: "function" as const,
       detail: "window function",
-      apply: `${name}() OVER (PARTITION BY \${col} ORDER BY \${col})`,
+      apply: applyGeneratedSqlTemplateKeywordCase(`${functionName}() OVER (PARTITION BY \${col} ORDER BY \${col})`, keywordCase),
       boost: computeBoost(name, prefix) + 250,
     });
   }

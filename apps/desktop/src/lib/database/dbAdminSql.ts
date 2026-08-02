@@ -74,6 +74,7 @@ export interface CopyTableDataSqlOptions {
   columns?: string[];
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
+  normalizeNewTargetName?: boolean;
 }
 
 export function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {
@@ -117,6 +118,13 @@ export function buildCreateSchemaSql(options: SchemaNameSqlOptions): Promise<str
 
 export function buildDropSchemaSql(options: SchemaNameSqlOptions): Promise<string> {
   return api.buildDropSchemaSql(options);
+}
+
+export function damengDropSchemaExecutionSchema(username: string | null | undefined, targetSchema: string): string | null {
+  const executionSchema = username?.trim();
+  const normalizedTargetSchema = targetSchema.trim().toUpperCase();
+  if (!executionSchema || !normalizedTargetSchema || executionSchema.toUpperCase() === normalizedTargetSchema) return null;
+  return executionSchema;
 }
 
 export function supportsSchemaComment(databaseType?: DatabaseType): boolean {

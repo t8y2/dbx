@@ -455,8 +455,10 @@ public final class JdbcExecutor {
             case Types.BINARY:
             case Types.VARBINARY:
             case Types.LONGVARBINARY:
-            case Types.BLOB:
                 value = bytesToHex(rs.getBytes(index));
+                break;
+            case Types.BLOB:
+                value = blobResultValue(rs, index);
                 break;
             case Types.SQLXML:
                 value = sqlXmlToString(rs.getSQLXML(index));
@@ -474,8 +476,10 @@ public final class JdbcExecutor {
             case Types.BINARY:
             case Types.VARBINARY:
             case Types.LONGVARBINARY:
-            case Types.BLOB:
                 value = bytesToHex(rs.getBytes(index));
+                break;
+            case Types.BLOB:
+                value = blobResultValue(rs, index);
                 break;
             case Types.SQLXML:
                 value = sqlXmlToString(rs.getSQLXML(index));
@@ -485,6 +489,17 @@ public final class JdbcExecutor {
                 break;
         }
         return rs.wasNull() ? null : value;
+    }
+
+    private static Object blobResultValue(ResultSet rs, int index) throws SQLException {
+        Object value = rs.getObject(index);
+        if (value instanceof Blob || value instanceof byte[]) {
+            return normalizeResultValue(value);
+        }
+        if (value == null && rs.wasNull()) {
+            return null;
+        }
+        return bytesToHex(rs.getBytes(index));
     }
 
     public static Object normalizeResultValue(Object value) throws SQLException {

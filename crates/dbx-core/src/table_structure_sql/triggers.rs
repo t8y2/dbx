@@ -10,7 +10,9 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
     let dialect = super::dialect::capabilities_for(options.database_type).dialect;
     let database_label = database_label(options.database_type);
     if !matches!(dialect, StructureDialect::Mysql | StructureDialect::Oracle) {
-        warnings.push(format!("Editing triggers is not supported for {database_label} from this editor."));
+        if options.triggers.iter().any(has_trigger_edit) {
+            warnings.push(format!("Editing triggers is not supported for {database_label} from this editor."));
+        }
         return Vec::new();
     }
 
@@ -50,6 +52,10 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
     }
 
     statements
+}
+
+fn has_trigger_edit(trigger: &EditableStructureTrigger) -> bool {
+    trigger.marked_for_drop || trigger.original.as_ref().is_none_or(|original| has_trigger_change(trigger, original))
 }
 
 fn has_trigger_change(trigger: &EditableStructureTrigger, original: &TriggerInfo) -> bool {

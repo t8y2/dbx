@@ -501,6 +501,19 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             });
         }
     }
+    if let Some((args, tail)) = method_call(source, prefix_end, "update") {
+        if !tail.is_empty() || !(2..=3).contains(&args.len()) {
+            return Err("Invalid MongoDB update() command.".to_string());
+        }
+        let (options, many) = legacy_update_options(args.get(2))?;
+        return Ok(MongoCommand::Update {
+            collection,
+            filter: normalized_json(&args[0])?,
+            update: normalized_json(&args[1])?,
+            options,
+            many,
+        });
+    }
     for (method, many) in [("deleteOne", false), ("deleteMany", true)] {
         if let Some((args, tail)) = method_call(source, prefix_end, method) {
             if !tail.is_empty() || args.len() != 1 {
@@ -672,6 +685,28 @@ fn optional_json_argument(value: Option<&String>) -> Result<Option<String>, Stri
     value.filter(|value| !value.trim().is_empty()).map(|value| normalized_json(value)).transpose()
 }
 
+fn legacy_update_options(value: Option<&String>) -> Result<(Option<String>, bool), String> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok((None, false));
+    };
+    let normalized = normalized_json(value)?;
+    let value = parse_json_value(&normalized).ok_or("Invalid MongoDB update() options.")?;
+    let Value::Object(mut options) = value else {
+        return Err("MongoDB update() options must be a document.".to_string());
+    };
+    let many = match options.remove("multi") {
+        Some(Value::Bool(many)) => many,
+        Some(_) => return Err("MongoDB update() multi option must be a boolean.".to_string()),
+        None => false,
+    };
+    let options = if options.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&Value::Object(options)).map_err(|error| error.to_string())?)
+    };
+    Ok((options, many))
+}
+
 fn parse_use_database(source: &str) -> Option<String> {
     let mut parts = source.split_whitespace();
     if !parts.next()?.eq_ignore_ascii_case("use") {
@@ -808,6 +843,9 @@ mod tests {
         assert!(aggregate.is_dangerous());
         let update = parse("db.projects.updateMany({}, {$set: {active: false}})").unwrap();
         assert!(update.has_empty_filter());
+        let legacy_update = parse("db.projects.update({}, {$set: {active: false}}, {multi: true})").unwrap();
+        assert!(legacy_update.has_empty_filter());
+        assert_eq!(validate_safety(&legacy_update, true, false, false), Err(MongoSafetyError::EmptyFilter));
     }
 
     #[test]
@@ -854,6 +892,52 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(update, MongoCommand::Update { many: true, options: Some(_), .. }));
+    }
+
+    #[test]
+    fn parses_legacy_update_with_single_and_multi_semantics() {
+        assert_eq!(
+            parse("db.projects.update({_id: 1}, {$set: {active: true}})").unwrap(),
+            MongoCommand::Update {
+                collection: "projects".to_string(),
+                filter: r#"{"_id":1}"#.to_string(),
+                update: r#"{"$set":{"active":true}}"#.to_string(),
+                options: None,
+                many: false,
+            }
+        );
+
+        let command =
+            parse(r#"db.getCollection("xxx").update({tenantId: 7}, {$set: {active: true}}, {upsert: true})"#).unwrap();
+        let MongoCommand::Update { collection, update, options, many, .. } = command else {
+            panic!("expected legacy update command");
+        };
+        assert_eq!(collection, "xxx");
+        assert!(!many);
+        assert_eq!(parse_json_value(&update).unwrap(), serde_json::json!({ "$set": { "active": true } }));
+        assert_eq!(parse_json_value(options.as_deref().unwrap()).unwrap(), serde_json::json!({ "upsert": true }));
+
+        let command = parse(
+            r#"db.projects.update({tenantId: 7}, [{$set: {active: true}}], {multi: true, arrayFilters: [{"item.id": 1}]})"#,
+        )
+        .unwrap();
+        let MongoCommand::Update { update, options, many, .. } = command else {
+            panic!("expected legacy multi update command");
+        };
+        assert!(many);
+        assert_eq!(parse_json_value(&update).unwrap(), serde_json::json!([{ "$set": { "active": true } }]));
+        assert_eq!(
+            parse_json_value(options.as_deref().unwrap()).unwrap(),
+            serde_json::json!({ "arrayFilters": [{ "item.id": 1 }] })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_legacy_update_arguments() {
+        assert!(parse("db.projects.update({_id: 1})").is_err());
+        assert!(parse("db.projects.update({_id: 1}, {$set: {active: true}}, true)").is_err());
+        assert!(parse("db.projects.update({_id: 1}, {$set: {active: true}}, {multi: 'yes'})").is_err());
+        assert!(parse("db.projects.update({_id: 1}, {$set: {active: true}}, {}, false)").is_err());
     }
 
     #[test]

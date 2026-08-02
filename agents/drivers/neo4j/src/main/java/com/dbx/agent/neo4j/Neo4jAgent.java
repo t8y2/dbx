@@ -10,6 +10,7 @@ import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.QueryResult;
+import com.dbx.agent.StandardJdbcMetadata;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TransactionExecutor;
 import com.dbx.agent.TriggerInfo;
@@ -54,18 +55,12 @@ public class Neo4jAgent extends AbstractJdbcAgent {
 
     @Override
     public List<DatabaseInfo> listDatabases() {
-        return unchecked(() -> {
-            Connection conn = requireConnected();
-            List<DatabaseInfo> result = new ArrayList<>();
-            try (Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery("SHOW DATABASES")) {
-                while (rs.next()) {
-                    result.add(new DatabaseInfo(rs.getString("name")));
-                }
-            }
-            result.sort(Comparator.comparing(DatabaseInfo::getName));
-            return result;
-        });
+        List<DatabaseInfo> result = StandardJdbcMetadata.INSTANCE.listDatabases(
+            requireConnected(),
+            getConfiguredDatabase()
+        );
+        result.sort(Comparator.comparing(DatabaseInfo::getName));
+        return result;
     }
 
     @Override

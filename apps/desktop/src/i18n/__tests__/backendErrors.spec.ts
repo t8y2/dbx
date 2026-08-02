@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it as test } from "vitest";
 import { createI18n } from "vue-i18n";
 import { translateBackendError, type BackendErrorTranslate } from "@/i18n/backend-errors";
+import { BackendErrorException, normalizeBackendError } from "@/lib/backend/errorUtils";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import it from "@/i18n/locales/it";
@@ -23,6 +24,21 @@ const LOCALES = {
 } as const;
 
 type LocaleKey = keyof typeof LOCALES;
+
+const STRUCTURED_BACKEND_ERROR_KEYS = [
+  "backendErrors.jdbc.connectionFailed",
+  "backendErrors.jdbc.connectionInterrupted",
+  "backendErrors.jdbc.operationTimedOut",
+  "backendErrors.jdbc.operationCanceled",
+  "backendErrors.jdbc.busyRetryLater",
+  "backendErrors.jdbc.runtimeReplaced",
+  "backendErrors.jdbc.sqlFailed",
+  "backendErrors.jdbc.protocolFailed",
+  "backendErrors.jdbc.contractInvalid",
+  "backendErrors.jdbc.legacyFailure",
+  "backendErrors.legacy",
+  "backendErrors.unknown",
+] as const;
 
 // Reproduces the exact string crates/dbx-core/src/agent_service.rs builds on
 // Windows: `\` line continuations strip the newline plus the following indent.
@@ -125,6 +141,12 @@ describe("backend error translation", () => {
   // alongside the other non-English locales.
   const localeKeys = Object.keys(LOCALES) as LocaleKey[];
 
+  test.each(localeKeys)("all structured catalog keys exist in %s", (locale) => {
+    for (const key of STRUCTURED_BACKEND_ERROR_KEYS) {
+      expect(lookup(LOCALES[locale] as unknown as Record<string, unknown>, key), `${locale}:${key}`).toEqual(expect.any(String));
+    }
+  });
+
   describe.each(localeKeys)("in %s", (locale) => {
     const t = translatorFor(locale);
 
@@ -156,6 +178,68 @@ describe("backend error translation", () => {
 
     expect(translateBackendError(t, new Error(message))).toBe(expected);
     expect(translateBackendError(t, { message })).toBe(expected);
+  });
+
+  test("preserves and translates structured BackendError envelopes", () => {
+    const t = translatorFor("zh-CN");
+    const error = {
+      version: 1,
+      code: "DBX-JDBC-2002",
+      messageKey: "backendErrors.jdbc.operationTimedOut",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown",
+      detail: "relation dbx_table_that_does_not_exist does not exist",
+    } as const;
+
+    expect(normalizeBackendError(error)).toEqual(error);
+    const expected = `${t(error.messageKey, error.messageParams)}\n\n${error.detail}`;
+    expect(translateBackendError(t, error)).toBe(expected);
+    expect(translateBackendError(t, new BackendErrorException(error))).toBe(expected);
+  });
+
+  test("shows the database detail after an unclassified Agent summary", () => {
+    const t = translatorFor("zh-CN");
+    const error = {
+      version: 1,
+      code: "DBX-JDBC-9001",
+      messageKey: "backendErrors.jdbc.legacyFailure",
+      messageParams: {},
+      source: "jdbcAgentLegacy",
+      operationOutcome: "unknown",
+      detail: "Table dbx_table_that_does_not_exist does not exist",
+    } as const;
+
+    expect(translateBackendError(t, error)).toBe(`${t(error.messageKey)}\n\n${error.detail}`);
+  });
+
+  test.each([
+    ["array params", { messageParams: ["execute"] }],
+    ["nested params", { messageParams: { stage: { name: "execute" } } }],
+    ["non-finite params", { messageParams: { retryAfter: Number.POSITIVE_INFINITY } }],
+    ["non-string detail", { detail: 42 }],
+    ["object detail", { detail: { message: "database failure" } }],
+    ["unknown source", { source: "http" }],
+    ["unknown outcome", { operationOutcome: "completed" }],
+  ])("rejects malformed structured envelopes with %s", (_name, override) => {
+    expect(
+      normalizeBackendError({
+        version: 1,
+        code: "DBX-JDBC-2002",
+        messageKey: "backendErrors.jdbc.operationTimedOut",
+        messageParams: { stage: "execute" },
+        source: "jdbcAgent",
+        operationOutcome: "unknown",
+        ...override,
+      }),
+    ).toBeNull();
+  });
+
+  test("falls back to legacy text for plain HTTP and Tauri failures", () => {
+    const t = translatorFor("zh-CN");
+    const error = new BackendErrorException("legacy backend failure");
+    expect(error.backendError.code).toBe("DBX-LEGACY-0001");
+    expect(translateBackendError(t, error)).toBe(`${t("backendErrors.legacy")}\n\nlegacy backend failure`);
   });
 });
 

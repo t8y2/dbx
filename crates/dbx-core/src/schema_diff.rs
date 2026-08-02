@@ -3248,6 +3248,87 @@ fn generate_create_table_sql(
     (lines.join("\n"), missing)
 }
 
+fn append_sequence_diff_sql(
+    lines: &mut Vec<String>,
+    sequence_diffs: &[SequenceDiff],
+    profile: DdlDialectProfile,
+    db_type: DatabaseType,
+    schema: Option<&str>,
+    cascade: &str,
+    should_render: impl Fn(&str) -> bool,
+) {
+    let mut matching = sequence_diffs.iter().filter(|diff| should_render(&diff.diff_type)).peekable();
+    if matching.peek().is_none() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push("-- Sequences".to_string());
+    for diff in matching {
+        match diff.diff_type.as_str() {
+            "added" => {
+                if let Some(source) = &diff.source {
+                    if let Some(template) = profile.sequence_create_template {
+                        lines.push(format!("-- Create sequence: {}", diff.name));
+                        let name = qualified_name(&diff.name, db_type, schema);
+                        let cycle = if source.cycle { "CYCLE" } else { "NO CYCLE" };
+                        lines.push(DdlDialectProfile::render_template(
+                            template,
+                            &[
+                                ("name", &name),
+                                ("data_type", &source.data_type),
+                                ("start_value", &source.start_value),
+                                ("increment", &source.increment),
+                                ("min_value", &source.min_value),
+                                ("max_value", &source.max_value),
+                                ("cycle", cycle),
+                            ],
+                        ));
+                    } else {
+                        lines.push(format!(
+                            "-- Skip sequence {}: target database does not support sequence DDL generation",
+                            diff.name
+                        ));
+                    }
+                }
+            }
+            "removed" => {
+                if let Some(template) = profile.sequence_drop_template {
+                    lines.push(format!("-- Drop sequence: {}", diff.name));
+                    let name = qualified_name(&diff.name, db_type, schema);
+                    lines.push(DdlDialectProfile::render_template(template, &[("name", &name), ("cascade", cascade)]));
+                } else {
+                    lines.push(format!("-- Skip drop sequence {}: unsupported on target", diff.name));
+                }
+            }
+            "modified" => {
+                if let Some(source) = &diff.source {
+                    if let Some(template) = profile.sequence_alter_template {
+                        lines.push(format!("-- Alter sequence: {}", diff.name));
+                        let name = qualified_name(&diff.name, db_type, schema);
+                        let cycle = if source.cycle { "CYCLE" } else { "NO CYCLE" };
+                        lines.push(DdlDialectProfile::render_template(
+                            template,
+                            &[
+                                ("name", &name),
+                                ("data_type", &source.data_type),
+                                ("start_value", &source.start_value),
+                                ("increment", &source.increment),
+                                ("min_value", &source.min_value),
+                                ("max_value", &source.max_value),
+                                ("cycle", cycle),
+                            ],
+                        ));
+                    } else {
+                        lines.push(format!("-- Skip alter sequence {}: unsupported on target", diff.name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn generate_schema_sync_sql(
     diffs: &[TableDiff],
@@ -3300,15 +3381,39 @@ fn generate_schema_sync_sql_inner(
         }
         rewrite_column_type(source_type, db_type, source_dialect)
     };
+    let is_same_dialect =
+        source_dialect.map(|source| DialectKind::from_database_type(db_type) == source).unwrap_or(false);
+
+    append_sequence_diff_sql(&mut lines, sequence_diffs, profile, db_type, schema, cascade, |diff_type| {
+        diff_type == "added"
+    });
 
     for diff in diffs {
         let table = qualified_name(&diff.name, db_type, schema);
 
+        if diff.diff_type == "added" && diff.object_type.as_deref() == Some("view") {
+            if let Some(ddl) = &diff.ddl {
+                if is_same_dialect || source_dialect.is_none() {
+                    lines.push(format!("-- Create view: {}", diff.name));
+                    lines.push(format!("{};", ddl.trim_end().trim_end_matches(';')));
+                    lines.push(String::new());
+                    continue;
+                }
+            }
+
+            lines.push(format!("-- View exists only in source: {}", diff.name));
+            if diff.ddl.is_some() {
+                lines.push("-- Source view definition cannot be reused across different SQL dialects.".to_string());
+            } else {
+                lines.push("-- Source view definition is not available from this driver yet.".to_string());
+            }
+            lines.push(String::new());
+            continue;
+        }
+
         if diff.diff_type == "added" && diff.object_type.as_deref() != Some("view") {
             let has_structured_snapshot = diff.columns.as_ref().is_some_and(|columns| !columns.is_empty());
             let is_rollback_recreation = diff.ddl.is_none() && diff.target_ddl.is_some();
-            let is_same_dialect =
-                source_dialect.map(|src| DialectKind::from_database_type(db_type) == src).unwrap_or(false);
             if is_rollback_recreation {
                 if has_structured_snapshot {
                     let trigger_infos: Vec<TriggerInfo> = diff
@@ -3400,13 +3505,6 @@ fn generate_schema_sync_sql_inner(
                 }
                 missing_objects.extend(missing);
             }
-            continue;
-        }
-
-        if diff.diff_type == "added" && diff.object_type.as_deref() == Some("view") {
-            lines.push(format!("-- View exists only in source: {}", diff.name));
-            lines.push("-- Source view definition is not available from this driver yet.".to_string());
-            lines.push(String::new());
             continue;
         }
 
@@ -3676,77 +3774,9 @@ fn generate_schema_sync_sql_inner(
         }
     }
 
-    // Sequence diffs
-    if !sequence_diffs.is_empty() {
-        lines.push(String::new());
-        lines.push("-- Sequences".to_string());
-        for diff in sequence_diffs {
-            match diff.diff_type.as_str() {
-                "added" => {
-                    if let Some(source) = &diff.source {
-                        if let Some(template) = profile.sequence_create_template {
-                            lines.push(format!("-- Create sequence: {}", diff.name));
-                            let name = qualified_name(&diff.name, db_type, schema);
-                            let cycle = if source.cycle { "CYCLE" } else { "NO CYCLE" };
-                            lines.push(DdlDialectProfile::render_template(
-                                template,
-                                &[
-                                    ("name", &name),
-                                    ("data_type", &source.data_type),
-                                    ("start_value", &source.start_value),
-                                    ("increment", &source.increment),
-                                    ("min_value", &source.min_value),
-                                    ("max_value", &source.max_value),
-                                    ("cycle", cycle),
-                                ],
-                            ));
-                        } else {
-                            lines.push(format!(
-                                "-- Skip sequence {}: target database does not support sequence DDL generation",
-                                diff.name
-                            ));
-                        }
-                    }
-                }
-                "removed" => {
-                    if let Some(template) = profile.sequence_drop_template {
-                        lines.push(format!("-- Drop sequence: {}", diff.name));
-                        let name = qualified_name(&diff.name, db_type, schema);
-                        lines.push(DdlDialectProfile::render_template(
-                            template,
-                            &[("name", &name), ("cascade", cascade)],
-                        ));
-                    } else {
-                        lines.push(format!("-- Skip drop sequence {}: unsupported on target", diff.name));
-                    }
-                }
-                "modified" => {
-                    if let Some(source) = &diff.source {
-                        if let Some(template) = profile.sequence_alter_template {
-                            lines.push(format!("-- Alter sequence: {}", diff.name));
-                            let name = qualified_name(&diff.name, db_type, schema);
-                            let cycle = if source.cycle { "CYCLE" } else { "NO CYCLE" };
-                            lines.push(DdlDialectProfile::render_template(
-                                template,
-                                &[
-                                    ("name", &name),
-                                    ("data_type", &source.data_type),
-                                    ("start_value", &source.start_value),
-                                    ("increment", &source.increment),
-                                    ("min_value", &source.min_value),
-                                    ("max_value", &source.max_value),
-                                    ("cycle", cycle),
-                                ],
-                            ));
-                        } else {
-                            lines.push(format!("-- Skip alter sequence {}: unsupported on target", diff.name));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    append_sequence_diff_sql(&mut lines, sequence_diffs, profile, db_type, schema, cascade, |diff_type| {
+        matches!(diff_type, "removed" | "modified")
+    });
 
     // Rule diffs (PostgreSQL RULE)
     if !rule_diffs.is_empty() {
@@ -8411,6 +8441,199 @@ mod tests {
             Some("character(100)".to_string()),
             "Custom params already wrapped in parentheses should be kept as-is"
         );
+    }
+
+    #[test]
+    fn postgres_creates_sequences_before_tables_that_reference_them() {
+        let table_diff = TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("table".into()),
+            name: "events".into(),
+            ddl: Some(
+                "CREATE TABLE public.events (id bigint NOT NULL DEFAULT nextval('public.events_id_seq'::regclass))"
+                    .into(),
+            ),
+            ..TableDiff::default()
+        };
+        let sequence_diff = SequenceDiff {
+            diff_type: "added".into(),
+            name: "events_id_seq".into(),
+            source: Some(SequenceInfo {
+                name: "events_id_seq".into(),
+                data_type: "bigint".into(),
+                start_value: "1".into(),
+                min_value: "1".into(),
+                max_value: "9223372036854775807".into(),
+                increment: "1".into(),
+                cycle: false,
+                last_value: None,
+            }),
+            target: None,
+            changes: vec![],
+        };
+
+        let sql = generate_schema_sync_sql(
+            &[table_diff],
+            &[],
+            &[sequence_diff],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            Some(DialectKind::Postgres),
+            &[],
+        );
+
+        let sequence_position = sql.find("CREATE SEQUENCE").expect("sequence DDL");
+        let table_position = sql.find("CREATE TABLE public.events").expect("table DDL");
+        assert!(sequence_position < table_position, "{sql}");
+    }
+
+    #[test]
+    fn postgres_drops_sequences_after_dependent_tables() {
+        let table_diff = TableDiff {
+            diff_type: "removed".into(),
+            object_type: Some("table".into()),
+            name: "events".into(),
+            ..TableDiff::default()
+        };
+        let sequence_diff = SequenceDiff {
+            diff_type: "removed".into(),
+            name: "events_id_seq".into(),
+            source: None,
+            target: None,
+            changes: vec![],
+        };
+
+        let sql = generate_schema_sync_sql(
+            &[table_diff],
+            &[],
+            &[sequence_diff],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            Some(DialectKind::Postgres),
+            &[],
+        );
+
+        let table_position = sql.find("DROP TABLE").expect("table DDL");
+        let sequence_position = sql.find("DROP SEQUENCE").expect("sequence DDL");
+        assert!(table_position < sequence_position, "{sql}");
+    }
+
+    #[test]
+    fn postgres_sync_sql_preserves_zero_timestamp_precision() {
+        let table_diff = TableDiff {
+            diff_type: "modified".into(),
+            object_type: Some("table".into()),
+            name: "events".into(),
+            columns: Some(vec![ColumnDiff {
+                diff_type: "modified".into(),
+                name: "created_at".into(),
+                source: Some(column("created_at", "timestamp(0) without time zone", None)),
+                target: Some(column("created_at", "timestamp without time zone", None)),
+                changes: vec!["type: timestamp without time zone → timestamp(0) without time zone".into()],
+            }]),
+            ..TableDiff::default()
+        };
+
+        let sql = generate_schema_sync_sql(
+            &[table_diff],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            Some(DialectKind::Postgres),
+            &[],
+        );
+
+        assert!(sql.contains("ALTER COLUMN \"created_at\" TYPE timestamp(0)"), "{sql}");
+    }
+
+    #[test]
+    fn mysql_sync_sql_uses_same_dialect_view_ddl() {
+        let view_diff = TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("view".into()),
+            name: "active_users".into(),
+            ddl: Some("CREATE VIEW `active_users` AS SELECT `id` FROM `users` WHERE `active` = 1;".into()),
+            ..TableDiff::default()
+        };
+
+        let sql = generate_schema_sync_sql(
+            &[view_diff],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("app"),
+            false,
+            Some(DialectKind::Mysql),
+            &[],
+        );
+
+        assert!(sql.contains("CREATE VIEW `active_users`"), "{sql}");
+        assert!(!sql.contains("Source view definition is not available"), "{sql}");
+        assert!(!sql.contains(";;"), "{sql}");
+    }
+
+    #[test]
+    fn cross_dialect_sync_sql_does_not_reuse_view_ddl() {
+        let view_diff = TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("view".into()),
+            name: "active_users".into(),
+            ddl: Some("CREATE VIEW `active_users` AS SELECT `id` FROM `users`".into()),
+            ..TableDiff::default()
+        };
+
+        let sql = generate_schema_sync_sql(
+            &[view_diff],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            Some(DialectKind::Mysql),
+            &[],
+        );
+
+        assert!(!sql.contains("CREATE VIEW `active_users`"), "{sql}");
+        assert!(sql.contains("Source view definition cannot be reused across different SQL dialects"), "{sql}");
+    }
+
+    #[test]
+    fn same_dialect_sync_sql_keeps_diagnostic_without_view_ddl() {
+        let view_diff = TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("view".into()),
+            name: "active_users".into(),
+            ..TableDiff::default()
+        };
+
+        let sql = generate_schema_sync_sql(
+            &[view_diff],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("app"),
+            false,
+            Some(DialectKind::Mysql),
+            &[],
+        );
+
+        assert!(sql.contains("Source view definition is not available from this driver yet"), "{sql}");
     }
 
     #[test]

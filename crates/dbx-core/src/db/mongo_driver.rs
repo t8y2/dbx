@@ -20,6 +20,14 @@ pub type MongoDocumentResult = DocumentQueryResult;
 pub struct MongoDropIndexesResult {
     pub dropped_names: Vec<String>,
     pub affected_rows: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<MongoDropIndexFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MongoDropIndexFailure {
+    pub name: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -219,6 +227,16 @@ impl MongoCollectionKind {
             mongodb::results::CollectionType::View => Self::View,
             mongodb::results::CollectionType::Timeseries => Self::Timeseries,
             // Collection and any future non_exhaustive variants default to a renamable collection.
+            _ => Self::Collection,
+        }
+    }
+
+    /// Convert the Legacy Agent's optional listCollections metadata. Unknown
+    /// values stay compatible with the former name-only response.
+    pub fn from_metadata_kind(kind: Option<&str>) -> Self {
+        match kind.map(str::trim) {
+            Some(kind) if kind.eq_ignore_ascii_case("view") => Self::View,
+            Some(kind) if kind.eq_ignore_ascii_case("timeseries") => Self::Timeseries,
             _ => Self::Collection,
         }
     }
@@ -528,23 +546,24 @@ pub async fn create_database(client: &Client, database: &str) -> Result<(), Stri
 }
 
 pub async fn drop_database(client: &Client, database: &str) -> Result<(), String> {
-    let database = database.trim();
-    if database.is_empty() {
-        return Err("Database name is required".to_string());
-    }
+    let database = validate_mongo_namespace_name(database, "Database")?;
     client.database(database).drop().await.map_err(|e| e.to_string())
 }
 
 pub async fn drop_collection(client: &Client, database: &str, collection: &str) -> Result<(), String> {
-    let database = database.trim();
-    let collection = collection.trim();
-    if database.is_empty() {
-        return Err("Database name is required".to_string());
-    }
-    if collection.is_empty() {
-        return Err("Collection name is required".to_string());
-    }
+    let database = validate_mongo_namespace_name(database, "Database")?;
+    let collection = validate_mongo_namespace_name(collection, "Collection")?;
     client.database(database).collection::<Document>(collection).drop().await.map_err(|e| e.to_string())
+}
+
+/// MongoDB namespace identifiers must reach the server unchanged. In
+/// particular, a collection name may legitimately contain leading or trailing
+/// whitespace, so validation only rejects the empty identifier.
+pub fn validate_mongo_namespace_name<'a>(name: &'a str, kind: &str) -> Result<&'a str, String> {
+    if name.is_empty() {
+        return Err(format!("{kind} name is required"));
+    }
+    Ok(name)
 }
 
 /// Build the admin `renameCollection` command document for a same-database rename.
@@ -637,11 +656,11 @@ pub async fn find_documents(
         _ => doc! {},
     };
 
-    let total_is_exact = !filter_doc.is_empty();
-    let total = if total_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    let count_is_exact = !filter_doc.is_empty();
+    let total_result = if count_is_exact {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
+        col.estimated_document_count().await.map_err(|e| e.to_string())
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -670,6 +689,7 @@ pub async fn find_documents(
         documents.push(bson_to_json(&Bson::Document(doc.clone())));
         extended_documents.push(Bson::Document(doc).into_canonical_extjson());
     }
+    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
 
     Ok(MongoDocumentResult {
         documents,
@@ -782,11 +802,11 @@ pub async fn find_documents_extended_json(
         _ => doc! {},
     };
 
-    let total_is_exact = !filter_doc.is_empty();
-    let total = if total_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    let count_is_exact = !filter_doc.is_empty();
+    let total_result = if count_is_exact {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
+        col.estimated_document_count().await.map_err(|e| e.to_string())
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -816,6 +836,7 @@ pub async fn find_documents_extended_json(
         documents.push(document);
         extended_documents.push(extended_document);
     }
+    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
 
     Ok(MongoDocumentResult {
         extended_documents: Some(extended_documents),
@@ -824,6 +845,27 @@ pub async fn find_documents_extended_json(
         total,
         total_is_exact,
     })
+}
+
+fn resolve_mongo_find_total(
+    total_result: Result<u64, String>,
+    count_is_exact: bool,
+    skip: u64,
+    document_count: usize,
+) -> (u64, bool) {
+    match total_result {
+        Ok(total) => (total, count_is_exact),
+        Err(error) => {
+            log::debug!(
+                "[mongo][find:count-fallback] count_mode={} skip={} documents={} error={}",
+                if count_is_exact { "exact" } else { "estimated" },
+                skip,
+                document_count,
+                error
+            );
+            (skip.saturating_add(u64::try_from(document_count).unwrap_or(u64::MAX)), false)
+        }
+    }
 }
 
 /// Run `db.collection.aggregate(pipeline, options)`.
@@ -997,9 +1039,44 @@ pub async fn create_index(
     keys_json: &str,
     options_json: Option<&str>,
 ) -> Result<String, String> {
+    let database = validate_mongo_namespace_name(database, "Database")?;
+    let collection = validate_mongo_namespace_name(collection, "Collection")?;
+    let (command, name) = create_indexes_command(collection, keys_json, options_json)?;
+    client.database(database).run_command(command).await.map_err(|e| e.kind.to_string())?;
+    Ok(name)
+}
+
+/// Validate an index request before it reaches either the native driver or the
+/// Legacy Agent. In particular, `key` belongs to the createIndexes command
+/// itself and must not be smuggled through the options document.
+pub fn validate_create_index_request(keys_json: &str, options_json: Option<&str>) -> Result<(), String> {
+    parse_create_index_spec(keys_json, options_json).map(|_| ())
+}
+
+fn create_indexes_command(
+    collection: &str,
+    keys_json: &str,
+    options_json: Option<&str>,
+) -> Result<(Document, String), String> {
+    let (keys, options, name) = parse_create_index_spec(keys_json, options_json)?;
+    let mut index = doc! { "key": keys };
+    for (option, value) in options {
+        index.insert(option, value);
+    }
+
+    Ok((doc! { "createIndexes": collection, "indexes": [index] }, name))
+}
+
+fn parse_create_index_spec(
+    keys_json: &str,
+    options_json: Option<&str>,
+) -> Result<(Document, Document, String), String> {
     let keys_value: serde_json::Value =
         serde_json::from_str(keys_json).map_err(|e| format!("Invalid index keys JSON: {e}"))?;
-    let keys = json_object_to_document(&keys_value).map_err(|e| format!("Invalid index keys: {e}"))?;
+    // The internal transport uses JSON rather than a Mongo shell expression.
+    // Keep ordinary strings literal while supporting official Extended JSON
+    // wrappers, matching the Legacy Agent's Document.parse behavior.
+    let keys = json_object_to_document_extended_json(&keys_value).map_err(|e| format!("Invalid index keys: {e}"))?;
     if keys.is_empty() {
         return Err("Index keys are required".to_string());
     }
@@ -1008,16 +1085,40 @@ pub async fn create_index(
         Some(json) => {
             let value: serde_json::Value =
                 serde_json::from_str(json).map_err(|e| format!("Invalid index options JSON: {e}"))?;
-            let doc = json_object_to_document(&value).map_err(|e| format!("Invalid index options: {e}"))?;
-            Some(mongodb::bson::from_document::<IndexOptions>(doc).map_err(|e| format!("Invalid index options: {e}"))?)
+            json_object_to_document_extended_json(&value).map_err(|e| format!("Invalid index options: {e}"))?
         }
-        None => None,
+        None => Document::new(),
+    };
+    if options.contains_key("key") {
+        return Err("Index options cannot contain \"key\"; specify index fields in keys JSON".to_string());
+    }
+    let name = match options.get("name") {
+        Some(Bson::String(name)) if !name.trim().is_empty() => name.clone(),
+        Some(_) => return Err("Index option \"name\" must be a non-empty string".to_string()),
+        None => default_index_name(&keys),
     };
 
-    let col = client.database(database).collection::<Document>(collection);
-    let result =
-        col.create_index(IndexModel::builder().keys(keys).options(options).build()).await.map_err(|e| e.to_string())?;
-    Ok(result.index_name)
+    // Use the raw server command instead of deserializing into the driver's
+    // fixed IndexOptions struct. This keeps native and Legacy Agent requests
+    // equivalent and lets the connected MongoDB version validate new options.
+    let mut options = options;
+    if !options.contains_key("name") {
+        options.insert("name", name.clone());
+    }
+    Ok((keys, options, name))
+}
+
+fn default_index_name(keys: &Document) -> String {
+    keys.iter()
+        .map(|(field, value)| {
+            let value = match value {
+                Bson::String(value) => value.clone(),
+                value => value.to_string(),
+            };
+            format!("{field}_{value}")
+        })
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 pub async fn drop_indexes(
@@ -1027,14 +1128,8 @@ pub async fn drop_indexes(
     indexes_json: Option<&str>,
     single: bool,
 ) -> Result<MongoDropIndexesResult, String> {
-    let database = database.trim();
-    let collection = collection.trim();
-    if database.is_empty() {
-        return Err("Database name is required".to_string());
-    }
-    if collection.is_empty() {
-        return Err("Collection name is required".to_string());
-    }
+    let database = validate_mongo_namespace_name(database, "Database")?;
+    let collection = validate_mongo_namespace_name(collection, "Collection")?;
 
     let index = parse_drop_indexes_value(indexes_json, single)?;
     let before = list_indexes(client, database, collection).await?;
@@ -1045,7 +1140,57 @@ pub async fn drop_indexes(
         .map_err(|e| e.to_string())?;
     let after = list_indexes(client, database, collection).await?;
     let dropped_names = diff_dropped_index_names(&before, &after);
-    Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names })
+    Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names, failures: Vec::new() })
+}
+
+/// Validate a drop-index request before it is sent to either MongoDB driver.
+/// The Legacy Agent receives the original JSON, so keeping this validation
+/// public gives both paths the same protection for MongoDB's default index.
+pub fn validate_drop_indexes_request(indexes_json: Option<&str>, single: bool) -> Result<(), String> {
+    parse_drop_indexes_value(indexes_json, single).map(|_| ())
+}
+
+/// MongoDB added array-form `dropIndexes.index` in 4.2. Unknown version
+/// strings preserve the modern single-command semantics instead of risking a
+/// partially applied serial fallback.
+pub fn mongo_server_requires_serial_drop_indexes(version: &str) -> bool {
+    let Some(start) = version.find(|character: char| character.is_ascii_digit()) else {
+        return false;
+    };
+    let mut components = version[start..].split('.');
+    let Some(major) = components.next().and_then(parse_version_component) else {
+        return false;
+    };
+    let Some(minor) = components.next().and_then(parse_version_component) else {
+        return false;
+    };
+    (major, minor) < (4, 2)
+}
+
+fn parse_version_component(component: &str) -> Option<u32> {
+    let digits = component.chars().take_while(|character| character.is_ascii_digit()).collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+/// Return names that must be issued as individual dropIndex commands for
+/// MongoDB 3.4 compatibility. The original request is fully parsed first, so
+/// an invalid name (including `_id_`) cannot cause a partial batch mutation.
+pub fn serial_drop_index_names(indexes_json: Option<&str>, single: bool) -> Result<Option<Vec<String>>, String> {
+    let Bson::Array(indexes) = parse_drop_indexes_value(indexes_json, single)? else {
+        return Ok(None);
+    };
+
+    let mut seen = HashSet::new();
+    let mut names = Vec::new();
+    for index in indexes {
+        let Bson::String(name) = index else {
+            return Err("dropIndexes only accepts arrays of string index names".to_string());
+        };
+        if seen.insert(name.clone()) {
+            names.push(name);
+        }
+    }
+    Ok(Some(names))
 }
 
 fn diff_dropped_index_names(before: &[IndexInfo], after: &[IndexInfo]) -> Vec<String> {
@@ -1063,56 +1208,83 @@ fn parse_drop_indexes_value(indexes_json: Option<&str>, single: bool) -> Result<
 
 fn parse_drop_indexes_json(json: &str, single: bool) -> Result<Bson, String> {
     let value: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("Invalid index JSON: {e}"))?;
+    let bson = json_value_to_bson(&value);
     if single {
-        validate_single_drop_index_value(&value)?;
+        validate_single_drop_index_value(&bson)?;
     } else {
-        validate_multi_drop_indexes_value(&value)?;
+        validate_multi_drop_indexes_value(&bson)?;
     }
-    Ok(json_value_to_bson(&value))
+    Ok(bson)
 }
 
-fn validate_single_drop_index_value(value: &serde_json::Value) -> Result<(), String> {
+fn validate_single_drop_index_value(value: &Bson) -> Result<(), String> {
     match value {
-        serde_json::Value::String(name) => {
+        Bson::String(name) => {
             if name.trim().is_empty() {
                 Err("Index name is required".to_string())
             } else if name == "*" {
                 Err(r#"dropIndex does not accept "*"; use dropIndexes() or dropIndexes("*") instead"#.to_string())
+            } else if name == "_id_" {
+                Err("The default MongoDB _id_ index cannot be dropped".to_string())
             } else {
                 Ok(())
             }
         }
-        serde_json::Value::Object(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
-        serde_json::Value::Object(_) => Ok(()),
-        serde_json::Value::Array(_) => {
+        Bson::Document(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
+        Bson::Document(doc) if is_default_id_index_specification(doc) => {
+            Err("The default MongoDB _id_ index cannot be dropped".to_string())
+        }
+        Bson::Document(_) => Ok(()),
+        Bson::Array(_) => {
             Err("dropIndex only accepts a string index name or JSON document; arrays are not supported".to_string())
         }
         _ => Err("dropIndex only accepts a string index name or JSON document".to_string()),
     }
 }
 
-fn validate_multi_drop_indexes_value(value: &serde_json::Value) -> Result<(), String> {
+fn validate_multi_drop_indexes_value(value: &Bson) -> Result<(), String> {
     match value {
-        serde_json::Value::String(name) => {
+        Bson::String(name) => {
             if name.trim().is_empty() {
                 Err("Index name is required".to_string())
+            } else if name == "_id_" {
+                Err("The default MongoDB _id_ index cannot be dropped".to_string())
             } else {
                 Ok(())
             }
         }
-        serde_json::Value::Object(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
-        serde_json::Value::Object(_) => Ok(()),
-        serde_json::Value::Array(items) if items.is_empty() => {
-            Err("dropIndexes only accepts non-empty string arrays".to_string())
+        Bson::Document(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
+        Bson::Document(doc) if is_default_id_index_specification(doc) => {
+            Err("The default MongoDB _id_ index cannot be dropped".to_string())
         }
-        serde_json::Value::Array(items) => {
-            if items.iter().all(|item| matches!(item, serde_json::Value::String(name) if !name.trim().is_empty())) {
-                Ok(())
+        Bson::Document(_) => Ok(()),
+        Bson::Array(items) if items.is_empty() => Err("dropIndexes only accepts non-empty string arrays".to_string()),
+        Bson::Array(items) => {
+            if items.iter().all(|item| matches!(item, Bson::String(name) if !name.trim().is_empty())) {
+                if items.iter().any(|item| matches!(item, Bson::String(name) if name == "_id_")) {
+                    Err("The default MongoDB _id_ index cannot be dropped".to_string())
+                } else {
+                    Ok(())
+                }
             } else {
                 Err("dropIndexes only accepts arrays of string index names".to_string())
             }
         }
         _ => Err("dropIndexes only accepts a string index name, JSON document, or string array".to_string()),
+    }
+}
+
+fn is_default_id_index_specification(specification: &Document) -> bool {
+    specification.len() == 1 && specification.get("_id").is_some_and(is_bson_numeric_one)
+}
+
+fn is_bson_numeric_one(value: &Bson) -> bool {
+    match value {
+        Bson::Int32(value) => *value == 1,
+        Bson::Int64(value) => *value == 1,
+        Bson::Double(value) => *value == 1.0,
+        Bson::Decimal128(value) => value.to_string().parse::<f64>().is_ok_and(|value| value == 1.0),
+        _ => false,
     }
 }
 
@@ -1230,16 +1402,22 @@ pub async fn update_documents(
         serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
     let update = json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
-    let array_filters = parse_update_array_filters(options_json)?;
+    let ParsedMongoUpdateOptions { upsert, array_filters } = parse_update_options(options_json)?;
     let col = client.database(database).collection::<Document>(collection);
     let result = if many {
         let mut action = col.update_many(filter, update);
+        if let Some(upsert) = upsert {
+            action = action.upsert(upsert);
+        }
         if let Some(filters) = array_filters {
             action = action.array_filters(filters);
         }
         action.await.map_err(|e| e.to_string())?
     } else {
         let mut action = col.update_one(filter, update);
+        if let Some(upsert) = upsert {
+            action = action.upsert(upsert);
+        }
         if let Some(filters) = array_filters {
             action = action.array_filters(filters);
         }
@@ -1249,17 +1427,24 @@ pub async fn update_documents(
 }
 
 #[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct MongoUpdateOptions {
+    upsert: Option<bool>,
     array_filters: Option<Vec<serde_json::Value>>,
 }
 
-fn parse_update_array_filters(options_json: Option<&str>) -> Result<Option<Vec<Document>>, String> {
+#[derive(Debug, Default)]
+struct ParsedMongoUpdateOptions {
+    upsert: Option<bool>,
+    array_filters: Option<Vec<Document>>,
+}
+
+fn parse_update_options(options_json: Option<&str>) -> Result<ParsedMongoUpdateOptions, String> {
     let Some(raw) = options_json.filter(|value| !value.trim().is_empty()) else {
-        return Ok(None);
+        return Ok(ParsedMongoUpdateOptions::default());
     };
     let options: MongoUpdateOptions = serde_json::from_str(raw).map_err(|e| format!("Invalid update options: {e}"))?;
-    options
+    let array_filters = options
         .array_filters
         .map(|filters| {
             filters
@@ -1268,7 +1453,8 @@ fn parse_update_array_filters(options_json: Option<&str>) -> Result<Option<Vec<D
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| format!("Invalid arrayFilters: {e}"))
         })
-        .transpose()
+        .transpose()?;
+    Ok(ParsedMongoUpdateOptions { upsert: options.upsert, array_filters })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1903,6 +2089,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mongo_find_count_failure_returns_loaded_lower_bound() {
+        let error = "invalid type: floating point `2053278871.0`, expected u64".to_string();
+
+        assert_eq!(resolve_mongo_find_total(Err(error), false, 100, 25), (125, false));
+    }
+
+    #[test]
+    fn mongo_find_count_success_preserves_count_semantics() {
+        assert_eq!(resolve_mongo_find_total(Ok(250), true, 100, 25), (250, true));
+        assert_eq!(resolve_mongo_find_total(Ok(250), false, 100, 25), (250, false));
+    }
+
+    #[test]
     fn parse_aggregate_options_document_keeps_official_fields() {
         let doc = parse_aggregate_options_document(Some(
             r#"{
@@ -2021,20 +2220,13 @@ mod tests {
     }
 
     #[test]
-    fn update_options_parse_array_filters() {
-        let filters = parse_update_array_filters(Some(r#"{"arrayFilters":[{"item.id":322678},{"item.active":true}]}"#))
-            .unwrap()
-            .unwrap();
+    fn update_options_parse_upsert_and_array_filters() {
+        let options =
+            parse_update_options(Some(r#"{"upsert":true,"arrayFilters":[{"item.id":322678},{"item.active":true}]}"#))
+                .unwrap();
 
-        assert_eq!(filters, vec![doc! { "item.id": 322678_i64 }, doc! { "item.active": true }]);
-    }
-
-    #[test]
-    fn update_options_reject_unsupported_fields() {
-        let error = parse_update_array_filters(Some(r#"{"upsert":true}"#)).unwrap_err();
-
-        assert!(error.starts_with("Invalid update options:"));
-        assert!(error.contains("unknown field `upsert`"));
+        assert_eq!(options.upsert, Some(true));
+        assert_eq!(options.array_filters.unwrap(), vec![doc! { "item.id": 322678_i64 }, doc! { "item.active": true }]);
     }
 
     #[test]
@@ -2550,6 +2742,102 @@ mod tests {
     }
 
     #[test]
+    fn mongo_namespace_validation_preserves_whitespace_and_rejects_only_empty_names() {
+        assert_eq!(validate_mongo_namespace_name("  app  ", "Database").unwrap(), "  app  ");
+        assert_eq!(validate_mongo_namespace_name(" users ", "Collection").unwrap(), " users ");
+        assert_eq!(validate_mongo_namespace_name("   ", "Collection").unwrap(), "   ");
+
+        let error = validate_mongo_namespace_name("", "Collection").unwrap_err();
+        assert_eq!(error, "Collection name is required");
+    }
+
+    #[test]
+    fn create_indexes_command_keeps_raw_options_and_generates_a_name() {
+        let (command, name) = create_indexes_command(
+            "users",
+            r#"{"email":1,"createdAt":-1,"content":"text"}"#,
+            Some(
+                r#"{"unique":true,"partialFilterExpression":{"verified":true},"customServerOption":{"enabled":true}}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(name, "email_1_createdAt_-1_content_text");
+        assert_eq!(command.get_str("createIndexes").unwrap(), "users");
+        let index = command.get_array("indexes").unwrap()[0].as_document().unwrap();
+        assert_eq!(
+            index.get_document("key").unwrap().keys().collect::<Vec<_>>(),
+            vec!["email", "createdAt", "content"],
+            "compound-index key order is part of MongoDB index semantics"
+        );
+        assert_eq!(
+            index.get_document("key").unwrap(),
+            &doc! { "email": 1_i32, "createdAt": -1_i32, "content": "text" }
+        );
+        assert!(index.get_bool("unique").unwrap());
+        assert_eq!(index.get_str("name").unwrap(), "email_1_createdAt_-1_content_text");
+        assert_eq!(index.get_document("customServerOption").unwrap(), &doc! { "enabled": true });
+    }
+
+    #[test]
+    fn create_indexes_command_canonicalizes_a_whole_double_in_the_default_name() {
+        let (command, name) = create_indexes_command("users", r#"{"email":1.0}"#, None).unwrap();
+
+        assert_eq!(name, "email_1");
+        let index = command.get_array("indexes").unwrap()[0].as_document().unwrap();
+        assert_eq!(index.get_str("name").unwrap(), "email_1");
+        assert!(
+            matches!(index.get("key"), Some(Bson::Document(keys)) if matches!(keys.get("email"), Some(Bson::Double(value)) if *value == 1.0))
+        );
+    }
+
+    #[test]
+    fn create_indexes_command_preserves_extended_json_options() {
+        let (command, name) = create_indexes_command(
+            "events",
+            r#"{"expiresAt":1}"#,
+            Some(r#"{"name":"expires_ttl","partialFilterExpression":{"createdAt":{"$date":"2026-06-10T13:59:31.287Z"}}}"#),
+        )
+        .unwrap();
+
+        assert_eq!(name, "expires_ttl");
+        let index = command.get_array("indexes").unwrap()[0].as_document().unwrap();
+        let filter = index.get_document("partialFilterExpression").unwrap();
+        assert!(matches!(filter.get("createdAt"), Some(Bson::DateTime(_))));
+    }
+
+    #[test]
+    fn create_indexes_command_keeps_plain_json_strings_literal() {
+        let (command, _) = create_indexes_command(
+            "events",
+            r#"{"expiresAt":1}"#,
+            Some(r#"{"partialFilterExpression":{"source":"ISODate(\"2026-06-10T13:59:31.287Z\")"}}"#),
+        )
+        .unwrap();
+
+        let index = command.get_array("indexes").unwrap()[0].as_document().unwrap();
+        let filter = index.get_document("partialFilterExpression").unwrap();
+        assert!(
+            matches!(filter.get("source"), Some(Bson::String(value)) if value == "ISODate(\"2026-06-10T13:59:31.287Z\")")
+        );
+    }
+
+    #[test]
+    fn create_indexes_command_rejects_key_inside_options() {
+        let error = create_indexes_command("users", r#"{"email":1}"#, Some(r#"{"key":{"other":1}}"#)).unwrap_err();
+
+        assert!(error.contains("cannot contain \"key\""), "{error}");
+    }
+
+    #[test]
+    fn create_indexes_command_rejects_empty_or_non_string_names() {
+        for options in [r#"{"name":""}"#, r#"{"name":"   "}"#, r#"{"name":null}"#, r#"{"name":1}"#] {
+            let error = create_indexes_command("users", r#"{"email":1}"#, Some(options)).unwrap_err();
+            assert!(error.contains("non-empty string"), "{error}");
+        }
+    }
+
+    #[test]
     fn parse_drop_indexes_value_validates_drop_index_arguments() {
         assert!(matches!(
             parse_drop_indexes_value(Some(r#""users_email_unique""#), true),
@@ -2597,6 +2885,50 @@ mod tests {
 
         let invalid_array = parse_drop_indexes_value(Some(r#"[{"a":1}]"#), false).unwrap_err();
         assert!(invalid_array.contains("arrays of string index names"));
+    }
+
+    #[test]
+    fn drop_indexes_validation_rejects_the_default_id_index() {
+        for (indexes_json, single) in [
+            (Some(r#""_id_""#), true),
+            (Some(r#""_id_""#), false),
+            (Some(r#"{"_id":1}"#), true),
+            (Some(r#"{"_id":1}"#), false),
+            (Some(r#"{"_id":1.0}"#), true),
+            (Some(r#"{"_id":{"$numberInt":"1"}}"#), true),
+            (Some(r#"{"_id":{"$numberLong":"1"}}"#), false),
+            (Some(r#"{"_id":{"$numberDouble":"1.0"}}"#), false),
+            (Some(r#"{"_id":{"$numberDecimal":"1.0"}}"#), true),
+            (Some(r#"["email_1","_id_"]"#), false),
+        ] {
+            let error = validate_drop_indexes_request(indexes_json, single).unwrap_err();
+            assert!(error.contains("_id_"), "{error}");
+        }
+
+        // MongoDB defines dropIndexes("*") to retain the default _id_ index.
+        assert!(matches!(validate_drop_indexes_request(Some(r#""*""#), false), Ok(())));
+    }
+
+    #[test]
+    fn serial_drop_index_names_is_portable_and_prevalidates_all_names() {
+        assert_eq!(
+            serial_drop_index_names(Some(r#"["email_1","email_1","createdAt_-1"]"#), false).unwrap(),
+            Some(vec!["email_1".to_string(), "createdAt_-1".to_string()])
+        );
+        assert_eq!(serial_drop_index_names(Some(r#""*""#), false).unwrap(), None);
+
+        let error = serial_drop_index_names(Some(r#"["email_1","_id_"]"#), false).unwrap_err();
+        assert!(error.contains("_id_"), "{error}");
+    }
+
+    #[test]
+    fn serial_drop_indexes_fallback_is_limited_to_pre_42_servers() {
+        for version in ["3.4.24", "4.0.28", "MongoDB 3.6.23"] {
+            assert!(mongo_server_requires_serial_drop_indexes(version), "{version}");
+        }
+        for version in ["4.2.0", "4.4.29", "5.0.0-rc0", "8.0.1", "unknown", "4"] {
+            assert!(!mongo_server_requires_serial_drop_indexes(version), "{version}");
+        }
     }
 
     #[test]

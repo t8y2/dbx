@@ -1,6 +1,6 @@
 ---
 title: Web API 参考
-description: DBX Web 与 Docker 部署使用的 HTTP API，适用于自动化与集成场景。
+description: DBX Web 与 Docker UI 使用的内部 HTTP API，包括认证、查询、后台任务、上传和下载边界。
 ---
 
 <Callout type="warn">这套 API 主要服务于 DBX Web 界面，以及 MCP Web 模式等内部工具。它不是单独对外承诺的集成契约，路由和字段可能随版本调整。做脚本或 Agent 集成时，优先使用 [@dbx-app/cli](/cn/docs/cli) 或 [@dbx-app/mcp-server](/cn/docs/mcp)。</Callout>
@@ -71,6 +71,8 @@ Content-Type: application/json
 
 登录成功后，响应会返回 `Set-Cookie: dbx_session=...`。后续请求带上这个 Cookie 即可。
 
+连续 5 次登录失败会触发约 60 秒锁定。会话保存在当前 Web 进程内，进程重启后需要重新登录；Cookie 使用 `HttpOnly` 和 `SameSite=Lax`，路径会跟随 `DBX_PUBLIC_BASE_PATH`。
+
 ### 退出登录
 
 ```http
@@ -87,12 +89,18 @@ Cookie: dbx_session=...
 | `DBX_PORT` | 修改监听端口，默认 `4224` |
 | `DBX_DATA_DIR` | 存放 `dbx.db` 的数据目录 |
 | `DBX_PUBLIC_BASE_PATH` | 在子路径下提供服务，例如 `/dbx` |
+| `DBX_MAX_UPLOAD_MB` | 调整通用请求/上传大小上限，默认 1024 MB |
+| `DBX_AGENT_DIR` | 覆盖 Web 端 Agent/驱动目录，默认位于数据目录下的 `agents` |
+| `DBX_STATIC_DIR` | 覆盖 Web 静态文件目录 |
 
 ## 请求约定
 
-- JSON 请求体字段名默认使用 `camelCase`。
-- `GET` 请求的查询参数使用 `snake_case`，例如 `connection_id`。
+- 字段命名由具体 Rust 请求结构决定，既有 `camelCase`，也有连接配置使用的 `snake_case`；不要对整个 API 套用单一命名规则。
+- `GET` 查询参数通常使用 `snake_case`，例如 `connection_id`，但仍应以当前路由实现为准。
 - 出错时通常返回带 `error` 字段的 JSON 和对应 HTTP 状态码。
+- 导出、导入、数据传输、SQL 文件和 AI 等长任务通常使用“启动请求 + SSE 进度 + 取消/下载”组合，不是一个同步响应。
+
+只有数据网格提取器当前提供受测试的局部 OpenAPI 文档：`/api/query/data-grid-extractor-openapi.json`。它不覆盖完整 DBX Web API，也不代表其它路由已经版本化。
 
 ## 连接相关 API
 
@@ -308,6 +316,16 @@ Content-Type: application/json
 ```
 
 MCP Server 会自动处理登录和会话 Cookie。
+
+CLI 同样支持 `DBX_WEB_URL` 和 `DBX_WEB_PASSWORD`。两者都复用 Web 后端的连接、驱动、只读保护、生产保护和数据库权限，比复制内部路由字段更容易随 DBX 升级。
+
+## 写入、安全和文件边界
+
+- API 认证只证明请求来自已登录会话，不会替代数据库权限
+- 查询、导入和传输路径会继续检查连接只读保护；生产保护和 SQL 风险策略在对应核心路径中执行
+- 浏览器上传的表导入和 SQL 文件会写入服务器临时目录，不是浏览器电脑的原始路径
+- Web 导出先生成服务器临时文件，再通过下载路由返回并清理
+- 反向代理应保留 Cookie、SSE 流和较长请求超时，并限制公网暴露范围
 
 ## 示例脚本
 

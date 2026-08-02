@@ -21,6 +21,7 @@ describe("sqlCompletion database functions", () => {
       databaseType: "clickhouse",
       tables: [],
       columnsByTable: new Map(),
+      functionCase: "lower",
     });
 
     expect(items.find((item) => item.label === "toStartOfDay")).toMatchObject({

@@ -3,12 +3,15 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use dbx_core::connection::AppState;
-use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo};
+use dbx_core::connection::{AppState, PoolKind};
+use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType};
 use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::state::WebState;
+
+const MONGO_LEGACY_DRIVER_PROFILE: &str = "mongodb-legacy";
+const MONGO_LEGACY_DRIVER_LABEL: &str = "MongoDB (Legacy)";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +70,86 @@ fn is_connection_info_capability_unsupported(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("connectioninfo")
         && (error.contains("unsupported") || error.contains("unknown method") || error.contains("method not found"))
+}
+
+fn mark_mongo_legacy_driver(config: &mut ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::MongoDb {
+        return false;
+    }
+    let changed = config.driver_profile.as_deref() != Some(MONGO_LEGACY_DRIVER_PROFILE)
+        || config.driver_label.as_deref() != Some(MONGO_LEGACY_DRIVER_LABEL);
+    config.driver_profile = Some(MONGO_LEGACY_DRIVER_PROFILE.to_string());
+    config.driver_label = Some(MONGO_LEGACY_DRIVER_LABEL.to_string());
+    changed
+}
+
+fn mongo_fallback_config_matches(current: &ConnectionConfig, expected: &ConnectionConfig) -> bool {
+    let mut current = current.clone();
+    let mut expected = expected.clone();
+    current.note.clear();
+    current.database_info = None;
+    expected.note.clear();
+    expected.database_info = None;
+    if current == expected {
+        return true;
+    }
+    if current.driver_profile.as_deref() != Some(MONGO_LEGACY_DRIVER_PROFILE)
+        || current.driver_label.as_deref() != Some(MONGO_LEGACY_DRIVER_LABEL)
+    {
+        return false;
+    }
+    current.driver_profile = expected.driver_profile.clone();
+    current.driver_label = expected.driver_label.clone();
+    current == expected
+}
+
+async fn apply_mongo_legacy_driver_profile(state: &WebState, config: &ConnectionConfig) -> Result<(), AppError> {
+    if config.db_type != DatabaseType::MongoDb {
+        return Ok(());
+    }
+
+    // Draft and one-time connections have no durable profile to update.
+    let persisted = if config.one_time {
+        true
+    } else {
+        state
+            .app
+            .storage
+            .save_connection_driver_profile(
+                config,
+                Some(MONGO_LEGACY_DRIVER_PROFILE.to_string()),
+                Some(MONGO_LEGACY_DRIVER_LABEL.to_string()),
+            )
+            .await
+            .map_err(AppError::from)?
+    };
+    if !persisted {
+        return Ok(());
+    }
+    let mut runtime_configs = state.app.configs.write().await;
+    if let Some(current) =
+        runtime_configs.get_mut(&config.id).filter(|current| mongo_fallback_config_matches(current, config))
+    {
+        mark_mongo_legacy_driver(current);
+    }
+    Ok(())
+}
+
+/// The core connector can choose the Legacy Agent after a native MongoDB
+/// handshake failure. Keep Web's runtime and saved profile aligned so the UI
+/// does not expose native-only collection rename for that session.
+async fn sync_mongo_legacy_driver_fallback(state: &WebState, config: &ConnectionConfig) -> Result<(), AppError> {
+    if config.db_type != DatabaseType::MongoDb {
+        return Ok(());
+    }
+    let uses_legacy_agent = {
+        let connections = state.app.connections.read().await;
+        matches!(connections.get(&config.id), Some(PoolKind::Agent(_)))
+    };
+    if !uses_legacy_agent {
+        return Ok(());
+    }
+    apply_mongo_legacy_driver_profile(state, config).await
 }
 
 async fn run_temporary_connection_test(
@@ -143,6 +226,11 @@ pub async fn connect_db(
     app.configs.write().await.insert(connection_id.clone(), config.clone());
 
     app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await.map_err(AppError::from)?;
+    if let Err(error) = sync_mongo_legacy_driver_fallback(&state, &config).await {
+        app.remove_connection_pools_detached(&connection_id).await;
+        app.reset_connection_transport_for_config(&connection_id, &config).await;
+        return Err(error);
+    }
 
     Ok(Json(connection_id))
 }
@@ -391,10 +479,10 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
 #[cfg(test)]
 mod tests {
     use super::{
-        connect_db, connection_final_proxy_port, disconnect_db, load_connections, mcp_add_connection,
-        mcp_remove_connection, save_connection_database_info, save_connections, test_connection,
-        test_connection_with_info, ConnectRequest, DisconnectRequest, McpAddConnectionRequest,
-        McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest, SaveConnectionsRequest,
+        apply_mongo_legacy_driver_profile, connect_db, connection_final_proxy_port, disconnect_db, load_connections,
+        mark_mongo_legacy_driver, mcp_add_connection, mcp_remove_connection, save_connection_database_info,
+        save_connections, test_connection, test_connection_with_info, ConnectRequest, DisconnectRequest,
+        McpAddConnectionRequest, McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest, SaveConnectionsRequest,
     };
     use crate::state::WebState;
     use axum::extract::State;
@@ -479,6 +567,70 @@ mod tests {
             "pinnedVersion": "3.1"
         }));
         config
+    }
+
+    #[test]
+    fn mongo_legacy_marker_updates_only_mongodb_profiles() {
+        let mut mongo = sqlite_config("mongo", "");
+        mongo.db_type = DatabaseType::MongoDb;
+        mongo.driver_profile = Some("legacy".to_string());
+        assert!(mark_mongo_legacy_driver(&mut mongo));
+        assert_eq!(mongo.driver_profile.as_deref(), Some("mongodb-legacy"));
+        assert_eq!(mongo.driver_label.as_deref(), Some("MongoDB (Legacy)"));
+        assert!(!mark_mongo_legacy_driver(&mut mongo));
+
+        let mut sqlite = sqlite_config("sqlite", ":memory:");
+        assert!(!mark_mongo_legacy_driver(&mut sqlite));
+        assert_eq!(sqlite.driver_profile, None);
+    }
+
+    #[tokio::test]
+    async fn mongo_legacy_profile_sync_preserves_unrelated_saved_connections() {
+        let (state, dir) = test_web_state().await;
+        let mut mongo = sqlite_config("mongo", "");
+        mongo.db_type = DatabaseType::MongoDb;
+        let other = sqlite_config("other", ":memory:");
+        state.app.storage.save_connections(&[mongo.clone(), other.clone()]).await.unwrap();
+        let mut current = mongo.clone();
+        current.note = "Updated while connecting".to_string();
+        state.app.configs.write().await.insert(current.id.clone(), current);
+
+        apply_mongo_legacy_driver_profile(&state, &mongo).await.unwrap();
+
+        let runtime = state.app.configs.read().await.get(&mongo.id).cloned().unwrap();
+        assert_eq!(runtime.note, "Updated while connecting");
+        assert_eq!(runtime.driver_profile.as_deref(), Some("mongodb-legacy"));
+        assert_eq!(runtime.driver_label.as_deref(), Some("MongoDB (Legacy)"));
+        let saved = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            saved.iter().find(|config| config.id == mongo.id).and_then(|config| config.driver_profile.as_deref()),
+            Some("mongodb-legacy")
+        );
+        assert!(saved.iter().any(|config| config.id == other.id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mongo_legacy_profile_sync_does_not_overwrite_a_replacement_connection() {
+        let (state, dir) = test_web_state().await;
+        let mut original = sqlite_config("mongo", "");
+        original.db_type = DatabaseType::MongoDb;
+        state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
+
+        let mut replacement = original.clone();
+        replacement.host = "replacement.example.com".to_string();
+        replacement.name = "Replacement MongoDB".to_string();
+        state.app.storage.save_connections(std::slice::from_ref(&replacement)).await.unwrap();
+        state.app.configs.write().await.insert(replacement.id.clone(), replacement.clone());
+
+        apply_mongo_legacy_driver_profile(&state, &original).await.unwrap();
+
+        assert_eq!(state.app.configs.read().await.get(&replacement.id), Some(&replacement));
+        assert_eq!(state.app.storage.load_connections().await.unwrap(), vec![replacement]);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     async fn test_web_state() -> (Arc<WebState>, std::path::PathBuf) {

@@ -281,6 +281,11 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 
+  it("keeps SQL Server temporary table names instead of treating them as hash comments", () => {
+    const sql = "DROP TABLE IF EXISTS #Temp;\nSELECT * FROM ##GlobalTemp;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["DROP TABLE IF EXISTS #Temp", "SELECT * FROM ##GlobalTemp"]);
+  });
+
   it("keeps MyBatis placeholders instead of treating them as hash comments", () => {
     const sql = "SELECT * FROM yd_org_decla_detail WHERE clr_ym = #{ym};\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "kingbase"))).toEqual(["SELECT * FROM yd_org_decla_detail WHERE clr_ym = #{ym}", "SELECT 2"]);
@@ -1013,10 +1018,11 @@ describe("currentExecutableStatementRange", () => {
     expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "redis")).toBeNull();
   });
 
-  it("does not expose current statement framing for MongoDB", () => {
-    const sql = "db.users.find({})";
+  it("uses the current MongoDB command range", () => {
+    const sql = 'db.users.find({})\n\ndb.getCollection("audit.logs").countDocuments({})';
 
-    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")).toBeNull();
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")?.sql).toBe("db.users.find({})");
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "audit.logs"), "mongodb")?.sql).toBe('db.getCollection("audit.logs").countDocuments({})');
   });
 });
 
@@ -1094,6 +1100,12 @@ describe("buildExecutionCandidates", () => {
     const cursorAfterFirstSemicolon = sql.indexOf(";") + 1;
     const candidates = buildExecutionCandidates(sql, cursorAfterFirstSemicolon);
     expect(candidateSummaries(candidates)).toEqual(["cursor:select 1", "all:select 1;\n\nselect 2;"]);
+  });
+
+  it("uses the final soft statement when the cursor follows trailing EOF whitespace", () => {
+    const sql = "SELECT 1\nSELECT 2 ";
+    const candidates = buildExecutionCandidates(sql, sql.length);
+    expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nSELECT 2"]);
   });
 
   it("dedupes when the cursor statement equals the full document", () => {

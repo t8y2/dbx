@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.71"
+version = "0.5.74"
 dependencies = [
  "anyhow",
  "axum",
@@ -1669,12 +1669,13 @@ dependencies = [
  "tokio-postgres",
  "tokio-util",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.49"
+version = "0.4.52"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1759,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.49"
+version = "0.4.52"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1777,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.71"
+version = "0.5.74"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -4523,7 +4524,7 @@ dependencies = [
 [[package]]
 name = "mysql-common-derive"
 version = "0.32.2"
-source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=77085e91e5081309d585153e3b656ce33bc1fe74#77085e91e5081309d585153e3b656ce33bc1fe74"
+source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=47740d85a8277167a5717afac785d37b46a36296#47740d85a8277167a5717afac785d37b46a36296"
 dependencies = [
  "darling",
  "heck 0.5.0",
@@ -4540,7 +4541,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.37.0"
-source = "git+https://github.com/t8y2/mysql_async.git?rev=2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec#2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec"
+source = "git+https://github.com/t8y2/mysql_async.git?rev=b615bb0b10b5975182a4aa069cabc3d09021f6ab#b615bb0b10b5975182a4aa069cabc3d09021f6ab"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -4569,7 +4570,7 @@ dependencies = [
 [[package]]
 name = "mysql_common"
 version = "0.38.0"
-source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=77085e91e5081309d585153e3b656ce33bc1fe74#77085e91e5081309d585153e3b656ce33bc1fe74"
+source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=47740d85a8277167a5717afac785d37b46a36296#47740d85a8277167a5717afac785d37b46a36296"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.IndexInfo;
+import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -113,6 +114,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_CONNECT));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_QUERY));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_METADATA));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
     }
 
     @Test
@@ -126,6 +128,15 @@ class MongoAgentTest {
     }
 
     @Test
+    void runtimeHandshakeAdvertisesDropDatabaseForMultiSessionConnections() {
+        JsonObject result = new Gson().toJsonTree(MongoAgent.runtimeHandshakeResult()).getAsJsonObject();
+
+        assertEquals(AgentProtocol.MULTI_SESSION_PROTOCOL_VERSION, result.get("protocolVersion").getAsInt());
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MULTI_SESSION));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
+    }
+
+    @Test
     void listIndexesMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"list_indexes\","
@@ -135,6 +146,14 @@ class MongoAgentTest {
         assertEquals(8, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void collectionSpecsPreserveCollectionKindsForTypeAwareClients() {
+        assertEquals(Map.of("name", "orders", "kind", "collection"), MongoAgent.collectionSpec("orders", "collection"));
+        assertEquals(Map.of("name", "report_view", "kind", "view"), MongoAgent.collectionSpec("report_view", "view"));
+        assertEquals(Map.of("name", "metrics", "kind", "timeseries"), MongoAgent.collectionSpec("metrics", "timeseries"));
+        assertEquals("collection", MongoAgent.collectionKind("futureType"));
     }
 
     @Test
@@ -290,6 +309,14 @@ class MongoAgentTest {
     }
 
     @Test
+    void defaultIndexNameMatchesNativeDriverForWholeDoubles() {
+        assertEquals(
+            "email_1_createdAt_-1",
+            MongoAgent.defaultIndexName(Document.parse("{\"email\":1.0,\"createdAt\":-1.0}"))
+        );
+    }
+
+    @Test
     void dropIndexesMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"drop_indexes\","
@@ -304,6 +331,57 @@ class MongoAgentTest {
     }
 
     @Test
+    void dropIndexesRejectsTheDefaultIdIndex() {
+        for (String indexesJson : List.of(
+            "\"_id_\"",
+            "{\"_id\":1}",
+            "{\"_id\":{\"$numberDecimal\":\"1.0\"}}",
+            "[\"email_1\",\"_id_\"]"
+        )) {
+            IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> MongoAgent.parseDropIndexesValue(indexesJson, false)
+            );
+            assertEquals("The default MongoDB _id_ index cannot be dropped", error.getMessage());
+        }
+
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.parseDropIndexesValue("\"_id_\"", true)
+        );
+        assertEquals("*", MongoAgent.parseDropIndexesValue("\"*\"", false));
+    }
+
+    @Test
+    void batchDropIndexesReportsPartialFailuresAndContinues() {
+        List<String> calls = new ArrayList<>();
+
+        Map<String, Object> result = MongoAgent.dropNamedIndexes(List.of("email_1", "missing_1", "created_at_-1"), name -> {
+            calls.add(String.valueOf(name));
+            if ("missing_1".equals(name)) {
+                throw new IllegalStateException("index not found");
+            }
+        });
+
+        assertEquals(List.of("email_1", "missing_1", "created_at_-1"), calls);
+        assertEquals(List.of("email_1", "created_at_-1"), result.get("dropped_names"));
+        assertEquals(2, result.get("affected_rows"));
+        assertEquals(
+            List.of(Map.of("name", "missing_1", "message", "index not found")),
+            result.get("failures")
+        );
+    }
+
+    @Test
+    void batchDropIndexesUsesSerialFallbackOnlyBeforeMongo42() {
+        assertTrue(MongoAgent.serverVersionRequiresSerialDropIndexes("3.4.24"));
+        assertTrue(MongoAgent.serverVersionRequiresSerialDropIndexes("4.0.28"));
+        assertFalse(MongoAgent.serverVersionRequiresSerialDropIndexes("4.2.0"));
+        assertFalse(MongoAgent.serverVersionRequiresSerialDropIndexes("7.0.14"));
+        assertFalse(MongoAgent.serverVersionRequiresSerialDropIndexes("unknown"));
+    }
+
+    @Test
     void dropCollectionMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"drop_collection\","
@@ -314,6 +392,20 @@ class MongoAgentTest {
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
         assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_DROP_COLLECTION));
+    }
+
+    @Test
+    void dropDatabaseMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"drop_database\","
+                + "\"params\":{\"database\":\"app\"}}"
+        );
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(15, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_DROP_DATABASE));
     }
 
     @Test

@@ -619,9 +619,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		if err := session.server.validateConnection(); err == nil {
 			return map[string]bool{"ok": true}, false, nil
 		}
-		r.connectMu.Lock()
-		err = session.server.connectWithControl(session.server.params, session.server.cancelDB, false)
-		r.connectMu.Unlock()
+		err = r.reconnectSession(session)
 		return map[string]bool{"ok": true}, false, err
 	case "cancel_session":
 		session, err := r.session(stringParam(params, "agentSessionId"))
@@ -677,15 +675,25 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 	server := newServer()
 	params.URLParams = appendURLParam(params.URLParams, "APP_NAME", xuguSessionAppName(agentSessionID))
 	r.connectMu.Lock()
-	controlKey, controlDB, err := r.acquireControl(params)
-	if err == nil {
-		err = server.connectWithControl(params, controlDB, false)
+	controlKey, controlDB, controlErr := r.acquireControl(params)
+	var err error
+	if controlErr == nil {
+		var controlAttached bool
+		controlAttached, err = server.connectWithControl(params, controlDB, false)
+		if err != nil || !controlAttached {
+			// Business connect may have succeeded without cancel capability; drop the
+			// unused shared control ref. On hard failure, also release the reservation.
+			r.releaseControl(controlKey)
+			controlKey = ""
+		}
+	} else {
+		// SYSTEM control is optional for ordinary users (no SYSTEM account / no SYS_SESSIONS).
+		// Fall back to a business-database-only session so metadata and queries still work.
+		_, err = server.connectWithControl(params, nil, false)
+		controlKey = ""
 	}
 	r.connectMu.Unlock()
 	if err != nil {
-		if controlKey != "" {
-			r.releaseControl(controlKey)
-		}
 		return err
 	}
 	session := &agentSession{server: server, controlKey: controlKey}
@@ -703,6 +711,24 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 	}
 	r.sessions[agentSessionID] = session
 	return nil
+}
+
+func (r *runtimeServer) reconnectSession(session *agentSession) error {
+	return r.reconnectSessionWith(session, (*server).connectWithControl)
+}
+
+func (r *runtimeServer) reconnectSessionWith(
+	session *agentSession,
+	connect func(*server, connectParams, *sql.DB, bool) (bool, error),
+) error {
+	r.connectMu.Lock()
+	controlAttached, err := connect(session.server, session.server.params, session.server.cancelDB, false)
+	r.connectMu.Unlock()
+	if !controlAttached {
+		r.releaseControl(session.controlKey)
+		session.controlKey = ""
+	}
+	return err
 }
 
 func (r *runtimeServer) replaceSession(agentSessionID string, params connectParams) error {
@@ -736,6 +762,13 @@ func (r *runtimeServer) closeSession(agentSessionID string) error {
 }
 
 func (r *runtimeServer) acquireControl(params connectParams) (string, *sql.DB, error) {
+	return r.acquireControlWith(params, openDB)
+}
+
+func (r *runtimeServer) acquireControlWith(
+	params connectParams,
+	openControl func(connectParams) (*sql.DB, error),
+) (string, *sql.DB, error) {
 	r.controlMu.Lock()
 	defer r.controlMu.Unlock()
 	cancelParams := xuguControlParams(params)
@@ -744,7 +777,7 @@ func (r *runtimeServer) acquireControl(params connectParams) (string, *sql.DB, e
 		control.refs++
 		return key, control.db, nil
 	}
-	db, err := openDB(cancelParams)
+	db, err := openControl(cancelParams)
 	if err != nil {
 		return "", nil, err
 	}
@@ -982,51 +1015,96 @@ func (s *server) connect(params connectParams) error {
 	cancelParams := xuguControlParams(params)
 	cancelDB, err := openDB(cancelParams)
 	if err != nil {
+		_, err = s.connectWithControl(params, nil, false)
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := cancelDB.PingContext(ctx); err != nil {
 		cancelDB.Close()
+		_, err = s.connectWithControl(params, nil, false)
 		return err
 	}
-	if err := s.connectWithControl(params, cancelDB, true); err != nil {
-		cancelDB.Close()
+	attached, err := s.connectWithControl(params, cancelDB, true)
+	if err != nil {
+		// connectWithControl closes an owned cancelDB on failure.
 		return err
+	}
+	if !attached {
+		// Business session is usable; cancel/kill is degraded.
 	}
 	return nil
 }
 
-func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, ownsCancelDB bool) error {
+// connectWithControl opens the business database session.
+// When cancelDB can query SYS_SESSIONS and a unique new session is identified,
+// cancel/kill support is wired. Otherwise the session still succeeds without cancel
+// (controlAttached=false). Ordinary users often cannot use SYSTEM control.
+//
+// controlAttached is true only when cancelDB remains owned by the server session.
+// Callers that share cancelDB must release their control reservation when false.
+func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, ownsCancelDB bool) (controlAttached bool, err error) {
 	_ = s.disconnect()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	before, err := xuguDatabaseSessions(cancelDB)
-	if err != nil {
-		return err
+
+	closeOwnedControl := func() {
+		if ownsCancelDB && cancelDB != nil {
+			_ = cancelDB.Close()
+		}
 	}
+
+	var before map[xuguDatabaseSession]struct{}
+	controlReady := false
+	if cancelDB != nil {
+		before, err = xuguDatabaseSessions(cancelDB)
+		if err != nil {
+			// e.g. E18012 on SYS_SESSIONS — keep business connect path.
+			closeOwnedControl()
+			cancelDB = nil
+			ownsCancelDB = false
+		} else {
+			controlReady = true
+		}
+	}
+
 	db, err := openDB(params)
 	if err != nil {
-		return err
+		closeOwnedControl()
+		return false, err
 	}
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return err
+		closeOwnedControl()
+		return false, err
 	}
+
+	s.db = db
+	s.params = params
+	s.cancelDB = nil
+	s.ownsCancelDB = false
+	s.nodeID = 0
+	s.databaseSessionID = 0
+	s.killSession = nil
+
+	if !controlReady || cancelDB == nil {
+		return false, nil
+	}
+
 	after, err := xuguDatabaseSessions(cancelDB)
 	if err != nil {
-		db.Close()
-		return err
+		closeOwnedControl()
+		return false, nil
 	}
 	databaseSession, err := newXuguDatabaseSession(before, after)
 	if err != nil {
-		db.Close()
-		return err
+		// Ambiguous session tracking must not block ordinary browsing.
+		closeOwnedControl()
+		return false, nil
 	}
-	s.db = db
+
 	s.cancelDB = cancelDB
 	s.ownsCancelDB = ownsCancelDB
-	s.params = params
 	s.nodeID = databaseSession.nodeID
 	s.databaseSessionID = databaseSession.sessionID
 	s.killSession = func() {
@@ -1034,7 +1112,7 @@ func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, owns
 			_, _ = s.cancelDB.Exec(fmt.Sprintf("CALL DBMS_DBA.KILL_SESSION_TRANS(%d, %d)", s.nodeID, s.databaseSessionID))
 		}
 	}
-	return nil
+	return true, nil
 }
 
 func (s *server) disconnect() error {
@@ -1129,6 +1207,20 @@ func newXuguDatabaseSession(
 	before map[xuguDatabaseSession]struct{},
 	after map[xuguDatabaseSession]struct{},
 ) (xuguDatabaseSession, error) {
+	session, n, ok := controlSessionFromSnapshot(before, after)
+	if !ok {
+		return xuguDatabaseSession{}, fmt.Errorf("failed to identify Xugu server session: found %d new sessions", n)
+	}
+	return session, nil
+}
+
+// controlSessionFromSnapshot returns the single newly appeared session, if any.
+// Callers treat ok=false as a soft degrade signal (no cancel/kill), not a hard error.
+// n is the number of newly appeared sessions (useful for error messages).
+func controlSessionFromSnapshot(
+	before map[xuguDatabaseSession]struct{},
+	after map[xuguDatabaseSession]struct{},
+) (xuguDatabaseSession, int, bool) {
 	var candidates []xuguDatabaseSession
 	for session := range after {
 		if _, existed := before[session]; !existed {
@@ -1136,9 +1228,9 @@ func newXuguDatabaseSession(
 		}
 	}
 	if len(candidates) != 1 {
-		return xuguDatabaseSession{}, fmt.Errorf("failed to identify Xugu server session: found %d new sessions", len(candidates))
+		return xuguDatabaseSession{}, len(candidates), false
 	}
-	return candidates[0], nil
+	return candidates[0], 1, true
 }
 
 func buildDSN(params connectParams) string {
@@ -1423,24 +1515,38 @@ func configuredDatabaseName(params connectParams) string {
 }
 
 func isXuguMetadataAccessError(err error) bool {
-	message := strings.ToUpper(err.Error())
-	return strings.Contains(message, "E18012") ||
-		strings.Contains(message, "权限不够") ||
-		strings.Contains(message, "ALL_DATABASES") ||
-		strings.Contains(message, "SYS_DATABASES") ||
-		strings.Contains(message, "ALL_SCHEMAS") ||
-		strings.Contains(message, "SYS_SCHEMAS") ||
-		strings.Contains(message, "ALL_TABLES") ||
-		strings.Contains(message, "SYS_TABLES") ||
-		strings.Contains(message, "ALL_VIEWS") ||
-		strings.Contains(message, "SYS_VIEWS") ||
-		strings.Contains(message, "ALL_COLUMNS") ||
-		strings.Contains(message, "ALL_CONSTRAINTS") ||
-		strings.Contains(message, "ALL_INDEXES") ||
-		strings.Contains(message, "SYS_COLUMNS") ||
-		strings.Contains(message, "SYS_CONSTRAINTS") ||
-		strings.Contains(message, "SYS_INDEXES") ||
-		strings.Contains(message, "SYS_TRIGGERS")
+	if err == nil {
+		return false
+	}
+	message := strings.ToUpper(strings.TrimSpace(strings.TrimRight(err.Error(), "\x00")))
+	for _, marker := range []string{
+		"E18012", "权限不够", "PERMISSION DENIED", "ACCESS DENIED", "INSUFFICIENT PRIVILEGE", "NOT AUTHORIZED",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	catalogObject := false
+	for _, object := range []string{
+		"DATABASES", "SCHEMAS", "TABLES", "VIEWS", "COLUMNS", "CONSTRAINTS", "INDEXES",
+		"TRIGGERS", "PARTIS", "SUBPARTIS", "SEQUENCES", "SYNONYMS", "PROCEDURES", "PACKAGES", "TYPES",
+	} {
+		if strings.Contains(message, "ALL_"+object) || strings.Contains(message, "SYS_"+object) {
+			catalogObject = true
+			break
+		}
+	}
+	if !catalogObject {
+		return false
+	}
+	for _, marker := range []string{
+		"不存在", "DOES NOT EXIST", "NOT EXIST", "UNKNOWN TABLE", "UNKNOWN VIEW", "UNDEFINED TABLE", "INVALID OBJECT NAME",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isXuguMissingOnNullColumnError(err error) bool {
@@ -1527,6 +1633,49 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 	query := xuguListTablesQuery(schema, constraints)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			fallback, fallbackErr := s.listOwnTables(schema, constraints)
+			if fallbackErr == nil {
+				return fallback, nil
+			}
+			if isXuguMetadataAccessError(fallbackErr) {
+				return []tableInfo{}, nil
+			}
+			return nil, fallbackErr
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var result []tableInfo
+	for rows.Next() {
+		var item tableInfo
+		if err := rows.Scan(&item.Name, &item.TableType, &item.Comment); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) listOwnTables(schema string, constraints metadataListConstraints) ([]tableInfo, error) {
+	if !strings.EqualFold(strings.TrimSpace(schema), strings.TrimSpace(s.params.Username)) {
+		return []tableInfo{}, nil
+	}
+	query := xuguConstrainedMetadataListQuery(
+		`
+SELECT TABLE_NAME, 'TABLE' AS TABLE_TYPE, COMMENTS
+FROM USER_TABLES
+UNION ALL
+SELECT VIEW_NAME, 'VIEW' AS TABLE_TYPE, COMMENTS
+FROM USER_VIEWS`,
+		"TABLE_NAME, TABLE_TYPE, COMMENTS",
+		"TABLE_NAME",
+		"TABLE_TYPE",
+		nil,
+		constraints,
+	)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
@@ -1549,6 +1698,21 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	query := xuguListObjectsQuery(schema, constraints)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			// A single inaccessible ALL_* view must not hide the fact that the
+			// table browser can still query the low-privilege table path.  The
+			// fallback deliberately exposes only tables/views; programmable
+			// objects are omitted rather than guessed from unavailable metadata.
+			tables, tableErr := s.listTables(schema, constraints)
+			if tableErr != nil {
+				return nil, tableErr
+			}
+			result := make([]objectInfo, 0, len(tables))
+			for _, table := range tables {
+				result = append(result, objectInfo{Name: table.Name, ObjectType: table.TableType, Schema: schema, Comment: table.Comment})
+			}
+			return result, nil
+		}
 		return nil, err
 	}
 	defer s.closeRows(rows)
@@ -1773,6 +1937,23 @@ func xuguFuzzyLikePattern(value string) string {
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
+		if isXuguMetadataAccessError(err) || isXuguTableNotFoundError(err) {
+			fallbackSchema, fallbackTable, fallbackErr := s.fallbackTableIdentity(schema, table)
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			columns, directErr := s.columnsFromSelect(fallbackSchema, fallbackTable, map[string]bool{})
+			if directErr == nil {
+				return columns, nil
+			}
+			if isXuguMetadataAccessError(err) && isXuguMetadataAccessError(directErr) {
+				return []columnInfo{}, nil
+			}
+			if isXuguTableNotFoundError(directErr) {
+				return nil, err
+			}
+			return nil, directErr
+		}
 		return nil, err
 	}
 	schema, table = catalogSchema, catalogTable
@@ -1859,6 +2040,26 @@ func (s *server) columnsFromSelect(schema, table string, primaryKeys map[string]
 	return emptyIfNil(result), nil
 }
 
+func (s *server) fallbackTableIdentity(schema, table string) (string, string, error) {
+	schema = strings.TrimSpace(schema)
+	if schema == "" {
+		var err error
+		schema, err = s.currentSchema()
+		if err != nil {
+			return "", "", err
+		}
+	}
+	table = strings.TrimSpace(table)
+	if table == "" {
+		return "", "", errors.New("table is required")
+	}
+	return schema, table, nil
+}
+
+func isXuguTableNotFoundError(err error) bool {
+	return strings.Contains(strings.ToUpper(err.Error()), "TABLE NOT FOUND:")
+}
+
 func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error) {
 	rows, err := s.queryRows(xuguTableCatalogQuery(xuguPrimaryKeyColumnsSQL, schema, table), nil)
 	if err != nil {
@@ -1884,6 +2085,9 @@ func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error
 func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
+		if isXuguMetadataAccessError(err) || isXuguTableNotFoundError(err) {
+			return []indexInfo{}, nil
+		}
 		return nil, err
 	}
 	rows, err := s.queryRows(xuguTableCatalogQuery(xuguListIndexesSQL, catalogSchema, catalogTable), nil)
@@ -2043,10 +2247,18 @@ func (s *server) listSubpartitions(schema, table string) ([]subpartitionInfo, er
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
 	if strings.EqualFold(strings.TrimSpace(objectType), "SEQUENCE") {
-		return s.getSequenceSource(schema, name)
+		result, err := s.getSequenceSource(schema, name)
+		if err != nil && isXuguMetadataAccessError(err) {
+			return xuguUnavailableObjectSource(schema, name, objectType), nil
+		}
+		return result, err
 	}
 	if strings.EqualFold(strings.TrimSpace(objectType), "SYNONYM") {
-		return s.getSynonymSource(schema, name)
+		result, err := s.getSynonymSource(schema, name)
+		if err != nil && isXuguMetadataAccessError(err) {
+			return xuguUnavailableObjectSource(schema, name, objectType), nil
+		}
+		return result, err
 	}
 	var err error
 	schema, err = s.normalizeSchema(schema)
@@ -2059,6 +2271,9 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 	}
 	rows, err := s.queryRows(sourceSQL, args)
 	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			return xuguUnavailableObjectSource(schema, name, objectType), nil
+		}
 		return nil, err
 	}
 	defer s.closeRows(rows)
@@ -2077,6 +2292,16 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		result["editable"] = false
 	}
 	return result, rows.Err()
+}
+
+func xuguUnavailableObjectSource(schema, name, objectType string) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"object_type": objectType,
+		"schema":      schema,
+		"source":      fmt.Sprintf("-- XuguDB did not expose source metadata for %s.%s (%s).\n-- The object can still be listed and managed, but its source cannot be reconstructed with the current privileges.", schema, name, objectType),
+		"editable":    false,
+	}
 }
 
 // getSequenceSource reconstructs sequence DDL from ALL_SEQUENCES. Unlike
@@ -2375,15 +2600,33 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	// schema/table/column spellings.
 	if strings.TrimSpace(schema) != "" {
 		if err := s.setSchema(schema); err != nil {
-			return "", err
+			if !isXuguMetadataAccessError(err) {
+				return "", err
+			}
 		}
 	}
 	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
+		if isXuguMetadataAccessError(err) || isXuguTableNotFoundError(err) {
+			fallbackSchema, fallbackTable, fallbackErr := s.fallbackTableIdentity(schema, table)
+			if fallbackErr != nil {
+				return "", fallbackErr
+			}
+			ddl, directErr := s.buildFallbackTableDDL(fallbackSchema, fallbackTable)
+			if directErr == nil {
+				return ddl, nil
+			}
+			if isXuguMetadataAccessError(directErr) {
+				return xuguUnavailableTableDDL(fallbackSchema, fallbackTable), nil
+			}
+			return "", directErr
+		}
 		return "", err
 	}
 	if err := s.setSchema(catalogSchema); err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
 	}
 	// DBMS_METADATA.GET_DDL can block indefinitely on XuguDB, even when the
 	// table metadata itself is accessible. Reconstruct the DDL from the same
@@ -2393,6 +2636,21 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 		return "", err
 	}
 	return s.appendTableIndexDDL(catalogSchema, catalogTable, ddl), nil
+}
+
+func (s *server) buildFallbackTableDDL(schema, table string) (string, error) {
+	columns, err := s.columnsFromSelect(schema, table, map[string]bool{})
+	if err != nil {
+		return "", err
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("table not found: %s.%s", schema, table)
+	}
+	return renderXuguTableDDL(schema, table, columns, xuguTableMetadata{}, nil, nil, nil, nil), nil
+}
+
+func xuguUnavailableTableDDL(schema, table string) string {
+	return fmt.Sprintf("-- XuguDB did not expose enough metadata to reconstruct %s.%s.\n-- The table may still be readable, but its DDL requires additional metadata privileges.", schema, table)
 }
 
 type xuguCatalogTableName struct {
@@ -2971,27 +3229,45 @@ func (s *server) buildTableDDL(schema, table string) (string, error) {
 	}
 	metadata, err := s.tableMetadata(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		metadata = xuguTableMetadata{}
 	}
 	identities, err := s.tableIdentities(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		identities = map[string]xuguIdentityInfo{}
 	}
 	constraints, err := s.tableConstraints(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		constraints = []xuguConstraintInfo{}
 	}
 	foreignKeys, err := s.tableForeignKeys(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		foreignKeys = []xuguConstraintInfo{}
 	}
 	partitions, err := s.tablePartitions(schema, table, false)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		partitions = []xuguPartitionInfo{}
 	}
 	subpartitions, err := s.tablePartitions(schema, table, true)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		subpartitions = []xuguPartitionInfo{}
 	}
 	allConstraints := make([]xuguConstraintInfo, 0, len(constraints)+len(foreignKeys))
 	allConstraints = append(allConstraints, constraints...)

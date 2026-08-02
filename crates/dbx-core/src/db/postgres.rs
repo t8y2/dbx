@@ -8,12 +8,16 @@ use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
+use sqlparser::ast::Statement;
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::types::{FromSql, Kind, Type};
@@ -27,7 +31,7 @@ use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
     DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics,
-    OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
+    OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -63,6 +67,22 @@ pub struct PostgresTableAccessInfo {
     pub owner: String,
     pub owner_default_privileges: Vec<String>,
     pub privileges: Vec<PostgresTablePrivilegeInfo>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PostgresTablePartitionInfo {
+    pub is_partition: bool,
+    pub parent_schema: Option<String>,
+    pub parent_table: Option<String>,
+    pub bound: Option<String>,
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PostgresTablePartitionLocalObjects {
+    pub has_primary_key: bool,
+    pub foreign_keys: BTreeSet<String>,
+    pub indexes: BTreeSet<String>,
 }
 
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
@@ -605,6 +625,86 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
     }
 }
 
+fn pg_value_to_json_with_srid(row: &Row, idx: usize, col_type: PgColType) -> (serde_json::Value, Option<u32>) {
+    if col_type != PgColType::Geometry {
+        return (pg_value_to_json_classified(row, idx, col_type), None);
+    }
+    if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
+        return match super::wkb::decode_wkb_geometry(&raw) {
+            Some(geometry) => (serde_json::Value::String(geometry.wkt), geometry.srid),
+            None => (super::binary_value_to_json(&raw), None),
+        };
+    }
+    (serde_json::Value::Null, None)
+}
+
+fn pg_text_fallback_value(value: &str, col_type: Option<PgColType>) -> (serde_json::Value, Option<u32>) {
+    let (value, srid, _) = pg_text_fallback_value_with_spatial(value, col_type);
+    (value, srid)
+}
+
+fn pg_text_fallback_value_with_spatial(
+    value: &str,
+    col_type: Option<PgColType>,
+) -> (serde_json::Value, Option<u32>, bool) {
+    match col_type {
+        Some(PgColType::Geometry) => decode_pg_text_wkb(value)
+            .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
+            .or_else(|| split_pg_ewkt(value, false).map(|(value, srid)| (value, srid, true)))
+            .unwrap_or_else(|| (serde_json::Value::String(value.to_string()), None, true)),
+        Some(_) => (serde_json::Value::String(value.to_string()), None, false),
+        None => decode_pg_text_wkb(value)
+            .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
+            .or_else(|| split_pg_ewkt(value, true).map(|(value, srid)| (value, srid, true)))
+            .unwrap_or_else(|| (serde_json::Value::String(value.to_string()), None, false)),
+    }
+}
+
+fn decode_pg_text_wkb(value: &str) -> Option<super::wkb::DecodedGeometry> {
+    let trimmed = value.trim();
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .or_else(|| trimmed.strip_prefix("\\x"))
+        .or_else(|| trimmed.strip_prefix("\\X"))
+        .unwrap_or(trimmed);
+    if hex.len() < 10 || !hex.len().is_multiple_of(2) || !matches!(&hex[..2], "00" | "01") || !hex.is_ascii() {
+        return None;
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    super::wkb::decode_wkb_geometry(&bytes)
+}
+
+fn split_pg_ewkt(value: &str, require_recognizable_wkt: bool) -> Option<(serde_json::Value, Option<u32>)> {
+    let rest = value.strip_prefix("SRID=")?;
+    let (srid, wkt) = rest.split_once(';')?;
+    let srid = srid.parse::<i64>().ok().and_then(|value| u32::try_from(value).ok())?;
+    if require_recognizable_wkt && !is_recognizable_wkt(wkt) {
+        return None;
+    }
+    Some((serde_json::Value::String(wkt.to_string()), (srid != 0).then_some(srid)))
+}
+
+fn is_recognizable_wkt(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    const TYPES: [&str; 7] =
+        ["POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"];
+    TYPES.iter().any(|geometry_type| {
+        trimmed
+            .get(..geometry_type.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(geometry_type))
+            .and_then(|_| trimmed.as_bytes().get(geometry_type.len()))
+            .is_some_and(|next| next.is_ascii_whitespace() || *next == b'(')
+    })
+}
+
 /// Serialize a pgvector `vector` component with f32 shortest round-trip decimal text.
 ///
 /// Casting through `f64` (or fixed fractional rounding) either expands binary noise or
@@ -770,8 +870,20 @@ fn should_retry_postgres_text_query_message(message: &str) -> bool {
 }
 
 fn should_retry_postgres_stale_cache(err: &tokio_postgres::Error) -> bool {
-    let message = err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string()).to_ascii_lowercase();
-    message.contains("cached plan must not change result type")
+    if let Some(db_error) = err.as_db_error() {
+        return should_retry_postgres_stale_cache_fields(
+            Some(db_error.code().code()),
+            db_error.routine(),
+            db_error.message(),
+        );
+    }
+    should_retry_postgres_stale_cache_fields(None, None, &err.to_string())
+}
+
+fn should_retry_postgres_stale_cache_fields(sqlstate: Option<&str>, routine: Option<&str>, message: &str) -> bool {
+    let structured_match = sqlstate == Some("0A000")
+        && routine.is_some_and(|routine| routine.eq_ignore_ascii_case("RevalidateCachedQuery"));
+    structured_match || message.to_ascii_lowercase().contains("cached plan must not change result type")
 }
 
 async fn postgres_query_cached(
@@ -883,6 +995,13 @@ async fn execute_select_prepared(
     );
     tokio::pin!(stream);
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
+    let mut spatial_columns = SpatialColumnBuilder::new(
+        column_classes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, col_type)| (*col_type == PgColType::Geometry).then_some(index)),
+    );
     let mut truncated = false;
 
     let rows_start = Instant::now();
@@ -892,13 +1011,19 @@ async fn execute_select_prepared(
             break;
         }
         let row = row_result?;
-        result_rows.push(
-            (0..row.columns().len())
-                .map(|i| {
-                    pg_value_to_json_classified(&row, i, column_classes.get(i).copied().unwrap_or(PgColType::Other))
-                })
-                .collect(),
-        );
+        let mut values = Vec::with_capacity(row.columns().len());
+        let mut row_srids = vec![None; row.columns().len()];
+        for (i, row_srid) in row_srids.iter_mut().enumerate() {
+            let col_type = column_classes.get(i).copied().unwrap_or(PgColType::Other);
+            let (value, srid) = pg_value_to_json_with_srid(&row, i, col_type);
+            if col_type == PgColType::Geometry {
+                spatial_columns.observe(i, srid);
+                *row_srid = srid;
+            }
+            values.push(value);
+        }
+        result_rows.push(values);
+        spatial_values.push(row_srids);
     }
     log::info!(
         "[postgres][select:rows:done] elapsed_ms={} total_ms={} row_count={} truncated={}",
@@ -908,10 +1033,13 @@ async fn execute_select_prepared(
         truncated
     );
 
+    let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(PreparedSelectOutcome::Complete(QueryResult {
         columns,
         column_types,
         column_sortables: Vec::new(),
+        spatial_columns,
+        spatial_values,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -937,6 +1065,15 @@ async fn execute_select_text(
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
+    let column_classes =
+        prepared_column_types.as_ref().map(|types| classify_pg_column_types(types)).unwrap_or_default();
+    let mut spatial_columns = SpatialColumnBuilder::new(
+        column_classes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, col_type)| (*col_type == PgColType::Geometry).then_some(index)),
+    );
     let mut truncated = false;
 
     while let Some(message) = stream.next().await {
@@ -953,13 +1090,25 @@ async fn execute_select_text(
                     break;
                 }
                 let mut values = Vec::with_capacity(row.len());
-                for i in 0..row.len() {
-                    values.push(match row.try_get(i).map_err(pg_error_to_string)? {
-                        Some(value) => serde_json::Value::String(value.to_string()),
-                        None => serde_json::Value::Null,
-                    });
+                let mut row_srids = vec![None; row.len()];
+                for (i, row_srid) in row_srids.iter_mut().enumerate() {
+                    match row.try_get(i).map_err(pg_error_to_string)? {
+                        Some(value) => {
+                            let (decoded, srid, is_spatial) =
+                                pg_text_fallback_value_with_spatial(value, column_classes.get(i).copied());
+                            values.push(decoded);
+                            if is_spatial {
+                                spatial_columns.observe(i, srid);
+                                *row_srid = srid;
+                            }
+                        }
+                        None => {
+                            values.push(serde_json::Value::Null);
+                        }
+                    }
                 }
                 result_rows.push(values);
+                spatial_values.push(row_srids);
             }
             Err(_) if result_rows.len() >= row_limit => {
                 truncated = true;
@@ -971,10 +1120,13 @@ async fn execute_select_text(
         }
     }
 
+    let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(QueryResult {
         column_types: matching_pg_text_column_types(&columns, prepared_column_types),
         columns,
         column_sortables: Vec::new(),
+        spatial_columns,
+        spatial_values,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1112,6 +1264,8 @@ async fn stream_select_query_text(
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
+    let column_classes =
+        prepared_column_types.as_ref().map(|types| classify_pg_column_types(types)).unwrap_or_default();
     let mut rows_streamed = 0_u64;
     while let Some(message) = stream.next().await {
         match message.map_err(pg_error_to_string)? {
@@ -1132,7 +1286,7 @@ async fn stream_select_query_text(
                 let mut values = Vec::with_capacity(row.len());
                 for i in 0..row.len() {
                     values.push(match row.try_get(i).map_err(pg_error_to_string)? {
-                        Some(value) => serde_json::Value::String(value.to_string()),
+                        Some(value) => pg_text_fallback_value(value, column_classes.get(i).copied()).0,
                         None => serde_json::Value::Null,
                     });
                 }
@@ -1201,7 +1355,7 @@ pub async fn stream_query_rows(
     match stream_query_rows_on_client(&client, sql, max_rows, cancelled, &mut on_row).await {
         Ok(rows) => Ok(rows),
         Err(error) if should_retry_postgres_text_query_message(&error.to_ascii_lowercase()) => {
-            stream_query_rows_text_on_client(&client, sql, max_rows, cancelled, &mut on_row).await
+            stream_query_rows_text_on_client(&client, sql, max_rows, cancelled, None, &mut on_row).await
         }
         Err(error) => Err(error),
     }
@@ -1221,7 +1375,7 @@ async fn stream_query_rows_on_client(
             "[postgres][row_stream:text_fallback] unsupported_type={} switching_to=simple_query",
             unsupported_type
         );
-        return stream_query_rows_text_on_client(client, sql, max_rows, cancelled, on_row).await;
+        return stream_query_rows_text_on_client(client, sql, max_rows, cancelled, Some(&column_classes), on_row).await;
     }
     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     let stream = client.query_raw(&stmt, params).await.map_err(pg_error_to_string)?;
@@ -1252,6 +1406,7 @@ async fn stream_query_rows_text_on_client(
     sql: &str,
     max_rows: Option<usize>,
     cancelled: &AtomicBool,
+    column_classes: Option<&[PgColType]>,
     on_row: &mut impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
@@ -1271,7 +1426,9 @@ async fn stream_query_rows_text_on_client(
             let mut values = Vec::with_capacity(row.len());
             for i in 0..row.len() {
                 values.push(match row.try_get(i).map_err(pg_error_to_string)? {
-                    Some(value) => serde_json::Value::String(value.to_string()),
+                    Some(value) => {
+                        pg_text_fallback_value(value, column_classes.and_then(|classes| classes.get(i)).copied()).0
+                    }
                     None => serde_json::Value::Null,
                 });
             }
@@ -2098,38 +2255,113 @@ pub async fn get_table_comment(pool: &Pool, schema: &str, table: &str) -> Result
     Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()).filter(|s| !s.is_empty()))
 }
 
-pub async fn get_table_partition_key(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
+pub async fn get_table_partition_info(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<PostgresTablePartitionInfo, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    // Probe relkind first so PostgreSQL-compatible servers without the PG10
-    // pg_get_partkeydef function keep ordinary-table DDL unchanged.
-    if postgres_query_cached(&client, postgres_partitioned_parent_sql(), &[&schema, &table])
-        .await
-        .map_err(|e| e.to_string())?
-        .is_empty()
-    {
-        return Ok(None);
-    }
-    let rows = postgres_query_cached(&client, postgres_table_partition_key_sql(), &[&schema, &table])
+    let relation_rows = postgres_query_cached(&client, postgres_table_partition_relation_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
-    Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()).filter(|s| !s.is_empty()))
+    let Some(relation) = relation_rows.first() else {
+        return Ok(PostgresTablePartitionInfo::default());
+    };
+    let relkind = relation.try_get::<_, String>(0).unwrap_or_default();
+    let is_partition = relation.try_get::<_, bool>(1).unwrap_or(false);
+    if relkind != "p" && !is_partition {
+        return Ok(PostgresTablePartitionInfo::default());
+    }
+
+    let rows = postgres_query_cached(&client, postgres_table_partition_info_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(row) = rows.first() else {
+        return Ok(PostgresTablePartitionInfo { is_partition, ..Default::default() });
+    };
+    Ok(PostgresTablePartitionInfo {
+        is_partition,
+        parent_schema: row.try_get::<_, Option<String>>(0).ok().flatten().filter(|value| !value.is_empty()),
+        parent_table: row.try_get::<_, Option<String>>(1).ok().flatten().filter(|value| !value.is_empty()),
+        bound: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|value| !value.is_empty()),
+        key: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|value| !value.is_empty()),
+    })
 }
 
-fn postgres_partitioned_parent_sql() -> &'static str {
-    "SELECT 1 \
+pub async fn get_table_partition_key(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
+    Ok(get_table_partition_info(pool, schema, table).await?.key)
+}
+
+pub async fn get_table_partition_local_objects(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<PostgresTablePartitionLocalObjects, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_table_partition_local_objects_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut result = PostgresTablePartitionLocalObjects::default();
+    for row in rows {
+        let object_kind = row.try_get::<_, String>(0).unwrap_or_default();
+        let object_name = row.try_get::<_, String>(1).unwrap_or_default();
+        let object_type = row.try_get::<_, Option<String>>(2).ok().flatten().unwrap_or_default();
+        match object_kind.as_str() {
+            "constraint" if object_type == "p" => result.has_primary_key = true,
+            "constraint" if object_type == "f" && !object_name.is_empty() => {
+                result.foreign_keys.insert(object_name);
+            }
+            "index" if !object_name.is_empty() => {
+                result.indexes.insert(object_name);
+            }
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
+fn postgres_table_partition_relation_sql() -> &'static str {
+    "SELECT c.relkind::text, \
+            COALESCE((pg_catalog.row_to_json(c)->>'relispartition')::boolean, false) AS is_partition \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'p' \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p') \
      LIMIT 1"
 }
 
-fn postgres_table_partition_key_sql() -> &'static str {
-    "SELECT pg_catalog.pg_get_partkeydef(c.oid) AS partition_key \
+fn postgres_table_partition_info_sql() -> &'static str {
+    "SELECT CASE WHEN c.relispartition THEN pn.nspname ELSE NULL END AS parent_schema, \
+            CASE WHEN c.relispartition THEN pc.relname ELSE NULL END AS parent_table, \
+            CASE WHEN c.relispartition THEN pg_catalog.pg_get_expr(c.relpartbound, c.oid, true) ELSE NULL END AS partition_bound, \
+            CASE WHEN c.relkind = 'p' THEN pg_catalog.pg_get_partkeydef(c.oid) ELSE NULL END AS partition_key \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'p' \
+     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p') \
+     ORDER BY i.inhseqno NULLS LAST \
      LIMIT 1"
+}
+
+fn postgres_table_partition_local_objects_sql() -> &'static str {
+    "SELECT 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND con.contype IN ('p','f') \
+       AND COALESCE(NULLIF(pg_catalog.row_to_json(con)->>'conparentid', '')::oid, 0) = 0 \
+     UNION ALL \
+     SELECT 'index'::text AS object_kind, idx.relname AS object_name, NULL::text AS object_type \
+     FROM pg_catalog.pg_index ix \
+     JOIN pg_catalog.pg_class c ON c.oid = ix.indrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     JOIN pg_catalog.pg_class idx ON idx.oid = ix.indexrelid \
+     WHERE n.nspname = $1 AND c.relname = $2 \
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = idx.oid) \
+     ORDER BY object_kind, object_name"
 }
 
 fn postgres_table_comment_sql() -> &'static str {
@@ -2820,6 +3052,77 @@ pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<C
     }
 }
 
+fn pg_quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn redshift_columns_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT c.column_name, \
+                CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+                c.is_nullable, \
+                c.column_default, \
+                CAST(c.numeric_precision AS varchar) AS numeric_precision, \
+                CAST(c.numeric_scale AS varchar) AS numeric_scale, \
+                CAST(c.character_maximum_length AS varchar) AS character_maximum_length \
+         FROM information_schema.columns c \
+         WHERE c.table_schema = {} AND c.table_name = {} \
+         ORDER BY c.ordinal_position",
+        pg_quote_literal(schema),
+        pg_quote_literal(table)
+    )
+}
+
+fn query_result_text(row: &[serde_json::Value], index: usize) -> Option<String> {
+    row.get(index).and_then(|value| match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    })
+}
+
+fn query_result_i32(row: &[serde_json::Value], index: usize) -> Option<i32> {
+    query_result_text(row, index)?.parse().ok()
+}
+
+fn redshift_columns_from_query_result(result: QueryResult) -> Vec<ColumnInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(ColumnInfo {
+                name: query_result_text(&row, 0)?,
+                data_type: query_result_text(&row, 1).unwrap_or_default(),
+                is_nullable: query_result_text(&row, 2).is_none_or(|value| value.eq_ignore_ascii_case("YES")),
+                column_default: query_result_text(&row, 3),
+                is_primary_key: false,
+                extra: None,
+                comment: None,
+                numeric_precision: query_result_i32(&row, 4),
+                numeric_scale: query_result_i32(&row, 5),
+                character_maximum_length: query_result_i32(&row, 6),
+                enum_values: None,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let result = execute_select_text(
+        &client,
+        &redshift_columns_sql(schema, table),
+        Instant::now(),
+        crate::query::MAX_ROWS,
+        None,
+    )
+    .await?;
+    Ok(redshift_columns_from_query_result(result))
+}
+
 pub(crate) fn pg_quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -2829,6 +3132,7 @@ pub(crate) enum PostgresSearchPathContext {
     Query,
     Transaction,
     LocalTransaction,
+    LocalQueryTransaction,
 }
 
 pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
@@ -2838,13 +3142,110 @@ pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearch
         PostgresSearchPathContext::Query => ("", ", pg_catalog, public"),
         PostgresSearchPathContext::Transaction => ("", ", pg_catalog"),
         PostgresSearchPathContext::LocalTransaction => (" LOCAL", ", pg_catalog"),
+        PostgresSearchPathContext::LocalQueryTransaction => (" LOCAL", ", pg_catalog, public"),
     };
     // PostgreSQL otherwise searches pg_catalog before every explicit path item.
     format!("SET{scope} search_path TO {}{suffix}", pg_quote_ident(schema))
 }
 
+fn postgres_set_single_schema_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
+    let scope = if context == PostgresSearchPathContext::LocalTransaction { " LOCAL" } else { "" };
+    format!("SET{scope} search_path TO {}", pg_quote_ident(schema))
+}
+
+fn postgres_requires_single_schema_search_path(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("does not support search_path with multiple names")
+}
+
+fn postgres_single_schema_clients() -> &'static Mutex<HashMap<usize, Weak<deadpool_postgres::StatementCache>>> {
+    static CLIENTS: OnceLock<Mutex<HashMap<usize, Weak<deadpool_postgres::StatementCache>>>> = OnceLock::new();
+    CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn postgres_client_uses_single_schema_search_path(client: &deadpool_postgres::Client) -> bool {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut clients = postgres_single_schema_clients().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match clients.get(&key).and_then(Weak::upgrade) {
+        Some(cached) if Arc::ptr_eq(&cached, statement_cache) => true,
+        _ => {
+            clients.remove(&key);
+            false
+        }
+    }
+}
+
+fn mark_postgres_client_single_schema_search_path(client: &deadpool_postgres::Client) {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut clients = postgres_single_schema_clients().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    clients.retain(|_, cached| cached.strong_count() > 0);
+    clients.insert(key, Arc::downgrade(statement_cache));
+}
+
+pub(crate) async fn set_postgres_search_path(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    context: PostgresSearchPathContext,
+    timeout_duration: Duration,
+) -> Result<u64, String> {
+    if postgres_client_uses_single_schema_search_path(client) {
+        return execute_postgres_infra_statement(
+            client,
+            &postgres_set_single_schema_search_path_sql(schema, context),
+            timeout_duration,
+            "schema.set",
+        )
+        .await;
+    }
+
+    let primary_sql = postgres_set_search_path_sql(schema, context);
+    match execute_postgres_infra_statement(client, &primary_sql, timeout_duration, "schema.set").await {
+        Ok(affected) => Ok(affected),
+        Err(primary_error) if postgres_requires_single_schema_search_path(&primary_error) => {
+            mark_postgres_client_single_schema_search_path(client);
+            log::info!("[postgres][schema.set:single-schema-fallback] schema={schema}");
+            execute_postgres_infra_statement(
+                client,
+                &postgres_set_single_schema_search_path_sql(schema, context),
+                timeout_duration,
+                "schema.set",
+            )
+            .await
+            .map_err(|fallback_error| {
+                format!("{primary_error}; single-schema search_path fallback failed: {fallback_error}")
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
+}
+
+/// Returns whether PostgreSQL should execute this statement through the row
+/// retrieval path. DML without `RETURNING` needs `execute` for its command
+/// tag/affected-row count, while DML with `RETURNING` produces a result set.
+pub(crate) fn postgres_statement_returns_rows(sql: &str) -> bool {
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+        return true;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
+        return false;
+    };
+    let [statement] = statements.as_slice() else {
+        return false;
+    };
+
+    match statement {
+        Statement::Insert(insert) => insert.returning.is_some(),
+        Statement::Update(update) => update.returning.is_some(),
+        Statement::Delete(delete) => delete.returning.is_some(),
+        Statement::Merge(merge) => merge.output.is_some(),
+        _ => false,
+    }
 }
 
 pub async fn execute_query(pool: &Pool, sql: &str) -> Result<QueryResult, String> {
@@ -2859,7 +3260,7 @@ pub async fn execute_query_with_max_rows(
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if postgres_statement_returns_rows(sql) {
         let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
         execute_select_query(&client, sql, start, row_limit).await
     } else {
@@ -2871,6 +3272,8 @@ pub async fn execute_query_with_max_rows(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -2889,6 +3292,7 @@ pub async fn execute_query_with_max_rows_and_cancel(
     cancel_token: Option<CancellationToken>,
     budget: DbOperationBudget,
     cancel_context: Option<PostgresCancelContext>,
+    prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
     let pg_cancel_token = client.cancel_token();
@@ -2898,7 +3302,89 @@ pub async fn execute_query_with_max_rows_and_cancel(
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows),
+        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+    )
+    .await
+}
+
+fn postgres_read_only_transaction_setup(schema: Option<&str>) -> Vec<(String, &'static str)> {
+    let mut statements = vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")];
+    if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
+        statements.push((
+            postgres_set_search_path_sql(schema, PostgresSearchPathContext::LocalQueryTransaction),
+            "explain_analyze.schema",
+        ));
+    }
+    statements
+}
+
+fn postgres_read_only_transaction_cleanup_error(error: String) -> String {
+    format!("PostgreSQL read-only transaction cleanup failed: {error}")
+}
+
+fn merge_postgres_operation_and_rollback_result<T>(
+    operation_result: Result<T, String>,
+    rollback_result: Result<(), String>,
+) -> Result<T, String> {
+    match (operation_result, rollback_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(operation_error), Ok(())) => Err(operation_error),
+        (Ok(_), Err(rollback_error)) => Err(postgres_read_only_transaction_cleanup_error(rollback_error)),
+        (Err(operation_error), Err(rollback_error)) => {
+            Err(format!("{operation_error}; {}", postgres_read_only_transaction_cleanup_error(rollback_error)))
+        }
+    }
+}
+
+async fn run_postgres_operation_with_rollback<T, Operation, OperationFuture, Rollback, RollbackFuture>(
+    operation: Operation,
+    rollback: Rollback,
+) -> Result<T, String>
+where
+    Operation: FnOnce() -> OperationFuture,
+    OperationFuture: Future<Output = Result<T, String>>,
+    Rollback: FnOnce() -> RollbackFuture,
+    RollbackFuture: Future<Output = Result<(), String>>,
+{
+    let operation_result = operation().await;
+    let rollback_result = rollback().await;
+    merge_postgres_operation_and_rollback_result(operation_result, rollback_result)
+}
+
+pub async fn execute_query_in_read_only_transaction_with_rollback(
+    pool: &Pool,
+    schema: Option<&str>,
+    sql: &str,
+    max_rows: Option<usize>,
+    cancel_token: Option<CancellationToken>,
+    budget: DbOperationBudget,
+    cancel_context: Option<PostgresCancelContext>,
+) -> Result<QueryResult, String> {
+    let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
+    let setup = postgres_read_only_transaction_setup(schema);
+
+    run_postgres_operation_with_rollback(
+        || async {
+            for (statement, stage) in setup {
+                execute_postgres_infra_statement(&client, &statement, budget.recycle_timeout, stage).await?;
+            }
+
+            let pg_cancel_token = client.cancel_token();
+            wait_postgres_query(
+                pg_cancel_token,
+                cancel_context,
+                cancel_token,
+                budget.query_timeout,
+                budget.cancel_timeout,
+                execute_query_with_max_rows_inner(&client, sql, max_rows, false),
+            )
+            .await
+        },
+        || async {
+            execute_postgres_infra_statement(&client, "ROLLBACK", budget.cleanup_timeout, "explain_analyze.rollback")
+                .await
+                .map(|_| ())
+        },
     )
     .await
 }
@@ -2924,13 +3410,7 @@ pub async fn stream_select_query_with_cancel(
     if let Some(schema) = schema.filter(|_| schema_was_set) {
         // Match normal query execution: export may reference unqualified names
         // in the active schema, so the streaming path must use the same search_path.
-        execute_postgres_infra_statement(
-            &client,
-            &postgres_set_search_path_sql(schema, PostgresSearchPathContext::Query),
-            budget.recycle_timeout,
-            "schema.set",
-        )
-        .await?;
+        set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
     }
 
     let setup_transaction_started = !setup_sql.is_empty();
@@ -3037,17 +3517,11 @@ pub async fn execute_query_with_schema_and_max_rows(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        return execute_query_with_max_rows_inner(&client, sql, max_rows).await;
+        return execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
     }
 
     let set_schema_start = Instant::now();
-    execute_postgres_infra_statement(
-        &client,
-        &postgres_set_search_path_sql(schema, PostgresSearchPathContext::Query),
-        super::connection_timeout(),
-        "schema.set",
-    )
-    .await?;
+    set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, super::connection_timeout()).await?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),
@@ -3055,7 +3529,7 @@ pub async fn execute_query_with_schema_and_max_rows(
     );
 
     let query_start = Instant::now();
-    let result = execute_query_with_max_rows_inner(&client, sql, max_rows).await;
+    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
     if result.is_ok() {
         clear_postgres_caches_after_ddl(pool, Some(&client), sql);
     }
@@ -3078,6 +3552,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     cancel_token: Option<CancellationToken>,
     budget: DbOperationBudget,
     cancel_context: Option<PostgresCancelContext>,
+    prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let checkout_start = Instant::now();
@@ -3100,19 +3575,13 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
             cancel_token,
             budget.query_timeout,
             budget.cancel_timeout,
-            execute_query_with_max_rows_inner(&client, sql, max_rows),
+            execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
         )
         .await;
     }
 
     let set_schema_start = Instant::now();
-    execute_postgres_infra_statement(
-        &client,
-        &postgres_set_search_path_sql(schema, PostgresSearchPathContext::Query),
-        budget.recycle_timeout,
-        "schema.set",
-    )
-    .await?;
+    set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),
@@ -3127,7 +3596,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows),
+        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
     )
     .await;
     if result.is_ok() {
@@ -3366,12 +3835,17 @@ async fn execute_query_with_max_rows_inner(
     client: &deadpool_postgres::Client,
     sql: &str,
     max_rows: Option<usize>,
+    prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
-        execute_select_query(client, sql, start, row_limit).await
+    if postgres_statement_returns_rows(sql) {
+        if prefer_text_protocol {
+            execute_select_text(client, sql, start, row_limit, None).await
+        } else {
+            execute_select_query(client, sql, start, row_limit).await
+        }
     } else {
         let affected = client.execute(sql, &[]).await.map_err(pg_error_to_string)?;
 
@@ -3379,6 +3853,8 @@ async fn execute_query_with_max_rows_inner(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -3585,6 +4061,30 @@ pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result
             on_delete: postgres_foreign_key_action(pg_row_try_string(row, 6)),
         })
         .collect())
+}
+
+fn postgres_table_dependencies_sql() -> &'static str {
+    "SELECT DISTINCT child.relname AS table_name, parent.relname AS ref_table \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class child ON child.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace child_schema ON child_schema.oid = child.relnamespace \
+     JOIN pg_catalog.pg_class parent ON parent.oid = con.confrelid \
+     JOIN pg_catalog.pg_namespace parent_schema ON parent_schema.oid = parent.relnamespace \
+     WHERE con.contype = 'f' \
+       AND child_schema.nspname = $1 \
+       AND parent_schema.nspname = $1 \
+     ORDER BY child.relname, parent.relname"
+}
+
+/// Fetch all same-schema table dependencies in one round trip. Whole-database
+/// exports use this instead of issuing one information_schema query per table.
+pub async fn list_table_dependencies(pool: &Pool, schema: &str) -> Result<Vec<(String, String)>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_table_dependencies_sql(), &[&schema])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows.iter().map(|row| (pg_row_try_string(row, 0), pg_row_try_string(row, 1))).collect())
 }
 
 pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
@@ -4071,6 +4571,7 @@ pub async fn copy_in(pool: &Pool, sql: &str, data: &[u8]) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::process::Command;
     use std::time::Instant;
     use tokio_postgres::types::FromSql;
@@ -4160,6 +4661,65 @@ mod tests {
         assert!(Vec::<Option<serde_json::Value>>::accepts(&Type::JSONB_ARRAY));
         assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::TEXT_ARRAY));
         assert!(!Vec::<Option<serde_json::Value>>::accepts(&Type::INT4_ARRAY));
+    }
+
+    #[test]
+    fn postgres_explain_analyze_uses_read_only_transaction_local_schema() {
+        assert_eq!(
+            postgres_read_only_transaction_setup(Some("sales")),
+            vec![
+                ("BEGIN READ ONLY".to_string(), "explain_analyze.begin"),
+                ("SET LOCAL search_path TO \"sales\", pg_catalog, public".to_string(), "explain_analyze.schema"),
+            ]
+        );
+        assert_eq!(
+            postgres_read_only_transaction_setup(None),
+            vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")]
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_explain_analyze_rolls_back_after_success_and_query_failures() {
+        let rollback_calls = Cell::new(0);
+        let result = run_postgres_operation_with_rollback(
+            || async { Ok::<_, String>(7) },
+            || async {
+                rollback_calls.set(rollback_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result, Ok(7));
+        assert_eq!(rollback_calls.get(), 1);
+
+        for operation_error in ["query failed", crate::query::QUERY_CANCELED, "Query timed out after 30 seconds"] {
+            let rollback_calls = Cell::new(0);
+            let result = run_postgres_operation_with_rollback(
+                || async { Err::<(), _>(operation_error.to_string()) },
+                || async {
+                    rollback_calls.set(rollback_calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .await;
+
+            assert_eq!(result, Err(operation_error.to_string()));
+            assert_eq!(rollback_calls.get(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_explain_analyze_marks_rollback_failure_as_pool_pollution() {
+        let result = run_postgres_operation_with_rollback(
+            || async { Err::<(), _>("query failed".to_string()) },
+            || async { Err("PostgreSQL explain_analyze.rollback timed out after 3 seconds".to_string()) },
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err("query failed; PostgreSQL read-only transaction cleanup failed: PostgreSQL explain_analyze.rollback timed out after 3 seconds".to_string())
+        );
     }
 
     fn pg_interval_bytes(microseconds: i64, days: i32, months: i32) -> [u8; 16] {
@@ -4276,6 +4836,10 @@ mod tests {
             postgres_set_search_path_sql("application", PostgresSearchPathContext::LocalTransaction),
             "SET LOCAL search_path TO \"application\", pg_catalog"
         );
+        assert_eq!(
+            postgres_set_search_path_sql("application", PostgresSearchPathContext::LocalQueryTransaction),
+            "SET LOCAL search_path TO \"application\", pg_catalog, public"
+        );
     }
 
     #[test]
@@ -4284,6 +4848,56 @@ mod tests {
             postgres_set_search_path_sql("tenant\"; RESET search_path; --", PostgresSearchPathContext::Query,),
             "SET search_path TO \"tenant\"\"; RESET search_path; --\", pg_catalog, public"
         );
+    }
+
+    #[test]
+    fn postgres_single_schema_search_path_preserves_scope_and_quoting() {
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql("application", PostgresSearchPathContext::Query),
+            "SET search_path TO \"application\""
+        );
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql("application", PostgresSearchPathContext::Transaction),
+            "SET search_path TO \"application\""
+        );
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql(
+                "tenant\"; RESET search_path; --",
+                PostgresSearchPathContext::LocalTransaction,
+            ),
+            "SET LOCAL search_path TO \"tenant\"\"; RESET search_path; --\""
+        );
+    }
+
+    #[test]
+    fn postgres_single_schema_fallback_only_matches_compatible_server_error() {
+        assert!(postgres_requires_single_schema_search_path(
+            "ERROR: Hologres does not support search_path with multiple names: admaterial."
+        ));
+        assert!(!postgres_requires_single_schema_search_path("ERROR: permission denied for schema admaterial"));
+    }
+
+    #[test]
+    fn postgres_statement_returns_rows_for_returning_dml_only() {
+        for sql in [
+            "INSERT INTO users (id) VALUES (1) RETURNING id",
+            "UPDATE users SET name = 'Ada' RETURNING id, name",
+            "DELETE FROM users WHERE id = 1 RETURNING id",
+            "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
+            "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
+        ] {
+            assert!(postgres_statement_returns_rows(sql), "expected result rows for: {sql}");
+        }
+
+        for sql in [
+            "INSERT INTO users (id) VALUES (1)",
+            "UPDATE users SET name = 'Ada'",
+            "DELETE FROM users WHERE id = 1",
+            "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name",
+            "INSERT INTO users (note) VALUES ('RETURNING is text')",
+        ] {
+            assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
+        }
     }
 
     #[test]
@@ -4345,6 +4959,45 @@ mod tests {
         assert_eq!(classify_pg_type("int4"), PgColType::Other);
         assert_eq!(classify_pg_type("varchar"), PgColType::Other);
         assert_eq!(classify_pg_type(""), PgColType::Other);
+    }
+
+    #[test]
+    fn postgres_text_spatial_value_separates_srid_from_wkt() {
+        assert_eq!(
+            pg_text_fallback_value("SRID=4326;POINT(1 2)", Some(PgColType::Geometry)),
+            (serde_json::json!("POINT(1 2)"), Some(4326))
+        );
+        assert_eq!(
+            pg_text_fallback_value("SRID=0;POINT(1 2)", Some(PgColType::Geometry)),
+            (serde_json::json!("POINT(1 2)"), None)
+        );
+        assert_eq!(
+            pg_text_fallback_value("POINT(1 2)", Some(PgColType::Geometry)),
+            (serde_json::json!("POINT(1 2)"), None)
+        );
+    }
+
+    #[test]
+    fn postgres_text_spatial_value_decodes_hex_ewkb() {
+        let ewkb = "0101000020E6100000000000000000F03F0000000000000040";
+        for value in [ewkb.to_string(), format!("0x{ewkb}"), format!("\\x{ewkb}")] {
+            assert_eq!(
+                pg_text_fallback_value(&value, Some(PgColType::Geometry)),
+                (serde_json::json!("POINT(1 2)"), Some(4326))
+            );
+            assert_eq!(pg_text_fallback_value(&value, None), (serde_json::json!("POINT(1 2)"), Some(4326)));
+        }
+
+        let srid_zero = "010100002000000000000000000000F03F0000000000000040";
+        assert_eq!(pg_text_fallback_value(srid_zero, None), (serde_json::json!("POINT(1 2)"), None));
+    }
+
+    #[test]
+    fn postgres_text_fallback_does_not_reinterpret_ordinary_text() {
+        for value in ["SRID=abc;POINT(1 2)", "SRID=4326;not geometry", "0101-not-hex", "POINTLESS"] {
+            assert_eq!(pg_text_fallback_value(value, None), (serde_json::json!(value), None));
+        }
+        assert_eq!(pg_text_fallback_value("SRID=4326;point(1 2)", None), (serde_json::json!("point(1 2)"), Some(4326)));
     }
 
     struct DockerPostgres {
@@ -4413,6 +5066,58 @@ mod tests {
                 Err(error) => panic!("docker postgres did not become ready: {error}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_dml_returning_preserves_result_rows() {
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+
+        execute_query(&pool, "CREATE TABLE dml_returning (id integer PRIMARY KEY, name text NOT NULL)")
+            .await
+            .expect("create table");
+
+        let inserted = execute_query(&pool, "INSERT INTO dml_returning VALUES (1, 'alice'), (2, 'bob')")
+            .await
+            .expect("insert rows");
+        let updated = execute_query(&pool, "UPDATE dml_returning SET name = 'bob-updated' WHERE id = 2")
+            .await
+            .expect("update rows");
+        let deleted = execute_query(&pool, "DELETE FROM dml_returning WHERE id = 1").await.expect("delete row");
+        let unmatched =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999").await.expect("update no rows");
+
+        assert_eq!(inserted.affected_rows, 2);
+        assert_eq!(updated.affected_rows, 1);
+        assert_eq!(deleted.affected_rows, 1);
+        assert_eq!(unmatched.affected_rows, 0);
+
+        let insert_returning = execute_query(&pool, "INSERT INTO dml_returning VALUES (3, 'carol') RETURNING id, name")
+            .await
+            .expect("insert returning");
+        let update_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = 'carol-updated' WHERE id = 3 RETURNING id, name")
+                .await
+                .expect("update returning");
+        let delete_returning = execute_query(&pool, "DELETE FROM dml_returning WHERE id = 3 RETURNING id, name")
+            .await
+            .expect("delete returning");
+        let empty_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999 RETURNING id, name")
+                .await
+                .expect("empty returning");
+
+        for result in [&insert_returning, &update_returning, &delete_returning] {
+            assert_eq!(result.columns, vec!["id", "name"]);
+            assert_eq!(result.rows.len(), 1);
+        }
+        assert_eq!(insert_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol")]);
+        assert_eq!(update_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol-updated")]);
+        assert_eq!(delete_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol-updated")]);
+        assert_eq!(empty_returning.columns, vec!["id", "name"]);
+        assert!(empty_returning.rows.is_empty());
     }
 
     async fn assert_postgres_18(pool: &Pool) {
@@ -4718,6 +5423,17 @@ mod tests {
         assert!(sql.contains("rc.update_rule AS on_update"));
         assert!(sql.contains("rc.delete_rule AS on_delete"));
         assert!(sql.contains("information_schema.referential_constraints rc"));
+    }
+
+    #[test]
+    fn postgres_table_dependencies_sql_batches_schema_foreign_keys() {
+        let sql = postgres_table_dependencies_sql();
+
+        assert!(sql.contains("pg_catalog.pg_constraint"));
+        assert!(sql.contains("con.contype = 'f'"));
+        assert!(sql.contains("child_schema.nspname = $1"));
+        assert!(sql.contains("parent_schema.nspname = $1"));
+        assert!(!sql.contains("information_schema"));
     }
 
     #[test]
@@ -5190,18 +5906,21 @@ mod tests {
     }
 
     #[test]
-    fn postgres_table_partition_key_sql_targets_partitioned_parents() {
-        let parent_sql = postgres_partitioned_parent_sql();
-        let sql = postgres_table_partition_key_sql();
+    fn postgres_table_partition_sql_tracks_parents_bounds_and_local_objects() {
+        let relation_sql = postgres_table_partition_relation_sql();
+        let info_sql = postgres_table_partition_info_sql();
+        let local_objects_sql = postgres_table_partition_local_objects_sql();
 
-        assert!(parent_sql.contains("n.nspname = $1"));
-        assert!(parent_sql.contains("c.relname = $2"));
-        assert!(parent_sql.contains("c.relkind = 'p'"));
-        assert!(sql.contains("pg_catalog.pg_get_partkeydef(c.oid)"));
-        assert!(sql.contains("n.nspname = $1"));
-        assert!(sql.contains("c.relname = $2"));
-        assert!(sql.contains("c.relkind = 'p'"));
-        assert!(!sql.contains("pg_get_expr(c.relpartbound"));
+        assert!(relation_sql.contains("row_to_json(c)->>'relispartition'"));
+        assert!(relation_sql.contains("c.relkind IN ('r','p')"));
+        assert!(info_sql.contains("pg_catalog.pg_get_expr(c.relpartbound, c.oid, true)"));
+        assert!(info_sql.contains("pg_catalog.pg_get_partkeydef(c.oid)"));
+        assert!(info_sql.contains("pg_catalog.pg_inherits"));
+        assert!(info_sql.contains("parent_schema"));
+        assert!(info_sql.contains("parent_table"));
+        assert!(local_objects_sql.contains("row_to_json(con)->>'conparentid'"));
+        assert!(local_objects_sql.contains("con.contype IN ('p','f')"));
+        assert!(local_objects_sql.contains("i.inhrelid = idx.oid"));
     }
 
     #[test]
@@ -5347,34 +6066,93 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
-    async fn postgres_partition_key_metadata_reads_parent_only() {
+    async fn postgres_partition_metadata_renders_replayable_children_and_subpartitions() {
         let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
         let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
         let schema = format!("dbx_partition_meta_{}", std::process::id());
         let schema_ident = pg_quote_ident(&schema);
+        let replay_schema = format!("{schema}_replay");
+        let replay_schema_ident = pg_quote_ident(&replay_schema);
         let parent = format!("{schema_ident}.parent");
         let child = format!("{schema_ident}.child");
+        let default_child = format!("{schema_ident}.child_default");
+        let subpartition = format!("{schema_ident}.subpartition");
+        let inherited_parent = format!("{schema_ident}.inherited_parent");
+        let inherited_child = format!("{schema_ident}.inherited_child");
 
         execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
         let client = pool.get().await.expect("get postgres client");
         client
             .batch_execute(&format!(
                 "CREATE TABLE {parent} (id integer, payload text) PARTITION BY RANGE (id); \
-                 CREATE TABLE {child} PARTITION OF {parent} FOR VALUES FROM (1) TO (10)"
+                 CREATE TABLE {child} PARTITION OF {parent} (PRIMARY KEY (id)) FOR VALUES FROM (1) TO (10); \
+                 CREATE INDEX child_payload_idx ON {child} (payload); \
+                 CREATE TABLE {default_child} PARTITION OF {parent} DEFAULT; \
+                 CREATE TABLE {subpartition} PARTITION OF {parent} FOR VALUES FROM (10) TO (20) PARTITION BY HASH (payload); \
+                 CREATE TABLE {inherited_parent} (id integer, bucket integer, PRIMARY KEY (id, bucket)) PARTITION BY RANGE (bucket); \
+                 CREATE TABLE {inherited_child} PARTITION OF {inherited_parent} FOR VALUES FROM (1) TO (10)"
             ))
             .await
             .expect("create partitioned tables");
 
-        let parent_key = get_table_partition_key(&pool, &schema, "parent").await.expect("parent metadata");
-        let child_key = get_table_partition_key(&pool, &schema, "child").await.expect("child metadata");
+        let parent_info = get_table_partition_info(&pool, &schema, "parent").await.expect("parent metadata");
+        let child_info = get_table_partition_info(&pool, &schema, "child").await.expect("child metadata");
+        let default_info = get_table_partition_info(&pool, &schema, "child_default").await.expect("default metadata");
+        let subpartition_info =
+            get_table_partition_info(&pool, &schema, "subpartition").await.expect("subpartition metadata");
+        let child_local_objects =
+            get_table_partition_local_objects(&pool, &schema, "child").await.expect("child local objects");
+        let inherited_child_local_objects = get_table_partition_local_objects(&pool, &schema, "inherited_child")
+            .await
+            .expect("inherited child local objects");
         let parent_ddl = crate::schema::pg_ddl(&pool, &schema, "parent").await.expect("parent ddl");
+        let child_ddl = crate::schema::pg_ddl(&pool, &schema, "child").await.expect("child ddl");
+        let default_ddl = crate::schema::pg_ddl(&pool, &schema, "child_default").await.expect("default ddl");
+        let subpartition_ddl = crate::schema::pg_ddl(&pool, &schema, "subpartition").await.expect("subpartition ddl");
+        let inherited_parent_ddl =
+            crate::schema::pg_ddl(&pool, &schema, "inherited_parent").await.expect("inherited parent ddl");
+        let inherited_child_ddl =
+            crate::schema::pg_ddl(&pool, &schema, "inherited_child").await.expect("inherited child ddl");
 
-        execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await.expect("drop schema");
+        execute_query(&pool, &format!("CREATE SCHEMA {replay_schema_ident}")).await.expect("create replay schema");
+        for ddl in
+            [&parent_ddl, &child_ddl, &default_ddl, &subpartition_ddl, &inherited_parent_ddl, &inherited_child_ddl]
+        {
+            client
+                .batch_execute(&ddl.replace(&schema_ident, &replay_schema_ident))
+                .await
+                .unwrap_or_else(|error| panic!("replay partition ddl failed: {error}; ddl: {ddl}"));
+        }
 
-        assert_eq!(parent_key, Some("RANGE (id)".to_string()));
-        assert_eq!(child_key, None);
+        client
+            .batch_execute(&format!("DROP SCHEMA {schema_ident} CASCADE; DROP SCHEMA {replay_schema_ident} CASCADE"))
+            .await
+            .expect("drop schemas");
+
+        assert_eq!(parent_info.key.as_deref(), Some("RANGE (id)"));
+        assert!(!parent_info.is_partition);
+        assert_eq!(child_info.parent_schema.as_deref(), Some(schema.as_str()));
+        assert_eq!(child_info.parent_table.as_deref(), Some("parent"));
+        assert_eq!(child_info.bound.as_deref(), Some("FOR VALUES FROM (1) TO (10)"));
+        assert!(child_local_objects.has_primary_key);
+        assert!(child_local_objects.indexes.contains("child_payload_idx"));
+        assert!(!inherited_child_local_objects.has_primary_key);
+        assert!(inherited_child_local_objects.indexes.is_empty());
+        assert_eq!(default_info.bound.as_deref(), Some("DEFAULT"));
+        assert_eq!(subpartition_info.key.as_deref(), Some("HASH (payload)"));
         assert!(parent_ddl.contains(") PARTITION BY RANGE (id);"), "ddl: {parent_ddl}");
-        assert!(!parent_ddl.contains("PARTITION OF"));
+        assert!(child_ddl.contains("CREATE TABLE"), "ddl: {child_ddl}");
+        assert!(child_ddl.contains("PARTITION OF"), "ddl: {child_ddl}");
+        assert!(child_ddl.contains("PRIMARY KEY (\"id\")"), "ddl: {child_ddl}");
+        assert!(child_ddl.contains("FOR VALUES FROM (1) TO (10);"), "ddl: {child_ddl}");
+        assert!(child_ddl.contains("CREATE INDEX \"child_payload_idx\""), "ddl: {child_ddl}");
+        assert!(default_ddl.contains(" DEFAULT;"), "ddl: {default_ddl}");
+        assert!(
+            subpartition_ddl.contains("FOR VALUES FROM (10) TO (20) PARTITION BY HASH (payload);"),
+            "ddl: {subpartition_ddl}"
+        );
+        assert!(!inherited_child_ddl.contains("PRIMARY KEY"), "ddl: {inherited_child_ddl}");
+        assert!(!inherited_child_ddl.contains("CREATE INDEX"), "ddl: {inherited_child_ddl}");
     }
 
     #[tokio::test]
@@ -5554,6 +6332,61 @@ mod tests {
     }
 
     #[test]
+    fn redshift_columns_sql_uses_simple_information_schema_metadata() {
+        let sql = redshift_columns_sql("tenant's", "orders");
+        assert!(sql.contains("FROM information_schema.columns c"));
+        assert!(sql.contains("c.table_schema = 'tenant''s'"));
+        assert!(sql.contains("c.table_name = 'orders'"));
+        assert!(!sql.contains("pg_attribute"));
+        assert!(!sql.contains("pg_index"));
+        assert!(!sql.contains('$'));
+    }
+
+    #[test]
+    fn redshift_columns_from_text_result_preserves_basic_metadata() {
+        let result = QueryResult {
+            columns: vec![
+                "column_name".to_string(),
+                "full_type".to_string(),
+                "is_nullable".to_string(),
+                "column_default".to_string(),
+                "numeric_precision".to_string(),
+                "numeric_scale".to_string(),
+                "character_maximum_length".to_string(),
+            ],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![
+                serde_json::json!("amount"),
+                serde_json::json!("numeric"),
+                serde_json::json!("NO"),
+                serde_json::Value::Null,
+                serde_json::json!(18),
+                serde_json::json!(2),
+                serde_json::Value::Null,
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        };
+
+        let columns = redshift_columns_from_query_result(result);
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "amount");
+        assert_eq!(columns[0].data_type, "numeric");
+        assert!(!columns[0].is_nullable);
+        assert_eq!(columns[0].numeric_precision, Some(18));
+        assert_eq!(columns[0].numeric_scale, Some(2));
+        assert_eq!(columns[0].character_maximum_length, None);
+        assert!(!columns[0].is_primary_key);
+    }
+
+    #[test]
     fn function_identity_arguments_probe_uses_pg_proc() {
         let sql = postgres_has_function_identity_arguments_sql();
         assert!(sql.contains("pg_catalog.pg_proc"));
@@ -5695,6 +6528,26 @@ mod tests {
         assert!(!invalidates_postgres_statement_cache("UPDATE users SET name = 'Ada'"));
         assert!(!invalidates_postgres_statement_cache("INSERT INTO users(name) VALUES ('Ada')"));
         assert!(!invalidates_postgres_statement_cache("DELETE FROM users WHERE id = 1"));
+    }
+
+    #[test]
+    fn postgres_stale_cache_retry_uses_structured_fields_for_localized_errors() {
+        assert!(should_retry_postgres_stale_cache_fields(
+            Some("0A000"),
+            Some("RevalidateCachedQuery"),
+            "已缓冲的计划不能改变结果类型",
+        ));
+        assert!(should_retry_postgres_stale_cache_fields(None, None, "cached plan must not change result type",));
+    }
+
+    #[test]
+    fn postgres_stale_cache_retry_rejects_other_feature_errors() {
+        assert!(!should_retry_postgres_stale_cache_fields(Some("0A000"), Some("CheckFeatureSupport"), "不支持该功能",));
+        assert!(!should_retry_postgres_stale_cache_fields(
+            Some("23505"),
+            Some("RevalidateCachedQuery"),
+            "duplicate key value violates unique constraint",
+        ));
     }
 
     // --- execute_batch ---

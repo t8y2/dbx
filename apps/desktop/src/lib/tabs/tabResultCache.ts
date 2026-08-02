@@ -46,6 +46,8 @@ export interface TabResultSnapshot {
 
 interface ColumnarQueryResult {
   columns: string[];
+  spatial_columns?: QueryResult["spatial_columns"];
+  spatial_values?: QueryResult["spatial_values"];
   execution_error?: true;
   statement_index?: number;
   column_types?: string[];
@@ -324,6 +326,8 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
+    spatial_values: result.spatial_values?.map((row) => [...row]),
     rows: result.rows.map((row) => [...row]),
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
@@ -363,6 +367,8 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
+    spatial_values: result.spatial_values?.map((row) => [...row]),
     columnValues,
     rowCount: result.rows.length,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
@@ -386,6 +392,8 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
+    spatial_values: result.spatial_values?.map((row) => [...row]),
     rows,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,

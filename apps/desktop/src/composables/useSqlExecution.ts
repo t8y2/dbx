@@ -9,7 +9,7 @@ import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCap
 import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
-import { isQueryExecutionErrorResult, usesMysqlProtocolDatabaseType } from "@/lib/query/queryResultError";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
@@ -63,10 +63,9 @@ function primarySqlOperation(sql: string): string {
   return statement?.match(/^([a-z]+)/i)?.[1]?.toUpperCase() || "SQL";
 }
 
-function firstQueryExecutionError(tab: Pick<QueryTab, "result" | "results">, databaseType: DatabaseType | undefined) {
+function firstQueryExecutionError(tab: Pick<QueryTab, "result" | "results">) {
   const activeResult = tab.result;
   if (activeResult && isQueryExecutionErrorResult(activeResult)) return activeResult;
-  if (!usesMysqlProtocolDatabaseType(databaseType) && activeResult?.columns.includes("Error")) return activeResult;
 
   const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
   return results.find((result) => isQueryExecutionErrorResult(result));
@@ -233,7 +232,7 @@ export function useSqlExecution(deps: {
       deps.activeOutputView.value = "summary";
     }
     const elapsed = Date.now() - start;
-    const failure = firstQueryExecutionError(tab, executionDatabaseType);
+    const failure = firstQueryExecutionError(tab);
     const success = !failure;
     historyStore.add({
       connection_id: tab.connectionId,

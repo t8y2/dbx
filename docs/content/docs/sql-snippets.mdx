@@ -1,70 +1,78 @@
 ---
 title: SQL Snippets
-description: Create customizable SQL snippet templates with custom trigger keys for faster query writing.
+description: Manage reusable SQL templates, trigger prefixes, and tab-stop placeholders for editor completion.
 ---
 
-SQL Snippets let you define reusable SQL templates that expand automatically when you type a trigger key. This is useful for frequently written query patterns, standard clauses, or team-specific SQL conventions.
+SQL snippets appear as editor completion candidates. Accept a matching trigger to insert the template at the cursor, then use `Tab` and `Shift+Tab` to move through any editable placeholders.
 
-## How Snippets Work
+## Manage Snippets
 
-1. You define a snippet with a **trigger key** and a **template**
-2. In the SQL editor, type the trigger key
-3. DBX auto-completes the trigger to the full template
-4. Placeholders in the template let you tab through editable positions
+Open **Settings → Snippets**. Each snippet contains:
 
-## Creating A Snippet
+| Field | Purpose |
+| --- | --- |
+| Label | Name shown in the completion list. DBX uses the prefix when the label is empty. |
+| Prefix | Text that matches the completion candidate. It is required and must be unique in the current snippet list. |
+| Status | Enables or disables the snippet without deleting it. |
+| SQL Body | Template inserted into the editor when you accept the completion. |
 
-<Steps>
-  <Step>### Open Snippet Settings Go to **Settings → SQL Snippets**.</Step>
-  <Step>### Add a New Snippet Click **Add Snippet** and fill in: - **Trigger**: a short key you type in the editor (e.g., `selall`, `joinex`) - **Template**: the SQL text that replaces the trigger</Step>
-  <Step>### Use the Snippet In the SQL editor, type the trigger key and press `Tab` or select it from the autocomplete list. The template expands in place.</Step>
-</Steps>
+You can add, edit, enable, disable, or delete snippets. **Restore Defaults** replaces the current draft with DBX's built-in snippets; click **Apply** in the settings dialog to persist your changes.
 
-## Example Snippets
+<Callout type="info">
+  DBX includes common snippets such as `sel`, `ins`, `upd`, `cte`, and `join`. Some built-in templates adapt to the active database, for example by choosing the appropriate row-limit or `ALTER TABLE` syntax. Custom snippets are inserted exactly as written.
+</Callout>
 
-Here are some useful snippet templates to get started:
+## Expand a Snippet
 
-**SELECT with common clauses:**
+1. Type a prefix such as `sel` in the SQL editor.
+2. Confirm the label and body preview in the completion list.
+3. Press `Tab`, `Enter`, or click the candidate to accept it.
+4. When the template has placeholders, press `Tab` to move forward and `Shift+Tab` to move back.
+
+If no candidate appears, confirm that the snippet is enabled, the prefix matches the current text, and editor autocomplete is enabled.
+
+## Placeholder Syntax
+
+DBX uses CodeMirror snippet syntax:
+
+| Syntax | Purpose |
+| --- | --- |
+| `${}` | Creates an empty editable field. |
+| `${name}` | Creates a field whose default text is `name`; repeated names are edited together. |
+| `${1}` | Sets an explicit field order. |
+| `${1:defaultText}` | Sets the order and provides default text. |
+| `#{name}` | Alternative form of `${name}`. |
+
+Numbered fields follow numeric order. Unnumbered fields follow their textual order in the template. Escape a literal opening or closing brace with a backslash when it must not be parsed as a placeholder.
+
+For example:
 
 ```sql
 SELECT ${1:columns}
 FROM ${2:table}
 WHERE ${3:condition}
-ORDER BY ${4:column}
+ORDER BY ${4:column};
 ```
 
-**LEFT JOIN pattern:**
-
-```sql
-LEFT JOIN ${1:table} ON ${2:left_alias}.${3:column} = ${4:right_alias}.${5:column}
-```
-
-**COUNT with GROUP BY:**
+Reuse a field to edit multiple locations together:
 
 ```sql
 SELECT ${1:column}, COUNT(*) AS cnt
 FROM ${2:table}
-GROUP BY ${1:column}
-HAVING COUNT(*) > ${3:threshold}
-ORDER BY cnt DESC
+GROUP BY ${1:column};
 ```
 
-**CREATE TABLE template:**
+## Storage, Sync, and Safety
 
-```sql
-CREATE TABLE ${1:table_name} (
-    ${2:id} INTEGER PRIMARY KEY,
-    ${3:column} ${4:type}
-);
-```
+Snippets are editor settings stored in the current DBX runtime. On Desktop, [Configuration Cloud Sync](/en/docs/cloud-sync) can synchronize snippets with the other editor settings. [Connection Config Migration](/en/docs/config-export) only moves database connections and does not include snippets.
 
-## Placeholders
+A snippet only generates SQL; it does not bypass database permissions or DBX production protection. Review the fully expanded statement before running templates that contain writes or DDL, and follow the [Production Safety](/en/docs/production-safety) guidance.
 
-Use `${1}`, `${2}`, etc. in templates to mark editable positions. After expansion, press `Tab` to jump between placeholders. Placeholders with the same number are edited simultaneously.
-
-## Tips
-
-- Keep triggers short but memorable (3-6 characters works well)
-- Use a consistent prefix for personal snippets (e.g., `my_selall`)
-- Review expanded snippets before execution, especially on production databases
-- Share useful snippets with your team for consistent query patterns
+<Cards>
+  <Card title="Query Editor" href="/en/docs/query-editor">
+    Learn how completion, execution scope, history, and SQL files work together.
+  </Card>
+  <Card title="Keyboard Shortcuts" href="/en/docs/keyboard-shortcuts">
+    Check the current shortcuts for accepting completion, formatting, and execution.
+  </Card>
+</Cards>

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::models::connection::DatabaseConnectionInfo;
 
 type PendingAgentResponse = tokio::sync::oneshot::Sender<Result<Value, String>>;
@@ -35,15 +37,7 @@ pub struct AgentRuntimeClient {
 
 impl AgentRuntimeClient {
     pub async fn spawn(launch: AgentLaunchSpec, app_version: &str) -> Result<Arc<Self>, String> {
-        let mut command = crate::process::new_std_command(&launch.program);
-        command.args(&launch.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(working_dir) = &launch.working_dir {
-            command.current_dir(working_dir);
-        }
-        remove_agent_proxy_env(&mut command);
-
-        let mut child =
-            command.spawn().map_err(|e| format!("Failed to spawn agent process {}: {e}", launch_display(&launch)))?;
+        let mut child = spawn_agent_process(&launch)?;
         let child_stdin = child.stdin.take().ok_or("Failed to capture agent stdin")?;
         let child_stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
         let child_stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
@@ -82,7 +76,7 @@ impl AgentRuntimeClient {
         });
         runtime.start_response_reader(stdout);
         let handshake = match runtime
-            .call::<AgentHandshake>(
+            .call_typed::<AgentHandshake>(
                 AgentMethod::Handshake.as_str(),
                 agent_handshake_params(app_version),
                 Some(Duration::from_secs(RPC_TIMEOUT_SECS)),
@@ -91,13 +85,13 @@ impl AgentRuntimeClient {
             .await
         {
             Ok(handshake) => handshake,
-            Err(error) if is_unsupported_handshake_error(&error) => {
+            Err(error) if is_unsupported_handshake_error(&error.to_string()) => {
                 runtime.kill();
                 return Err("Agent runtime does not support multi_session protocol v2".to_string());
             }
             Err(error) => {
                 runtime.kill();
-                return Err(error);
+                return Err(error.into_legacy_string());
             }
         };
         if handshake.protocol_version < 2 || !handshake.supports(AgentCapability::MultiSession) {
@@ -145,15 +139,30 @@ impl AgentRuntimeClient {
         timeout_duration: Option<Duration>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<T, String> {
+        self.call_typed(method, params, timeout_duration, cancel_token)
+            .await
+            .map_err(AgentCallError::into_legacy_string)
+    }
+
+    pub async fn call_typed<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, AgentCallError> {
         if self.failed.load(Ordering::Acquire) {
-            return Err("Agent runtime is unavailable".to_string());
+            return Err(AgentCallError::Transport { message: "Agent runtime is unavailable".to_string() });
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let request = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let request_line =
-            serde_json::to_string(&request).map_err(|e| format!("Failed to serialize JSON-RPC request: {e}"))?;
+        let request_line = serde_json::to_string(&request)
+            .map_err(|e| AgentCallError::Transport { message: format!("Failed to serialize JSON-RPC request: {e}") })?;
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        self.pending.lock().map_err(|_| "Agent pending response lock poisoned".to_string())?.insert(id, sender);
+        self.pending
+            .lock()
+            .map_err(|_| AgentCallError::Transport { message: "Agent pending response lock poisoned".to_string() })?
+            .insert(id, sender);
         let write_result =
             self.stdin.lock().map_err(|_| "Agent stdin lock poisoned".to_string()).and_then(|mut writer| {
                 writer
@@ -164,21 +173,32 @@ impl AgentRuntimeClient {
             });
         if let Err(err) = write_result {
             self.pending.lock().expect("agent pending response lock poisoned").remove(&id);
-            return Err(err);
+            return Err(AgentCallError::Transport { message: err });
         }
 
-        let receive = async { receiver.await.map_err(|_| "Agent response channel closed".to_string())? };
+        let receive = async {
+            receiver
+                .await
+                .map_err(|_| AgentCallError::Transport { message: "Agent response channel closed".to_string() })?
+                .map_err(|message| AgentCallError::Transport { message })
+        };
         let response = match (timeout_duration, cancel_token) {
             (Some(duration), Some(token)) => tokio::select! {
                 _ = token.cancelled() => {
                     self.cancel_session_request_for_method(method, &params).await;
-                    Err("Query canceled".to_string())
+                    Err(AgentCallError::Canceled {
+                        stage: agent_error_stage(method),
+                        operation_outcome: agent_operation_outcome(method),
+                    })
                 },
                 result = tokio::time::timeout(duration, receive) => match result {
                     Ok(result) => result,
                     Err(_) => {
                         self.cancel_session_request_for_method(method, &params).await;
-                        Err(format!("Agent RPC call timed out ({}s)", duration.as_secs()))
+                        Err(AgentCallError::Timeout {
+                            stage: agent_error_stage(method),
+                            operation_outcome: agent_operation_outcome(method),
+                        })
                     }
                 },
             },
@@ -186,13 +206,19 @@ impl AgentRuntimeClient {
                 Ok(result) => result,
                 Err(_) => {
                     self.cancel_session_request_for_method(method, &params).await;
-                    Err(format!("Agent RPC call timed out ({}s)", duration.as_secs()))
+                    Err(AgentCallError::Timeout {
+                        stage: agent_error_stage(method),
+                        operation_outcome: agent_operation_outcome(method),
+                    })
                 }
             },
             (None, Some(token)) => tokio::select! {
                 _ = token.cancelled() => {
                     self.cancel_session_request_for_method(method, &params).await;
-                    Err("Query canceled".to_string())
+                    Err(AgentCallError::Canceled {
+                        stage: agent_error_stage(method),
+                        operation_outcome: agent_operation_outcome(method),
+                    })
                 },
                 result = receive => result,
             },
@@ -201,7 +227,12 @@ impl AgentRuntimeClient {
         if response.is_err() {
             self.pending.lock().expect("agent pending response lock poisoned").remove(&id);
         }
-        decode_agent_response(response?)
+        let response = response?;
+        decode_agent_response(
+            response,
+            self.handshake.supports(AgentCapability::StructuredErrorV1),
+            params.get("agentSessionId").and_then(Value::as_str),
+        )
     }
 
     async fn cancel_session_request_for_method(&self, method: &str, params: &Value) {
@@ -214,7 +245,7 @@ impl AgentRuntimeClient {
         let Some(agent_session_id) = params.get("agentSessionId").and_then(Value::as_str) else {
             return;
         };
-        let _ = Box::pin(self.call::<Value>(
+        let _ = Box::pin(self.call_typed::<Value>(
             AgentMethod::CancelSession.as_str(),
             serde_json::json!({ "agentSessionId": agent_session_id }),
             Some(Duration::from_secs(5)),
@@ -283,15 +314,492 @@ impl AgentRuntimeClient {
     }
 }
 
-fn decode_agent_response<T: DeserializeOwned>(response: Value) -> Result<T, String> {
+fn decode_agent_response<T: DeserializeOwned>(
+    response: Value,
+    strict_structured_errors: bool,
+    expected_session_id: Option<&str>,
+) -> Result<T, AgentCallError> {
     if let Some(err) = response.get("error") {
-        let message = err.get("message").and_then(Value::as_str).unwrap_or("Unknown agent error");
-        let code = err.get("code").and_then(Value::as_i64).unwrap_or(-1);
-        return Err(format!("Agent RPC error ({code}): {message}"));
+        return Err(parse_agent_call_error(err, strict_structured_errors, expected_session_id));
     }
-    let result =
-        response.get("result").ok_or_else(|| "Agent response missing both 'result' and 'error'".to_string())?;
-    serde_json::from_value(result.clone()).map_err(|e| format!("Failed to deserialize agent result: {e}"))
+    let result = response.get("result").ok_or_else(|| AgentCallError::ContractViolation {
+        rpc_code: None,
+        message: "Agent response missing both 'result' and 'error'".to_string(),
+        reason: ContractViolationReason::MissingResultOrError,
+    })?;
+    serde_json::from_value(result.clone()).map_err(|e| AgentCallError::ContractViolation {
+        rpc_code: None,
+        message: format!("Failed to deserialize agent result: {e}"),
+        reason: ContractViolationReason::InvalidResult,
+    })
+}
+
+const AGENT_RPC_ERROR_DATA_MARKER: &str = "\nDBX_AGENT_ERROR_DATA:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionDisposition {
+    Keep,
+    Quarantine,
+    ReplaceRuntime,
+}
+
+impl AgentSessionDisposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Quarantine => "quarantine",
+            Self::ReplaceRuntime => "replace_runtime",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentErrorCategory {
+    Connection,
+    Sql,
+    Resource,
+    Protocol,
+    Timeout,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentErrorStage {
+    Request,
+    Checkout,
+    Connect,
+    Validate,
+    Execute,
+    Fetch,
+    Cancel,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOperationOutcome {
+    NotStarted,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentErrorContext {
+    pub contract_version: u8,
+    pub category: AgentErrorCategory,
+    pub retryable: bool,
+    pub session_disposition: AgentSessionDisposition,
+    pub stage: AgentErrorStage,
+    pub operation_outcome: AgentOperationOutcome,
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+    #[serde(default)]
+    pub sql_state: Option<String>,
+    #[serde(default)]
+    pub vendor_code: Option<i32>,
+    #[serde(default)]
+    pub exception_class: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyAgentHints {
+    pub category: Option<AgentErrorCategory>,
+    pub retryable: Option<bool>,
+    pub session_disposition: Option<AgentSessionDisposition>,
+    pub stage: Option<AgentErrorStage>,
+    pub operation_outcome: Option<AgentOperationOutcome>,
+    pub agent_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractViolationReason {
+    MissingContractVersion,
+    UnsupportedContractVersion,
+    InvalidDataShape,
+    InvalidSessionId,
+    InvalidCombination,
+    MissingResultOrError,
+    InvalidResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentCallError {
+    Structured { rpc_code: i64, message: String, context: AgentErrorContext },
+    Legacy { rpc_code: Option<i64>, message: String, hints: LegacyAgentHints },
+    ContractViolation { rpc_code: Option<i64>, message: String, reason: ContractViolationReason },
+    Transport { message: String },
+    Timeout { stage: AgentErrorStage, operation_outcome: AgentOperationOutcome },
+    Canceled { stage: AgentErrorStage, operation_outcome: AgentOperationOutcome },
+}
+
+/// Decode an already-stringified Agent failure at the compatibility boundary.
+///
+/// Business modules must use this adapter instead of inspecting the legacy
+/// `DBX_AGENT_ERROR_DATA` marker themselves. Callers must only use it after the
+/// owning pool has been identified as an Agent pool.
+pub(crate) fn agent_error_from_legacy(error: &str, expected_session_id: Option<&str>) -> AgentCallError {
+    if error == "Query canceled" {
+        return AgentCallError::Canceled {
+            stage: AgentErrorStage::Cancel,
+            operation_outcome: AgentOperationOutcome::Unknown,
+        };
+    }
+    let lower = error.to_ascii_lowercase();
+    if lower.starts_with("agent rpc call timed out") {
+        return AgentCallError::Timeout {
+            stage: AgentErrorStage::Execute,
+            operation_outcome: AgentOperationOutcome::Unknown,
+        };
+    }
+    legacy_agent_call_error(error.to_string(), expected_session_id)
+}
+
+/// Returns a typed error only when a mixed legacy path can prove the string
+/// originated from the Agent call corridor.
+pub(crate) fn try_agent_error_from_legacy(error: &str) -> Option<AgentCallError> {
+    let lower = error.to_ascii_lowercase();
+    let is_local_agent_failure = error == "Query canceled"
+        || lower.starts_with("agent rpc call timed out")
+        || lower.contains("agent stdin not available")
+        || lower.contains("agent stdout not available")
+        || lower.contains("agent runtime terminated")
+        || lower.contains("agent runtime is unavailable")
+        || lower.contains("agent runtime unavailable")
+        || lower.contains("failed to write to agent stdin")
+        || lower.contains("failed to flush agent stdin")
+        || lower.contains("agent rpc task failed");
+    (is_agent_rpc_response_error(error) || is_local_agent_failure).then(|| agent_error_from_legacy(error, None))
+}
+
+pub(crate) fn agent_recovery_decision(error: &str, scope: RecoveryScope) -> RecoveryDecision {
+    RecoveryPolicy::decide(&agent_error_from_legacy(error, None), scope)
+}
+
+impl AgentCallError {
+    pub fn into_legacy_string(self) -> String {
+        match self {
+            Self::Structured { rpc_code, message, context } => {
+                let data = serde_json::json!({
+                    "contractVersion": context.contract_version,
+                    "category": category_name(context.category),
+                    "retryable": context.retryable,
+                    "sessionDisposition": context.session_disposition.as_str(),
+                    "stage": stage_name(context.stage),
+                    "operationOutcome": outcome_name(context.operation_outcome),
+                    "agentSessionId": context.agent_session_id,
+                    "sqlState": context.sql_state,
+                    "vendorCode": context.vendor_code,
+                    "exceptionClass": context.exception_class,
+                });
+                format_agent_rpc_error_parts(rpc_code, &message, Some(&data))
+            }
+            Self::Legacy { rpc_code, message, hints } => {
+                let data = serde_json::json!({
+                    "category": hints.category.map(category_name),
+                    "retryable": hints.retryable,
+                    "sessionDisposition": hints.session_disposition.map(|value| value.as_str()),
+                    "stage": hints.stage.map(stage_name),
+                    "operationOutcome": hints.operation_outcome.map(outcome_name),
+                    "agentSessionId": hints.agent_session_id,
+                });
+                format_agent_rpc_error_parts(rpc_code.unwrap_or(-1), &message, Some(&data))
+            }
+            Self::ContractViolation { rpc_code, message, .. } => format_agent_rpc_error_parts(
+                rpc_code.unwrap_or(-1),
+                &message,
+                Some(&serde_json::json!({ "contractVersion": 1 })),
+            ),
+            Self::Transport { message } => message,
+            Self::Timeout { stage, .. } => format!("Agent RPC call timed out at {}", stage_name(stage)),
+            Self::Canceled { .. } => "Query canceled".to_string(),
+        }
+    }
+
+    fn into_legacy_string_with_session_id(self, agent_session_id: Option<&str>) -> String {
+        let has_session_id = self.session_id().is_some();
+        let message = self.into_legacy_string();
+        match (has_session_id, agent_session_id) {
+            (false, Some(agent_session_id)) => append_legacy_agent_session_id(&message, agent_session_id),
+            _ => message,
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Structured { context, .. } => context.agent_session_id.as_deref(),
+            Self::Legacy { hints, .. } => hints.agent_session_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn session_disposition(&self) -> Option<AgentSessionDisposition> {
+        match self {
+            Self::Structured { context, .. } => Some(context.session_disposition),
+            Self::Legacy { hints, .. } => hints.session_disposition,
+            _ => None,
+        }
+    }
+
+    pub fn category(&self) -> Option<AgentErrorCategory> {
+        match self {
+            Self::Structured { context, .. } => Some(context.category),
+            Self::Legacy { hints, .. } => hints.category,
+            Self::Timeout { .. } => Some(AgentErrorCategory::Timeout),
+            Self::Canceled { .. } => Some(AgentErrorCategory::Canceled),
+            Self::ContractViolation { .. } | Self::Transport { .. } => None,
+        }
+    }
+
+    pub fn operation_outcome(&self) -> AgentOperationOutcome {
+        match self {
+            Self::Structured { context, .. } => context.operation_outcome,
+            Self::Legacy { hints, .. } => hints.operation_outcome.unwrap_or(AgentOperationOutcome::Unknown),
+            Self::Timeout { operation_outcome, .. } | Self::Canceled { operation_outcome, .. } => *operation_outcome,
+            Self::ContractViolation { .. } | Self::Transport { .. } => AgentOperationOutcome::Unknown,
+        }
+    }
+
+    fn with_legacy_session_id(mut self, agent_session_id: Option<&str>) -> Self {
+        if let (Self::Legacy { hints, .. }, Some(agent_session_id)) = (&mut self, agent_session_id) {
+            hints.agent_session_id.get_or_insert_with(|| agent_session_id.to_string());
+        }
+        self
+    }
+}
+
+fn append_legacy_agent_session_id(error: &str, agent_session_id: &str) -> String {
+    if let Some((header, data)) = error.rsplit_once(AGENT_RPC_ERROR_DATA_MARKER) {
+        if let Some((mut data, suffix)) = parse_legacy_agent_error_data(data) {
+            if let Some(object) = data.as_object_mut() {
+                object.insert("agentSessionId".to_string(), Value::String(agent_session_id.to_string()));
+                return format!("{header}{AGENT_RPC_ERROR_DATA_MARKER}{data}{suffix}");
+            }
+        }
+    }
+    format!("{error}{AGENT_RPC_ERROR_DATA_MARKER}{}", serde_json::json!({ "agentSessionId": agent_session_id }))
+}
+
+impl fmt::Display for AgentCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Structured { message, .. } | Self::Legacy { message, .. } => f.write_str(message),
+            Self::ContractViolation { message, .. } => write!(f, "Agent error contract violation: {message}"),
+            Self::Transport { message } => f.write_str(message),
+            Self::Timeout { stage, .. } => write!(f, "Agent RPC call timed out at {}", stage_name(*stage)),
+            Self::Canceled { .. } => f.write_str("Query canceled"),
+        }
+    }
+}
+
+impl From<AgentCallError> for String {
+    fn from(error: AgentCallError) -> Self {
+        error.into_legacy_string()
+    }
+}
+
+impl From<String> for AgentCallError {
+    fn from(message: String) -> Self {
+        Self::Transport { message }
+    }
+}
+
+impl From<&str> for AgentCallError {
+    fn from(message: &str) -> Self {
+        Self::Transport { message: message.to_string() }
+    }
+}
+
+fn parse_agent_call_error(
+    error: &Value,
+    strict_structured_errors: bool,
+    expected_session_id: Option<&str>,
+) -> AgentCallError {
+    let rpc_code = error.get("code").and_then(Value::as_i64);
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("Unknown agent error").to_string();
+    let data = error.get("data");
+
+    if !strict_structured_errors {
+        return AgentCallError::Legacy { rpc_code, message, hints: data.map(legacy_agent_hints).unwrap_or_default() };
+    }
+
+    let Some(data) = data.filter(|value| value.is_object()) else {
+        return AgentCallError::ContractViolation {
+            rpc_code,
+            message,
+            reason: ContractViolationReason::MissingContractVersion,
+        };
+    };
+    match parse_structured_error_context(data, expected_session_id) {
+        Ok(context) => AgentCallError::Structured { rpc_code: rpc_code.unwrap_or(-1), message, context },
+        Err(reason) => AgentCallError::ContractViolation { rpc_code, message, reason },
+    }
+}
+
+fn parse_structured_error_context(
+    data: &Value,
+    expected_session_id: Option<&str>,
+) -> Result<AgentErrorContext, ContractViolationReason> {
+    let Some(contract_version_value) = data.get("contractVersion") else {
+        return Err(ContractViolationReason::MissingContractVersion);
+    };
+    let Some(contract_version) = contract_version_value.as_u64() else {
+        return Err(ContractViolationReason::InvalidDataShape);
+    };
+    if contract_version != 1 {
+        return Err(ContractViolationReason::UnsupportedContractVersion);
+    }
+    let context = serde_json::from_value::<AgentErrorContext>(data.clone())
+        .map_err(|_| ContractViolationReason::InvalidDataShape)?;
+    if context.contract_version != 1 {
+        return Err(ContractViolationReason::UnsupportedContractVersion);
+    }
+    if let Some(expected_session_id) = expected_session_id {
+        if context.agent_session_id.as_deref() != Some(expected_session_id) {
+            return Err(ContractViolationReason::InvalidSessionId);
+        }
+    }
+    if !valid_agent_error_combination(&context) {
+        return Err(ContractViolationReason::InvalidCombination);
+    }
+    Ok(context)
+}
+
+fn legacy_agent_hints(data: &Value) -> LegacyAgentHints {
+    LegacyAgentHints {
+        category: data.get("category").and_then(|value| serde_json::from_value(value.clone()).ok()),
+        retryable: data.get("retryable").and_then(Value::as_bool),
+        session_disposition: match data.get("sessionDisposition").and_then(Value::as_str) {
+            Some("keep") => Some(AgentSessionDisposition::Keep),
+            Some("quarantine") => Some(AgentSessionDisposition::Quarantine),
+            Some("replace_runtime") => Some(AgentSessionDisposition::ReplaceRuntime),
+            _ => None,
+        },
+        stage: data.get("stage").and_then(|value| serde_json::from_value(value.clone()).ok()),
+        operation_outcome: data.get("operationOutcome").and_then(|value| serde_json::from_value(value.clone()).ok()),
+        agent_session_id: data.get("agentSessionId").and_then(Value::as_str).map(str::to_string),
+    }
+}
+
+pub(crate) fn valid_agent_error_combination(context: &AgentErrorContext) -> bool {
+    let expected_outcome = match context.stage {
+        AgentErrorStage::Request | AgentErrorStage::Checkout | AgentErrorStage::Connect | AgentErrorStage::Validate => {
+            AgentOperationOutcome::NotStarted
+        }
+        AgentErrorStage::Execute | AgentErrorStage::Fetch | AgentErrorStage::Cancel | AgentErrorStage::Close => {
+            AgentOperationOutcome::Unknown
+        }
+    };
+    if context.operation_outcome != expected_outcome {
+        return false;
+    }
+    let valid_disposition = match context.category {
+        AgentErrorCategory::Connection => context.session_disposition != AgentSessionDisposition::ReplaceRuntime,
+        AgentErrorCategory::Sql => {
+            matches!(
+                context.stage,
+                AgentErrorStage::Execute | AgentErrorStage::Fetch | AgentErrorStage::Cancel | AgentErrorStage::Close
+            ) && context.session_disposition != AgentSessionDisposition::ReplaceRuntime
+        }
+        AgentErrorCategory::Resource => {
+            context.session_disposition == AgentSessionDisposition::ReplaceRuntime
+                || context.operation_outcome == AgentOperationOutcome::NotStarted
+        }
+        AgentErrorCategory::Protocol => {
+            context.session_disposition != AgentSessionDisposition::ReplaceRuntime
+                || context.operation_outcome == AgentOperationOutcome::Unknown
+        }
+        AgentErrorCategory::Timeout | AgentErrorCategory::Canceled => {
+            context.session_disposition == AgentSessionDisposition::Quarantine
+        }
+    };
+    if !valid_disposition {
+        return false;
+    }
+    valid_ascii_diagnostic(context.sql_state.as_deref(), 16)
+        && valid_ascii_diagnostic(context.exception_class.as_deref(), 160)
+        && context.agent_session_id.as_deref().is_none_or(valid_ascii_identifier)
+}
+
+fn valid_ascii_diagnostic(value: Option<&str>, max_length: usize) -> bool {
+    value.is_none_or(|value| {
+        !value.is_empty() && value.len() <= max_length && value.bytes().all(|byte| byte.is_ascii_graphic())
+    })
+}
+
+fn valid_ascii_identifier(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+pub(crate) fn category_name(category: AgentErrorCategory) -> &'static str {
+    match category {
+        AgentErrorCategory::Connection => "connection",
+        AgentErrorCategory::Sql => "sql",
+        AgentErrorCategory::Resource => "resource",
+        AgentErrorCategory::Protocol => "protocol",
+        AgentErrorCategory::Timeout => "timeout",
+        AgentErrorCategory::Canceled => "canceled",
+    }
+}
+
+pub(crate) fn stage_name(stage: AgentErrorStage) -> &'static str {
+    match stage {
+        AgentErrorStage::Request => "request",
+        AgentErrorStage::Checkout => "checkout",
+        AgentErrorStage::Connect => "connect",
+        AgentErrorStage::Validate => "validate",
+        AgentErrorStage::Execute => "execute",
+        AgentErrorStage::Fetch => "fetch",
+        AgentErrorStage::Cancel => "cancel",
+        AgentErrorStage::Close => "close",
+    }
+}
+
+pub(crate) fn outcome_name(outcome: AgentOperationOutcome) -> &'static str {
+    match outcome {
+        AgentOperationOutcome::NotStarted => "not_started",
+        AgentOperationOutcome::Unknown => "unknown",
+    }
+}
+
+fn agent_error_stage(method: &str) -> AgentErrorStage {
+    match method {
+        "handshake" => AgentErrorStage::Request,
+        "connect" | "open_session" | "test_connection" => AgentErrorStage::Connect,
+        "validate_connection" | "validate_session" => AgentErrorStage::Validate,
+        "cancel_session" => AgentErrorStage::Cancel,
+        "close_session" | "disconnect" | "shutdown" | "close_query_session" | "close_table_read_session" => {
+            AgentErrorStage::Close
+        }
+        "fetch_query_page" | "fetch_table_read_page" => AgentErrorStage::Fetch,
+        _ => AgentErrorStage::Execute,
+    }
+}
+
+fn agent_operation_outcome(method: &str) -> AgentOperationOutcome {
+    match agent_error_stage(method) {
+        AgentErrorStage::Request | AgentErrorStage::Checkout | AgentErrorStage::Connect | AgentErrorStage::Validate => {
+            AgentOperationOutcome::NotStarted
+        }
+        _ => AgentOperationOutcome::Unknown,
+    }
+}
+
+fn format_agent_rpc_error(error: &Value) -> String {
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("Unknown agent error");
+    let code = error.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    format_agent_rpc_error_parts(code, message, error.get("data").filter(|data| data.is_object()))
+}
+
+fn format_agent_rpc_error_parts(code: i64, message: &str, data: Option<&Value>) -> String {
+    let mut formatted = format!("Agent RPC error ({code}): {message}");
+    if let Some(data) = data {
+        formatted.push_str(AGENT_RPC_ERROR_DATA_MARKER);
+        formatted.push_str(&data.to_string());
+    }
+    formatted
 }
 
 fn deserialize_cached_agent_result<T: DeserializeOwned>(result: Result<Value, String>) -> Result<T, String> {
@@ -327,6 +835,66 @@ pub struct AgentDriverClient {
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
     cached_query: Option<CachedAgentQuery>,
+}
+
+/// Keeps serialized session RPC access separate from the process-level fail-stop handle.
+/// A stuck RPC may hold `client` indefinitely, but it must never prevent terminating the
+/// shared Agent runtime after the pool has been removed from routing.
+pub struct PooledAgentClient {
+    client: tokio::sync::Mutex<AgentDriverClient>,
+    shared_runtime: Option<Arc<AgentRuntimeClient>>,
+    agent_session_id: Option<String>,
+}
+
+impl PooledAgentClient {
+    pub fn new(client: AgentDriverClient) -> Self {
+        let shared_runtime = client.shared_runtime.clone();
+        let agent_session_id = client.agent_session_id.clone();
+        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id }
+    }
+
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, AgentDriverClient> {
+        self.client.lock().await
+    }
+
+    pub fn try_lock(&self) -> Result<tokio::sync::MutexGuard<'_, AgentDriverClient>, tokio::sync::TryLockError> {
+        self.client.try_lock()
+    }
+
+    pub fn shares_runtime_with(&self, other: &Self) -> bool {
+        match (&self.shared_runtime, &other.shared_runtime) {
+            (Some(runtime), Some(other_runtime)) => Arc::ptr_eq(runtime, other_runtime),
+            _ => false,
+        }
+    }
+
+    pub fn uses_runtime(&self, runtime: &Arc<AgentRuntimeClient>) -> bool {
+        self.shared_runtime.as_ref().is_some_and(|current| Arc::ptr_eq(current, runtime))
+    }
+
+    pub fn matches_session_id(&self, session_id: &str) -> bool {
+        self.agent_session_id.as_deref() == Some(session_id)
+    }
+
+    pub fn is_runtime_available(&self) -> bool {
+        self.shared_runtime.as_ref().is_none_or(|runtime| !runtime.is_failed())
+    }
+
+    /// Terminates a protocol-v2 shared runtime without waiting for the logical session lock.
+    /// Legacy single-session clients can only be killed immediately when they are not busy.
+    pub fn fail_stop(&self) -> bool {
+        if let Some(runtime) = &self.shared_runtime {
+            runtime.kill();
+            return true;
+        }
+        match self.client.try_lock() {
+            Ok(mut client) => {
+                client.kill();
+                true
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,11 +971,90 @@ pub enum AgentCapability {
     EtcdWatch,
     EtcdLease,
     EtcdAuth,
+    MongoDropDatabase,
     MultiSession,
+    StructuredErrorV1,
+}
+
+pub(crate) fn legacy_agent_call_error(error: String, agent_session_id: Option<&str>) -> AgentCallError {
+    if !is_agent_rpc_response_error(&error) {
+        return AgentCallError::Transport { message: error };
+    }
+    let (header, data, suffix) =
+        error.rsplit_once(AGENT_RPC_ERROR_DATA_MARKER).map_or((error.as_str(), None, ""), |(header, data)| {
+            match parse_legacy_agent_error_data(data) {
+                Some((data, suffix)) => (header, Some(data), suffix),
+                None => (header, None, ""),
+            }
+        });
+    let header_with_suffix = (!suffix.is_empty()).then(|| format!("{header}{suffix}"));
+    let header = header_with_suffix.as_deref().unwrap_or(header);
+    let (rpc_code, message) = parse_agent_rpc_error_header(header);
+    if let Some(data) = data.as_ref().filter(|data| data.get("contractVersion").is_some()) {
+        return match parse_structured_error_context(data, agent_session_id) {
+            Ok(context) => AgentCallError::Structured { rpc_code: rpc_code.unwrap_or(-1), message, context },
+            Err(reason) => AgentCallError::ContractViolation { rpc_code, message, reason },
+        };
+    }
+    let mut hints = data.as_ref().map(legacy_agent_hints).unwrap_or_default();
+    if hints.category.is_none() && is_legacy_connection_message(&message) {
+        hints.category = Some(AgentErrorCategory::Connection);
+        hints.session_disposition.get_or_insert(AgentSessionDisposition::Quarantine);
+    }
+    AgentCallError::Legacy { rpc_code, message, hints }.with_legacy_session_id(agent_session_id)
+}
+
+fn parse_legacy_agent_error_data(data: &str) -> Option<(Value, &str)> {
+    let mut values = serde_json::Deserializer::from_str(data).into_iter::<Value>();
+    let value = values.next()?.ok()?;
+    Some((value, &data[values.byte_offset()..]))
+}
+
+pub(crate) fn append_legacy_error_context(error: &str, context: &str) -> String {
+    if error.contains(context) {
+        return error.to_string();
+    }
+    if let Some((header, data)) = error.rsplit_once(AGENT_RPC_ERROR_DATA_MARKER) {
+        return format!("{header}\n{context}{AGENT_RPC_ERROR_DATA_MARKER}{data}");
+    }
+    format!("{error}\n{context}")
+}
+
+fn is_legacy_connection_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "connection lost",
+        "connection reset",
+        "broken pipe",
+        "communications link failure",
+        "sqlrecoverableexception",
+        "sqlnontransientconnectionexception",
+        "sqltransientconnectionexception",
+        "network communication",
+        "网络通信异常",
+        "通信异常",
+        "关闭的连接",
+        "连接已关闭",
+        "not connected",
+        "end of stream",
+        "end-of-file",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
+    let Some(rest) = header.strip_prefix("Agent RPC error (") else {
+        return (None, header.to_string());
+    };
+    let Some((code, message)) = rest.split_once("): ") else {
+        return (None, header.to_string());
+    };
+    (code.parse().ok(), message.to_string())
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -426,7 +1073,9 @@ impl AgentCapability {
         Self::EtcdWatch,
         Self::EtcdLease,
         Self::EtcdAuth,
+        Self::MongoDropDatabase,
         Self::MultiSession,
+        Self::StructuredErrorV1,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -449,7 +1098,9 @@ impl AgentCapability {
             Self::EtcdWatch => "etcd_watch",
             Self::EtcdLease => "etcd_lease",
             Self::EtcdAuth => "etcd_auth",
+            Self::MongoDropDatabase => "mongo_drop_database",
             Self::MultiSession => "multi_session",
+            Self::StructuredErrorV1 => "structured_error_v1",
         }
     }
 }
@@ -627,6 +1278,7 @@ pub enum MongoAgentMethod {
     CreateIndex,
     DropIndexes,
     DropCollection,
+    DropDatabase,
     InsertDocument,
     UpdateDocument,
     UpdateDocuments,
@@ -635,7 +1287,7 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -645,6 +1297,7 @@ impl MongoAgentMethod {
         Self::CreateIndex,
         Self::DropIndexes,
         Self::DropCollection,
+        Self::DropDatabase,
         Self::InsertDocument,
         Self::UpdateDocument,
         Self::UpdateDocuments,
@@ -663,6 +1316,7 @@ impl MongoAgentMethod {
             Self::CreateIndex => "create_index",
             Self::DropIndexes => "drop_indexes",
             Self::DropCollection => "drop_collection",
+            Self::DropDatabase => "drop_database",
             Self::InsertDocument => "insert_document",
             Self::UpdateDocument => "update_document",
             Self::UpdateDocuments => "update_documents",
@@ -814,15 +1468,7 @@ impl AgentDriverClient {
     /// they speak the DBX stdin/stdout JSON-RPC protocol.
     /// Blocks (async) until the agent writes `{"ready":true}` to stdout.
     pub async fn spawn(launch: AgentLaunchSpec) -> Result<Self, String> {
-        let mut command = crate::process::new_std_command(&launch.program);
-        command.args(&launch.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(working_dir) = &launch.working_dir {
-            command.current_dir(working_dir);
-        }
-        remove_agent_proxy_env(&mut command);
-
-        let mut child =
-            command.spawn().map_err(|e| format!("Failed to spawn agent process {}: {e}", launch_display(&launch)))?;
+        let mut child = spawn_agent_process(&launch)?;
 
         let child_stdin = child.stdin.take().ok_or("Failed to capture agent stdin")?;
         let child_stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
@@ -911,7 +1557,18 @@ impl AgentDriverClient {
         method: &str,
         params: Value,
     ) -> Result<T, String> {
-        self.call_with_timeout(method, params, Some(Duration::from_secs(RPC_TIMEOUT_SECS))).await
+        let agent_session_id = self.agent_session_id.clone();
+        self.call_typed(method, params)
+            .await
+            .map_err(|error| error.into_legacy_string_with_session_id(agent_session_id.as_deref()))
+    }
+
+    pub async fn call_typed<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, AgentCallError> {
+        self.call_typed_with_timeout(method, params, Some(Duration::from_secs(RPC_TIMEOUT_SECS))).await
     }
 
     /// Send a JSON-RPC 2.0 request and wait for the response.
@@ -922,7 +1579,19 @@ impl AgentDriverClient {
         params: Value,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_with_timeout_and_cancel(method, params, timeout_duration, None).await
+        let agent_session_id = self.agent_session_id.clone();
+        self.call_typed_with_timeout(method, params, timeout_duration)
+            .await
+            .map_err(|error| error.into_legacy_string_with_session_id(agent_session_id.as_deref()))
+    }
+
+    pub async fn call_typed_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, AgentCallError> {
+        self.call_typed_with_timeout_and_cancel(method, params, timeout_duration, None).await
     }
 
     /// Send a JSON-RPC 2.0 request and wait for the response.
@@ -935,19 +1604,36 @@ impl AgentDriverClient {
         timeout_duration: Option<Duration>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<T, String> {
+        let agent_session_id = self.agent_session_id.clone();
+        self.call_typed_with_timeout_and_cancel(method, params, timeout_duration, cancel_token)
+            .await
+            .map_err(|error| error.into_legacy_string_with_session_id(agent_session_id.as_deref()))
+    }
+
+    pub async fn call_typed_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, AgentCallError> {
         if let Some(runtime) = &self.shared_runtime {
+            let agent_session_id = self.agent_session_id.clone();
             let mut params = params;
             if method != AgentMethod::Handshake.as_str()
                 && method != AgentMethod::TestConnection.as_str()
                 && method != AgentMethod::Shutdown.as_str()
             {
-                let session_id = self.agent_session_id.as_ref().ok_or("Shared Agent session id is missing")?;
+                let session_id = agent_session_id.as_ref().ok_or("Shared Agent session id is missing")?;
                 params
                     .as_object_mut()
                     .ok_or_else(|| "Agent RPC parameters must be an object".to_string())?
                     .insert("agentSessionId".to_string(), Value::String(session_id.clone()));
             }
-            return runtime.call(method, params, timeout_duration, cancel_token).await;
+            return runtime
+                .call_typed(method, params, timeout_duration, cancel_token)
+                .await
+                .map_err(|error| error.with_legacy_session_id(agent_session_id.as_deref()));
         }
         self.next_id += 1;
         let id = self.next_id;
@@ -973,7 +1659,7 @@ impl AgentDriverClient {
                 .and_then(|_| writer.flush().map_err(|e| format!("Failed to flush agent stdin: {e}")))
         };
         if let Err(e) = write_result {
-            return Err(self.format_agent_process_error(&e));
+            return Err(AgentCallError::Transport { message: self.format_agent_process_error(&e) });
         }
 
         // Read response from stdout (blocking, with timeout)
@@ -993,9 +1679,7 @@ impl AgentDriverClient {
             };
 
             let result = if let Some(err) = resp.get("error") {
-                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown agent error");
-                let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-                Err(format!("Agent RPC error ({code}): {msg}"))
+                Err(format_agent_rpc_error(err))
             } else if let Some(result_val) = resp.get("result") {
                 serde_json::from_value::<T>(result_val.clone())
                     .map_err(|e| format!("Failed to deserialize agent result: {e}"))
@@ -1011,13 +1695,19 @@ impl AgentDriverClient {
                     biased;
                     _ = token.cancelled() => {
                         self.kill();
-                        return Err("Query canceled".to_string());
+                        return Err(AgentCallError::Canceled {
+                            stage: agent_error_stage(method),
+                            operation_outcome: agent_operation_outcome(method),
+                        });
                     }
                     result = tokio::time::timeout(duration, response_task) => match result {
                         Ok(result) => result,
                         Err(_) => {
                             self.kill();
-                            return Err(format!("Agent RPC call timed out ({}s)", duration.as_secs()));
+                            return Err(AgentCallError::Timeout {
+                                stage: agent_error_stage(method),
+                                operation_outcome: agent_operation_outcome(method),
+                            });
                         }
                     },
                 }
@@ -1026,7 +1716,10 @@ impl AgentDriverClient {
                 Ok(result) => result,
                 Err(_) => {
                     self.kill();
-                    return Err(format!("Agent RPC call timed out ({}s)", duration.as_secs()));
+                    return Err(AgentCallError::Timeout {
+                        stage: agent_error_stage(method),
+                        operation_outcome: agent_operation_outcome(method),
+                    });
                 }
             },
             (None, Some(token)) => {
@@ -1034,23 +1727,30 @@ impl AgentDriverClient {
                     biased;
                     _ = token.cancelled() => {
                         self.kill();
-                        return Err("Query canceled".to_string());
+                        return Err(AgentCallError::Canceled {
+                            stage: agent_error_stage(method),
+                            operation_outcome: agent_operation_outcome(method),
+                        });
                     }
                     result = response_task => result,
                 }
             }
             (None, None) => response_task.await,
         }
-        .map_err(|e| format!("Agent RPC task failed: {e}"))?;
+        .map_err(|e| AgentCallError::Transport { message: format!("Agent RPC task failed: {e}") })?;
 
         let _ = self.stdout.insert(returned_reader);
-        result.map_err(|error| {
-            if is_agent_rpc_response_error(&error) {
-                error
-            } else {
-                self.format_agent_process_error(&error)
-            }
-        })
+        result
+            .map_err(
+                |error| {
+                    if is_agent_rpc_response_error(&error) {
+                        error
+                    } else {
+                        self.format_agent_process_error(&error)
+                    }
+                },
+            )
+            .map_err(|error| legacy_agent_call_error(error, self.agent_session_id.as_deref()))
     }
 
     pub async fn call_method<T: DeserializeOwned + Send + 'static>(
@@ -1059,6 +1759,14 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call(method.as_str(), params).await
+    }
+
+    pub async fn call_method_typed<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: AgentMethod,
+        params: Value,
+    ) -> Result<T, AgentCallError> {
+        self.call_typed(method.as_str(), params).await
     }
 
     pub async fn call_method_with_timeout<T: DeserializeOwned + Send + 'static>(
@@ -1070,6 +1778,15 @@ impl AgentDriverClient {
         self.call_with_timeout(method.as_str(), params, timeout_duration).await
     }
 
+    pub async fn call_method_typed_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: AgentMethod,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, AgentCallError> {
+        self.call_typed_with_timeout(method.as_str(), params, timeout_duration).await
+    }
+
     pub async fn call_method_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
         &mut self,
         method: AgentMethod,
@@ -1078,6 +1795,16 @@ impl AgentDriverClient {
         cancel_token: Option<CancellationToken>,
     ) -> Result<T, String> {
         self.call_with_timeout_and_cancel(method.as_str(), params, timeout_duration, cancel_token).await
+    }
+
+    pub async fn call_method_typed_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: AgentMethod,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, AgentCallError> {
+        self.call_typed_with_timeout_and_cancel(method.as_str(), params, timeout_duration, cancel_token).await
     }
 
     pub async fn connect(&mut self, params: Value) -> Result<Value, String> {
@@ -1115,6 +1842,14 @@ impl AgentDriverClient {
 
     pub async fn validate_connection(&mut self, timeout_duration: Option<Duration>) -> Result<Value, String> {
         self.call_method_with_timeout(AgentMethod::ValidateConnection, serde_json::json!({}), timeout_duration).await
+    }
+
+    pub async fn validate_connection_typed(
+        &mut self,
+        timeout_duration: Option<Duration>,
+    ) -> Result<Value, AgentCallError> {
+        self.call_method_typed_with_timeout(AgentMethod::ValidateConnection, serde_json::json!({}), timeout_duration)
+            .await
     }
 
     pub async fn connection_info(&mut self, timeout_duration: Option<Duration>) -> Result<AgentConnectionInfo, String> {
@@ -1443,6 +2178,15 @@ impl AgentDriverClient {
         self.call_method_with_timeout(AgentMethod::ExecuteQuery, params, timeout_duration).await
     }
 
+    pub async fn execute_query_typed_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, AgentCallError> {
+        self.invalidate_cached_query();
+        self.call_method_typed_with_timeout(AgentMethod::ExecuteQuery, params, timeout_duration).await
+    }
+
     pub async fn execute_query_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -1452,6 +2196,22 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_with_timeout_and_cancel(AgentMethod::ExecuteQuery, params, timeout_duration, cancel_token)
             .await
+    }
+
+    pub async fn execute_query_typed_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, AgentCallError> {
+        self.invalidate_cached_query();
+        self.call_method_typed_with_timeout_and_cancel(
+            AgentMethod::ExecuteQuery,
+            params,
+            timeout_duration,
+            cancel_token,
+        )
+        .await
     }
 
     pub async fn execute_query_cached_with_timeout<T: DeserializeOwned + Send + 'static>(
@@ -1503,6 +2263,22 @@ impl AgentDriverClient {
             .await
     }
 
+    pub async fn execute_query_page_typed_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, AgentCallError> {
+        self.invalidate_cached_query();
+        self.call_method_typed_with_timeout_and_cancel(
+            AgentMethod::ExecuteQueryPage,
+            params,
+            timeout_duration,
+            cancel_token,
+        )
+        .await
+    }
+
     pub async fn fetch_query_page<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
         self.call_method(AgentMethod::FetchQueryPage, params).await
     }
@@ -1523,6 +2299,21 @@ impl AgentDriverClient {
     ) -> Result<T, String> {
         self.call_method_with_timeout_and_cancel(AgentMethod::FetchQueryPage, params, timeout_duration, cancel_token)
             .await
+    }
+
+    pub async fn fetch_query_page_typed_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, AgentCallError> {
+        self.call_method_typed_with_timeout_and_cancel(
+            AgentMethod::FetchQueryPage,
+            params,
+            timeout_duration,
+            cancel_token,
+        )
+        .await
     }
 
     pub async fn get_explain_info<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
@@ -1579,6 +2370,17 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::ExecuteTransaction, agent_transaction_params(database, statements, schema)).await
     }
 
+    pub async fn execute_transaction_typed<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: Option<&str>,
+        statements: &[String],
+        schema: Option<&str>,
+    ) -> Result<T, AgentCallError> {
+        self.invalidate_cached_query();
+        self.call_method_typed(AgentMethod::ExecuteTransaction, agent_transaction_params(database, statements, schema))
+            .await
+    }
+
     pub async fn execute_batch<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: Option<&str>,
@@ -1588,6 +2390,22 @@ impl AgentDriverClient {
     ) -> Result<T, String> {
         self.invalidate_cached_query();
         self.call_method_with_timeout(
+            AgentMethod::ExecuteBatch,
+            agent_transaction_params(database, statements, schema),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn execute_batch_typed<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: Option<&str>,
+        statements: &[String],
+        schema: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, AgentCallError> {
+        self.invalidate_cached_query();
+        self.call_method_typed_with_timeout(
             AgentMethod::ExecuteBatch,
             agent_transaction_params(database, statements, schema),
             timeout_duration,
@@ -1624,6 +2442,19 @@ impl AgentDriverClient {
         database: &str,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::ListCollections, mongo_database_params(database)).await
+    }
+
+    /// Request collection metadata while accepting old Agents that still
+    /// return the historical string array and ignore `include_types`.
+    pub async fn mongo_list_collection_specs<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+    ) -> Result<T, String> {
+        self.call_mongo_method(
+            MongoAgentMethod::ListCollections,
+            serde_json::json!({ "database": database, "include_types": true }),
+        )
+        .await
     }
 
     pub async fn mongo_find_documents<T: DeserializeOwned + Send + 'static>(
@@ -1674,6 +2505,13 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::DropCollection, params).await
+    }
+
+    pub async fn mongo_drop_database<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::DropDatabase, params).await
     }
 
     pub async fn mongo_insert_document<T: DeserializeOwned + Send + 'static>(
@@ -1848,6 +2686,7 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::EtcdWatch
             | AgentCapability::EtcdLease
             | AgentCapability::EtcdAuth
+            | AgentCapability::MongoDropDatabase
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
@@ -2009,6 +2848,68 @@ fn launch_display(launch: &AgentLaunchSpec) -> String {
     let mut parts = vec![launch.program.to_string_lossy().to_string()];
     parts.extend(launch.args.iter().cloned());
     parts.join(" ")
+}
+
+fn spawn_agent_process(launch: &AgentLaunchSpec) -> Result<Child, String> {
+    match agent_command(launch).spawn() {
+        Ok(child) => Ok(child),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let repaired = repair_native_agent_execute_permission(&launch.program).map_err(|repair_error| {
+                format!(
+                    "Failed to spawn agent process {}: {error}; failed to restore executable permission: {repair_error}",
+                    launch_display(launch)
+                )
+            })?;
+            if !repaired {
+                return Err(format!("Failed to spawn agent process {}: {error}", launch_display(launch)));
+            }
+            agent_command(launch).spawn().map_err(|retry_error| {
+                format!("Failed to spawn agent process {}: {retry_error}", launch_display(launch))
+            })
+        }
+        Err(error) => Err(format!("Failed to spawn agent process {}: {error}", launch_display(launch))),
+    }
+}
+
+fn agent_command(launch: &AgentLaunchSpec) -> Command {
+    let mut command = crate::process::new_std_command(&launch.program);
+    command.args(&launch.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(working_dir) = &launch.working_dir {
+        command.current_dir(working_dir);
+    }
+    remove_agent_proxy_env(&mut command);
+    command
+}
+
+fn repair_native_agent_execute_permission(program: &Path) -> Result<bool, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !program.is_absolute() || program.file_name().and_then(|name| name.to_str()) != Some("agent") {
+            return Ok(false);
+        }
+        let metadata = program
+            .metadata()
+            .map_err(|error| format!("Failed to inspect native agent {}: {error}", program.display()))?;
+        if !metadata.is_file() {
+            return Ok(false);
+        }
+        let mut permissions = metadata.permissions();
+        let mode = permissions.mode();
+        if mode & 0o100 != 0 {
+            return Ok(false);
+        }
+        permissions.set_mode(mode | 0o100);
+        std::fs::set_permissions(program, permissions)
+            .map_err(|error| format!("Failed to make native agent executable {}: {error}", program.display()))?;
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = program;
+        Ok(false)
+    }
 }
 
 fn remove_agent_proxy_env(command: &mut Command) {
@@ -2177,22 +3078,405 @@ impl Drop for AgentDriverClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_close_query_session_params, agent_handshake_params, agent_java_args, agent_java_args_with_extra,
-        agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars, agent_schema_params,
-        agent_schema_table_params, agent_supports_capability, agent_transaction_params, format_agent_process_error,
-        format_agent_startup_error, is_agent_rpc_response_error, is_unsupported_handshake_error,
-        mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
-        read_agent_line, start_stderr_collector, validate_dameng_java_system_properties, AgentCapability,
-        AgentDriverClient, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentRuntimeClient,
+        agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
+        agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars,
+        agent_schema_params, agent_schema_table_params, agent_supports_capability, agent_transaction_params,
+        append_legacy_error_context, decode_agent_response, format_agent_process_error, format_agent_startup_error,
+        is_agent_rpc_response_error, is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params,
+        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_line, spawn_agent_process,
+        start_stderr_collector, validate_dameng_java_system_properties, AgentCallError, AgentCapability,
+        AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod,
+        AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition,
         AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail,
         AGENT_PROTOCOL_VERSION,
     };
+    use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_repairs_missing_native_execute_permission_after_eacces() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-agent-permission-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("agent");
+        fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_ne!(fs::metadata(&program).unwrap().permissions().mode() & 0o100, 0);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_keeps_existing_native_execute_permissions() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-agent-permission-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("agent");
+        fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(fs::metadata(&program).unwrap().permissions().mode() & 0o777, 0o700);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn test_python() -> &'static str {
+        if cfg!(windows) {
+            "python"
+        } else {
+            "python3"
+        }
+    }
+
+    fn test_shell_command(unix_script: &str, windows_script: &str) -> Command {
+        if cfg!(windows) {
+            let mut command = Command::new("powershell");
+            command.args(["-NoProfile", "-Command", windows_script]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", unix_script]);
+            command
+        }
+    }
+
+    #[test]
+    fn structured_agent_error_data_survives_legacy_string_boundary() {
+        let response = serde_json::json!({
+            "error": {
+                "code": -1,
+                "message": "connection lost",
+                "data": {
+                    "category": "connection",
+                    "retryable": true,
+                    "sessionDisposition": "quarantine",
+                    "agentSessionId": "session-generation-1",
+                    "stage": "execute"
+                }
+            }
+        });
+
+        let error = decode_agent_response::<serde_json::Value>(response, false, None).unwrap_err().into_legacy_string();
+
+        assert!(error.starts_with("Agent RPC error (-1): connection lost"));
+        let decoded = agent_error_from_legacy(&error, None);
+        assert_eq!(decoded.category(), Some(AgentErrorCategory::Connection));
+        assert_eq!(decoded.session_id(), Some("session-generation-1"));
+        assert_eq!(decoded.session_disposition(), Some(AgentSessionDisposition::Quarantine));
+    }
+
+    #[test]
+    fn strict_structured_error_requires_v1_and_preserves_diagnostics() {
+        let response = serde_json::json!({
+            "error": {
+                "code": -6007,
+                "message": "connection lost",
+                "data": {
+                    "contractVersion": 1,
+                    "category": "connection",
+                    "retryable": false,
+                    "sessionDisposition": "quarantine",
+                    "stage": "execute",
+                    "operationOutcome": "unknown",
+                    "agentSessionId": "session-1",
+                    "sqlState": "08006",
+                    "vendorCode": -6007,
+                    "exceptionClass": "java.sql.SQLRecoverableException",
+                    "futureField": "allowed"
+                }
+            }
+        });
+
+        let error = decode_agent_response::<serde_json::Value>(response, true, Some("session-1")).unwrap_err();
+        match error {
+            AgentCallError::Structured { rpc_code, context, .. } => {
+                assert_eq!(rpc_code, -6007);
+                assert_eq!(context.contract_version, 1);
+                assert_eq!(context.category, AgentErrorCategory::Connection);
+                assert_eq!(context.stage, AgentErrorStage::Execute);
+                assert_eq!(context.operation_outcome, AgentOperationOutcome::Unknown);
+                assert_eq!(context.sql_state.as_deref(), Some("08006"));
+            }
+            other => panic!("expected structured error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strict_structured_error_keeps_identity_across_legacy_api_boundary() {
+        let response = serde_json::json!({
+            "error": {
+                "code": -6007,
+                "message": "connection lost",
+                "data": {
+                    "contractVersion": 1,
+                    "category": "connection",
+                    "retryable": false,
+                    "sessionDisposition": "quarantine",
+                    "stage": "execute",
+                    "operationOutcome": "unknown",
+                    "agentSessionId": "session-1"
+                }
+            }
+        });
+        let legacy = decode_agent_response::<serde_json::Value>(response, true, Some("session-1"))
+            .unwrap_err()
+            .into_legacy_string();
+        let legacy = append_legacy_error_context(&legacy, "SQL text omitted");
+
+        assert!(matches!(agent_error_from_legacy(&legacy, Some("session-1")), AgentCallError::Structured { .. }));
+    }
+
+    #[test]
+    fn contract_violation_keeps_identity_when_legacy_api_adds_session_id() {
+        let legacy = AgentCallError::ContractViolation {
+            rpc_code: Some(-6007),
+            message: "invalid strict error".to_string(),
+            reason: super::ContractViolationReason::InvalidDataShape,
+        }
+        .into_legacy_string_with_session_id(Some("session-1"));
+
+        assert!(matches!(
+            agent_error_from_legacy(&legacy, Some("session-1")),
+            AgentCallError::ContractViolation { .. }
+        ));
+        assert_eq!(crate::backend_error::BackendError::from_legacy_string(&legacy).code(), "DBX-JDBC-5002");
+    }
+
+    #[test]
+    fn legacy_adapter_preserves_strict_identity_when_old_callers_append_context() {
+        let structured = AgentCallError::Structured {
+            rpc_code: -6007,
+            message: "connection lost".to_string(),
+            context: AgentErrorContext {
+                contract_version: 1,
+                category: AgentErrorCategory::Connection,
+                retryable: false,
+                session_disposition: AgentSessionDisposition::Quarantine,
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+                agent_session_id: Some("session-1".to_string()),
+                sql_state: None,
+                vendor_code: None,
+                exception_class: None,
+            },
+        };
+        let suffixed = format!("{}: fallback failed", structured.into_legacy_string());
+        assert!(matches!(agent_error_from_legacy(&suffixed, Some("session-1")), AgentCallError::Structured { .. }));
+
+        let violation = AgentCallError::ContractViolation {
+            rpc_code: Some(-6007),
+            message: "invalid strict error".to_string(),
+            reason: super::ContractViolationReason::InvalidDataShape,
+        };
+        let suffixed = format!("{}: fallback failed", violation.into_legacy_string());
+        assert!(matches!(agent_error_from_legacy(&suffixed, None), AgentCallError::ContractViolation { .. }));
+        assert_eq!(crate::backend_error::BackendError::from_legacy_string(&suffixed).code(), "DBX-JDBC-5002");
+    }
+
+    #[test]
+    fn strict_structured_error_rejects_missing_fields_unknown_enums_and_session_mismatch() {
+        let base = serde_json::json!({
+            "contractVersion": 1,
+            "category": "connection",
+            "retryable": false,
+            "sessionDisposition": "keep",
+            "stage": "connect",
+            "operationOutcome": "not_started",
+            "agentSessionId": "session-1"
+        });
+
+        let missing = serde_json::json!({"error": {"message": "bad", "data": {"contractVersion": 1}}});
+        assert!(matches!(
+            decode_agent_response::<serde_json::Value>(missing, true, None).unwrap_err(),
+            AgentCallError::ContractViolation { reason: super::ContractViolationReason::InvalidDataShape, .. }
+        ));
+
+        let mut unknown_enum = base.clone();
+        unknown_enum["category"] = serde_json::json!("future");
+        let response = serde_json::json!({"error": {"message": "bad", "data": unknown_enum}});
+        assert!(matches!(
+            decode_agent_response::<serde_json::Value>(response, true, None).unwrap_err(),
+            AgentCallError::ContractViolation { reason: super::ContractViolationReason::InvalidDataShape, .. }
+        ));
+
+        let response = serde_json::json!({"error": {"message": "bad", "data": base}});
+        assert!(matches!(
+            decode_agent_response::<serde_json::Value>(response, true, Some("other")).unwrap_err(),
+            AgentCallError::ContractViolation { reason: super::ContractViolationReason::InvalidSessionId, .. }
+        ));
+    }
+
+    #[test]
+    fn strict_structured_error_rejects_inconsistent_operation_outcome() {
+        let response = serde_json::json!({
+            "error": {
+                "message": "bad",
+                "data": {
+                    "contractVersion": 1,
+                    "category": "connection",
+                    "retryable": false,
+                    "sessionDisposition": "keep",
+                    "stage": "connect",
+                    "operationOutcome": "unknown"
+                }
+            }
+        });
+
+        assert!(matches!(
+            decode_agent_response::<serde_json::Value>(response, true, None).unwrap_err(),
+            AgentCallError::ContractViolation { reason: super::ContractViolationReason::InvalidCombination, .. }
+        ));
+    }
+
+    #[test]
+    fn strict_structured_error_rejects_dangerous_disposition_and_invalid_diagnostics() {
+        let dangerous = serde_json::json!({
+            "error": {
+                "message": "bad",
+                "data": {
+                    "contractVersion": 1,
+                    "category": "protocol",
+                    "retryable": false,
+                    "sessionDisposition": "replace_runtime",
+                    "stage": "request",
+                    "operationOutcome": "not_started"
+                }
+            }
+        });
+        assert!(matches!(
+            decode_agent_response::<serde_json::Value>(dangerous, true, None).unwrap_err(),
+            AgentCallError::ContractViolation { reason: super::ContractViolationReason::InvalidCombination, .. }
+        ));
+
+        let invalid_diagnostic = serde_json::json!({
+            "error": {
+                "message": "bad",
+                "data": {
+                    "contractVersion": 1,
+                    "category": "sql",
+                    "retryable": false,
+                    "sessionDisposition": "keep",
+                    "stage": "execute",
+                    "operationOutcome": "unknown",
+                    "sqlState": "08\n006"
+                }
+            }
+        });
+        assert!(matches!(
+            decode_agent_response::<serde_json::Value>(invalid_diagnostic, true, None).unwrap_err(),
+            AgentCallError::ContractViolation { reason: super::ContractViolationReason::InvalidCombination, .. }
+        ));
+    }
+
+    #[test]
+    fn recovery_policy_never_replays_user_operations_and_retries_metadata_once() {
+        let quarantined = AgentCallError::Structured {
+            rpc_code: -1,
+            message: "connection lost".to_string(),
+            context: AgentErrorContext {
+                contract_version: 1,
+                category: AgentErrorCategory::Connection,
+                retryable: true,
+                session_disposition: AgentSessionDisposition::Quarantine,
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+                agent_session_id: Some("session-1".to_string()),
+                sql_state: Some("08006".to_string()),
+                vendor_code: None,
+                exception_class: None,
+            },
+        };
+
+        assert_eq!(
+            RecoveryPolicy::decide(&quarantined, RecoveryScope::UserOperation),
+            RecoveryDecision::QuarantineSession
+        );
+        assert_eq!(
+            RecoveryPolicy::decide(&quarantined, RecoveryScope::ReadOnlyMetadata { retried: false }),
+            RecoveryDecision::RetryReadOnlyMetadata
+        );
+        assert_eq!(
+            RecoveryPolicy::decide(&quarantined, RecoveryScope::ReadOnlyMetadata { retried: true }),
+            RecoveryDecision::QuarantineSession
+        );
+    }
+
+    #[test]
+    fn recovery_policy_is_conservative_for_runtime_local_and_legacy_failures() {
+        let replace = AgentCallError::Structured {
+            rpc_code: -1,
+            message: "runtime saturated".to_string(),
+            context: AgentErrorContext {
+                contract_version: 1,
+                category: AgentErrorCategory::Resource,
+                retryable: false,
+                session_disposition: AgentSessionDisposition::ReplaceRuntime,
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+                agent_session_id: Some("session-1".to_string()),
+                sql_state: None,
+                vendor_code: None,
+                exception_class: None,
+            },
+        };
+        assert_eq!(RecoveryPolicy::decide(&replace, RecoveryScope::Keepalive), RecoveryDecision::ReplaceRuntime);
+        let structured_timeout = AgentCallError::Structured {
+            rpc_code: -1,
+            message: "timed out".to_string(),
+            context: AgentErrorContext {
+                contract_version: 1,
+                category: AgentErrorCategory::Timeout,
+                retryable: false,
+                session_disposition: AgentSessionDisposition::Keep,
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+                agent_session_id: Some("session-1".to_string()),
+                sql_state: None,
+                vendor_code: None,
+                exception_class: None,
+            },
+        };
+        assert_eq!(
+            RecoveryPolicy::decide(&structured_timeout, RecoveryScope::UserOperation),
+            RecoveryDecision::QuarantineSession
+        );
+        assert_eq!(
+            RecoveryPolicy::decide(
+                &AgentCallError::Timeout {
+                    stage: AgentErrorStage::Connect,
+                    operation_outcome: AgentOperationOutcome::NotStarted,
+                },
+                RecoveryScope::UserOperation,
+            ),
+            RecoveryDecision::QuarantineSession
+        );
+
+        let legacy = legacy_agent_call_error(
+            "Agent RPC error (-1): SQLRecoverableException: connection lost".to_string(),
+            Some("legacy-session"),
+        );
+        assert_eq!(legacy.category(), Some(AgentErrorCategory::Connection));
+        assert_eq!(
+            RecoveryPolicy::decide(&legacy, RecoveryScope::ReadOnlyMetadata { retried: false }),
+            RecoveryDecision::RetryReadOnlyMetadata
+        );
+    }
 
     #[test]
     fn agent_java_args_include_oracle_network_compatibility_flags() {
@@ -2353,9 +3637,10 @@ mod tests {
 
     #[test]
     fn startup_error_waits_briefly_for_exit_status_and_stderr_tail() {
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 0.05; echo 'java.lang.UnsupportedClassVersionError: class file version 65.0' >&2; exit 1")
+        let mut child = test_shell_command(
+            "sleep 0.05; echo 'java.lang.UnsupportedClassVersionError: class file version 65.0' >&2; exit 1",
+            "Start-Sleep -Milliseconds 50; [Console]::Error.WriteLine('java.lang.UnsupportedClassVersionError: class file version 65.0'); exit 1",
+        )
             .stderr(Stdio::piped())
             .spawn()
             .expect("child should start");
@@ -2371,7 +3656,12 @@ mod tests {
         );
 
         assert!(message.contains("Failed to read startup line from agent: end of stream"));
-        assert!(message.contains("agent process exited with exit status: 1"));
+        let expected_exit = if cfg!(windows) {
+            "agent process exited with exit code: 1"
+        } else {
+            "agent process exited with exit status: 1"
+        };
+        assert!(message.contains(expected_exit), "unexpected message: {message}");
         assert!(message.contains("Agent requires Java 21"));
         assert!(message.contains("details: Failed to read startup line from agent: end of stream"));
         assert!(message.contains("UnsupportedClassVersionError"));
@@ -2379,9 +3669,7 @@ mod tests {
 
     #[test]
     fn runtime_agent_process_error_does_not_wait_for_live_child() {
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 2")
+        let child = test_shell_command("sleep 2", "Start-Sleep -Seconds 2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2494,8 +3782,9 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
         let runtime = AgentRuntimeClient::spawn(
-            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(python).with_args([script_path.to_string_lossy().to_string()]),
             "test",
         )
         .await
@@ -2520,6 +3809,9 @@ for line in sys.stdin:
             .await
             .unwrap_err();
         assert!(error.contains("Agent RPC call timed out"));
+        let typed_error = agent_error_from_legacy(&error, None);
+        assert_eq!(typed_error.category(), Some(AgentErrorCategory::Timeout));
+        assert_eq!(typed_error.operation_outcome(), AgentOperationOutcome::Unknown);
         let started = Instant::now();
         client
             .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
@@ -2536,6 +3828,9 @@ for line in sys.stdin:
             .await
             .unwrap_err();
         assert!(error.contains("Agent RPC call timed out"));
+        let typed_error = agent_error_from_legacy(&error, None);
+        assert_eq!(typed_error.category(), Some(AgentErrorCategory::Timeout));
+        assert_eq!(typed_error.operation_outcome(), AgentOperationOutcome::Unknown);
         let started = Instant::now();
         client
             .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
@@ -2725,7 +4020,7 @@ for line in sys.stdin:
         drop(script);
 
         let runtime = AgentRuntimeClient::spawn(
-            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
             "test",
         )
         .await
@@ -2760,7 +4055,7 @@ for line in sys.stdin:
         .unwrap();
 
         let error = match AgentRuntimeClient::spawn(
-            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
             "test",
         )
         .await
@@ -2773,6 +4068,66 @@ for line in sys.stdin:
         };
 
         assert_eq!(error, "Agent runtime does not support multi_session protocol v2");
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn disconnect_reports_runtime_replacement_without_owning_runtime_routing() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-runtime-cleanup-saturation-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        response = {
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'result': {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}
+        }
+    elif req['method'] == 'close_session':
+        response = {
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'error': {
+                'code': -1,
+                'message': 'Agent runtime resource limit reached',
+                'data': {
+                    'category': 'resource',
+                    'retryable': False,
+                    'sessionDisposition': 'replace_runtime',
+                    'stage': 'close'
+                }
+            }
+        }
+    else:
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'result': {}}
+    print(json.dumps(response), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let runtime = AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new(python).with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "session-1".to_string());
+
+        let error = client.disconnect().await.unwrap_err();
+
+        assert_eq!(
+            agent_error_from_legacy(&error, None).session_disposition(),
+            Some(AgentSessionDisposition::ReplaceRuntime)
+        );
+        assert!(!runtime.is_failed());
+        runtime.kill();
+        drop(client);
         let _ = std::fs::remove_file(script_path);
     }
 
@@ -2796,7 +4151,7 @@ for line in sys.stdin:
         )
         .unwrap();
         let runtime = AgentRuntimeClient::spawn(
-            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
             "test",
         )
         .await
@@ -2846,7 +4201,7 @@ for line in sys.stdin:
         )
         .unwrap();
         let runtime = AgentRuntimeClient::spawn(
-            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
             "test",
         )
         .await
@@ -2914,8 +4269,10 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::EtcdWatch.as_str(), "etcd_watch");
         assert_eq!(AgentCapability::EtcdLease.as_str(), "etcd_lease");
         assert_eq!(AgentCapability::EtcdAuth.as_str(), "etcd_auth");
+        assert_eq!(AgentCapability::MongoDropDatabase.as_str(), "mongo_drop_database");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
-        assert_eq!(AgentCapability::ALL.len(), 19);
+        assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
+        assert_eq!(AgentCapability::ALL.len(), 21);
     }
 
     #[test]
@@ -2963,6 +4320,7 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::CreateIndex.as_str(), "create_index");
         assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");
         assert_eq!(MongoAgentMethod::DropCollection.as_str(), "drop_collection");
+        assert_eq!(MongoAgentMethod::DropDatabase.as_str(), "drop_database");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::UpdateDocuments.as_str(), "update_documents");
@@ -3021,6 +4379,7 @@ for line in sys.stdin:
     fn exposes_mongo_protocol_wrappers() {
         let _mongo_list_databases = AgentDriverClient::mongo_list_databases::<serde_json::Value>;
         let _mongo_list_collections = AgentDriverClient::mongo_list_collections::<serde_json::Value>;
+        let _mongo_list_collection_specs = AgentDriverClient::mongo_list_collection_specs::<serde_json::Value>;
         let _mongo_find_documents = AgentDriverClient::mongo_find_documents::<serde_json::Value>;
         let _mongo_find_documents_extended_json =
             AgentDriverClient::mongo_find_documents_extended_json::<serde_json::Value>;
@@ -3028,6 +4387,7 @@ for line in sys.stdin:
         let _mongo_create_index = AgentDriverClient::mongo_create_index::<serde_json::Value>;
         let _mongo_drop_indexes = AgentDriverClient::mongo_drop_indexes::<serde_json::Value>;
         let _mongo_drop_collection = AgentDriverClient::mongo_drop_collection::<serde_json::Value>;
+        let _mongo_drop_database = AgentDriverClient::mongo_drop_database::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
         let _mongo_update_documents = AgentDriverClient::mongo_update_documents::<serde_json::Value>;
@@ -3205,7 +4565,7 @@ for line in sys.stdin:
             string_array(&contract["allCapabilities"]),
             AgentCapability::ALL.iter().map(|method| method.as_str()).collect::<Vec<_>>()
         );
-        assert_eq!(string_array(&contract["capabilities"]), default_sql_capabilities());
+        assert_eq!(string_array(&contract["capabilities"]), multi_session_capabilities());
         assert_eq!(string_array(&contract["defaultSqlCapabilities"]), default_sql_capabilities());
         assert_eq!(
             string_array(&contract["commonMethods"]),
@@ -3258,6 +4618,12 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvStatus));
         assert!(!agent_supports_capability(None, AgentCapability::KvHistory));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvHistory));
+        assert!(!agent_supports_capability(None, AgentCapability::MongoDropDatabase));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoDropDatabase));
+
+        let mongo_handshake =
+            AgentHandshake { capabilities: vec![AgentCapability::MongoDropDatabase.as_str().to_string()], ..handshake };
+        assert!(agent_supports_capability(Some(&mongo_handshake), AgentCapability::MongoDropDatabase));
     }
 
     #[test]
@@ -3280,9 +4646,17 @@ for line in sys.stdin:
             AgentCapability::Transaction,
             AgentCapability::Ddl,
             AgentCapability::MultiSession,
+            AgentCapability::StructuredErrorV1,
         ]
         .iter()
         .map(|capability| capability.as_str())
         .collect()
+    }
+
+    fn multi_session_capabilities() -> Vec<&'static str> {
+        default_sql_capabilities()
+            .into_iter()
+            .filter(|capability| *capability != AgentCapability::StructuredErrorV1.as_str())
+            .collect()
     }
 }

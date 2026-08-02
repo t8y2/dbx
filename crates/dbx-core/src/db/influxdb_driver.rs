@@ -476,6 +476,8 @@ pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -
             columns: s.columns.clone(),
             column_types: vec![],
             column_sortables: s.columns.iter().map(|_| false).collect(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: s.values.clone(),
             affected_rows: s.values.len() as u64,
             execution_time_ms: start.elapsed().as_millis(),
@@ -488,6 +490,8 @@ pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -
             columns: vec![],
             column_types: vec![],
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -630,6 +634,8 @@ fn parse_flux_csv(text: &str, start: Instant) -> Result<QueryResult, String> {
     let columns = headers.unwrap_or_default();
     Ok(QueryResult {
         column_sortables: columns.iter().map(|_| false).collect(),
+        spatial_columns: vec![],
+        spatial_values: vec![],
         columns,
         column_types: vec![],
         affected_rows: rows.len() as u64,

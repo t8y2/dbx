@@ -8,6 +8,7 @@ import {
   dataGridToolbarIntervalOptions,
   isDataGridToolbarCapabilityDisabled,
   isDataGridToolbarCapabilityVisible,
+  selectDataGridToolbarAddRowItem,
   selectDataGridToolbarAutoRefreshInterval,
   selectDataGridToolbarCopyItem,
   selectDataGridToolbarExportItem,
@@ -15,6 +16,7 @@ import {
   triggerDataGridToolbarCopy,
   triggerDataGridToolbarAction,
   type DataGridToolbarActionCapability,
+  type DataGridToolbarAddRowCapability,
   type DataGridToolbarAutoRefreshCapability,
   type DataGridToolbarCopyCapability,
   type DataGridToolbarExportCapability,
@@ -25,7 +27,7 @@ const props = defineProps<{
   compact?: boolean;
   refresh: DataGridToolbarActionCapability;
   autoRefresh?: DataGridToolbarAutoRefreshCapability;
-  addRow?: DataGridToolbarActionCapability;
+  addRow?: DataGridToolbarAddRowCapability;
   copyData?: DataGridToolbarCopyCapability;
   exportData?: DataGridToolbarExportCapability;
   transpose?: DataGridToolbarActionCapability;
@@ -117,15 +119,34 @@ function actionLabelClass() {
       </DropdownMenu>
     </div>
 
-    <Tooltip v-if="isDataGridToolbarCapabilityVisible(addRow)">
-      <TooltipTrigger as-child>
-        <Button variant="ghost" size="sm" :class="actionButtonClass" :disabled="isDataGridToolbarCapabilityDisabled(addRow)" @click="void triggerDataGridToolbarAction(addRow)">
-          <Plus class="data-grid-topbar-action-icon h-3 w-3" />
-          <span class="data-grid-topbar-action-label" :class="actionLabelClass()">{{ addRow?.label }}</span>
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">{{ addRow?.tooltip ?? addRow?.label }}</TooltipContent>
-    </Tooltip>
+    <div v-if="isDataGridToolbarCapabilityVisible(addRow)" class="flex h-5 shrink-0 items-stretch overflow-hidden rounded-md border border-border">
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="sm" class="h-5 rounded-none border-0 px-1.5 text-xs" :disabled="isDataGridToolbarCapabilityDisabled(addRow)" @click="void triggerDataGridToolbarAction(addRow)">
+            <Plus class="h-3 w-3" :class="compact ? '' : 'mr-1'" />
+            <span v-if="!compact">{{ addRow?.label }}</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{{ addRow?.tooltip ?? addRow?.label }}</TooltipContent>
+      </Tooltip>
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none border-0 border-l border-border" :aria-label="addRow?.label" :disabled="isDataGridToolbarCapabilityDisabled(addRow)">
+            <ChevronDown class="h-3 w-3" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" class="min-w-52">
+          <template v-for="item in addRow?.items ?? []" :key="item.value">
+            <DropdownMenuSeparator v-if="item.separatorBefore" />
+            <DropdownMenuItem class="gap-2" :disabled="item.disabled" @select="void selectDataGridToolbarAddRowItem(addRow, item.value)">
+              <Check v-if="item.selected" class="h-3.5 w-3.5 shrink-0 text-primary" />
+              <span v-else class="h-3.5 w-3.5 shrink-0" />
+              <span class="flex-1">{{ item.label }}</span>
+            </DropdownMenuItem>
+          </template>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
 
     <DropdownMenu v-if="isDataGridToolbarCapabilityVisible(exportData)">
       <Tooltip>

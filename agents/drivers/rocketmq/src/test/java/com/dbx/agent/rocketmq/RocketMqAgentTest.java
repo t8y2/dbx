@@ -14,6 +14,7 @@ import org.apache.rocketmq.remoting.protocol.admin.TopicStatsTable;
 import org.apache.rocketmq.remoting.protocol.admin.TopicOffset;
 import org.apache.rocketmq.remoting.protocol.body.ProducerInfo;
 import org.apache.rocketmq.remoting.protocol.body.ProducerTableInfo;
+import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
 import org.apache.rocketmq.common.message.MessageQueue;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -23,6 +24,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
@@ -221,6 +226,70 @@ class RocketMqAgentTest {
         SubscriptionGroupConfig normal = new SubscriptionGroupConfig();
         normal.setConsumeMessageOrderly(false);
         assertEquals("NORMAL", RocketMqAgent.classifyConsumerGroupType("MyGroup", normal));
+    }
+
+    @Test
+    void enrichConsumerGroupRowsRunsIndependentLookupsConcurrently() throws Exception {
+        List<Map<String, Object>> rows = IntStream.range(0, 4)
+            .mapToObj(index -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("groupId", "group-" + index);
+                return row;
+            })
+            .toList();
+        CountDownLatch started = new CountDownLatch(rows.size());
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+
+        CompletableFuture<Void> enrichment = CompletableFuture.runAsync(() ->
+            RocketMqAgent.enrichConsumerGroupRows(rows, groupId -> {
+                int current = active.incrementAndGet();
+                maxActive.accumulateAndGet(current, Math::max);
+                started.countDown();
+                try {
+                    release.await(1, TimeUnit.SECONDS);
+                    return new ConsumerConnection();
+                } finally {
+                    active.decrementAndGet();
+                }
+            }, 4, 1_000)
+        );
+
+        assertTrue(started.await(1, TimeUnit.SECONDS));
+        release.countDown();
+        enrichment.get(2, TimeUnit.SECONDS);
+
+        assertTrue(maxActive.get() > 1);
+        for (Map<String, Object> row : rows) {
+            assertEquals(0, row.get("memberCount"));
+            assertEquals(List.of(), row.get("topics"));
+        }
+    }
+
+    @Test
+    void enrichConsumerGroupRowsReturnsDefaultsWhenBudgetExpires() {
+        List<Map<String, Object>> rows = IntStream.range(0, 4)
+            .mapToObj(index -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("groupId", "slow-group-" + index);
+                return row;
+            })
+            .toList();
+        CountDownLatch blocked = new CountDownLatch(1);
+        long startedAt = System.nanoTime();
+
+        RocketMqAgent.enrichConsumerGroupRows(rows, groupId -> {
+            blocked.await();
+            return new ConsumerConnection();
+        }, 2, 50);
+
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        assertTrue(elapsedMs < 1_000, "enrichment exceeded its response budget: " + elapsedMs + "ms");
+        for (Map<String, Object> row : rows) {
+            assertEquals(0, row.get("memberCount"));
+            assertEquals(List.of(), row.get("topics"));
+        }
     }
 
     @Test

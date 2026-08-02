@@ -464,16 +464,12 @@ a {
 }
 
 .landing-nav-link {
-  transition:
-    background 0.16s ease,
-    color 0.16s ease,
-    transform 0.16s ease;
+  transition: color 0.16s ease;
 }
 
 .landing-nav-link:hover {
-  background: var(--color-landing-soft);
+  background: transparent;
   color: var(--color-landing-ink);
-  transform: translateY(-1px);
 }
 
 .landing-mobile-menu {

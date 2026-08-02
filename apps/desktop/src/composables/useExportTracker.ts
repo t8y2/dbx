@@ -23,6 +23,7 @@ export interface ExportTask {
   errorMessage: string | null;
   objectIndex?: number;
   totalObjects?: number;
+  overallPercent?: number;
   statementIndex?: number;
   successCount?: number;
   failureCount?: number;
@@ -381,7 +382,7 @@ export function useExportTracker() {
     task.errorMessage = progress.errorMessage || null;
   }
 
-  function updateDatabaseExportTask(exportId: string, progress: api.ExportProgress) {
+  function updateDatabaseExportTask(exportId: string, progress: api.ExportProgress & { overallPercent?: number }) {
     const task = taskMap.get(exportId);
     if (!task) return;
     // Keep the database label during metadata prefetch; only follow object names while writing.
@@ -394,6 +395,9 @@ export function useExportTracker() {
     task.errorMessage = progress.error || null;
     task.objectIndex = progress.objectIndex;
     task.totalObjects = progress.totalObjects;
+    if (progress.overallPercent !== undefined) {
+      task.overallPercent = Math.max(0, Math.min(100, Math.round(progress.overallPercent)));
+    }
   }
 
   function updateSqlFileTask(executionId: string, progress: api.SqlFileProgress) {

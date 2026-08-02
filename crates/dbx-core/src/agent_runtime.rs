@@ -2,9 +2,21 @@ use serde::de::DeserializeOwned;
 use std::time::Duration;
 
 use crate::agent_manager::{AgentManager, DEFAULT_JRE_KEY};
+use crate::agent_recovery::{RecoveryPolicy, RecoveryScope};
 use crate::database_capabilities;
-use crate::db::agent_driver::{AgentDriverClient, AgentMethod, AgentRuntimeClient};
+use crate::db::agent_driver::{AgentCallError, AgentDriverClient, AgentMethod, AgentRuntimeClient};
 use crate::models::connection::DatabaseType;
+
+pub struct SharedConnectionOpenError {
+    pub(crate) message: String,
+    pub(crate) runtime: Option<std::sync::Arc<AgentRuntimeClient>>,
+}
+
+impl From<String> for SharedConnectionOpenError {
+    fn from(message: String) -> Self {
+        Self { message, runtime: None }
+    }
+}
 
 pub fn db_type_to_agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {
     database_capabilities::agent_key(db_type, driver_profile)
@@ -64,7 +76,7 @@ pub async fn spawn_shared_connection_client(
     agent_session_id: String,
     connect_params: serde_json::Value,
     connect_timeout: Duration,
-) -> Result<AgentDriverClient, String> {
+) -> Result<AgentDriverClient, SharedConnectionOpenError> {
     let keys = runtime_agent_key_candidates(db_type, driver_profile)
         .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
     let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]);
@@ -100,13 +112,22 @@ pub async fn spawn_shared_connection_client(
         }
     };
     if let Err(err) = runtime
-        .call::<serde_json::Value>(AgentMethod::OpenSession.as_str(), session_params, Some(connect_timeout), None)
+        .call_typed::<serde_json::Value>(AgentMethod::OpenSession.as_str(), session_params, Some(connect_timeout), None)
         .await
     {
+        let open_error = shared_connection_open_error(err, runtime.clone());
         forget_unused_runtime_after_failed_open(manager, &runtime_key, &runtime_cell, &runtime).await;
-        return Err(err);
+        return Err(open_error);
     }
     Ok(AgentDriverClient::shared_session(runtime, agent_session_id))
+}
+
+fn shared_connection_open_error(
+    error: AgentCallError,
+    runtime: std::sync::Arc<AgentRuntimeClient>,
+) -> SharedConnectionOpenError {
+    let runtime = RecoveryPolicy::decide(&error, RecoveryScope::ConnectionOpen).replaces_runtime().then_some(runtime);
+    SharedConnectionOpenError { message: error.into_legacy_string(), runtime }
 }
 
 async fn forget_unused_runtime_after_failed_open(
@@ -316,8 +337,9 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
         let runtime = AgentRuntimeClient::spawn(
-            crate::db::agent_driver::AgentLaunchSpec::new("python3")
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
                 .with_args([script_path.to_string_lossy().to_string()]),
             "test",
         )
@@ -382,6 +404,29 @@ for line in sys.stdin:
         assert_eq!(runtime.active_session_count(), 1);
         AgentRuntimeClient::decrement_session_count(&runtime);
         runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn replace_runtime_open_error_reports_runtime_without_killing_it_directly() {
+        let (manager, _cell, runtime, script_path) = test_shared_runtime("replace-runtime-open-error").await;
+        let error = AgentCallError::Legacy {
+            rpc_code: Some(-1),
+            message: "capacity exhausted".to_string(),
+            hints: crate::db::agent_driver::LegacyAgentHints {
+                category: Some(crate::db::agent_driver::AgentErrorCategory::Resource),
+                session_disposition: Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime),
+                ..Default::default()
+            },
+        };
+
+        let open_error = shared_connection_open_error(error, runtime.clone());
+
+        assert!(open_error.runtime.as_ref().is_some_and(|failed| std::sync::Arc::ptr_eq(failed, &runtime)));
+        assert!(!runtime.is_failed());
+
+        runtime.kill();
+        drop(manager);
         let _ = std::fs::remove_file(script_path);
     }
 

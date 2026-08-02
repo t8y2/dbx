@@ -18,8 +18,9 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "starrocks", patterns: [/starrocks/i] },
   { type: "doris", patterns: [/doris/i] },
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
-  { type: "hive", patterns: [/org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
-  { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /kyuubi/i, /hive2/i] },
+  { type: "mysql", patterns: [/kyuubi/i] },
+  { type: "hive", patterns: [/inceptor/i, /\bapache\s+hive\b/i, /org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
+  { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /hive2/i] },
   { type: "gaussdb", patterns: [/jdbc:gaussdb:/i, /com\.huawei\.gaussdb/i, /gaussdb/i] },
   { type: "dameng", patterns: [/jdbc:dm:/i, /dm\.jdbc\.driver/i, /dameng/i] },
   { type: "opengauss", patterns: [/jdbc:opengauss:/i, /org\.opengauss/i, /opengauss/i] },
@@ -161,6 +162,7 @@ export function connectionQueryExecutionSchema(connection: JdbcDialectConnection
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
+  if (effectiveDatabaseTypeForConnection(connection) === "informix") return schema || "";
   return schema || database;
 }
 
@@ -175,6 +177,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   if (schema) return schema;
   const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "informix") return undefined;
   if (type === "sqlite") return database;
   return isSchemaAware(type) ? database : undefined;
 }

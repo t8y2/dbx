@@ -27,7 +27,7 @@ interface ParsedPasteValues {
 
 const SIMPLE_SLASH_LIST_VALUE_RE = /^[A-Za-z0-9_.:-]+$/;
 
-export function buildSqlInConditionFromPasteSource(source: string): SqlInListPasteResult {
+export function buildSqlInConditionFromPasteSource(source: string, keywordCase: "preserve" | "upper" | "lower" = "upper"): SqlInListPasteResult {
   if (source.length > SQL_IN_LIST_PASTE_MAX_SOURCE_LENGTH) {
     return { ok: false, reason: "too-large", limit: SQL_IN_LIST_PASTE_MAX_SOURCE_LENGTH };
   }
@@ -41,9 +41,10 @@ export function buildSqlInConditionFromPasteSource(source: string): SqlInListPas
   }
 
   const literals = values.map(formatSqlLiteral);
+  const inKeyword = keywordCase === "lower" ? "in" : "IN";
   return {
     ok: true,
-    sql: `IN (${literals.join(", ")})`,
+    sql: `${inKeyword} (${literals.join(", ")})`,
     valueCount: values.length,
   };
 }

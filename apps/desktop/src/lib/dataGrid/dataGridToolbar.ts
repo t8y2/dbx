@@ -35,6 +35,8 @@ export interface DataGridToolbarMenuItem {
   label: string;
   disabled?: boolean;
   separatorBefore?: boolean;
+  /** Marks a menu item as the active choice in a mutually-exclusive group (rendered as a check). */
+  selected?: boolean;
 }
 
 export interface DataGridToolbarExportCapability {
@@ -53,6 +55,16 @@ export interface DataGridToolbarCopyCapability {
   currentValue: string;
   items: readonly DataGridToolbarMenuItem[];
   onCopy: () => void | Promise<void>;
+  onSelect: (value: string) => void | Promise<void>;
+}
+
+export interface DataGridToolbarAddRowCapability {
+  label: string;
+  tooltip?: string;
+  visible?: boolean;
+  disabled?: boolean;
+  items: readonly DataGridToolbarMenuItem[];
+  onTrigger: () => void | Promise<void>;
   onSelect: (value: string) => void | Promise<void>;
 }
 
@@ -119,6 +131,14 @@ export async function triggerDataGridToolbarCopy(capability: DataGridToolbarCopy
 
 export async function selectDataGridToolbarCopyItem(capability: DataGridToolbarCopyCapability | undefined, value: string): Promise<boolean> {
   if (!capability || !isDataGridToolbarCapabilityVisible(capability)) return false;
+  const item = capability.items.find((candidate) => candidate.value === value);
+  if (!item || item.disabled) return false;
+  await capability.onSelect(value);
+  return true;
+}
+
+export async function selectDataGridToolbarAddRowItem(capability: DataGridToolbarAddRowCapability | undefined, value: string): Promise<boolean> {
+  if (!capability || !isDataGridToolbarCapabilityVisible(capability) || capability.disabled) return false;
   const item = capability.items.find((candidate) => candidate.value === value);
   if (!item || item.disabled) return false;
   await capability.onSelect(value);

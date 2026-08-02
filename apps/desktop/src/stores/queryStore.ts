@@ -29,6 +29,7 @@ import {
   splitMongoCommandRanges,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongo/mongoShellCommand";
+import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
@@ -61,7 +62,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { formatError } from "@/lib/backend/errorUtils";
+import { formatError, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
@@ -73,6 +74,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle"]);
+const QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR = "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
@@ -157,7 +159,7 @@ function exactTotalFromIncompletePage(result: QueryResult, pageLimit: number | u
   return (pageOffset ?? 0) + result.rows.length;
 }
 
-function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, maxRows: number): QueryResult {
+export function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, maxRows: number): QueryResult {
   if (segment.execution_error) throw new Error(String(segment.rows[0]?.[0] ?? "Failed to load the next result segment"));
   if (previous.columns.length !== segment.columns.length || previous.columns.some((column, index) => column !== segment.columns[index])) {
     throw new Error("Result columns changed while loading the next segment");
@@ -169,12 +171,25 @@ function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, m
     if (existing.length !== previous.rows.length || next.length !== segment.rows.length) return undefined;
     return [...existing, ...next.slice(0, appendedRowCount)];
   };
+  const sridByColumn = new Map<number, number | null>();
+  for (const column of previous.spatial_columns ?? []) {
+    sridByColumn.set(column.column_index, column.srid);
+  }
+  for (const column of segment.spatial_columns ?? []) {
+    const existing = sridByColumn.get(column.column_index) ?? null;
+    sridByColumn.set(column.column_index, existing ?? column.srid);
+  }
+  const spatial_columns = Array.from(sridByColumn.entries())
+    .map(([column_index, srid]) => ({ column_index, srid }))
+    .sort((a, b) => a.column_index - b.column_index);
   // Keep prior row objects intact so source-index based dirty/new/deleted state
   // remains valid, while bounding the in-memory result by the configured cap.
   return markQueryResultRowsRaw({
     ...segment,
     appended_from_row_count: previous.rows.length,
     rows: [...previous.rows, ...segment.rows.slice(0, appendedRowCount)],
+    spatial_columns: spatial_columns.length > 0 ? spatial_columns : undefined,
+    spatial_values: appendParallelValues(previous.spatial_values, segment.spatial_values),
     mongo_documents: appendParallelValues(previous.mongo_documents, segment.mongo_documents),
     mongo_copy_documents: appendParallelValues(previous.mongo_copy_documents, segment.mongo_copy_documents),
     execution_time_ms: (previous.execution_time_ms ?? 0) + (segment.execution_time_ms ?? 0),
@@ -264,7 +279,7 @@ function applyBatchSqlProgress(
     success: boolean;
     executionTimeMs: number;
     affectedRows: number;
-    error?: string;
+    error?: BackendError;
   },
   continueOnError: boolean,
 ) {
@@ -275,7 +290,8 @@ function applyBatchSqlProgress(
   item.status = progress.success ? "success" : "error";
   item.executionTimeMs = progress.executionTimeMs;
   item.affectedRows = progress.affectedRows;
-  item.error = progress.error;
+  item.errorDetails = progress.error;
+  item.error = progress.error ? translateBackendError(i18n.global.t, progress.error) : undefined;
   batch.completed = Math.max(batch.completed, progress.completed);
   if ((progress.success || continueOnError) && progress.completed < batch.total) {
     const next = batch.items[progress.statementIndex + 1];
@@ -296,7 +312,8 @@ function reconcileBatchSqlResults(tab: QueryTab, executionId: string, results: Q
     item.status = failed ? "error" : "success";
     item.executionTimeMs = result.execution_time_ms;
     item.affectedRows = result.affected_rows;
-    item.error = failed ? String(result.rows[0]?.[0] ?? "") : undefined;
+    item.errorDetails = failed ? result.error : undefined;
+    item.error = failed ? (result.error ? translateBackendError(i18n.global.t, result.error) : String(result.rows[0]?.[0] ?? "")) : undefined;
   }
   batch.completed = batch.items.filter((item) => item.status === "success" || item.status === "error").length;
 }
@@ -307,7 +324,8 @@ function failBatchSqlExecution(tab: QueryTab, executionId: string, error: unknow
   const item = batch.items.find((candidate) => candidate.status === "running") ?? batch.items.find((candidate) => candidate.status === "pending");
   if (!item) return;
   item.status = cancelled ? "cancelled" : "error";
-  item.error = cancelled ? undefined : error instanceof Error ? error.message : String(error);
+  item.errorDetails = cancelled ? undefined : (normalizeBackendError(error) ?? undefined);
+  item.error = cancelled ? undefined : translateBackendError(i18n.global.t, error);
   batch.completed = batch.items.filter((candidate) => candidate.status === "success" || candidate.status === "error").length;
 }
 
@@ -315,7 +333,7 @@ function finishBatchSqlExecution(tab: QueryTab, executionId: string, cancelled: 
   const batch = batchSqlExecutionFor(tab, executionId);
   if (!batch) return;
   if (cancelled) {
-    const cancelledError = [...batch.items].reverse().find((item) => item.status === "error" && /cancel|取消/i.test(item.error ?? ""));
+    const cancelledError = [...batch.items].reverse().find((item) => item.status === "error" && (item.errorDetails?.code === "DBX-JDBC-2003" || /cancel|取消/i.test(item.error ?? "")));
     if (cancelledError) {
       cancelledError.status = "cancelled";
       cancelledError.error = undefined;
@@ -370,9 +388,7 @@ function sqlServerUseDatabaseFromStatement(statement: string | undefined): strin
 }
 
 function isSqlServerBatchErrorResult(result: QueryResult): boolean {
-  // SQL Server batch errors can arrive without execution_error metadata.
-  // A standalone USE statement cannot legitimately return an Error column.
-  return result.execution_error === true || (result.columns.length === 1 && result.columns[0] === "Error" && result.rows.length > 0);
+  return result.execution_error === true;
 }
 
 function sapHanaCurrentSchemaFromResult(result: QueryResult): string | undefined {
@@ -653,6 +669,10 @@ export const useQueryStore = defineStore("query", () => {
       ...tableStructureRefreshVersions.value,
       [key]: (tableStructureRefreshVersions.value[key] ?? 0) + 1,
     };
+    for (const tab of tabs.value) {
+      if (tab.mode !== "query" || tab.connectionId !== connectionId || tab.database !== database) continue;
+      tab.completionContextVersion = (tab.completionContextVersion ?? 0) + 1;
+    }
   }
 
   function tableStructureRefreshVersion(connectionId: string, database: string, schema: string | undefined, tableName: string): number {
@@ -663,6 +683,21 @@ export const useQueryStore = defineStore("query", () => {
 
   function queryExecutionLog(level: "debug" | "info" | "warn" | "error", event: string, details: Record<string, unknown>) {
     appendDebugLog(level, `[DBX][executeTabSql:${event}]`, details);
+  }
+
+  async function refreshLoadedMongoIndexesAfterMutation(connectionId: string, database: string, collection: string, traceId: string) {
+    const connStore = useConnectionStore();
+    try {
+      await refreshLoadedMongoIndexes(connStore, { connectionId, database, collection });
+    } catch (error) {
+      queryExecutionLog("warn", "mongo-indexes:refresh-failed", {
+        traceId,
+        connectionId,
+        database,
+        collection,
+        error: formatError(error),
+      });
+    }
   }
 
   async function closeResultSession(tab: QueryTab | undefined, preserveSessionId?: string, throwOnError = false) {
@@ -2703,13 +2738,14 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function toErrorResult(e: any): NonNullable<QueryTab["result"]> {
-    const raw = e instanceof Error ? e.message : String(e);
     // Single funnel for every query execution failure, so backend messages DBX
     // knows about are shown in the active locale rather than as raw English.
-    const message = translateBackendError(i18n.global.t, raw);
+    const error = normalizeBackendError(e) ?? undefined;
+    const message = translateBackendError(i18n.global.t, e);
     return markQueryResultRowsRaw({
       columns: ["Error"],
       execution_error: true,
+      error,
       rows: [[message]],
       affected_rows: 0,
       execution_time_ms: 0,
@@ -3408,7 +3444,7 @@ export const useQueryStore = defineStore("query", () => {
               connStore.invalidateCompletionCache(tab.connectionId, String(currentDb));
             }
           } catch (e: any) {
-            allResults.push(annotateQueryResultSource({ columns: ["Error"], rows: [[e?.message ?? String(e)]], affected_rows: 0, execution_time_ms: 0 }, command, undefined, undefined, sourceRange));
+            allResults.push(annotateQueryResultSource(toErrorResult(e), command, undefined, undefined, sourceRange));
           }
         }
         queryExecutionLog("info", "redis:done", { traceId, commandCount: commands.length, elapsed: elapsed() });
@@ -3417,7 +3453,7 @@ export const useQueryStore = defineStore("query", () => {
         if (current?.executionId === executionId) {
           if (openInNewResultTab && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
           if (allResults.length > 1) {
-            const activeResultIndex = allResults.findIndex((r) => !r.columns.includes("Error"));
+            const activeResultIndex = allResults.findIndex((result) => !isQueryExecutionErrorResult(result));
             const resultIndex = preservedResultIndex(allResults, current.activeResultIndex, options?.preserveActiveResultIndex) ?? (activeResultIndex >= 0 ? activeResultIndex : 0);
             current.results = allResults;
             current.activeResultIndex = resultIndex;
@@ -3686,8 +3722,12 @@ export const useQueryStore = defineStore("query", () => {
                   const result = await api.mongoCreateIndex(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.keys, mongoCommand.options);
                   allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoCreateIndexToQueryResult(result.name, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "dropIndex" || mongoCommand.kind === "dropIndexes") {
-                  const result = await api.mongoDropIndexes(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.kind === "dropIndex" ? mongoCommand.index : mongoCommand.indexes, mongoCommand.kind === "dropIndex");
-                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt))));
+                  try {
+                    const result = await api.mongoDropIndexes(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.kind === "dropIndex" ? mongoCommand.index : mongoCommand.indexes, mongoCommand.kind === "dropIndex");
+                    allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt, result.failures))));
+                  } finally {
+                    await refreshLoadedMongoIndexesAfterMutation(tab.connectionId, currentDatabase, mongoCommand.collection, traceId);
+                  }
                 } else if (mongoCommand.kind === "dropCollection") {
                   await api.mongoDropCollection(tab.connectionId, currentDatabase, mongoCommand.collection);
                   allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(1, performance.now() - commandStartedAt))));
@@ -3756,7 +3796,7 @@ export const useQueryStore = defineStore("query", () => {
           } else if (allResults.length > 1) {
             // Open grouped output on the first non-error result when possible so
             // mixed success/error batches land on the most useful table first.
-            const activeResultIndex = allResults.findIndex((result) => !result.columns.includes("Error"));
+            const activeResultIndex = allResults.findIndex((result) => !isQueryExecutionErrorResult(result));
             const resultIndex = preservedResultIndex(allResults, current.activeResultIndex, options?.preserveActiveResultIndex) ?? (activeResultIndex >= 0 ? activeResultIndex : 0);
             current.results = allResults;
             current.activeResultIndex = resultIndex;
@@ -3825,7 +3865,7 @@ export const useQueryStore = defineStore("query", () => {
         if (current?.executionId === executionId && openInNewResultTab && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
         if (current?.executionId === executionId && allResults.length > 0) {
           clearResultNavigationState(current);
-          const errorResultIndex = allResults.findIndex((result) => result.columns.includes("Error") || elasticsearchHttpErrorStatus(result) !== undefined);
+          const errorResultIndex = allResults.findIndex((result) => isQueryExecutionErrorResult(result) || elasticsearchHttpErrorStatus(result) !== undefined);
           const resultIndex = errorResultIndex >= 0 ? errorResultIndex : 0;
           current.results = allResults.length > 1 ? allResults : undefined;
           current.activeResultIndex = allResults.length > 1 ? resultIndex : undefined;
@@ -4429,9 +4469,15 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     if (databaseType === "sqlserver") {
+      // SQL Server reuses the autotrace toggle to ask for the actual execution plan:
+      // STATISTICS XML runs the statement and adds runtime counters to the same
+      // ShowPlanXML document, while SHOWPLAN_XML only estimates.
+      const actualPlan = explainMode === "autotrace";
+      const planCaptureOn = actualPlan ? "SET STATISTICS XML ON;" : "SET SHOWPLAN_XML ON;";
+      const planCaptureOff = actualPlan ? "SET STATISTICS XML OFF;" : "SET SHOWPLAN_XML OFF;";
       let built: BuildExplainSqlResult;
       try {
-        built = await buildExplainSql(databaseType, sql);
+        built = actualPlan ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
       } catch (e: any) {
         tab.isExplaining = false;
         tab.explainExecutionId = undefined;
@@ -4448,14 +4494,14 @@ export const useQueryStore = defineStore("query", () => {
       tab.explainSql = built.sql;
       const clientSessionId = `${tabClientSessionId(tab, "explain")}:${executionId}`;
       tab.explainClientSessionId = clientSessionId;
-      let showplanEnabled = false;
+      let planCaptureEnabled = false;
       try {
-        await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML ON;", tab.schema, executionId, {
+        await api.executeQuery(tab.connectionId, tab.database, planCaptureOn, tab.schema, executionId, {
           clientSessionId,
           timeoutSecs: queryTimeoutSecs,
           executionMode: "simple",
         });
-        showplanEnabled = true;
+        planCaptureEnabled = true;
         if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
           return { ok: true as const, sql: built.sql };
         }
@@ -4486,9 +4532,9 @@ export const useQueryStore = defineStore("query", () => {
           current.explainError = String(e?.message || e);
         }
       } finally {
-        if (showplanEnabled) {
+        if (planCaptureEnabled) {
           try {
-            await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML OFF;", tab.schema, undefined, {
+            await api.executeQuery(tab.connectionId, tab.database, planCaptureOff, tab.schema, undefined, {
               clientSessionId,
               timeoutSecs: queryTimeoutSecs > 0 ? Math.min(queryTimeoutSecs, 5) : 5,
               executionMode: "simple",
@@ -4508,7 +4554,8 @@ export const useQueryStore = defineStore("query", () => {
       return { ok: true as const, sql: built.sql };
     }
 
-    const built = await buildExplainSql(databaseType, sql);
+    const postgresAnalyze = databaseType === "postgres" && explainMode === "autotrace";
+    const built = postgresAnalyze ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
     if (!built.ok) {
       tab.explainPlan = undefined;
       tab.explainError = built.reason;
@@ -4518,12 +4565,14 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     tab.explainSql = built.sql;
-    const clientSessionId = tabClientSessionId(tab, "explain");
+    const clientSessionId = postgresAnalyze ? `${tabClientSessionId(tab, "explain")}:${executionId}` : tabClientSessionId(tab, "explain");
+    if (postgresAnalyze) tab.explainClientSessionId = clientSessionId;
     try {
       const result = await api.executeQuery(tab.connectionId, tab.database, built.sql, tab.schema, executionId, {
         clientSessionId,
         catalog: tab.catalog,
         timeoutSecs: queryTimeoutSecs,
+        executionMode: postgresAnalyze ? "postgres_read_only_transaction" : undefined,
       });
       const current = tabs.value.find((t) => t.id === id);
       if (current?.explainExecutionId === executionId) {
@@ -4542,7 +4591,10 @@ export const useQueryStore = defineStore("query", () => {
         current.isExplaining = false;
         current.explainExecutionId = undefined;
       }
-      void closeClientSessionId(tab.connectionId, tab.database, clientSessionId, tab.catalog, { tabId: tab.id });
+      if (current?.explainClientSessionId === clientSessionId) current.explainClientSessionId = undefined;
+      const closePromise = closeClientSessionId(tab.connectionId, tab.database, clientSessionId, tab.catalog, { tabId: tab.id, explainExecutionId: executionId });
+      if (postgresAnalyze) await closePromise;
+      else void closePromise;
     }
     return { ok: true as const, sql: built.sql };
   }
@@ -4960,6 +5012,64 @@ export const useQueryStore = defineStore("query", () => {
     const queryBaseSql = queryResultBaseSql(tab);
     const exportSettings = useSettingsStore().editorSettings;
     const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
+
+    if (effectiveDbType === "mongodb") {
+      let mongoCommand;
+      try {
+        mongoCommand = await api.mongoParseShellCommand(sql);
+      } catch {
+        throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+      }
+      if (mongoCommand.kind !== "find") throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+
+      const pageLimit = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
+      const documents: unknown[] = [];
+      let copyDocuments: unknown[] | undefined = [];
+      let pageOffset = 0;
+      let totalRows = typeof tab.resultTotalRowCount === "number" ? Math.min(tab.resultTotalRowCount, exportRowLimit) : null;
+      const exportStartedAt = performance.now();
+      const exportExecutionId = uuid();
+
+      while (documents.length < exportRowLimit) {
+        const remaining = exportRowLimit - documents.length;
+        const plan = planMongoFindPagination(sql, mongoCommand, pageOffset, Math.min(pageLimit, remaining));
+        if (!plan) throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+        if (plan.requestLimit === 0) break;
+
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCommand.collection, plan.requestSkip, plan.requestLimit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, exportExecutionId);
+        const pageDocuments = result.documents.slice(0, plan.requestLimit);
+        documents.push(...pageDocuments);
+
+        if (copyDocuments) {
+          if (result.extended_documents?.length === result.documents.length) {
+            copyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length));
+          } else {
+            copyDocuments = undefined;
+          }
+        }
+
+        if (result.total_is_exact !== false) {
+          totalRows = Math.min(mongoFindLogicalTotal(result.total, plan), exportRowLimit);
+        }
+        onProgress?.({ rowsExported: documents.length, totalRows });
+
+        pageOffset += pageDocuments.length;
+        const reachedLogicalLimit = plan.logicalLimit !== undefined && pageOffset >= plan.logicalLimit;
+        const reachedExactTotal = result.total_is_exact !== false && pageOffset >= mongoFindLogicalTotal(result.total, plan);
+        if (pageDocuments.length === 0 || pageDocuments.length < plan.requestLimit || reachedLogicalLimit || reachedExactTotal) break;
+      }
+
+      const result = mongoDocumentsToQueryResult(documents, performance.now() - exportStartedAt, totalRows ?? documents.length, copyDocuments, totalRows !== null);
+      if (result.columns.length === 0) {
+        result.columns = tab.result.columns;
+        result.column_types = tab.result.column_types;
+      }
+      result.affected_rows = documents.length;
+      result.truncated = false;
+      result.has_more = false;
+      return result;
+    }
+
     const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
     // Use the already-computed total row count as a progress estimate so the
     // export dialog shows a moving bar instead of a stuck 0 while paginating.
@@ -5037,6 +5147,7 @@ export const useQueryStore = defineStore("query", () => {
     const settings = useSettingsStore().editorSettings;
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
+    if (effectiveDbType === "mongodb") return undefined;
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = queryResultBaseSql(tab);
     const resultStatementIndex = tab.result.statement_index;

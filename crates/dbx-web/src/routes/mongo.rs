@@ -336,8 +336,11 @@ pub async fn create_database(
 
 pub async fn drop_database(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(req): Json<MongoCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop database")
+        .await?;
     ensure_writable(&state.app, &req.connection_id, "Drop database").await?;
     dbx_core::mongo_ops::mongo_drop_database_core(&state.app, &req.connection_id, &req.database)
         .await
@@ -796,9 +799,13 @@ async fn ensure_find_one_write_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_find_one_write_policy;
+    use super::{drop_database, ensure_find_one_write_policy, MongoCollectionRequest};
     use crate::state::WebState;
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::{
+        extract::State,
+        http::{HeaderMap, HeaderValue},
+        Json,
+    };
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
     use dbx_core::storage::{McpGlobalPolicy, Storage};
@@ -897,6 +904,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(allowlist.message.starts_with("CONNECTION_OUT_OF_SCOPE:"), "{}", allowlist.message);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn drop_database_requires_mcp_dangerous_write_approval() {
+        let (state, dir) = test_web_state().await;
+        let connection = mongo_config(false);
+        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: Some(vec![connection.id.clone()]),
+            })
+            .await
+            .unwrap();
+
+        let error = drop_database(
+            State(state.clone()),
+            mcp_headers(),
+            Json(MongoCollectionRequest { connection_id: connection.id, database: "app".to_string() }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.starts_with("SQL_BLOCKED:"), "{}", error.message);
 
         drop(state);
         let _ = std::fs::remove_dir_all(dir);

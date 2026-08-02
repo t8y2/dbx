@@ -162,10 +162,6 @@ function openGroups(host: HTMLElement) {
 async function refreshValue(host: HTMLElement) {
   host.querySelector<HTMLButtonElement>("[data-redis-value-refresh]")!.click();
   await settle();
-  const refreshItem = document.querySelector<HTMLElement>("[data-slot='dropdown-menu-content'] [data-slot='dropdown-menu-item']");
-  expect(refreshItem).not.toBeNull();
-  refreshItem!.click();
-  await settle();
 }
 
 describe("RedisValueViewer stream monitoring", () => {

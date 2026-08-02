@@ -76,6 +76,17 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function structuredTimeoutError() {
+  return {
+    version: 1 as const,
+    code: "DBX-JDBC-2002",
+    messageKey: "backendErrors.jdbc.operationTimedOut",
+    messageParams: { stage: "execute" },
+    source: "jdbcAgent" as const,
+    operationOutcome: "unknown" as const,
+  };
+}
+
 describe("queryStore multi-statement errors", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -115,7 +126,7 @@ describe("queryStore multi-statement errors", () => {
           success,
           executionTimeMs: result.execution_time_ms,
           affectedRows: result.affected_rows,
-          error: success ? undefined : String(result.rows[0]?.[0] ?? ""),
+          error: success ? undefined : result.error,
         });
       });
       return results;
@@ -123,9 +134,10 @@ describe("queryStore multi-statement errors", () => {
   });
 
   it("opens the first error result from a mixed result batch", async () => {
+    const structuredError = structuredTimeoutError();
     mocks.executeMulti.mockResolvedValue([
       { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
-      { columns: ["Error"], execution_error: true, rows: [["no such table: missing"]], affected_rows: 0, execution_time_ms: 1 },
+      { columns: ["Error"], execution_error: true, error: structuredError, rows: [["no such table: missing"]], affected_rows: 0, execution_time_ms: 1 },
     ]);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -136,6 +148,10 @@ describe("queryStore multi-statement errors", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.activeResultIndex).toBe(1);
     expect(tab.result?.columns).toEqual(["Error"]);
+    expect(tab.result?.error).toEqual(structuredError);
+    expect(tab.batchSqlExecution?.items[1]?.errorDetails).toEqual(structuredError);
+    expect(tab.batchSqlExecution?.items[1]?.error).not.toBe(structuredError.code);
+    expect(tab.batchSqlExecution?.items[1]?.error).not.toBe("[object Object]");
   });
 
   it("updates live per-statement progress before the batch promise resolves", async () => {
@@ -193,6 +209,24 @@ describe("queryStore multi-statement errors", () => {
       completed: 1,
       items: [{ status: "error", error: "transport failed" }, { status: "skipped" }],
     });
+  });
+
+  it("preserves a structured top-level batch failure", async () => {
+    const structuredError = structuredTimeoutError();
+    mocks.executeMultiWithProgress.mockRejectedValueOnce(structuredError);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", undefined, "SELECT 1;\nSELECT 2");
+
+    await store.executeTabSql(tabId, "SELECT 1;\nSELECT 2");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.error).toEqual(structuredError);
+    expect(tab.result?.rows[0]?.[0]).toEqual(expect.any(String));
+    expect(tab.result?.rows[0]?.[0]).not.toBe(structuredError.code);
+    expect(tab.result?.rows[0]?.[0]).not.toBe("[object Object]");
+    expect(tab.batchSqlExecution?.items[0]?.errorDetails).toEqual(structuredError);
+    expect(tab.batchSqlExecution?.items[0]?.error).toBe(tab.result?.rows[0]?.[0]);
   });
 
   it("keeps completed progress and records a later top-level batch failure", async () => {
@@ -359,7 +393,7 @@ describe("queryStore multi-statement errors", () => {
       database: "FooDB",
       query_timeout_secs: 30,
     });
-    mocks.executeMulti.mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]).mockResolvedValueOnce([{ columns: ["Error"], rows: [["Database does not exist"]], affected_rows: 0, execution_time_ms: 1 }]);
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]).mockResolvedValueOnce([{ columns: ["Error"], rows: [["Database does not exist"]], affected_rows: 0, execution_time_ms: 1, execution_error: true }]);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabA = store.createTab("sqlserver-1", "FooDB", "Tab A", "query", "dbo");

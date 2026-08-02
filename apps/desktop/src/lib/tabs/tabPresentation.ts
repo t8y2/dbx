@@ -4,6 +4,7 @@ import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { executableStatementRanges, splitSqlStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
@@ -378,7 +379,7 @@ export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" |
     });
   }
   return results.map((result, index) => {
-    const isError = result.execution_error === true || result.columns.includes("Error");
+    const isError = isQueryExecutionErrorResult(result);
     return {
       result,
       index,

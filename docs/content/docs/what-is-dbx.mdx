@@ -1,70 +1,153 @@
 ---
 title: What is DBX?
-description: DBX is an open-source database workspace for connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access.
+description: DBX is an open-source, lightweight workspace for 70+ databases and data systems, with desktop and self-hosted access, AI, CLI, and MCP.
 ---
 
-DBX is an open-source database workspace. It brings the daily database workflow into one place: connecting to databases, writing SQL, browsing and editing data, exploring schemas, comparing structures, importing and exporting data, and using AI assistance when it helps.
+DBX is an open-source, lightweight workspace for databases and data infrastructure. It brings connection management, object browsing, SQL editing, data changes, schema tools, specialized consoles, and automation into one interface across more than 70 databases and data systems.
 
-DBX is available as both a desktop app and a Docker deployment. Use the desktop app for local daily work, or self-host the Docker version when you want browser-based access from a server.
+DBX does not force every system into a SQL-shaped interface. Relational databases use the query editor, data grid, and schema tools, while Redis, MongoDB, vector databases, message queues, etcd, ZooKeeper, Nacos, and similar systems use workspaces designed around their own data models.
 
-![DBX Screenshot](/screenshot-dark.png)
+<Callout type="info">If you are ready to use DBX, start with [Getting Started](/en/docs/getting-started). To check a specific engine or feature, use [Database Support and the feature matrix](/en/docs/databases).</Callout>
 
-## Where DBX Fits
+![DBX dark interface screenshot](/screenshot-dark.png)
+
+## What DBX Helps You Do
 
 <Cards>
-  <Card title="Daily Query Work" href="/en/docs/query-editor">
-    Write, format, and execute SQL, then use query history to return to previous investigation steps.
+  <Card title="Connect and separate environments" href="/en/docs/getting-started">
+    Manage local, test, staging, and production connections with groups, colors, pins, search, read-only mode, and production protection.
   </Card>
-  <Card title="Browse and Edit Data" href="/en/docs/data-grid">
-    Filter, sort, edit, preview SQL, and decide when changes should be committed to the database.
+  <Card title="Query, troubleshoot, and analyze" href="/en/docs/query-editor">
+    Use metadata completion, formatting, selected execution, query history, multiple results, and execution plans for daily SQL work.
   </Card>
-  <Card title="Understand Schemas" href="/en/docs/schema-browser">
-    Browse databases, schemas, tables, columns, indexes, foreign keys, and triggers from the sidebar.
+  <Card title="Browse and change data" href="/en/docs/data-grid">
+    Filter, sort, and edit data in a virtualized grid, then review generated SQL before writing changes.
   </Card>
-  <Card title="Compare Environments" href="/en/docs/schema-diff">
-    Compare dev, staging, and production schemas, then generate SQL you can review before syncing.
+  <Card title="Understand and change schemas" href="/en/docs/schema-browser">
+    Browse database objects, edit table structures, compare schemas, inspect ER diagrams and lineage, and generate reviewable DDL.
+  </Card>
+  <Card title="Move and exchange data" href="/en/docs/data-transfer">
+    Import tabular files, transfer data across connections, execute SQL files, and export schemas and data where supported.
+  </Card>
+  <Card title="Expose connections to tools and AI" href="/en/docs/mcp">
+    Use the CLI, MCP, or a self-hosted backend to connect configured databases to terminals, scripts, and coding agents.
   </Card>
 </Cards>
 
-## Core Capabilities
+## More Than SQL Databases
 
-| Capability           | Details                                                                                                                        |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Database connections | MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and more                                    |
-| SQL editor           | CodeMirror 6, syntax highlighting, metadata completion, formatting, selected execution, and query history                      |
-| Data grid            | Virtual scrolling, inline editing, WHERE/ORDER BY controls, SQL preview, and export tools                                      |
-| Schema tools         | Schema browser, table structure editing, schema diff, ER diagrams, field lineage, database export, and SQL file execution      |
-| Data movement        | Table import, data transfer, SQL file execution, and SQL export with progress and cancellation where supported                 |
-| Specialized browsers | Redis key/value browsing and MongoDB document browsing                                                                         |
-| AI and automation    | Generate SQL, explain queries, suggest optimizations, help fix errors, and expose DBX connections to coding agents through MCP |
-| Self-hosted access   | Run DBX with Docker and access it from a browser                                                                               |
+The connection picker groups databases and data systems by how they are actually used. Each category can open a different workspace instead of falling back to one generic query box.
 
-## Product Principles
+| Category | Representative systems | Main DBX experience |
+| --- | --- | --- |
+| Relational and compatible protocols | MySQL, PostgreSQL, SQLite, Oracle, SQL Server, Dameng, openGauss, GaussDB | SQL editor, data grid, object tree, table structure, and schema tools |
+| Analytics and warehouses | ClickHouse, Doris, StarRocks, Databricks, Snowflake, Trino, BigQuery | Queries, result analysis, metadata, and driver-supported schema and export tools |
+| Document, key/value, and search | MongoDB, Redis, Elasticsearch, Easysearch, HBase, Cassandra | Specialized document, key, index, or column-family browsers |
+| Graph, vector, and AI data | Neo4j, Qdrant, Milvus, Weaviate, ChromaDB | Graph connections plus vector collection browsing, search, and mutation flows |
+| Time series | QuestDB, TDengine, IoTDB, InfluxDB | Time-series queries and system-specific connection, object, and data views |
+| Message queues | Pulsar, Kafka, RocketMQ, RabbitMQ | Topics, subscriptions or consumers, messages, monitoring, permissions, and policies |
+| Registry and configuration | etcd, ZooKeeper, Nacos | Key/ZNode browsing, cluster status, access control, configuration, and service management |
+| Driver extensions | JDBCX, custom MySQL/PostgreSQL, optional JDBC plugins | Extend coverage through compatible protocols or vendor JDBC drivers |
 
-DBX focuses on the core work of a database client instead of turning every operation into a separate tool. A few details shape the product:
+Advanced features depend on the driver, protocol, and database itself. Use the [Database Support](/en/docs/databases) matrix as the source of truth, and see [Specialized Workspaces](/en/docs/specialized-workspaces) for non-relational and infrastructure interfaces.
 
-- **Less context switching**: schema browsing, SQL editing, data grids, and results stay close together.
-- **Reviewable operations**: data and schema changes show the SQL before they are applied where possible.
-- **Clear environment separation**: connection colors, pins, search, and context menus help separate dev, test, and production.
-- **Flexible deployment**: the desktop app fits personal workflows; the Docker version fits shared or server-hosted access.
+## One Workflow, Multiple Entry Points
 
-## Data and Security
+| Entry point | Best for | Capabilities and boundaries |
+| --- | --- | --- |
+| Desktop | Daily personal work, local database files, the complete workbench | Adds local files, the SQL file tree and SQL library, desktop deep links, and other OS integrations |
+| Docker / Web | Self-hosting on a server and remote browser access | Shares most database workflows; paths belong to the server, and some local-file and desktop integrations are unavailable |
+| CLI | Terminals, scripts, CI, and Codex workflows | Lists connections and schemas, describes tables, runs queries, builds compact context, and can open a table in Desktop |
+| MCP Server | Claude Code, Cursor, Windsurf, and other AI clients | Lists connections, reads schema, and runs policy-controlled queries or commands against local storage or DBX Web |
 
-- Connection configuration is stored in a local SQLite database under the app data directory. Sensitive fields such as passwords, SSH passwords, SSH key passphrases, and connection strings are removed from the normal connection JSON and stored separately in the `connection_secrets` table.
-- Config export can be encrypted with AES-GCM for migration between machines.
-- SSH tunnels can connect to databases behind firewalls or private networks.
-- AI Ask mode does not execute generated SQL. Agent and MCP flows use conservative execution policies and block dangerous SQL by default.
+Desktop and Web reuse the same Rust core, but they are not identical substitutes for every system integration. Choose a deployment mode based on database network placement, whether files live on the local machine or server, and whether you need desktop deep links or local SQL file management.
+
+## From Connection to Automation
+
+<Steps>
+  <Step>
+    ### Establish the connection boundary
+
+    Choose a database type, enter credentials, and configure TLS, SSH, SOCKS5, HTTP proxying, or HTTP tunneling when needed. Enable read-only mode or production protection for high-risk targets.
+
+  </Step>
+  <Step>
+    ### Understand objects and context first
+
+    Use the sidebar to inspect databases, schemas, tables, columns, indexes, foreign keys, and database-specific objects. Search, source views, ER diagrams, and field lineage help with unfamiliar systems.
+
+  </Step>
+  <Step>
+    ### Query, inspect, and change
+
+    Run SQL in the query editor or use the data grid, document/key-value browsers, and specialized consoles. DBX shows SQL or request content before execution where the workflow supports it.
+
+  </Step>
+  <Step>
+    ### Compare, move, and reuse
+
+    Use schema diff, table import, data transfer, database export, SQL file execution, query history, and the SQL library to turn one-off operations into reviewable workflows.
+
+  </Step>
+  <Step>
+    ### Add AI and automation
+
+    Use AI Ask or Agent inside the app, or expose connections, schema context, and query execution to scripts and coding agents through the CLI and MCP.
+
+  </Step>
+</Steps>
+
+## Capability Map
+
+| Task | Product capabilities implemented in DBX | Documentation |
+| --- | --- | --- |
+| Create connections | Connection categories, URL parsing, TLS, tunnels/proxies, read-only mode, production protection, and driver selection | [Getting Started](/en/docs/getting-started), [Tunnels and Proxies](/en/docs/ssh-tunnel) |
+| Write and run queries | CodeMirror 6, metadata completion, formatting, execution targets, multiple results, cancellation, and history | [Query Editor](/en/docs/query-editor) |
+| Browse and edit results | Virtual scrolling, database-side filters and sorting, inline edits, SQL preview, and multiple export formats | [Data Grid](/en/docs/data-grid) |
+| Understand schemas | Object tree and search, source views, table structure, schema diff, ER diagrams, and field lineage | [Schema Browser](/en/docs/schema-browser), [Schema Diff](/en/docs/schema-diff) |
+| Import, transfer, and export | CSV/TSV/JSON/Excel import, cross-connection transfer, SQL file execution, and database export | [Table Import](/en/docs/table-import), [Data Transfer](/en/docs/data-transfer) |
+| Manage non-relational systems | Redis, MongoDB, search, vector, HBase, message queue, registry, and configuration workspaces | [Specialized Workspaces](/en/docs/specialized-workspaces) |
+| Use AI and external tools | Ask/Agent, CLI, MCP, and the Web/Docker backend API | [AI Assistant](/en/docs/ai-assistant), [CLI](/en/docs/cli), [MCP](/en/docs/mcp) |
+| Move personal configuration | Connection import, encrypted config export, WebDAV/Gist/Gitee sync, and SQL library sync | [Config Export and Import](/en/docs/config-export), [Cloud Sync and Backup](/en/docs/cloud-sync) |
+
+## Safety Model
+
+DBX uses layered controls rather than relying on a single dangerous-operation confirmation switch:
+
+- **Database account privileges** remain the final boundary. Use least-privilege accounts for production.
+- **Read-only connections** block recognizable writes in the core query execution path and hide or disable multiple mutation entry points.
+- **Production protection** can cover an entire connection or selected databases and requires a fresh explicit confirmation for every detected write.
+- **Reviewable changes** show SQL first where possible in data editing, table structure, schema diff, and similar workflows.
+- **AI Ask mode** returns an answer without executing SQL. Agent does not receive autonomous write permission in production and returns SQL to the editor for review.
+- **MCP policy** centrally controls the connection allowlist and Read only, Data read/write, or Full access modes. It cannot bypass connection read-only state, production protection, or database privileges.
+- **Sensitive configuration** is stored separately from normal connection JSON, and config exports can be protected with AES-GCM encryption.
+
+See [Production and Write Safety](/en/docs/production-safety) for configuration and behavior across entry points.
+
+## Boundaries to Understand
+
+<Callout type="warn">
+  DBX is a database workbench, not a managed database service, and it does not replace database privileges, auditing, backups, or change approval. Database export is useful for lightweight backup or migration, but large production systems should use native backup tools. AI output, generated SQL, and cross-engine transfers still require human review.
+</Callout>
+
+- Advanced features are not force-enabled for every database; unreliable compatibility paths are hidden or degraded.
+- Local paths in Docker/Web refer to the server filesystem, not the computer running the browser.
+- JDBC and Agent databases require the corresponding driver or runtime and may expose fewer features than native drivers.
+- The [Web API](/en/docs/web-api) primarily serves DBX Web and internal integrations and is not a stable public contract. Prefer the CLI or MCP for scripts and AI integrations.
 
 ## Next Steps
 
 <Cards>
-  <Card title="Install and Connect" href="/en/docs/getting-started">
-    Start with the desktop app or Docker version, then create your first database connection.
+  <Card title="Install and create a connection" href="/en/docs/getting-started">
+    Choose Desktop or Docker, then configure the first connection, network path, and safety settings.
   </Card>
-  <Card title="Review Database Support" href="/en/docs/databases">
-    Check supported engines, compatible protocols, and ODBC-specific setup.
+  <Card title="Check database support" href="/en/docs/databases">
+    Review connection types, default ports, driver architecture, and the advanced feature matrix.
   </Card>
-  <Card title="Set Up AI Assistant" href="/en/docs/ai-assistant">
-    Add an API key and use natural language in the SQL editor.
+  <Card title="Configure production safety" href="/en/docs/production-safety">
+    Set read-only connections, production protection, and AI and MCP permission boundaries.
+  </Card>
+  <Card title="Choose an automation entry point" href="/en/docs/cli">
+    Select the CLI or MCP based on terminal, Codex, scripting, or AI-client workflows.
   </Card>
 </Cards>

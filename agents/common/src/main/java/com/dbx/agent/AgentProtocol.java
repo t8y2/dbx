@@ -57,6 +57,7 @@ public final class AgentProtocol {
     public static final String MONGO_METHOD_CREATE_INDEX = "create_index";
     public static final String MONGO_METHOD_DROP_INDEXES = "drop_indexes";
     public static final String MONGO_METHOD_DROP_COLLECTION = "drop_collection";
+    public static final String MONGO_METHOD_DROP_DATABASE = "drop_database";
     public static final String MONGO_METHOD_INSERT_DOCUMENT = "insert_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENT = "update_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENTS = "update_documents";
@@ -112,7 +113,9 @@ public final class AgentProtocol {
     public static final String CAPABILITY_ETCD_WATCH = "etcd_watch";
     public static final String CAPABILITY_ETCD_LEASE = "etcd_lease";
     public static final String CAPABILITY_ETCD_AUTH = "etcd_auth";
+    public static final String CAPABILITY_MONGO_DROP_DATABASE = "mongo_drop_database";
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
+    public static final String CAPABILITY_STRUCTURED_ERROR_V1 = "structured_error_v1";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         CAPABILITY_CONNECT,
@@ -142,11 +145,16 @@ public final class AgentProtocol {
         CAPABILITY_ETCD_DEFRAG,
         CAPABILITY_ETCD_WATCH,
         CAPABILITY_ETCD_LEASE,
-        CAPABILITY_ETCD_AUTH
+        CAPABILITY_ETCD_AUTH,
+        CAPABILITY_MONGO_DROP_DATABASE
     ));
 
     public static final List<String> MULTI_SESSION_CAPABILITIES;
     public static final List<String> MULTI_SESSION_ALL_CAPABILITIES;
+    public static final List<String> MONGO_LEGACY_CAPABILITIES;
+    public static final List<String> MONGO_LEGACY_MULTI_SESSION_CAPABILITIES;
+    public static final List<String> MULTI_SESSION_JDBC_CAPABILITIES;
+    public static final List<String> MULTI_SESSION_JDBC_ALL_CAPABILITIES;
 
     public static final List<String> COMMON_METHODS = Collections.unmodifiableList(Arrays.asList(
         METHOD_HANDSHAKE,
@@ -194,6 +202,22 @@ public final class AgentProtocol {
         allCapabilities.add(CAPABILITY_MULTI_SESSION);
         MULTI_SESSION_ALL_CAPABILITIES = Collections.unmodifiableList(allCapabilities);
 
+        List<String> mongoCapabilities = new java.util.ArrayList<>(CAPABILITIES);
+        mongoCapabilities.add(CAPABILITY_MONGO_DROP_DATABASE);
+        MONGO_LEGACY_CAPABILITIES = Collections.unmodifiableList(mongoCapabilities);
+
+        List<String> mongoMultiSessionCapabilities = new java.util.ArrayList<>(MULTI_SESSION_CAPABILITIES);
+        mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_DROP_DATABASE);
+        MONGO_LEGACY_MULTI_SESSION_CAPABILITIES = Collections.unmodifiableList(mongoMultiSessionCapabilities);
+
+        List<String> jdbcCapabilities = new java.util.ArrayList<>(MULTI_SESSION_CAPABILITIES);
+        jdbcCapabilities.add(CAPABILITY_STRUCTURED_ERROR_V1);
+        MULTI_SESSION_JDBC_CAPABILITIES = Collections.unmodifiableList(jdbcCapabilities);
+
+        List<String> jdbcAllCapabilities = new java.util.ArrayList<>(MULTI_SESSION_ALL_CAPABILITIES);
+        jdbcAllCapabilities.add(CAPABILITY_STRUCTURED_ERROR_V1);
+        MULTI_SESSION_JDBC_ALL_CAPABILITIES = Collections.unmodifiableList(jdbcAllCapabilities);
+
         List<String> methods = new java.util.ArrayList<>(COMMON_METHODS);
         int insertAt = methods.indexOf(METHOD_CONNECT) + 1;
         methods.addAll(insertAt, Arrays.asList(
@@ -215,6 +239,7 @@ public final class AgentProtocol {
         MONGO_METHOD_CREATE_INDEX,
         MONGO_METHOD_DROP_INDEXES,
         MONGO_METHOD_DROP_COLLECTION,
+        MONGO_METHOD_DROP_DATABASE,
         MONGO_METHOD_INSERT_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENTS,
@@ -267,6 +292,30 @@ public final class AgentProtocol {
             MULTI_SESSION_PROTOCOL_VERSION,
             MULTI_SESSION_PROTOCOL_VERSION,
             MULTI_SESSION_CAPABILITIES
+        );
+    }
+
+    public static HandshakeResult mongoLegacyHandshakeResult() {
+        return new HandshakeResult(PROTOCOL_VERSION, PROTOCOL_VERSION, MONGO_LEGACY_CAPABILITIES);
+    }
+
+    public static HandshakeResult mongoLegacyMultiSessionHandshakeResult() {
+        return new HandshakeResult(
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MONGO_LEGACY_MULTI_SESSION_CAPABILITIES
+        );
+    }
+
+    /**
+     * Handshake for pooled JDBC Agents that emit the v1 structured error contract.
+     * Generic/custom v2 handlers must continue using multiSessionHandshakeResult().
+     */
+    public static HandshakeResult multiSessionJdbcHandshakeResult() {
+        return new HandshakeResult(
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MULTI_SESSION_JDBC_CAPABILITIES
         );
     }
 

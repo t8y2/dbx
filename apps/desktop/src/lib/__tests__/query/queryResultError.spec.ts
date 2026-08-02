@@ -14,29 +14,30 @@ function dataResult(columns: string[]): QueryResult {
 
 describe("isNoSnapshotErrorResult", () => {
   it("matches the StarRocks Paimon no-snapshot error surfaced via executeTabSql", () => {
-    const result = errorResult("Server error: `ERROR HY000 (1064): There is currently no snapshot.`");
+    const result = { ...errorResult("Server error: `ERROR HY000 (1064): There is currently no snapshot.`"), execution_error: true as const };
     expect(isNoSnapshotErrorResult(result)).toBe(true);
   });
 
   it("matches case-insensitively", () => {
-    const result = errorResult("there IS currently NO snapshot");
+    const result = { ...errorResult("there IS currently NO snapshot"), execution_error: true as const };
     expect(isNoSnapshotErrorResult(result)).toBe(true);
   });
 
   it("does not match unrelated query errors", () => {
-    expect(isNoSnapshotErrorResult(errorResult("Unknown table 'tag_test.record_tag_t'"))).toBe(false);
-    expect(isNoSnapshotErrorResult(errorResult("ERROR 1142: SELECT command denied"))).toBe(false);
+    expect(isNoSnapshotErrorResult({ ...errorResult("Unknown table 'tag_test.record_tag_t'"), execution_error: true })).toBe(false);
+    expect(isNoSnapshotErrorResult({ ...errorResult("ERROR 1142: SELECT command denied"), execution_error: true })).toBe(false);
   });
 
   it("does not match successful data results", () => {
     expect(isNoSnapshotErrorResult(dataResult(["id", "name"]))).toBe(false);
     expect(isNoSnapshotErrorResult(dataResult(["Error"]))).toBe(false); // data column literally named Error, no rows
+    expect(isNoSnapshotErrorResult({ ...errorResult("There is currently no snapshot."), rows: [["There is currently no snapshot."]] })).toBe(false);
   });
 
   it("returns false for missing or empty results", () => {
     expect(isNoSnapshotErrorResult(undefined)).toBe(false);
     expect(isNoSnapshotErrorResult(null)).toBe(false);
-    expect(isNoSnapshotErrorResult({ ...errorResult("There is currently no snapshot."), rows: [] })).toBe(false);
+    expect(isNoSnapshotErrorResult({ ...errorResult("There is currently no snapshot."), execution_error: true, rows: [] })).toBe(false);
   });
 });
 

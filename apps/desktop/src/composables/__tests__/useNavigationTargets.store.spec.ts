@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     ensureConnected: vi.fn(),
     connectionIdentifierQuote: vi.fn(() => undefined),
     refreshObjectListTreeNode: vi.fn(),
+    invalidateCompletionTableCache: vi.fn(),
   },
   settingsStore: {
     editorSettings: {

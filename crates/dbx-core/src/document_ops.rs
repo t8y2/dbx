@@ -98,6 +98,37 @@ fn sort_mongo_collection_specs(
     specs
 }
 
+/// Decode both generations of the Legacy Agent response. Existing installed
+/// Agents return names, while current Agents opt into `name` + `kind` specs.
+fn mongo_collection_specs_from_agent_response(
+    value: serde_json::Value,
+) -> Result<Vec<mongo_driver::MongoCollectionSpec>, String> {
+    let values =
+        value.as_array().ok_or_else(|| "Invalid MongoDB legacy collection list: expected an array".to_string())?;
+
+    values
+        .iter()
+        .map(|value| match value {
+            serde_json::Value::String(name) => Ok(mongo_driver::MongoCollectionSpec {
+                name: name.clone(),
+                kind: mongo_driver::MongoCollectionKind::Collection,
+            }),
+            serde_json::Value::Object(spec) => {
+                let name = spec
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "Invalid MongoDB legacy collection spec: name is required".to_string())?;
+                let kind = spec.get("kind").or_else(|| spec.get("type")).and_then(serde_json::Value::as_str);
+                Ok(mongo_driver::MongoCollectionSpec {
+                    name: name.to_string(),
+                    kind: mongo_driver::MongoCollectionKind::from_metadata_kind(kind),
+                })
+            }
+            _ => Err("Invalid MongoDB legacy collection list entry".to_string()),
+        })
+        .collect()
+}
+
 pub(crate) fn mongo_gridfs_bucket_names(names: &[String]) -> Vec<String> {
     use std::collections::BTreeSet;
 
@@ -225,14 +256,12 @@ pub async fn list_collections_core(
         PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(client, database).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
-            let names = sort_names(client.mongo_list_collections(database).await?);
+            let specs = sort_mongo_collection_specs(mongo_collection_specs_from_agent_response(
+                client.mongo_list_collection_specs(database).await?,
+            )?);
+            let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
             let mut infos = mongo_bucket_infos(&names);
-            // Legacy agent returns names only; treat every entry as a plain collection.
-            infos.extend(
-                names
-                    .into_iter()
-                    .map(|name| mongo_collection_info(name, mongo_driver::MongoCollectionKind::Collection)),
-            );
+            infos.extend(specs.into_iter().map(|spec| mongo_collection_info(spec.name, spec.kind)));
             Ok(infos)
         }
         _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
@@ -540,6 +569,18 @@ pub async fn delete_document_core(
     id: &str,
     routing: Option<&str>,
 ) -> Result<u64, String> {
+    delete_document_core_with_type(state, connection_id, database, collection, id, routing, None).await
+}
+
+pub async fn delete_document_core_with_type(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    id: &str,
+    routing: Option<&str>,
+    document_type: Option<&str>,
+) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
@@ -549,12 +590,12 @@ pub async fn delete_document_core(
             drop(connections);
             // Elasticsearch requires the same custom routing value for writes
             // as was used to index the document.
-            elasticsearch_driver::delete_document(&client, collection, id, routing).await
+            elasticsearch_driver::delete_document(&client, collection, id, document_type, routing).await
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
             drop(connections);
-            easysearch_driver::delete_document(&client, collection, id, routing).await
+            easysearch_driver::delete_document(&client, collection, id, document_type, routing).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -569,9 +610,11 @@ pub async fn delete_document_core(
 #[cfg(test)]
 mod tests {
     use super::{
-        fallback_mongo_database, filter_and_sort_gridfs_bucket_infos, mongo_gridfs_bucket_names,
-        mongo_list_databases_unauthorized, parse_gridfs_bucket_sort, sort_names, MongoGridFsBucketInfo,
+        fallback_mongo_database, filter_and_sort_gridfs_bucket_infos, mongo_collection_specs_from_agent_response,
+        mongo_gridfs_bucket_names, mongo_list_databases_unauthorized, parse_gridfs_bucket_sort, sort_names,
+        MongoGridFsBucketInfo,
     };
+    use crate::db::mongo_driver::MongoCollectionKind;
 
     #[test]
     fn sorts_names_case_insensitively() {
@@ -614,6 +657,27 @@ mod tests {
         ]);
 
         assert_eq!(buckets, vec!["orders".to_string(), "reports".to_string()]);
+    }
+
+    #[test]
+    fn decodes_legacy_collection_names_and_type_aware_specs() {
+        let specs = mongo_collection_specs_from_agent_response(serde_json::json!([
+            "orders",
+            { "name": "report_view", "kind": "view" },
+            { "name": "metrics", "kind": "timeseries" },
+            { "name": "future_kind", "kind": "unknown" }
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            specs.into_iter().map(|spec| (spec.name, spec.kind)).collect::<Vec<_>>(),
+            vec![
+                ("orders".to_string(), MongoCollectionKind::Collection),
+                ("report_view".to_string(), MongoCollectionKind::View),
+                ("metrics".to_string(), MongoCollectionKind::Timeseries),
+                ("future_kind".to_string(), MongoCollectionKind::Collection),
+            ]
+        );
     }
 
     #[test]

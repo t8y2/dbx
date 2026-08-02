@@ -297,7 +297,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 boolean metadataObject = normalized.contains("all_objects")
                     || normalized.contains("sysobjects")
                     || normalized.contains("all_dependencies")
-                    || normalized.contains("all_tab_comments");
+                    || normalized.contains("all_tab_comments")
+                    || normalized.contains("dbms_metadata")
+                    || normalized.contains("get_ddl");
                 boolean permissionDenied = normalized.contains("权限")
                     || normalized.contains("privilege")
                     || normalized.contains("permission denied")
@@ -406,7 +408,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private static boolean includesSupportedObjectTypes(MetadataListConstraints constraints) {
         return constraints.includesTableLikeTypes()
             || constraints.objectTypeAllowed("PROCEDURE")
-            || constraints.objectTypeAllowed("FUNCTION");
+            || constraints.objectTypeAllowed("FUNCTION")
+            || constraints.objectTypeAllowed("SEQUENCE")
+            || constraints.objectTypeAllowed("PACKAGE")
+            || constraints.objectTypeAllowed("PACKAGE_BODY");
     }
 
     private static void appendDamengObjectTypePredicate(
@@ -448,6 +453,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (constraints.objectTypeAllowed("FUNCTION")) {
             result.add("FUNCTION");
         }
+        if (constraints.objectTypeAllowed("SEQUENCE")) {
+            result.add("SEQUENCE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE")) {
+            result.add("PACKAGE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
+            result.add("PACKAGE BODY");
+        }
         return result;
     }
 
@@ -472,6 +486,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (constraints.objectTypeAllowed("FUNCTION")) {
             result.add("FUNCTION");
+        }
+        if (constraints.objectTypeAllowed("SEQUENCE")) {
+            result.add("SEQUENCE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE")) {
+            result.add("PACKAGE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
+            result.add("PACKAGE BODY");
         }
         return result;
     }
@@ -576,33 +599,66 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (!includesSupportedObjectTypes(constraints)) {
             return List.of();
         }
+        RuntimeException permissionError;
         try {
             return executeConstrainedObjects(schema, buildConstrainedObjectsQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
-            if (needsMaterializedViewClassification(constraints)) {
-                try {
-                    return executeConstrainedObjects(
-                        schema,
-                        buildAccessibleConstrainedObjectsQuery(schema, constraints),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to owner-local and raw catalog fallbacks.
-                }
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
             }
-            if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
-                try {
-                    return executeConstrainedObjects(
-                        schema,
-                        buildConstrainedObjectsQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to the raw catalog path below.
-                }
-            }
-            return executeRawConstrainedObjects(schema, constraints);
+            permissionError = e;
         }
+        if (needsMaterializedViewClassification(constraints)) {
+            try {
+                return executeConstrainedObjects(
+                    schema,
+                    buildAccessibleConstrainedObjectsQuery(schema, constraints),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
+            try {
+                return executeConstrainedObjects(
+                    schema,
+                    buildConstrainedObjectsQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        try {
+            return executeRawConstrainedObjects(schema, constraints);
+        } catch (RuntimeException e) {
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
+            }
+            permissionError.addSuppressed(e);
+        }
+        try {
+            return executeJdbcMetadataObjects(schema, constraints);
+        } catch (RuntimeException e) {
+            e.addSuppressed(permissionError);
+            throw e;
+        }
+    }
+
+    private List<ObjectInfo> executeJdbcMetadataObjects(String schema, MetadataListConstraints constraints) {
+        if (!constraints.includesTableLikeTypes()) {
+            return List.of();
+        }
+        return executeJdbcMetadataTables(schema, constraints).stream()
+            .map(table -> new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()))
+            .toList();
     }
 
     private List<ObjectInfo> executeConstrainedObjects(
@@ -730,6 +786,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
             case "MATERIALIZED_VIEW", "MATERIALIZED VIEW" -> "MATERIALIZED_VIEW";
             case "PROCEDURE" -> "PROCEDURE";
             case "FUNCTION" -> "FUNCTION";
+            case "SEQUENCE" -> "SEQUENCE";
+            case "PACKAGE" -> "PKG_SPEC";
+            case "PACKAGE_BODY", "PACKAGE BODY" -> "PKG_BODY";
             // DM DBMS_METADATA accepts TRIGGER directly and returns executable CREATE OR REPLACE DDL.
             case "TRIGGER" -> "TRIGGER";
             default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
@@ -738,25 +797,37 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public String getTableDdl(String schema, String table) {
-        return unchecked(() -> {
-            String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
-            String ddl = null;
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                stmt.setString(1, "TABLE");
-                stmt.setString(2, table);
-                stmt.setString(3, schema);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    if (rs.next()) {
-                        ddl = coalesce(readTextColumn(rs, 1));
+        try {
+            return unchecked(() -> {
+                String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+                String ddl = null;
+                try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+                    stmt.setString(1, "TABLE");
+                    stmt.setString(2, table);
+                    stmt.setString(3, schema);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            ddl = coalesce(readTextColumn(rs, 1));
+                        }
                     }
                 }
+                if (ddl != null) {
+                    ddl = appendTableAndColumnComments(ddl, schema, table);
+                    return appendIndependentIndexDdl(ddl, schema, table);
+                }
+                throw new IllegalArgumentException("Table not found: " + schema + "." + table);
+            });
+        } catch (RuntimeException error) {
+            if (!isDamengMetadataPermissionError(error)) {
+                throw error;
             }
-            if (ddl != null) {
-                ddl = appendTableAndColumnComments(ddl, schema, table);
-                return appendIndependentIndexDdl(ddl, schema, table);
+            try {
+                return super.getTableDdl(schema, table);
+            } catch (RuntimeException fallbackError) {
+                fallbackError.addSuppressed(error);
+                throw fallbackError;
             }
-            throw new IllegalArgumentException("Table not found: " + schema + "." + table);
-        });
+        }
     }
 
     @Override

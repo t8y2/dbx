@@ -4,6 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { buildTransferObjectSelections } from "./transferSelections";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -13,7 +14,9 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import * as api from "@/lib/backend/api";
-import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
+import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
+import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
+import ObjectSelectionTree from "@/components/transfer/ObjectSelectionTree.vue";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
@@ -21,7 +24,7 @@ import { isSameTransferDatabase, normalizeTransferCatalog } from "@/lib/database
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
 import type { CatalogInfo } from "@/types/database";
-import { ArrowRightLeft, ArrowLeftRight, Loader2, Square, CheckSquare } from "@lucide/vue";
+import { ArrowRightLeft, ArrowLeftRight, Loader2 } from "@lucide/vue";
 
 const { t } = useI18n();
 const { startDataTransferTask } = useExportTracker();
@@ -50,10 +53,73 @@ const sourceDatabase = ref("");
 const sourceDatabases = ref<string[]>([]);
 const sourceSchemas = ref<string[]>([]);
 const sourceSchema = ref("");
-const sourceTables = ref<string[]>([]);
-const selectedTables = ref<Set<string>>(new Set());
-const tableSearch = ref("");
-const loadingTables = ref(false);
+const objectGroups = ref<Partial<Record<TransferObjectKind, string[]>>>({});
+const selectedObjects = ref<Partial<Record<TransferObjectKind, Set<string>>>>({});
+const objectSearch = ref("");
+const loadingObjects = ref(false);
+const transferContent = ref<TransferContent>("structureAndData");
+
+const selectedTables = computed(() => new Set(selectedObjects.value.TABLE ?? []));
+
+const OBJECT_KIND_LABEL_KEY: Record<TransferObjectKind, string> = {
+  TABLE: "objectTypeTable",
+  VIEW: "objectTypeView",
+  MATERIALIZED_VIEW: "objectTypeMaterializedView",
+  PROCEDURE: "objectTypeProcedure",
+  FUNCTION: "objectTypeFunction",
+  TRIGGER: "objectTypeTrigger",
+  SEQUENCE: "objectTypeSequence",
+  EVENT: "objectTypeEvent",
+};
+
+const treeSelection = computed<Record<string, string[]>>({
+  get: () => Object.fromEntries(Object.entries(selectedObjects.value).map(([k, v]) => [k, [...(v ?? [])]])),
+  set: (value) => {
+    const next: Partial<Record<TransferObjectKind, Set<string>>> = {};
+    for (const [k, names] of Object.entries(value)) {
+      if (names.length > 0) next[k as TransferObjectKind] = new Set(names);
+    }
+    selectedObjects.value = next;
+  },
+});
+
+const treeGroups = computed(() =>
+  (Object.keys(objectGroups.value) as TransferObjectKind[]).map((kind) => ({
+    kind,
+    label: t(`transfer.${OBJECT_KIND_LABEL_KEY[kind]}`),
+    items: objectGroups.value[kind] ?? [],
+  })),
+);
+
+const treeDisabledGroups = computed<TransferObjectKind[]>(() => {
+  const presentKinds = Object.keys(objectGroups.value) as TransferObjectKind[];
+  if (transferContent.value === "dataOnly") {
+    return presentKinds.filter((k) => k !== "TABLE");
+  }
+  const sourceConfig = store.getConfig(sourceConnectionId.value);
+  const targetConfig = store.getConfig(targetConnectionId.value);
+  const allowed = crossFamilyTransferableKinds(sourceConfig?.db_type, targetConfig?.db_type);
+  return presentKinds.filter((k) => k !== "TABLE" && !allowed.includes(k));
+});
+
+const treeDisabledHints = computed<Record<string, string>>(() => {
+  const hints: Record<string, string> = {};
+  const dataOnly = transferContent.value === "dataOnly";
+  for (const kind of treeDisabledGroups.value) {
+    hints[kind] = dataOnly ? t("transfer.objectDataOnlyDisabled") : t("transfer.objectCrossFamilyDisabled");
+  }
+  return hints;
+});
+
+const showCrossFamilyViewHint = computed(() => {
+  const sourceConfig = store.getConfig(sourceConnectionId.value);
+  const targetConfig = store.getConfig(targetConnectionId.value);
+  if (transferContent.value === "dataOnly") return false;
+  if (!sourceConfig || !targetConfig) return false;
+  const allowed = crossFamilyTransferableKinds(sourceConfig.db_type, targetConfig.db_type);
+  if (!allowed.includes("VIEW")) return false;
+  return !isSameTransferFamily(sourceConfig.db_type, targetConfig.db_type) && (selectedObjects.value.VIEW?.size ?? 0) > 0;
+});
 const pendingSourceSchemaPrefill = ref("");
 const pendingSelectedTablesPrefill = ref<string[] | null>(null);
 
@@ -68,7 +134,6 @@ const targetSchema = ref("");
 const pendingTargetSchemaPrefill = ref("");
 
 // Options
-const createTable = ref(true);
 const transferMode = ref<TransferMode>("append");
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
 const batchSize = ref(1000);
@@ -78,13 +143,6 @@ const ownershipMissingOwners = ref<string[]>([]);
 const ownershipTargetOwner = ref("");
 const pendingOwnershipRequest = ref<api.TransferRequest | null>(null);
 const pendingOwnershipRefresh = ref<{ shouldRefreshTargetTree: boolean } | null>(null);
-
-const filteredTables = computed(() => {
-  const q = tableSearch.value.toLowerCase();
-  return q ? sourceTables.value.filter((t) => t.toLowerCase().includes(q)) : sourceTables.value;
-});
-
-const allSelected = computed(() => filteredTables.value.length > 0 && filteredTables.value.every((t) => selectedTables.value.has(t)));
 
 function connectionType(id: string): DatabaseType | undefined {
   return store.connections.find((c) => c.id === id)?.db_type;
@@ -108,25 +166,16 @@ const canStart = computed(() => {
   );
   const sameSourceAndTarget = sameCatalogAndDatabase && effectiveSourceSchema === effectiveTargetSchema;
   return (
-    !!sourceConnectionId.value && !!sourceDatabase.value && !!targetConnectionId.value && !!targetDatabase.value && (sourceCatalogs.value.length <= 1 || !!sourceCatalog.value) && (targetCatalogs.value.length <= 1 || !!targetCatalog.value) && selectedTables.value.size > 0 && !sameSourceAndTarget
+    !!sourceConnectionId.value &&
+    !!sourceDatabase.value &&
+    !!targetConnectionId.value &&
+    !!targetDatabase.value &&
+    (sourceCatalogs.value.length <= 1 || !!sourceCatalog.value) &&
+    (targetCatalogs.value.length <= 1 || !!targetCatalog.value) &&
+    (selectedTables.value.size > 0 || Object.values(selectedObjects.value).some((names) => names.size > 0)) &&
+    !sameSourceAndTarget
   );
 });
-
-function toggleSelectAll() {
-  if (allSelected.value) {
-    filteredTables.value.forEach((t) => selectedTables.value.delete(t));
-  } else {
-    filteredTables.value.forEach((t) => selectedTables.value.add(t));
-  }
-}
-
-function toggleTable(table: string) {
-  if (selectedTables.value.has(table)) {
-    selectedTables.value.delete(table);
-  } else {
-    selectedTables.value.add(table);
-  }
-}
 
 async function loadCatalogs(connectionId: string, side: "source" | "target") {
   if (!connectionId || !isCatalogCapable(connectionId)) {
@@ -234,19 +283,26 @@ async function loadSchemas(connectionId: string, database: string, side: "source
 
 function applyPendingTableSelection() {
   const pending = pendingSelectedTablesPrefill.value;
-  selectedTables.value = pending ? new Set(sourceTables.value.filter((table) => pending.includes(table))) : new Set(sourceTables.value);
+  const tables = objectGroups.value.TABLE ?? [];
+  if (pending) {
+    const chosen = new Set(tables.filter((table) => pending.includes(table)));
+    if (chosen.size > 0) {
+      selectedObjects.value = { ...selectedObjects.value, TABLE: chosen };
+    }
+  }
   pendingSelectedTablesPrefill.value = null;
 }
 
-async function loadTables() {
+async function loadObjects() {
   if (!sourceConnectionId.value || !sourceDatabase.value) {
-    sourceTables.value = [];
+    objectGroups.value = {};
     return;
   }
-  loadingTables.value = true;
+  loadingObjects.value = true;
   try {
     if (isMongoConnection(sourceConnectionId.value)) {
-      sourceTables.value = (await api.mongoListCollections(sourceConnectionId.value, sourceDatabase.value)).map((c) => c.name);
+      const collections = await api.mongoListCollections(sourceConnectionId.value, sourceDatabase.value);
+      objectGroups.value = { TABLE: collections.map((c) => c.name) };
       applyPendingTableSelection();
       return;
     }
@@ -254,13 +310,27 @@ async function loadTables() {
     const needsSchema = isSchemaAware(config?.db_type);
     const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;
     const catalog = sourceCatalog.value || undefined;
-    const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema, undefined, undefined, undefined, undefined, catalog);
-    sourceTables.value = tables.filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE").map((t) => t.name);
+    const kinds = transferObjectKindsForDatabase(config?.db_type);
+    const groups: Partial<Record<TransferObjectKind, string[]>> = {};
+    for (const kind of kinds) {
+      try {
+        if (kind === "TABLE") {
+          const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema, undefined, undefined, undefined, undefined, catalog);
+          groups.TABLE = tables.filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE").map((t) => t.name);
+        } else {
+          const objects = await api.listObjects(sourceConnectionId.value, sourceDatabase.value, schema, [kind], undefined, undefined, undefined, catalog);
+          groups[kind] = objects.map((o) => o.name);
+        }
+      } catch {
+        groups[kind] = [];
+      }
+    }
+    objectGroups.value = groups;
     applyPendingTableSelection();
   } catch {
-    sourceTables.value = [];
+    objectGroups.value = {};
   } finally {
-    loadingTables.value = false;
+    loadingObjects.value = false;
   }
 }
 
@@ -275,8 +345,8 @@ watch(sourceConnectionId, async (id) => {
   sourceCatalog.value = "";
   sourceCatalogs.value = [];
   sourceDatabase.value = "";
-  sourceTables.value = [];
-  selectedTables.value.clear();
+  objectGroups.value = {};
+  selectedObjects.value = {};
   pendingSourceSchemaPrefill.value = "";
   pendingSelectedTablesPrefill.value = null;
   if (isCatalogCapable(id)) {
@@ -292,8 +362,8 @@ watch(sourceConnectionId, async (id) => {
 watch(sourceCatalog, async (catalog) => {
   if (!sourceConnectionId.value) return;
   sourceDatabase.value = "";
-  sourceTables.value = [];
-  selectedTables.value.clear();
+  objectGroups.value = {};
+  selectedObjects.value = {};
   if (catalog) {
     await loadDatabasesForCatalog(sourceConnectionId.value, catalog, "source");
   }
@@ -316,7 +386,7 @@ watch(sourceDatabase, async (db) => {
   }
 });
 
-watch(sourceSchema, () => loadTables());
+watch(sourceSchema, () => loadObjects());
 
 watch(targetConnectionId, async (id) => {
   if (skipTargetWatch.value) {
@@ -414,11 +484,11 @@ function resetState() {
   sourceDatabases.value = [];
   sourceSchemas.value = [];
   sourceSchema.value = "";
-  sourceTables.value = [];
-  selectedTables.value.clear();
+  objectGroups.value = {};
+  selectedObjects.value = {};
   pendingSourceSchemaPrefill.value = "";
   pendingSelectedTablesPrefill.value = null;
-  tableSearch.value = "";
+  objectSearch.value = "";
   targetConnectionId.value = "";
   targetCatalog.value = "";
   targetCatalogs.value = [];
@@ -427,7 +497,7 @@ function resetState() {
   targetSchemas.value = [];
   targetSchema.value = "";
   pendingTargetSchemaPrefill.value = "";
-  createTable.value = true;
+  transferContent.value = "structureAndData";
   transferMode.value = "append";
   targetTableNameCase.value = "preserve";
   batchSize.value = 1000;
@@ -448,7 +518,7 @@ async function startTransfer() {
   const sourceDatabaseName = sourceDatabase.value;
   const targetConnection = targetConnectionId.value;
   const targetDatabaseName = targetDatabase.value;
-  const shouldRefreshTargetTree = createTable.value;
+  const shouldRefreshTargetTree = transferContent.value !== "dataOnly";
 
   const request: api.TransferRequest = {
     transferId: uuid(),
@@ -461,14 +531,16 @@ async function startTransfer() {
     targetSchema: effectiveTargetSchema,
     targetCatalog: normalizeTransferCatalog(targetCatalog.value, targetCatalogs.value) || undefined,
     tables: [...selectedTables.value],
-    createTable: createTable.value,
+    createTable: transferContent.value !== "dataOnly",
+    content: transferContent.value,
+    objects: buildTransferObjectSelections(selectedObjects.value, treeDisabledGroups.value),
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
     ownershipPolicy: "preserve",
     batchSize: batchSize.value,
   };
 
-  if (createTable.value) {
+  if (transferContent.value !== "dataOnly") {
     try {
       const preview = await api.previewTransferOwnership(request);
       if (preview.missingOwners.length > 0) {
@@ -535,8 +607,8 @@ function getConnectionName(id: string) {
         </DialogTitle>
       </DialogHeader>
 
-      <div class="min-h-0 flex-1 overflow-hidden">
-        <div class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 py-3">
+      <div class="min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-thin">
+        <div class="flex flex-col gap-5 py-3">
           <!-- Source / Target Side by Side -->
           <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
             <!-- Source Section -->
@@ -693,48 +765,47 @@ function getConnectionName(id: string) {
             </div>
           </div>
 
-          <!-- Tables Section -->
+          <!-- Objects Section -->
           <div class="flex min-h-0 flex-col gap-2">
             <div class="flex items-center justify-between">
               <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                {{ t("transfer.tables") }}
-                <span v-if="sourceTables.length" class="text-muted-foreground/60">({{ selectedTables.size }}/{{ sourceTables.length }})</span>
+                {{ t("transfer.objects") }}
+                <span v-if="objectGroups.TABLE?.length" class="text-muted-foreground/60">({{ selectedTables.size }}/{{ objectGroups.TABLE.length }})</span>
               </div>
-              <Button v-if="sourceTables.length" variant="ghost" size="sm" class="h-6 text-xs px-2" @click="toggleSelectAll">
-                {{ allSelected ? t("transfer.deselectAll") : t("transfer.selectAll") }}
-              </Button>
             </div>
 
-            <Input v-if="sourceTables.length > 5" v-model="tableSearch" :placeholder="t('transfer.searchTables')" class="h-7 text-xs" />
-
-            <div v-if="loadingTables" class="flex items-center gap-2 text-xs text-muted-foreground py-4 justify-center">
-              <Loader2 class="w-3.5 h-3.5 animate-spin" />
-              {{ t("common.loading") }}
-            </div>
-            <div v-else-if="!sourceConnectionId || !sourceDatabase" class="text-xs text-muted-foreground py-4 text-center">
+            <div v-if="(!loadingObjects && !sourceConnectionId) || !sourceDatabase" class="text-xs text-muted-foreground py-4 text-center">
               {{ t("transfer.selectSourceFirst") }}
             </div>
-            <div v-else-if="sourceTables.length === 0" class="text-xs text-muted-foreground py-4 text-center">
-              {{ t("transfer.noTables") }}
-            </div>
-            <div v-else class="min-h-0 max-h-[200px] overflow-y-auto rounded-md border">
-              <div v-for="table in filteredTables" :key="table" class="flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/50 cursor-pointer text-xs" @click="toggleTable(table)">
-                <CheckSquare v-if="selectedTables.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
-                <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
-                <span class="truncate">{{ table }}</span>
-              </div>
+            <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
+            <div v-if="showCrossFamilyViewHint" class="mt-1.5 rounded-md border border-amber-300/40 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
+              {{ t("transfer.crossFamilyViewHint") }}
             </div>
           </div>
 
           <!-- Options -->
           <div class="space-y-2.5">
-            <div class="flex items-center gap-2 cursor-pointer text-xs" @click="createTable = !createTable">
-              <CheckSquare v-if="createTable" class="w-3.5 h-3.5 text-primary shrink-0" />
-              <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
-              {{ t("transfer.createTable") }}
+            <div class="space-y-1">
+              <Label class="text-xs">{{ t("transfer.content") }}</Label>
+              <div class="flex flex-col gap-1">
+                <label class="flex cursor-pointer items-center gap-2 text-xs">
+                  <input type="radio" value="structureAndData" v-model="transferContent" class="h-3.5 w-3.5" />
+                  {{ t("transfer.contentStructureAndData") }}
+                </label>
+                <label class="flex cursor-pointer items-center gap-2 text-xs">
+                  <input type="radio" value="structureOnly" v-model="transferContent" class="h-3.5 w-3.5" />
+                  {{ t("transfer.contentStructureOnly") }}
+                  <span class="text-muted-foreground/70">{{ t("transfer.contentStructureOnlyHint") }}</span>
+                </label>
+                <label class="flex cursor-pointer items-center gap-2 text-xs">
+                  <input type="radio" value="dataOnly" v-model="transferContent" class="h-3.5 w-3.5" />
+                  {{ t("transfer.contentDataOnly") }}
+                  <span class="text-muted-foreground/70">{{ t("transfer.contentDataOnlyHint") }}</span>
+                </label>
+              </div>
             </div>
-            <div class="flex items-center gap-3">
-              <Label class="text-xs shrink-0">{{ t("transfer.transferMode") }}</Label>
+            <div v-if="transferContent !== 'structureOnly'" class="flex items-center gap-3">
+              <Label class="text-xs shrink-0">{{ t("transfer.dataWriteMode") }}</Label>
               <Select v-model="transferMode">
                 <SelectTrigger class="h-7 text-xs">
                   <SelectValue />

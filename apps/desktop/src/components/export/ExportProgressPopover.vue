@@ -38,6 +38,7 @@ const progressPercent = (totalRows: number | null, rowsExported: number) => {
 
 const progressValue = (task: ExportTask) => {
   if (task.kind === "database-export") {
+    if (task.overallPercent !== undefined) return task.overallPercent;
     if (!task.totalObjects || task.totalObjects <= 0) return 0;
     return Math.min(100, Math.round(((task.objectIndex ?? 0) / task.totalObjects) * 100));
   }
@@ -64,6 +65,7 @@ const taskTitle = (task: ExportTask) => {
 
 const rowsText = (task: ExportTask) => {
   if (task.kind === "database-export") {
+    if (task.overallPercent !== undefined) return `${task.overallPercent}%`;
     if (task.totalObjects) {
       return t("exportProgress.objectsCount", {
         current: (task.objectIndex ?? 0).toLocaleString(),
@@ -175,7 +177,11 @@ function failureDetailCount(task: ExportTask) {
 
             <!-- Progress bar -->
             <div v-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-              <div v-if="task.totalRows || (task.kind === 'database-export' && task.totalObjects) || (task.kind === 'data-transfer' && task.totalTables)" class="h-full bg-primary rounded-full transition-[width] duration-300" :style="{ width: `${progressValue(task)}%` }" />
+              <div
+                v-if="task.totalRows || (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) || (task.kind === 'data-transfer' && task.totalTables)"
+                class="h-full bg-primary rounded-full transition-[width] duration-300"
+                :style="{ width: `${progressValue(task)}%` }"
+              />
               <div v-else class="h-full w-full overflow-hidden rounded-full">
                 <div class="export-progress-indeterminate h-full rounded-full bg-primary" />
               </div>

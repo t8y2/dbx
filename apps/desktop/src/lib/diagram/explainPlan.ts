@@ -1,6 +1,7 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 
 export interface ExplainPlanNode {
   id: string;
@@ -28,8 +29,9 @@ export function supportsExplainPlan(databaseType?: DatabaseType): databaseType i
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
-export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string, format: "json" | "standard" = "json"): Promise<BuildExplainSqlResult> {
-  return api.buildExplainSql({ databaseType, sql, format }) as Promise<BuildExplainSqlResult>;
+/** `analyze` is honored by PostgreSQL only; every other engine ignores it server-side. */
+export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string, format: "json" | "standard" = "json", analyze?: boolean): Promise<BuildExplainSqlResult> {
+  return api.buildExplainSql({ databaseType, sql, format, analyze }) as Promise<BuildExplainSqlResult>;
 }
 
 export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "sqlserver", result: QueryResult): ParsedExplainPlan {
@@ -376,7 +378,7 @@ export function flattenExplainPlanNodes(nodes: ExplainPlanNode[]): ExplainPlanNo
 }
 
 export function sqlServerExplainResult(results: QueryResult[]): { result?: QueryResult; error?: string } {
-  const errorResult = results.find((result) => result.columns.length === 1 && result.columns[0] === "Error" && result.rows.length > 0);
+  const errorResult = results.find((result) => isQueryExecutionErrorResult(result) && result.rows.length > 0);
   if (errorResult) return { error: String(errorResult.rows[0]?.[0] ?? "") };
 
   const result = results.find((candidate) => firstSqlServerShowplanXml(candidate) !== undefined);
@@ -453,6 +455,7 @@ function parseSqlServerRelOp(element: Element): ExplainPlanNode {
     element.getAttribute("EstimateIO") ? `Estimated I/O: ${element.getAttribute("EstimateIO")}` : "",
     element.getAttribute("EstimateCPU") ? `Estimated CPU: ${element.getAttribute("EstimateCPU")}` : "",
     ...expressions.slice(0, 3).map((expression) => `Expression: ${expression}`),
+    ...sqlServerRuntimeDetails(sqlServerRuntimeCounters(element)),
   ].filter(Boolean);
 
   return {
@@ -467,6 +470,71 @@ function parseSqlServerRelOp(element: Element): ExplainPlanNode {
     details,
     children: planRegionElements(element, "RelOp").map(parseSqlServerRelOp),
   };
+}
+
+interface SqlServerRuntimeCounters {
+  rows: number;
+  executions: number;
+  threads: number;
+  /** Set only when the operator was genuinely invoked more than once per thread. */
+  rowsPerExecution?: number;
+  elapsedMs?: number;
+  cpuMs?: number;
+}
+
+/**
+ * Aggregates the `SET STATISTICS XML` runtime counters of one operator across its
+ * threads: rows and executions are summed, elapsed time is wall clock per thread so
+ * the slowest thread is the operator duration, and CPU time is additive work so it
+ * is summed. Estimated plans carry no RunTimeInformation and yield undefined.
+ */
+function sqlServerRuntimeCounters(element: Element): SqlServerRuntimeCounters | undefined {
+  const perThread = planRegionElements(element, "RunTimeCountersPerThread");
+  if (perThread.length === 0) return undefined;
+
+  const counters: SqlServerRuntimeCounters = { rows: 0, executions: 0, threads: perThread.length };
+  let activeThreads = 0;
+  for (const thread of perThread) {
+    const executions = xmlNumberAttribute(thread, "ActualExecutions") ?? 0;
+    counters.rows += xmlNumberAttribute(thread, "ActualRows") ?? 0;
+    counters.executions += executions;
+    if (executions > 0) activeThreads += 1;
+    const elapsed = xmlNumberAttribute(thread, "ActualElapsedms");
+    if (elapsed !== undefined) counters.elapsedMs = Math.max(counters.elapsedMs ?? 0, elapsed);
+    const cpu = xmlNumberAttribute(thread, "ActualCPUms");
+    if (cpu !== undefined) counters.cpuMs = (counters.cpuMs ?? 0) + cpu;
+  }
+
+  // ActualRows is cumulative over executions while EstimateRows stays per execution,
+  // so repeated invocations (a nested loop inner side) need normalizing. A parallel
+  // operator reports one execution per worker thread, which is still one logical
+  // execution: dividing there would understate every parallel node instead.
+  const executionsPerThread = counters.executions / (activeThreads || counters.threads);
+  if (executionsPerThread > 1) counters.rowsPerExecution = counters.rows / counters.executions;
+  return counters;
+}
+
+function sqlServerRuntimeDetails(counters?: SqlServerRuntimeCounters): string[] {
+  if (!counters) return [];
+
+  const details = [`Actual Rows: ${counters.rows}`];
+  if (counters.threads > 1) details.push(`Actual Threads: ${counters.threads}`);
+  if (counters.executions > 1) details.push(`Actual Executions: ${counters.executions}`);
+  if (counters.rowsPerExecution !== undefined) details.push(`Actual Rows Per Execution: ${formatPlanMetric(counters.rowsPerExecution)}`);
+  if (counters.elapsedMs !== undefined) details.push(`Actual Time: ${formatPlanMetric(counters.elapsedMs)} ms`);
+  if (counters.cpuMs !== undefined) details.push(`Actual CPU: ${formatPlanMetric(counters.cpuMs)} ms`);
+  return details;
+}
+
+function formatPlanMetric(value: number): string {
+  return String(Number(value.toFixed(2)));
+}
+
+function xmlNumberAttribute(element: Element, attribute: string): number | undefined {
+  const raw = element.getAttribute(attribute);
+  if (raw === null || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function planRegionElements(root: Element, localName: string): Element[] {
@@ -661,7 +729,15 @@ function parsePostgresExplain(raw: unknown): ExplainPlanNode[] {
       const root = objectValue(item);
       if (!root) return null;
       const plan = objectValue(root.Plan) || root;
-      return parsePostgresNode(plan, String(index));
+      const node = parsePostgresNode(plan, String(index));
+      if (!node) return null;
+
+      // EXPLAIN ANALYZE reports these next to "Plan", not inside it.
+      const planningTime = numberLike(root["Planning Time"]);
+      const executionTime = numberLike(root["Execution Time"]);
+      if (planningTime !== undefined) node.details.push(`Planning Time: ${planningTime} ms`);
+      if (executionTime !== undefined) node.details.push(`Execution Time: ${executionTime} ms`);
+      return node;
     })
     .filter((node): node is ExplainPlanNode => !!node);
 }
@@ -678,6 +754,11 @@ function parsePostgresNode(plan: Record<string, unknown> | null, id: string): Ex
   const filter = stringValue(plan.Filter);
   const joinType = stringValue(plan["Join Type"]);
   const sortKey = arrayValue(plan["Sort Key"])?.map(String).join(", ");
+  // EXPLAIN ANALYZE only. Actual Rows is per loop, matching Plan Rows.
+  const actualRows = numberLike(plan["Actual Rows"]);
+  const actualLoops = numberLike(plan["Actual Loops"]);
+  const actualStartupTime = numberLike(plan["Actual Startup Time"]);
+  const actualTotalTime = numberLike(plan["Actual Total Time"]);
 
   const children =
     arrayValue(plan.Plans)
@@ -693,7 +774,14 @@ function parsePostgresNode(plan: Record<string, unknown> | null, id: string): Ex
     cost: [startupCost, totalCost].every(Boolean) ? `${startupCost}..${totalCost}` : totalCost,
     rows,
     width,
-    details: [joinType ? `Join: ${joinType}` : "", filter ? `Filter: ${filter}` : "", sortKey ? `Sort: ${sortKey}` : ""].filter(Boolean),
+    details: [
+      joinType ? `Join: ${joinType}` : "",
+      filter ? `Filter: ${filter}` : "",
+      sortKey ? `Sort: ${sortKey}` : "",
+      actualRows !== undefined ? `Actual Rows: ${actualRows}` : "",
+      actualLoops !== undefined && Number(actualLoops) > 1 ? `Actual Loops: ${actualLoops}` : "",
+      actualStartupTime !== undefined && actualTotalTime !== undefined ? `Actual Time: ${actualStartupTime}..${actualTotalTime} ms` : "",
+    ].filter(Boolean),
     children,
   };
 }

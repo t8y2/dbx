@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget } from "@/lib/database/databaseNamespaceCreation";
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
-import { isSchemaAware, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTableImport, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 
 describe("schema awareness", () => {
   it("keeps SQLite database aliases separate from schema-capable databases", () => {
@@ -89,6 +89,12 @@ describe("supportsSqlInListPaste", () => {
   });
 });
 
+describe("supportsTableImport", () => {
+  it("enables OceanBase Oracle table import", () => {
+    expect(supportsTableImport("oceanbase-oracle")).toBe(true);
+  });
+});
+
 describe("database property editing", () => {
   it("allows MySQL-compatible charset and collation edits on database nodes", () => {
     expect(editableDatabasePropertyGroups({ db_type: "mysql" }, { type: "database", database: "app" })).toEqual(["charsetCollation"]);
@@ -134,6 +140,7 @@ describe("database namespace creation", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBeNull();
   });
 
   it("hides persistent SQLite attachment for memory and SQLCipher connections", () => {

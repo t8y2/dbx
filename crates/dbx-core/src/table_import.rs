@@ -1134,13 +1134,33 @@ fn xlsx_datetime_label(value: &ExcelDateTime, temporal_kind: Option<XlsxTemporal
     }
 }
 
-fn xlsx_cell_value_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> serde_json::Value {
+fn xlsx_string_value(value: &str, empty_string_as_null: bool) -> serde_json::Value {
+    if empty_string_as_null && value.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+fn xlsx_number_value(value: f64) -> serde_json::Value {
+    if value.is_finite() && value.fract() == 0.0 && value >= i64::MIN as f64 && value < -(i64::MIN as f64) {
+        let integer = value as i64;
+        if integer as f64 == value {
+            return serde_json::Value::Number(integer.into());
+        }
+    }
+    serde_json::Number::from_f64(value).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+}
+
+fn xlsx_cell_value_with_temporal_kind(
+    cell: &Data,
+    temporal_kind: Option<XlsxTemporalKind>,
+    empty_string_as_null: bool,
+) -> serde_json::Value {
     match cell {
         Data::Empty => serde_json::Value::Null,
-        Data::String(s) => csv_value(s),
-        Data::Float(n) => {
-            serde_json::Number::from_f64(*n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
-        }
+        Data::String(s) => xlsx_string_value(s, empty_string_as_null),
+        Data::Float(n) => xlsx_number_value(*n),
         Data::Int(n) => serde_json::Value::Number((*n).into()),
         Data::Bool(v) => serde_json::Value::Bool(*v),
         Data::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
@@ -1182,7 +1202,7 @@ fn xlsx_cell_text_value(cell: &Data, style: Option<&XlsxCellStyle>) -> Option<St
 }
 
 pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
-    xlsx_cell_value_with_temporal_kind(cell, None)
+    xlsx_cell_value_with_temporal_kind(cell, None, true)
 }
 
 fn xlsx_cell_label_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> String {
@@ -1206,14 +1226,13 @@ pub fn xlsx_cell_label(cell: &Data) -> String {
 fn xlsx_cell_ref_value_with_temporal_kind(
     cell: &DataRef<'_>,
     temporal_kind: Option<XlsxTemporalKind>,
+    empty_string_as_null: bool,
 ) -> serde_json::Value {
     match cell {
         DataRef::Empty => serde_json::Value::Null,
-        DataRef::String(s) => csv_value(s),
-        DataRef::SharedString(s) => csv_value(s),
-        DataRef::Float(n) => {
-            serde_json::Number::from_f64(*n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
-        }
+        DataRef::String(s) => xlsx_string_value(s, empty_string_as_null),
+        DataRef::SharedString(s) => xlsx_string_value(s, empty_string_as_null),
+        DataRef::Float(n) => xlsx_number_value(*n),
         DataRef::Int(n) => serde_json::Value::Number((*n).into()),
         DataRef::Bool(v) => serde_json::Value::Bool(*v),
         DataRef::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
@@ -1239,6 +1258,10 @@ fn xlsx_cell_ref_label_with_temporal_kind(cell: &DataRef<'_>, temporal_kind: Opt
 }
 
 pub fn xlsx_sheet_names(path: &str) -> Result<Vec<String>, String> {
+    if is_legacy_xls_path(path) {
+        let workbook = open_workbook_auto(path).map_err(|error| error.to_string())?;
+        return Ok(workbook.sheet_names().to_vec());
+    }
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
     let workbook_xml = read_xlsx_zip_text(&mut zip, "xl/workbook.xml")?;
@@ -1543,6 +1566,8 @@ struct XlsxPreviewRawCell {
     style_id: Option<usize>,
     value: String,
     inline_value: String,
+    has_value: bool,
+    has_inline_value: bool,
 }
 
 fn xlsx_dimension_bounds(reference: &str) -> Option<((usize, usize), (usize, usize))> {
@@ -1809,6 +1834,7 @@ fn xlsx_preview_cell_value(
     shared_strings: &HashMap<usize, String>,
     styles: &[XlsxCellStyle],
     date_1904: bool,
+    empty_string_as_null: bool,
 ) -> serde_json::Value {
     let cell_type = cell.cell_type.as_deref().unwrap_or_default();
     match cell_type {
@@ -1817,9 +1843,12 @@ fn xlsx_preview_cell_value(
             .parse::<usize>()
             .ok()
             .and_then(|index| shared_strings.get(&index))
-            .map_or(serde_json::Value::Null, |value| csv_value(value)),
-        "inlineStr" => csv_value(&cell.inline_value),
-        "str" | "d" | "e" => csv_value(&cell.value),
+            .map_or(serde_json::Value::Null, |value| xlsx_string_value(value, empty_string_as_null)),
+        "inlineStr" if cell.has_inline_value => xlsx_string_value(&cell.inline_value, empty_string_as_null),
+        "inlineStr" => serde_json::Value::Null,
+        "str" if cell.has_value => xlsx_string_value(&cell.value, empty_string_as_null),
+        "str" => serde_json::Value::Null,
+        "d" | "e" => csv_value(&cell.value),
         "b" => serde_json::Value::Bool(matches!(cell.value.trim(), "1" | "true" | "TRUE")),
         _ => {
             let Some(number) = cell.value.trim().parse::<f64>().ok() else {
@@ -1835,7 +1864,7 @@ fn xlsx_preview_cell_value(
                 let value = ExcelDateTime::new(number, date_type, date_1904);
                 return serde_json::Value::String(xlsx_datetime_label(&value, Some(kind)));
             }
-            serde_json::Number::from_f64(number).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+            xlsx_number_value(number)
         }
     }
 }
@@ -1878,6 +1907,7 @@ fn parse_xlsx_preview_file_with_options(
     let styles_xml = read_xlsx_zip_text(&mut zip, "xl/styles.xml").unwrap_or_default();
     let styles = parse_xlsx_styles(&styles_xml);
     let date_1904 = xlsx_workbook_uses_1904_date_system(&workbook_xml);
+    let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let row_range = effective_import_row_range(options)?;
     let preview_limit = preview_limit.max(1);
     let preview_last_row = row_range.data_start_row.saturating_add(preview_limit.saturating_sub(1));
@@ -1951,10 +1981,18 @@ fn parse_xlsx_preview_file_with_options(
                     };
                 }
                 Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                    current_cell.has_value = true;
                     in_value = true;
                 }
+                Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                    current_cell.has_value = true;
+                }
                 Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                    current_cell.has_inline_value = true;
                     in_inline_text = inline_phonetic_depth == 0;
+                }
+                Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                    current_cell.has_inline_value = true;
                 }
                 Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"rPh") => {
                     inline_phonetic_depth = inline_phonetic_depth.saturating_add(1);
@@ -2039,7 +2077,9 @@ fn parse_xlsx_preview_file_with_options(
                 let column = start_column + index;
                 let value = raw_cells
                     .get(&(absolute_title_row, column))
-                    .map(|cell| xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904))
+                    .map(|cell| {
+                        xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904, empty_string_as_null)
+                    })
                     .unwrap_or(serde_json::Value::Null);
                 normalize_header(&xlsx_preview_cell_label(&value), index)
             })
@@ -2066,7 +2106,9 @@ fn parse_xlsx_preview_file_with_options(
                 .map(|index| {
                     raw_cells
                         .get(&(absolute_row, start_column + index))
-                        .map(|cell| xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904))
+                        .map(|cell| {
+                            xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904, empty_string_as_null)
+                        })
                         .unwrap_or(serde_json::Value::Null)
                 })
                 .collect::<Vec<_>>()
@@ -2232,6 +2274,7 @@ fn xlsx_stream_cell_value(
     styles: &[XlsxCellStyle],
     date_1904: bool,
     format_as_text: bool,
+    empty_string_as_null: bool,
 ) -> Result<serde_json::Value, String> {
     if format_as_text && cell.cell_type.as_deref().unwrap_or_default().is_empty() {
         if let Ok(number) = cell.value.trim().parse::<f64>() {
@@ -2242,12 +2285,14 @@ fn xlsx_stream_cell_value(
         }
     }
     if cell.cell_type.as_deref() != Some("s") {
-        return Ok(xlsx_preview_cell_value(cell, &HashMap::new(), styles, date_1904));
+        return Ok(xlsx_preview_cell_value(cell, &HashMap::new(), styles, date_1904, empty_string_as_null));
     }
     let Some(index) = cell.value.parse::<usize>().ok() else {
         return Ok(serde_json::Value::Null);
     };
-    Ok(shared_strings.get(index)?.map_or(serde_json::Value::Null, |value| csv_value(&value)))
+    Ok(shared_strings
+        .get(index)?
+        .map_or(serde_json::Value::Null, |value| xlsx_string_value(&value, empty_string_as_null)))
 }
 
 fn xlsx_cell_ref_text_value(cell: &DataRef<'_>, style: Option<&XlsxCellStyle>) -> Option<String> {
@@ -2498,6 +2543,7 @@ fn stream_xlsx_rows_to_channel_with_control(
     // This producer runs on a blocking thread and communicates in bounded batches. The small
     // channel capacity applies backpressure when database writes are slower than XML parsing.
     let total_bytes = std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or_default();
+    let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let mut zip = zip::ZipArchive::new(File::open(path).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
     let workbook_xml = read_xlsx_zip_text(&mut zip, "xl/workbook.xml")?;
@@ -2615,9 +2661,19 @@ fn stream_xlsx_rows_to_channel_with_control(
                     ..XlsxPreviewRawCell::default()
                 };
             }
-            Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => in_value = true,
+            Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                current_cell.has_value = true;
+                in_value = true;
+            }
+            Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                current_cell.has_value = true;
+            }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                current_cell.has_inline_value = true;
                 in_inline_text = inline_phonetic_depth == 0;
+            }
+            Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                current_cell.has_inline_value = true;
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"rPh") => {
                 inline_phonetic_depth = inline_phonetic_depth.saturating_add(1);
@@ -2636,8 +2692,14 @@ fn stream_xlsx_rows_to_channel_with_control(
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
                 if let Some((row, column)) = current_position.take() {
                     let format_as_text = rows.is_text_source_column(row, column, &text_source_columns);
-                    let value =
-                        xlsx_stream_cell_value(&current_cell, &mut shared_strings, &styles, date_1904, format_as_text)?;
+                    let value = xlsx_stream_cell_value(
+                        &current_cell,
+                        &mut shared_strings,
+                        &styles,
+                        date_1904,
+                        format_as_text,
+                        empty_string_as_null,
+                    )?;
                     rows.push_cell(row, column, value, progress)?;
                     current_cell = XlsxPreviewRawCell::default();
                 }
@@ -2755,13 +2817,14 @@ fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric>(
 where
     T: CellType,
     Label: Fn(&T, Option<XlsxTemporalKind>) -> String,
-    Value: Fn(&T, Option<XlsxTemporalKind>) -> serde_json::Value,
+    Value: Fn(&T, Option<XlsxTemporalKind>, bool) -> serde_json::Value,
     TextValue: Fn(&T, Option<&XlsxCellStyle>) -> Option<String>,
     IsNumeric: Fn(&T) -> bool,
 {
     let (range_start_row, range_start_column) =
         range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
     let row_range = effective_import_row_range(options)?;
+    let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     let mut total_rows = 0;
@@ -2812,7 +2875,7 @@ where
                             return Ok(serde_json::Value::String(text));
                         }
                     }
-                    Ok(cell_value(cell, style.and_then(|style| style.temporal_kind)))
+                    Ok(cell_value(cell, style.and_then(|style| style.temporal_kind), empty_string_as_null))
                 })
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
@@ -6514,6 +6577,81 @@ mod tests {
         zip.finish().unwrap().into_inner()
     }
 
+    fn assert_xlsx_empty_string_option(options: TableImportParseOptions, expected_row: Vec<serde_json::Value>) {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-empty-string-option-{}.xlsx", uuid::Uuid::new_v4()));
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:E2"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>inline</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>shared</t></is></c>
+      <c r="C1" t="inlineStr"><is><t>formula</t></is></c>
+      <c r="D1" t="inlineStr"><is><t>absent</t></is></c>
+      <c r="E1" t="inlineStr"><is><t>empty_cell</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t></t></is></c>
+      <c r="B2" t="s"><v>0</v></c>
+      <c r="C2" t="str"><f>""</f><v></v></c>
+      <c r="E2"/>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let shared_strings_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1">
+  <si><t></t></si>
+</sst>"#;
+        std::fs::write(&path, build_preview_test_xlsx(sheet_xml, Some(shared_strings_xml))).unwrap();
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+            .unwrap();
+
+        let mut streamed_columns = Vec::new();
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            match message.unwrap() {
+                XlsxStreamMessage::Header(columns) => streamed_columns = columns,
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                _ => {}
+            }
+        }
+
+        assert_eq!(parsed.columns, vec!["inline", "shared", "formula", "absent", "empty_cell"]);
+        assert_eq!(preview.columns, parsed.columns);
+        assert_eq!(streamed_columns, parsed.columns);
+        assert_eq!(parsed.rows, vec![expected_row.clone()]);
+        assert_eq!(preview.rows, parsed.rows);
+        assert_eq!(streamed_rows, parsed.rows);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn xlsx_preserves_explicit_empty_strings_when_configured() {
+        let options =
+            TableImportParseOptions { empty_string_as_null: Some(false), ..TableImportParseOptions::default() };
+
+        assert_xlsx_empty_string_option(
+            options,
+            vec![
+                serde_json::json!(""),
+                serde_json::json!(""),
+                serde_json::json!(""),
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            ],
+        );
+    }
+
+    #[test]
+    fn xlsx_defaults_explicit_empty_strings_to_null() {
+        assert_xlsx_empty_string_option(TableImportParseOptions::default(), vec![serde_json::Value::Null; 5]);
+    }
+
     #[test]
     fn retains_only_temporal_and_text_target_xlsx_styles() {
         let styles = vec![
@@ -6560,6 +6698,28 @@ mod tests {
             assert!(error.contains(&source_column), "{error}");
             assert!(error.contains("Save the workbook as .xlsx"), "{error}");
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn legacy_xls_preview_reads_sheet_names_without_zip_parser() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-preview-{}.xls", uuid::Uuid::new_v4()));
+        std::fs::write(&path, include_bytes!("../tests/fixtures/issue3683-formatted-numbers.xls")).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let (parsed, non_streaming, sheets) = parse_import_preview_file_with_options(
+            &path.to_string_lossy(),
+            TableImportSourceFormat::Excel,
+            &options,
+            10,
+        )
+        .await
+        .unwrap();
+
+        assert!(non_streaming);
+        assert_eq!(sheets, vec!["Sheet1"]);
+        assert_eq!(parsed.columns, vec!["column_1", "column_2", "column_3", "column_4", "column_5"]);
+        assert_eq!(parsed.rows.len(), 1);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7371,8 +7531,8 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
         assert_eq!(streamed_rows.len(), 2);
-        assert_eq!(streamed_rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
-        assert_eq!(streamed_rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
+        assert_eq!(streamed_rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(streamed_rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7725,8 +7885,8 @@ mod tests {
         assert_eq!(
             streamed_rows,
             vec![
-                vec![serde_json::json!(1.0), serde_json::json!("Ada")],
-                vec![serde_json::json!(2.0), serde_json::json!("Grace")],
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
             ]
         );
         let _ = std::fs::remove_file(path);
@@ -7792,10 +7952,7 @@ mod tests {
                 streamed_rows.extend(rows);
             }
         }
-        assert_eq!(
-            streamed_rows,
-            vec![vec![serde_json::json!(7.0), serde_json::Value::Null, serde_json::json!("Ada")]]
-        );
+        assert_eq!(streamed_rows, vec![vec![serde_json::json!(7), serde_json::Value::Null, serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7821,7 +7978,7 @@ mod tests {
 
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(7.0), serde_json::json!("Ada")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(7), serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7848,7 +8005,7 @@ mod tests {
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
         assert_eq!(preview.columns, vec!["id", "column_2", "name"]);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(7.0), serde_json::Value::Null, serde_json::json!("Ada")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(7), serde_json::Value::Null, serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7905,7 +8062,7 @@ mod tests {
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
         assert_eq!(preview.columns, vec!["id", "name"]);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(8.0), serde_json::json!("Grace")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(8), serde_json::json!("Grace")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7979,7 +8136,7 @@ mod tests {
                 serde_json::json!("12.5%"),
                 serde_json::json!("€1.234,50"),
                 serde_json::json!("1,234.50"),
-                serde_json::json!(10.0),
+                serde_json::json!(10),
             ]
         );
         let _ = std::fs::remove_file(path);
@@ -8036,15 +8193,54 @@ mod tests {
     fn borrowed_excel_cells_preserve_owned_cell_conversion_semantics() {
         let shared_string = DataRef::SharedString("Ada");
         let number = DataRef::Float(42.5);
+        let integer = DataRef::Float(42.0);
         let date = DataRef::DateTime(ExcelDateTime::new(45996.0, calamine::ExcelDateTimeType::DateTime, false));
 
         assert_eq!(xlsx_cell_ref_label_with_temporal_kind(&shared_string, None), "Ada");
-        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&shared_string, None), serde_json::json!("Ada"));
-        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&number, None), serde_json::json!(42.5));
+        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&shared_string, None, true), serde_json::json!("Ada"));
+        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&number, None, true), serde_json::json!(42.5));
+        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&integer, None, true), serde_json::json!(42));
         assert_eq!(
-            xlsx_cell_ref_value_with_temporal_kind(&date, Some(XlsxTemporalKind::Date)),
+            xlsx_cell_ref_value_with_temporal_kind(&date, Some(XlsxTemporalKind::Date), true),
             serde_json::json!("2025-12-05")
         );
+    }
+
+    #[test]
+    fn excel_zero_fraction_numbers_infer_integer_columns() {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-integer-inference-{}.xlsx", uuid::Uuid::new_v4()));
+        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
+            sheet_name: Some("Numbers".to_string()),
+            columns: vec!["id".to_string(), "amount".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!(1.5)],
+                vec![serde_json::json!(2), serde_json::json!(2.25)],
+            ],
+            numeric_column_right_align: false,
+        }])
+        .unwrap();
+        std::fs::write(&path, workbook).unwrap();
+
+        let parsed =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &TableImportParseOptions::default(), 10).unwrap();
+        let mappings = parsed
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = build_import_create_table_plan(&parsed, &mappings, "numbers", "app", &DatabaseType::Mysql).unwrap();
+
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!(1.5)]);
+        assert_eq!(plan.columns[0].data_type, "BIGINT");
+        assert_eq!(plan.columns[1].data_type, "DOUBLE");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -8137,8 +8333,8 @@ mod tests {
 
         assert_eq!(parsed.columns, vec!["id", "name"]);
         assert_eq!(parsed.total_rows, 2);
-        assert_eq!(parsed.rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
-        assert_eq!(parsed.rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
         assert_eq!(preview.rows, parsed.rows);
         let _ = std::fs::remove_file(path);
     }
@@ -9223,7 +9419,8 @@ mod tests {
         }];
         let excel_date_time =
             Data::DateTime(ExcelDateTime::new(45959.686111111, calamine::ExcelDateTimeType::DateTime, false));
-        let imported_value = xlsx_cell_value_with_temporal_kind(&excel_date_time, Some(XlsxTemporalKind::DateTime));
+        let imported_value =
+            xlsx_cell_value_with_temporal_kind(&excel_date_time, Some(XlsxTemporalKind::DateTime), true);
         assert_eq!(imported_value, serde_json::json!("2025-10-29 16:28:00"));
         let data = ParsedImportFile {
             columns: vec!["created_at".to_string()],

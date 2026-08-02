@@ -46,6 +46,22 @@ mod tests {
     }
 
     #[test]
+    fn duckdb_execute_returns_dml_returning_rows() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        con.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR)").expect("create table");
+
+        let inserted = duckdb_execute(&con, "INSERT INTO users VALUES (1, 'Ada') RETURNING id, name")
+            .expect("insert returning");
+        let updated = duckdb_execute(&con, "UPDATE users SET name = 'Ada Lovelace' RETURNING id, name")
+            .expect("update returning");
+        let deleted = duckdb_execute(&con, "DELETE FROM users RETURNING id, name").expect("delete returning");
+
+        assert_eq!(inserted.rows, vec![vec![serde_json::json!(1), serde_json::json!("Ada")]]);
+        assert_eq!(updated.rows, vec![vec![serde_json::json!(1), serde_json::json!("Ada Lovelace")]]);
+        assert_eq!(deleted.rows, vec![vec![serde_json::json!(1), serde_json::json!("Ada Lovelace")]]);
+    }
+
+    #[test]
     fn duckdb_execute_returns_rows_for_from_first_query() {
         let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
         con.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR)").expect("create table");

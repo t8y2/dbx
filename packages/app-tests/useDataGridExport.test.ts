@@ -397,6 +397,24 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
 });
 
+test("MongoDB full query result CSV export uses the full-result fallback", async () => {
+  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb" });
+  fullExportResult.mockResolvedValueOnce({
+    columns: ["_id", "name"],
+    rows: [["1", "Ada"]],
+    affected_rows: 1,
+    execution_time_ms: 1,
+  });
+
+  await composable.exportCsv();
+
+  assert.equal(queryResultExportRequest.mock.calls.length, 0);
+  assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
+  assert.equal(fullExportResult.mock.calls.length, 1);
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][1], ["_id", "name"]);
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["1", "Ada"]]);
+});
+
 test("streaming query result export translates streaming unsupported error before the toast", async () => {
   const rawMessage = "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
   apiMock.startQueryResultExport.mockImplementationOnce(async (request, onProgress) => {

@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
-import { DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "../../apps/desktop/src/composables/useDataGridEditor.ts";
+import { DATA_GRID_MAX_BATCH_INSERT_ROWS, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "../../apps/desktop/src/composables/useDataGridEditor.ts";
 import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 import type { DataGridSaveStatementOptions } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
 import { matchesRowStatusFilter, type RowStatusFilter } from "../../apps/desktop/src/lib/dataGrid/gridRowStatus.ts";
@@ -878,6 +878,141 @@ test("undo and redo cover row add and delete operations", () => {
   assert.equal(editor.newRows.value.length, 1);
   editor.redoPendingChange();
   assert.deepEqual([...editor.deletedRows.value], [0]);
+});
+
+test("addRows appends the requested number of blank draft rows as one undoable change", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+
+  editor.addRows(3);
+  assert.equal(editor.newRows.value.length, 3);
+  assert.deepEqual(editor.newRows.value, [
+    [null, null],
+    [null, null],
+    [null, null],
+  ]);
+
+  editor.undoPendingChange();
+  assert.equal(editor.newRows.value.length, 0);
+  editor.redoPendingChange();
+  assert.equal(editor.newRows.value.length, 3);
+});
+
+test("addRows appends after existing draft rows", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRow();
+  editor.addRows(2);
+  assert.equal(editor.newRows.value.length, 3);
+});
+
+test("addRows ignores invalid counts", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(0);
+  editor.addRows(-5);
+  editor.addRows(1.5);
+  editor.addRows(Number.NaN);
+  assert.equal(editor.newRows.value.length, 0);
+  assert.equal(editor.canUndoPendingChange.value, false);
+});
+
+test("addRows clamps counts above the batch limit", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(DATA_GRID_MAX_BATCH_INSERT_ROWS + 100);
+  assert.equal(editor.newRows.value.length, DATA_GRID_MAX_BATCH_INSERT_ROWS);
+});
+
+test("addRows records the display placement alongside the pending rows", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  const firstId = editor.addRows(2, { anchorId: 0, position: "below" });
+  assert.equal(firstId, -1);
+  assert.equal(editor.newRowMeta.value.length, 2);
+  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [
+    { anchorId: 0, position: "below" },
+    { anchorId: 0, position: "below" },
+  ]);
+  // Stable tokens are unique and monotonic.
+  assert.equal(editor.newRowMeta.value[0].token, 1);
+  assert.equal(editor.newRowMeta.value[1].token, 2);
+});
+
+test("addRows with a null placement appends at the end", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(2, null);
+  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [null, null]);
+});
+
+test("addRows can anchor to another pending row by its token", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(1);
+  const firstToken = editor.newRowMeta.value[0].token;
+  editor.addRows(1, { anchorId: -firstToken, position: "below" });
+  assert.deepEqual(editor.newRowMeta.value[1].placement, { anchorId: -firstToken, position: "below" });
+});
+
+test("undo and redo restore the placement metadata", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(2, { anchorId: 0, position: "above" });
+  editor.undoPendingChange();
+  assert.equal(editor.newRows.value.length, 0);
+  assert.equal(editor.newRowMeta.value.length, 0);
+  editor.redoPendingChange();
+  assert.equal(editor.newRows.value.length, 2);
+  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [
+    { anchorId: 0, position: "above" },
+    { anchorId: 0, position: "above" },
+  ]);
+});
+
+test("deleting a pending row keeps the placement metadata aligned", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(3);
+  editor.applyDeleteRow(-1);
+  assert.equal(editor.newRows.value.length, 2);
+  assert.equal(editor.newRowMeta.value.length, 2);
+});
+
+test("restoring a cached snapshot resumes token allocation past restored tokens", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const firstEditor = createQuickEntryEditor({ quickEntryEnabled: true, cacheKey: "token-restore" });
+
+  firstEditor.addRows(2);
+  assert.deepEqual(firstEditor.newRowMeta.value.map((m) => m.token), [1, 2]);
+  firstEditor.savePendingSnapshot(false, false);
+
+  const restoredEditor = createQuickEntryEditor({ quickEntryEnabled: true, cacheKey: "token-restore" });
+  assert.deepEqual(restoredEditor.newRowMeta.value.map((m) => m.token), [1, 2]);
+
+  restoredEditor.addRows(1);
+  // The fresh instance restarts the allocator at 1; it must resume past the
+  // restored tokens so a new row never shares a token with a restored row.
+  assert.deepEqual(restoredEditor.newRowMeta.value.map((m) => m.token), [1, 2, 3]);
 });
 
 test("batch row delete records a single undo snapshot", () => {

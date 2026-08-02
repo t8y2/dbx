@@ -548,6 +548,15 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
 
+test("API AI provider settings expose and persist a default model ID", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const modelControl = source.indexOf('<Input v-model="aiEditModel"');
+
+  assert.ok(modelControl >= 0);
+  assert.match(source.slice(modelControl - 300, modelControl + 300), /v-if="!aiIsCliProvider"[\s\S]*t\("ai\.defaultModel"\)[\s\S]*t\('ai\.manualModelPlaceholder'\)/);
+  assert.match(source, /model:\s*aiEditModel\.value/);
+});
+
 test("normalizes legacy AI config and fills provider defaults", () => {
   const legacy = normalizeAiConfig({
     provider: "openai",

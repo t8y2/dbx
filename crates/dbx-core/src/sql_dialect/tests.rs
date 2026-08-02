@@ -77,6 +77,7 @@ fn qualifies_schema_only_for_schema_aware_databases() {
         "\"DBX_TEST\".\"PRODUCTS\""
     );
     assert_eq!(qualified_table_name(Some(DatabaseType::Oscar), Some("SYSDBA"), "EMPLOYEE"), "\"SYSDBA\".\"EMPLOYEE\"");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Informix), Some("xtdpcky"), "users"), "xtdpcky.users");
     assert_eq!(qualified_table_name(Some(DatabaseType::Sqlite), Some("analytics"), "users"), "\"analytics\".\"users\"");
     assert_eq!(qualified_table_name(Some(DatabaseType::Jdbc), Some("cbsdw_dwd"), "dwd_test_df"), "dwd_test_df");
     assert_eq!(qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "device2"), "root.test.device2");
@@ -622,7 +623,7 @@ fn builds_informix_table_data_with_skip_first_pagination() {
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Informix),
-            schema: Some("ignored".to_string()),
+            schema: Some("xtdpcky".to_string()),
             table_name: "users".to_string(),
             table_type: None,
             primary_keys: vec!["id".to_string()],
@@ -635,7 +636,7 @@ fn builds_informix_table_data_with_skip_first_pagination() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT SKIP 100 FIRST 50 * FROM users WHERE (active = 1)"
+        "SELECT SKIP 100 FIRST 50 * FROM xtdpcky.users WHERE (active = 1)"
     );
 
     assert_eq!(

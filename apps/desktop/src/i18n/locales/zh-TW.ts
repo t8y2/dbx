@@ -3012,7 +3012,7 @@ export default withEnglishFallback({
     objectTypeSequence: "序列",
     objectTypeEvent: "事件",
     objectDataOnlyDisabled: "僅資料模式不傳輸非表物件",
-    objectCrossFamilyDisabled: "跨庫僅支援檢視和序列傳輸",
+    objectCrossFamilyDisabled: "跨庫僅支援序列傳輸（純DDL；檢視查詢體無法翻譯）",
     crossFamilyViewHint: "跨庫檢視傳輸：請同時選擇檢視依賴的表，或確保目標庫已存在這些表",
     objectUnsupportedDisabled: "目前資料庫不支援該物件類型傳輸",
     skippedExistingObjects: "跳過 {count} 個已存在物件",

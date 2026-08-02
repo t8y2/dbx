@@ -3730,7 +3730,7 @@ export default withEnglishFallback({
     objectTypeSequence: "序列",
     objectTypeEvent: "事件",
     objectDataOnlyDisabled: "仅数据模式不传输非表对象",
-    objectCrossFamilyDisabled: "跨库仅支持视图和序列传输",
+    objectCrossFamilyDisabled: "跨库仅支持序列传输（纯DDL；视图查询体无法翻译）",
     crossFamilyViewHint: "跨库视图传输：请同时选择视图依赖的表，或确保目标库已存在这些表",
     objectUnsupportedDisabled: "当前数据库不支持该对象类型传输",
     skippedExistingObjects: "跳过 {count} 个已存在对象",

@@ -19,6 +19,7 @@ vi.mock("@lucide/vue", () => {
   return {
     Square: Icon,
     CheckSquare: Icon,
+    MinusSquare: Icon,
     Search: Icon,
     ChevronRight: Icon,
   };
@@ -235,5 +236,37 @@ describe("ObjectSelectionTree interaction", () => {
     itemCheckbox(container, "VIEW", "v2").click();
     await nextTick();
     expect(state.selection.VIEW ?? []).toEqual([]);
+  });
+
+  it("group header checkbox shows none / partial / all tri-state", async () => {
+    // none: no selection in the group
+    const none = mountTree({ groups: [VIEWS], selection: {} });
+    cleanup = () => none.app.unmount();
+    expect(groupToggle(none.container).dataset.state).toBe("none");
+    none.app.unmount();
+
+    // partial: only some visible items selected
+    const partial = mountTree({ groups: [VIEWS], selection: { VIEW: ["v1"] } });
+    cleanup = () => partial.app.unmount();
+    expect(groupToggle(partial.container).dataset.state).toBe("partial");
+    partial.app.unmount();
+
+    // all: every visible item selected
+    const all = mountTree({ groups: [VIEWS], selection: { VIEW: ["v1", "v2", "v3"] } });
+    cleanup = () => all.app.unmount();
+    expect(groupToggle(all.container).dataset.state).toBe("all");
+    all.app.unmount();
+  });
+
+  it("group header state is computed over visible items only", async () => {
+    // every item selected, but the search narrows the visible set to v1
+    const { container, app } = mountTree({ groups: [VIEWS], selection: { VIEW: ["v1", "v2", "v3"] } });
+    cleanup = () => app.unmount();
+    await typeSearch(container, "v1");
+    // v1 is the only visible item and it is selected -> all
+    expect(groupToggle(container).dataset.state).toBe("all");
+    // clearing the search shows every item selected again -> all
+    await typeSearch(container, "");
+    expect(groupToggle(container).dataset.state).toBe("all");
   });
 });

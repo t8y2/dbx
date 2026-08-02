@@ -3574,7 +3574,7 @@ export default withEnglishFallback({
     objectTypeSequence: "シーケンス",
     objectTypeEvent: "イベント",
     objectDataOnlyDisabled: "データのみモードではテーブル以外のオブジェクトは転送されません",
-    objectCrossFamilyDisabled: "データベース間転送はビューとシーケンスのみサポートします",
+    objectCrossFamilyDisabled: "データベース間転送はシーケンスのみサポートします（単純なDDL。ビューの本文は翻訳されません）",
     crossFamilyViewHint: "データベース間ビュー転送：ビューが依存するテーブルも選択するか、ターゲットDBに既に存在することを確認してください",
     objectUnsupportedDisabled: "現在のデータベースは、このオブジェクトタイプの転送をサポートしていません",
     skippedExistingObjects: "既存のオブジェクト {count} 件をスキップしました",

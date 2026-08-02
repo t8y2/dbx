@@ -245,56 +245,57 @@ pub async fn start_transfer(
         }
 
         // Transfer selected non-table objects (views, procedures, functions,
-        // triggers, sequences, events) after the per-table loop.
+        // triggers, sequences, events) after the per-table loop. The empty
+        // selection case is decided inside transfer_schema_objects: PG→PG
+        // keeps the legacy transfer-everything default, every other
+        // combination transfers nothing.
         let mut object_outcome = dbx_core::transfer::TransferObjectOutcome::default();
-        if !request.objects.is_empty() {
-            match dbx_core::transfer::transfer_schema_objects(
-                &state,
-                &request,
-                &source_pool_key,
-                &target_pool_key,
-                |progress| emit_progress(&app, progress),
-            )
-            .await
-            {
-                Ok(outcome) => {
-                    object_outcome = outcome;
-                }
-                Err(e) if e == "Cancelled" => {
-                    emit_progress(
-                        &app,
-                        TransferProgress {
-                            transfer_id: transfer_id.clone(),
-                            table: "schema objects".to_string(),
-                            table_index: total_tables,
-                            total_tables,
-                            rows_transferred: 0,
-                            total_rows: None,
-                            status: TransferStatus::Cancelled,
-                            error: None,
-                            terminal: true,
-                        },
-                    );
-                    dbx_core::transfer::clear_cancelled(&transfer_id).await;
-                    return;
-                }
-                Err(e) => {
-                    failed_tables.push("schema objects".to_string());
-                    emit_progress(
-                        &app,
-                        TransferProgress {
-                            transfer_id: transfer_id.clone(),
-                            table: "schema objects".to_string(),
-                            table_index: total_tables,
-                            total_tables,
-                            rows_transferred: 0,
-                            total_rows: None,
-                            status: TransferStatus::Error,
-                            error: Some(e),
-                            terminal: false,
-                        },
-                    );
-                }
+        match dbx_core::transfer::transfer_schema_objects(
+            &state,
+            &request,
+            &source_pool_key,
+            &target_pool_key,
+            |progress| emit_progress(&app, progress),
+        )
+        .await
+        {
+            Ok(outcome) => {
+                object_outcome = outcome;
+            }
+            Err(e) if e == "Cancelled" => {
+                emit_progress(
+                    &app,
+                    TransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        table: "schema objects".to_string(),
+                        table_index: total_tables,
+                        total_tables,
+                        rows_transferred: 0,
+                        total_rows: None,
+                        status: TransferStatus::Cancelled,
+                        error: None,
+                        terminal: true,
+                    },
+                );
+                dbx_core::transfer::clear_cancelled(&transfer_id).await;
+                return;
+            }
+            Err(e) => {
+                failed_tables.push("schema objects".to_string());
+                emit_progress(
+                    &app,
+                    TransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        table: "schema objects".to_string(),
+                        table_index: total_tables,
+                        total_tables,
+                        rows_transferred: 0,
+                        total_rows: None,
+                        status: TransferStatus::Error,
+                        error: Some(e),
+                        terminal: false,
+                    },
+                );
             }
         }
         if !object_outcome.failed.is_empty() {

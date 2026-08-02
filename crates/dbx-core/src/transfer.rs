@@ -366,12 +366,16 @@ pub fn cross_family_transferable_object_kinds(source: &DatabaseType, target: &Da
     if !family_supported(source) || !family_supported(target) {
         return Vec::new();
     }
+    // Cross-family VIEW transfer is disabled: convert_cross_family_object_ddl
+    // only rewrites the DDL wrapper, identifier quoting and schema qualifiers —
+    // it does not translate the view query body, so source-specific constructs
+    // (IFNULL, TOP, GETDATE, …) would execute unchanged on an incompatible
+    // target. Only sequences are allowed: their CREATE SEQUENCE statements are
+    // plain DDL (no query body) and the small set of dialect differences
+    // (AS <type>, NOCYCLE/NOCACHE) is converted and tested.
     let source_kinds = transfer_object_kinds(source);
     let target_kinds = transfer_object_kinds(target);
     let mut allowed = Vec::new();
-    if source_kinds.contains(&View) && target_kinds.contains(&View) {
-        allowed.push(View);
-    }
     if source_kinds.contains(&Sequence) && target_kinds.contains(&Sequence) {
         allowed.push(Sequence);
     }
@@ -4795,7 +4799,7 @@ where
         .map(|selection| format!("{:?}", selection.object_type))
         .collect();
     if !unsupported.is_empty() {
-        return Err(format!("跨库仅支持视图和序列传输，不支持: {}", unsupported.join(", ")));
+        return Err(format!("跨库非表对象传输暂不支持该类型，不支持: {}", unsupported.join(", ")));
     }
     let source_family = transfer_object_family(&source_db_type).ok_or("unsupported source family")?;
     let target_family = transfer_object_family(&target_db_type).ok_or("unsupported target family")?;
@@ -6891,22 +6895,20 @@ mod tests {
 
         #[test]
         fn cross_family_transferable_kinds_matrix() {
-            // mysql <-> dameng: views only (mysql has no sequences)
-            assert_eq!(cross_family_transferable_object_kinds(&DatabaseType::Mysql, &DatabaseType::Dameng), vec![View]);
-            assert_eq!(cross_family_transferable_object_kinds(&DatabaseType::Dameng, &DatabaseType::Mysql), vec![View]);
-            // sqlserver <-> dameng: views and sequences
+            // cross-family VIEW transfer is disabled (the DDL conversion does
+            // not translate the view query body, so source-specific constructs
+            // could run unchanged on an incompatible target)
+            assert!(cross_family_transferable_object_kinds(&DatabaseType::Mysql, &DatabaseType::Dameng).is_empty());
+            assert!(cross_family_transferable_object_kinds(&DatabaseType::Dameng, &DatabaseType::Mysql).is_empty());
+            assert!(cross_family_transferable_object_kinds(&DatabaseType::Mysql, &DatabaseType::SqlServer).is_empty());
+            // sqlserver <-> dameng: sequences only (plain DDL, converted and tested)
             assert_eq!(
                 cross_family_transferable_object_kinds(&DatabaseType::SqlServer, &DatabaseType::Dameng),
-                vec![View, Sequence]
+                vec![Sequence]
             );
             assert_eq!(
                 cross_family_transferable_object_kinds(&DatabaseType::Dameng, &DatabaseType::SqlServer),
-                vec![View, Sequence]
-            );
-            // mysql <-> sqlserver: views only
-            assert_eq!(
-                cross_family_transferable_object_kinds(&DatabaseType::Mysql, &DatabaseType::SqlServer),
-                vec![View]
+                vec![Sequence]
             );
             // same family: all source kinds are transferable
             let same = cross_family_transferable_object_kinds(&DatabaseType::Mysql, &DatabaseType::Mysql);
@@ -6927,6 +6929,24 @@ mod tests {
         }
 
         #[test]
+        fn should_transfer_schema_objects_matrix() {
+            // non-empty selection always transfers
+            assert!(should_transfer_schema_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::Mysql,
+                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+            ));
+            // empty selection: PG→PG keeps the legacy transfer-everything default
+            assert!(should_transfer_schema_objects(&DatabaseType::Postgres, &DatabaseType::Postgres, &[]));
+            assert!(should_transfer_schema_objects(&DatabaseType::Kingbase, &DatabaseType::Postgres, &[]));
+            assert!(should_transfer_schema_objects(&DatabaseType::Postgres, &DatabaseType::OpenGauss, &[]));
+            // empty selection: every other combination transfers nothing
+            assert!(!should_transfer_schema_objects(&DatabaseType::Postgres, &DatabaseType::Mysql, &[]));
+            assert!(!should_transfer_schema_objects(&DatabaseType::Mysql, &DatabaseType::Mysql, &[]));
+            assert!(!should_transfer_schema_objects(&DatabaseType::Mysql, &DatabaseType::Dameng, &[]));
+            assert!(!should_transfer_schema_objects(&DatabaseType::Dameng, &DatabaseType::SqlServer, &[]));
+            assert!(!should_transfer_schema_objects(&DatabaseType::Sqlite, &DatabaseType::Sqlite, &[]));
+        }
         fn rewrites_cross_family_view_ddl() {
             // mysql -> dameng
             let mysql_view = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `src`.`v` AS select `t`.`id` AS `id` from `src`.`t`";
@@ -7091,7 +7111,9 @@ mod tests {
         #[test]
         fn rejects_unsupported_cross_family_objects_in_executor() {
             let kinds = cross_family_transferable_object_kinds(&DatabaseType::Mysql, &DatabaseType::SqlServer);
-            assert_eq!(kinds, vec![View]);
+            // VIEW is disabled cross-family: only the DDL wrapper/quoting is
+            // rewritten, the query body is not translated
+            assert!(!kinds.contains(&View));
             // procedures/triggers are never cross-family transferable
             assert!(!kinds.contains(&Procedure));
             assert!(!kinds.contains(&Trigger));

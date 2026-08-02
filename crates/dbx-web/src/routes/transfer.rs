@@ -337,50 +337,51 @@ pub async fn start_transfer(
             }
         }
 
-        // Transfer selected non-table objects (tables, views, procedures,
-        // functions, triggers, sequences, events) after the per-table loop.
+        // Transfer selected non-table objects (views, procedures, functions,
+        // triggers, sequences, events) after the per-table loop. The empty
+        // selection case is decided inside transfer_schema_objects: PG→PG
+        // keeps the legacy transfer-everything default, every other
+        // combination transfers nothing.
         let mut object_outcome = transfer::TransferObjectOutcome::default();
-        if !req.objects.is_empty() {
-            let progress_channel_clone = progress_channel.clone();
-            match transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
-                send_transfer_progress(&progress_channel_clone, &progress);
-            })
-            .await
-            {
-                Ok(outcome) => {
-                    object_outcome = outcome;
-                }
-                Err(e) if e == "Cancelled" => {
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: "schema objects".to_string(),
-                        table_index: tables.len(),
-                        total_tables: tables.len(),
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Cancelled,
-                        error: None,
-                        terminal: true,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                    return;
-                }
-                Err(e) => {
-                    failed_tables.push("schema objects".to_string());
-                    let progress = transfer::TransferProgress {
-                        transfer_id: req.transfer_id.clone(),
-                        table: "schema objects".to_string(),
-                        table_index: tables.len(),
-                        total_tables: tables.len(),
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Error,
-                        error: Some(e),
-                        terminal: false,
-                    };
-                    send_transfer_progress(&progress_channel, &progress);
-                }
+        let progress_channel_clone = progress_channel.clone();
+        match transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+            send_transfer_progress(&progress_channel_clone, &progress);
+        })
+        .await
+        {
+            Ok(outcome) => {
+                object_outcome = outcome;
+            }
+            Err(e) if e == "Cancelled" => {
+                let progress = transfer::TransferProgress {
+                    transfer_id: req.transfer_id.clone(),
+                    table: "schema objects".to_string(),
+                    table_index: tables.len(),
+                    total_tables: tables.len(),
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: TransferStatus::Cancelled,
+                    error: None,
+                    terminal: true,
+                };
+                send_transfer_progress(&progress_channel, &progress);
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+                return;
+            }
+            Err(e) => {
+                failed_tables.push("schema objects".to_string());
+                let progress = transfer::TransferProgress {
+                    transfer_id: req.transfer_id.clone(),
+                    table: "schema objects".to_string(),
+                    table_index: tables.len(),
+                    total_tables: tables.len(),
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: TransferStatus::Error,
+                    error: Some(e),
+                    terminal: false,
+                };
+                send_transfer_progress(&progress_channel, &progress);
             }
         }
 
@@ -507,4 +508,165 @@ pub async fn sort_tables_by_fk_dependency(
     .await
     .map(Json)
     .map_err(AppError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use dbx_core::connection::AppState;
+    use dbx_core::models::connection::{
+        default_connect_timeout_secs, default_idle_timeout_secs, default_keepalive_interval_secs,
+        default_query_timeout_secs, ConnectionConfig, DatabaseType,
+    };
+    use dbx_core::storage::Storage;
+    use dbx_core::transfer::{
+        TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+    };
+
+    fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: id.to_string(),
+            name: "SQLite".to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Sqlite,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: path.to_string(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            visible_databases: None,
+            visible_schemas: None,
+            show_system_schemas: false,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+            query_timeout_secs: default_query_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            keepalive_interval_secs: default_keepalive_interval_secs(),
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+        }
+    }
+
+    async fn test_web_state() -> (Arc<WebState>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dbx-web-transfer-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+        let state = Arc::new(WebState::for_tests(app, dir.clone()));
+        (state, dir)
+    }
+
+    fn transfer_request(source: &str, target: &str, dir: &std::path::Path) -> TransferRequest {
+        let db = dir.join("main.db").to_string_lossy().to_string();
+        TransferRequest {
+            transfer_id: "transfer-entry-test".to_string(),
+            source_connection_id: source.to_string(),
+            source_database: db.clone(),
+            source_schema: "main".to_string(),
+            source_catalog: None,
+            target_connection_id: target.to_string(),
+            target_database: db,
+            target_schema: "main".to_string(),
+            target_catalog: None,
+            tables: Vec::new(),
+            create_table: false,
+            content: TransferContent::DataOnly,
+            objects: Vec::new(),
+            mode: TransferMode::Append,
+            target_table_name_case: TransferTableNameCase::Preserve,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
+            batch_size: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_object_selection_flows_through_the_core_decision_without_shortcircuiting() {
+        let (state, dir) = test_web_state().await;
+        let src = sqlite_config("src", &dir.join("src.db").to_string_lossy());
+        let dst = sqlite_config("dst", &dir.join("dst.db").to_string_lossy());
+        // SQLite pools need the backing files to exist before connecting.
+        std::fs::write(dir.join("src.db"), b"").unwrap();
+        std::fs::write(dir.join("dst.db"), b"").unwrap();
+        std::fs::write(dir.join("main.db"), b"").unwrap();
+        state.app.configs.write().await.insert("src".to_string(), src);
+        state.app.configs.write().await.insert("dst".to_string(), dst);
+
+        let req = transfer_request("src", "dst", &dir);
+        let transfer_id = req.transfer_id.clone();
+        let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let _ = response.into_response();
+
+        // The handler spawns the transfer; the schema-object stage must run (not
+        // be short-circuited by a `!objects.is_empty()` guard) and the empty
+        // non-PG selection must resolve to "transfer nothing" without erroring.
+        let channel = {
+            let channels = state.transfer_progress_channels.read().await;
+            channels.get(&transfer_id).cloned().expect("transfer channel registered")
+        };
+        let mut saw_terminal = false;
+        let mut saw_schema_objects = false;
+        let mut terminal_error: Option<String> = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !saw_terminal {
+            if let Some(data) = channel.latest() {
+                let value: serde_json::Value = serde_json::from_str(&data).unwrap();
+                if value["table"].as_str() == Some("schema objects") {
+                    saw_schema_objects = true;
+                }
+                if value["terminal"].as_bool() == Some(true) {
+                    saw_terminal = true;
+                    terminal_error = value["error"].as_str().map(|s| s.to_string());
+                }
+            }
+            if saw_terminal {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("transfer did not reach a terminal event within 15s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(saw_terminal, "transfer must reach a terminal event");
+        assert!(!saw_schema_objects, "empty non-PG selection must not transfer schema objects");
+        assert!(
+            terminal_error.is_none(),
+            "empty non-PG selection must complete without error, got: {terminal_error:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

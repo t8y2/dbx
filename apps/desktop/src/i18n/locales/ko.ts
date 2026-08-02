@@ -3476,7 +3476,7 @@ export default withEnglishFallback({
     objectTypeSequence: "시퀀스",
     objectTypeEvent: "이벤트",
     objectDataOnlyDisabled: "데이터 전용 모드에서는 테이블이 아닌 개체는 전송되지 않습니다",
-    objectCrossFamilyDisabled: "데이터베이스 간 전송은 뷰와 시퀀스만 지원합니다",
+    objectCrossFamilyDisabled: "데이터베이스 간 전송은 시퀀스만 지원합니다(단순 DDL, 뷰 본문은 변환되지 않음)",
     crossFamilyViewHint: "데이터베이스 간 뷰 전송: 뷰가 의존하는 테이블도 선택하거나 대상 DB에 이미 존재하는지 확인하세요",
     objectUnsupportedDisabled: "현재 데이터베이스는 이 개체 유형의 전송을 지원하지 않습니다",
     skippedExistingObjects: "기존 개체 {count}개 건너뜀",

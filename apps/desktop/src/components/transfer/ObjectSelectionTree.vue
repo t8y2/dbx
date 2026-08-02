@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { TransferObjectKind } from "@/lib/backend/api";
-import { Square, CheckSquare, Search, ChevronRight } from "@lucide/vue";
+import { Square, CheckSquare, MinusSquare, Search, ChevronRight } from "@lucide/vue";
 
 const { t } = useI18n();
 
@@ -155,6 +155,18 @@ const allVisibleEnabledSelected = computed(() => {
   const visibleEnabled = filteredGroups.value.filter((g) => !isGroupDisabled(g.kind) && g.items.length > 0);
   return visibleEnabled.length > 0 && visibleEnabled.every((g) => g.items.every((item) => (props.modelValue[g.kind] ?? []).includes(item)));
 });
+
+// Tri-state header checkbox: "all" when every visible item of the group is
+// selected, "partial" when only some are, "none" otherwise. Mirrors
+// toggleGroupAll, which only ever touches the visible items.
+function groupSelectionState(kind: TransferObjectKind, items: string[]): "none" | "partial" | "all" {
+  if (items.length === 0) return "none";
+  const selected = props.modelValue[kind] ?? [];
+  const visibleSelected = items.filter((item) => selected.includes(item)).length;
+  if (visibleSelected === 0) return "none";
+  if (visibleSelected === items.length) return "all";
+  return "partial";
+}
 </script>
 
 <template>
@@ -194,8 +206,9 @@ const allVisibleEnabledSelected = computed(() => {
     <div v-else class="flex-1 min-h-0 max-h-[240px] flex flex-col gap-1.5 overflow-y-auto rounded-md border border-border/80 bg-muted/10 p-1.5 scrollbar-thin scrollbar-thumb-muted-foreground/20">
       <div v-for="group in filteredGroups" :key="group.kind" :data-test="`group-${group.kind}`" class="rounded-lg border border-border/60 bg-card/60 transition-all hover:bg-card flex flex-col p-1.5" :class="{ 'opacity-50 bg-muted/5 border-dashed border-muted': isGroupDisabled(group.kind) }">
         <div class="flex items-center gap-2 px-1 py-0.5 select-none">
-          <button :data-test="'group-toggle'" type="button" class="flex items-center gap-2 text-left shrink-0" :disabled="isGroupDisabled(group.kind)" @click="!isGroupDisabled(group.kind) && toggleGroupAll(group.kind, group.items)">
-            <CheckSquare v-if="(modelValue[group.kind] ?? []).length > 0" class="h-4 w-4 text-primary" />
+          <button :data-test="'group-toggle'" :data-state="groupSelectionState(group.kind, group.items)" type="button" class="flex items-center gap-2 text-left shrink-0" :disabled="isGroupDisabled(group.kind)" @click="!isGroupDisabled(group.kind) && toggleGroupAll(group.kind, group.items)">
+            <CheckSquare v-if="groupSelectionState(group.kind, group.items) === 'all'" class="h-4 w-4 text-primary" />
+            <MinusSquare v-else-if="groupSelectionState(group.kind, group.items) === 'partial'" class="h-4 w-4 text-primary" />
             <Square v-else class="h-4 w-4 text-muted-foreground" />
           </button>
           <span class="flex-1 text-xs font-semibold text-foreground/90 cursor-pointer" @click="toggleGroup(group.kind)">

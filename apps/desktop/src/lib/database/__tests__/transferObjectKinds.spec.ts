@@ -27,14 +27,15 @@ describe("transferObjectKinds", () => {
     expect(isSameTransferFamily("sqlserver", "mysql")).toBe(false);
   });
 
-  it("limits cross-family transferable kinds to views and sequences", () => {
-    // mysql participates: no sequences on either side
-    expect(crossFamilyTransferableKinds("mysql", "dameng")).toEqual(["VIEW"]);
-    expect(crossFamilyTransferableKinds("dameng", "mysql")).toEqual(["VIEW"]);
-    expect(crossFamilyTransferableKinds("mysql", "sqlserver")).toEqual(["VIEW"]);
-    // sqlserver <-> dameng: views and sequences
-    expect(crossFamilyTransferableKinds("sqlserver", "dameng")).toEqual(["VIEW", "SEQUENCE"]);
-    expect(crossFamilyTransferableKinds("dameng", "sqlserver")).toEqual(["VIEW", "SEQUENCE"]);
+  it("limits cross-family transferable kinds to sequences only", () => {
+    // mysql participates: VIEW is disabled (query body not translated) and
+    // mysql has no sequences on either side
+    expect(crossFamilyTransferableKinds("mysql", "dameng")).toEqual([]);
+    expect(crossFamilyTransferableKinds("dameng", "mysql")).toEqual([]);
+    expect(crossFamilyTransferableKinds("mysql", "sqlserver")).toEqual([]);
+    // sqlserver <-> dameng: sequences only (plain DDL)
+    expect(crossFamilyTransferableKinds("sqlserver", "dameng")).toEqual(["SEQUENCE"]);
+    expect(crossFamilyTransferableKinds("dameng", "sqlserver")).toEqual(["SEQUENCE"]);
     // same family: all source kinds
     const same = crossFamilyTransferableKinds("mysql", "mysql");
     expect(same).toContain("TRIGGER");

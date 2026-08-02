@@ -3730,7 +3730,7 @@ export default {
     objectTypeSequence: "Sequences",
     objectTypeEvent: "Events",
     objectDataOnlyDisabled: "Non-table objects are not transferred in data-only mode",
-    objectCrossFamilyDisabled: "Cross-database transfer supports views and sequences only",
+    objectCrossFamilyDisabled: "Cross-database transfer supports sequences only (plain DDL; view query bodies cannot be translated)",
     crossFamilyViewHint: "Cross-database view transfer: select the tables the view depends on as well, or make sure they already exist in the target database",
     objectUnsupportedDisabled: "This database does not support transferring this object type",
     skippedExistingObjects: "Skipped {count} existing object(s)",

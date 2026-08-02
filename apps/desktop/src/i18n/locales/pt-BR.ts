@@ -3544,7 +3544,7 @@ export default withEnglishFallback({
     objectTypeSequence: "Sequências",
     objectTypeEvent: "Eventos",
     objectDataOnlyDisabled: "Objetos que não são tabelas não são transferidos no modo apenas dados",
-    objectCrossFamilyDisabled: "A transferência entre bancos suporta apenas views e sequências",
+    objectCrossFamilyDisabled: "A transferência entre bancos suporta apenas sequências (DDL simples; corpos de views não são traduzidos)",
     crossFamilyViewHint: "Transferência de views entre bancos: selecione também as tabelas das quais a view depende ou garanta que elas já existam no banco de destino",
     objectUnsupportedDisabled: "O banco de dados atual não suporta a transferência deste tipo de objeto",
     skippedExistingObjects: "Ignorado {count} objeto(s) existente(s)",

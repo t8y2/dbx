@@ -55,8 +55,11 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
 /**
  * Kinds selectable for a transfer between the two databases. Within one
  * family every kind of the source is allowed; across families only
- * mechanically rewriteable kinds (views, sequences) are allowed, and
- * sequences additionally require both sides to support the type.
+ * sequences are allowed (plain DDL without a query body), and only when
+ * both sides support the type. Views are excluded: the backend rewrites
+ * only the DDL wrapper, quoting and schema qualifiers, not the view
+ * query body, so cross-family view bodies could run unchanged on an
+ * incompatible target.
  */
 export function crossFamilyTransferableKinds(a?: DatabaseType, b?: DatabaseType): TransferObjectKind[] {
   if (isSameTransferFamily(a, b)) {
@@ -72,8 +75,12 @@ export function crossFamilyTransferableKinds(a?: DatabaseType, b?: DatabaseType)
   if (!aFam || !bFam || !supported.has(aFam) || !supported.has(bFam)) return [];
   const aKinds = transferObjectKindsForDatabase(a);
   const bKinds = transferObjectKindsForDatabase(b);
+  // Cross-family VIEW transfer is disabled: the backend only rewrites the
+  // DDL wrapper/quoting/schema qualifiers and cannot translate the view
+  // query body (IFNULL, TOP, GETDATE, … would run unchanged on an
+  // incompatible target). Sequences are plain DDL and remain transferable
+  // when both sides support them.
   const allowed: TransferObjectKind[] = [];
-  if (aKinds.includes("VIEW") && bKinds.includes("VIEW")) allowed.push("VIEW");
   if (aKinds.includes("SEQUENCE") && bKinds.includes("SEQUENCE")) allowed.push("SEQUENCE");
   return allowed;
 }

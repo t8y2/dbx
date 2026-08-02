@@ -2792,7 +2792,7 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateObjectBrowserRowsCache({ connectionId, database });
   }
 
-  async function ensureConnected(connectionId: string) {
+  async function ensureConnected(connectionId: string, options: { activate?: boolean } = {}) {
     if (connectedIds.value.has(connectionId)) {
       if (hasRecentConnectionHealthCheck(connectionId)) return;
       // Optimistic: verify backend pool is actually healthy
@@ -2821,6 +2821,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const existingConnect = connectInFlight.get(connectionId);
     if (existingConnect) {
       await existingConnect;
+      if (options.activate !== false) activeConnectionId.value = connectionId;
       return;
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
@@ -2839,12 +2840,12 @@ export const useConnectionStore = defineStore("connection", () => {
       await refreshConnectionIdentifierQuote(connectionId, config);
       markSuccessfulLocalConnectionAttempt(connectionId, localAttempt);
       markConnectionHealthChecked(connectionId);
-      activeConnectionId.value = connectionId;
       clearConnectionError(connectionId);
     })();
     connectInFlight.set(connectionId, connectPromise);
     try {
       await connectPromise;
+      if (options.activate !== false) activeConnectionId.value = connectionId;
     } catch (e) {
       if (isCancelledLocalConnectionAttempt(connectionId, localAttempt)) {
         clearConnectionError(connectionId);
@@ -5789,7 +5790,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return api.listTables(connectionId, database, schema, filter, limit);
   }
 
-  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string): Promise<SqlCompletionTable[]> {
+  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options: { activateConnection?: boolean } = {}): Promise<SqlCompletionTable[]> {
     const trimmedFilter = filter.trim();
     const normalizedFilter = trimmedFilter.toLowerCase();
     // Remote queries (Dameng/Oracle) are case-sensitive, so the cache key must
@@ -5805,7 +5806,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return withCompletionInFlight(
       `${cacheKey}:tables`,
       async () => {
-        await ensureConnected(connectionId);
+        await ensureConnected(connectionId, { activate: options.activateConnection !== false });
 
         if (isSchemaAwareDatabase(connectionId)) {
           if (normalizedFilter || limit) {

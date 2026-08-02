@@ -524,7 +524,7 @@ export function useQuickOpen() {
         try {
           // A newer query may supersede queued work before it reaches the metadata API.
           if (generation !== remoteSearchGeneration) return [];
-          const tables = await connectionStore.listCompletionTables(conn.id, database, query, REMOTE_SEARCH_RESULTS_PER_REQUEST, undefined, true);
+          const tables = await connectionStore.listCompletionTables(conn.id, database, query, REMOTE_SEARCH_RESULTS_PER_REQUEST, undefined, true, undefined, undefined, { activateConnection: false });
           return tables.slice(0, REMOTE_SEARCH_RESULTS_PER_REQUEST).map((table) => remoteTableItem(table, conn, database));
         } catch {
           return [];

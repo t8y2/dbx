@@ -780,7 +780,7 @@ describe("useQuickOpen", () => {
       setQuery("ord");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "ord", 25, undefined, true);
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "ord", 25, undefined, true, undefined, undefined, { activateConnection: false });
       expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "orders", type: "table", database: "app" })]));
     });
 
@@ -859,7 +859,7 @@ describe("useQuickOpen", () => {
       setQuery("users");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "users", 25, undefined, true);
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "users", 25, undefined, true, undefined, undefined, { activateConnection: false });
     });
 
     it("derives the SQLite main database before its tree is expanded", async () => {
@@ -875,8 +875,25 @@ describe("useQuickOpen", () => {
       setQuery("scroll_test");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("sqlite-1", "main", "scroll_test", 25, undefined, true);
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("sqlite-1", "main", "scroll_test", 25, undefined, true, undefined, undefined, { activateConnection: false });
       expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "scroll_test", type: "table", database: "main" })]));
+    });
+
+    it("searches the PostgreSQL backend default database before its tree is expanded", async () => {
+      const mockStore = remoteSearchStore({
+        connections: [{ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "" }],
+        connectedIds: new Set<string>(),
+        treeNodes: [],
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "cold_start_table", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("cold_start_table");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("pg-1", "postgres", "cold_start_table", 25, undefined, true, undefined, undefined, { activateConnection: false });
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "cold_start_table", type: "table", database: "postgres" })]));
     });
 
     it("keeps local results when remote metadata search fails", async () => {

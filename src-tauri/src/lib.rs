@@ -115,8 +115,16 @@ fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool, linux_appind
         && (matches!(target_os, "macos" | "windows") || (target_os == "linux" && linux_appindicator_available))
 }
 
-fn should_enable_single_instance(debug_build: bool, startup_recovery_attempt: bool) -> bool {
-    !debug_build && !startup_recovery_attempt
+fn should_enable_single_instance(debug_build: bool) -> bool {
+    !debug_build
+}
+
+fn startup_data_dir_mode(mode: &data_dir::DataDirMode) -> &'static str {
+    match mode {
+        data_dir::DataDirMode::Default => "default",
+        data_dir::DataDirMode::EnvOverride => "env_override",
+        data_dir::DataDirMode::Portable { .. } => "portable",
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -826,8 +834,10 @@ mod tests {
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
         should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
         should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
+        LinuxNvidiaDriver,
     };
+    use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
@@ -891,9 +901,18 @@ mod tests {
 
     #[test]
     fn keeps_single_instance_for_release_builds_only() {
-        assert!(!should_enable_single_instance(true, false));
-        assert!(should_enable_single_instance(false, false));
-        assert!(!should_enable_single_instance(false, true));
+        assert!(!should_enable_single_instance(true));
+        assert!(should_enable_single_instance(false));
+    }
+
+    #[test]
+    fn startup_data_dir_diagnostics_never_include_paths() {
+        let private_path = PathBuf::from(r"C:\Users\private-user\DBXData");
+        assert_eq!(startup_data_dir_mode(&DataDirMode::Default), "default");
+        assert_eq!(startup_data_dir_mode(&DataDirMode::EnvOverride), "env_override");
+        let label = startup_data_dir_mode(&DataDirMode::Portable { exe_dir: private_path });
+        assert_eq!(label, "portable");
+        assert!(!label.contains("private-user"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1156,7 +1175,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init());
 
-    let builder = if should_enable_single_instance(cfg!(debug_assertions), startup_recovery::is_recovery_attempt()) {
+    let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
@@ -1235,7 +1254,8 @@ pub fn run() {
             let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
             let data_dir = data_dir_resolution.data_dir.clone();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
-            append_startup_probe(format!("data dir ready: {}", data_dir.display()));
+            let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
+            append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
             let alternative_data_dir = data_dir::alternative_data_dir(&data_dir_resolution);
             match maybe_import_user_data_db(&data_dir, alternative_data_dir.as_deref()) {
                 Ok(result) => eprintln!("[STARTUP] data db fallback import: {result:?}"),
@@ -1244,7 +1264,7 @@ pub fn run() {
             let db_path = data_dir.join("dbx.db");
 
             let t = Instant::now();
-            append_startup_probe(format!("opening storage: {}", db_path.display()));
+            append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
                 let s = Storage::open(&db_path).await.expect("Failed to open storage");
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());

@@ -13,12 +13,15 @@ const KEEP_STARTUP_LOG_ENV: &str = "DBX_KEEP_STARTUP_LOG";
 #[cfg(target_os = "windows")]
 const NO_SANDBOX_ENV: &str = "DBX_WEBVIEW2_NO_SANDBOX";
 const RECOVERY_ATTEMPT_ENV: &str = "DBX_STARTUP_COMPAT_RECOVERY";
+const RECOVERY_PARENT_PID_ENV: &str = "DBX_STARTUP_COMPAT_PARENT_PID";
 const DISABLE_ENTERPRISE_COMPAT_ENV: &str = "DBX_DISABLE_ENTERPRISE_COMPAT";
 const WINDOWS_APP_DATA_DIR_NAME: &str = "com.dbx.app";
 const COMPATIBILITY_MARKER_FILE: &str = "webview2-enterprise-compat.enabled";
 const COMPATIBILITY_PROFILE_DIR: &str = "webview2-enterprise-compat";
 const STARTUP_LOG_BUFFER_CAPACITY: usize = 256;
 const STARTUP_WATCHDOG_DELAY: Duration = Duration::from_secs(15);
+#[cfg(target_os = "windows")]
+const RECOVERY_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct StartupProbeState {
@@ -31,6 +34,7 @@ static STARTUP_PROBE_STATE: LazyLock<Mutex<StartupProbeState>> =
 static STARTUP_PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static RECOVERY_ATTEMPT: AtomicBool = AtomicBool::new(false);
 static ENTERPRISE_COMPAT: AtomicBool = AtomicBool::new(false);
+static ENTERPRISE_COMPAT_DISABLED: AtomicBool = AtomicBool::new(false);
 static RUN_EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRONTEND_READY_SIGNAL: LazyLock<(Mutex<bool>, Condvar)> = LazyLock::new(|| (Mutex::new(false), Condvar::new()));
 
@@ -84,18 +88,68 @@ fn compatibility_marker_matches_version(path: &Path, version: &str) -> bool {
     std::fs::read_to_string(path).is_ok_and(|contents| contents == compatibility_marker_contents(version))
 }
 
-fn compatibility_profile_path_from_local_appdata(local_appdata: Option<OsString>) -> Option<PathBuf> {
-    local_appdata
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|dir| dir.join(WINDOWS_APP_DATA_DIR_NAME).join(COMPATIBILITY_PROFILE_DIR))
+fn compatibility_profile_path_from_inputs(
+    local_appdata: Option<OsString>,
+    windows_appdata: Option<OsString>,
+) -> (Option<PathBuf>, &'static str) {
+    if let Some(dir) = local_appdata.filter(|value| !value.is_empty()).map(PathBuf::from) {
+        return (Some(dir.join(WINDOWS_APP_DATA_DIR_NAME).join(COMPATIBILITY_PROFILE_DIR)), "local_appdata");
+    }
+    if let Some(dir) = windows_appdata.filter(|value| !value.is_empty()).map(PathBuf::from) {
+        return (Some(dir.join(WINDOWS_APP_DATA_DIR_NAME).join(COMPATIBILITY_PROFILE_DIR)), "appdata_fallback");
+    }
+    (None, "unavailable")
 }
 
 #[cfg(target_os = "windows")]
-fn compatibility_profile_path() -> Option<PathBuf> {
-    compatibility_profile_path_from_local_appdata(
-        std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA")),
-    )
+fn compatibility_profile_path() -> (Option<PathBuf>, &'static str) {
+    compatibility_profile_path_from_inputs(std::env::var_os("LOCALAPPDATA"), std::env::var_os("APPDATA"))
+}
+
+fn resolve_compatibility_mode(recovery_requested: bool, marker_enabled: bool, disabled: bool) -> (bool, bool) {
+    if disabled {
+        (false, false)
+    } else {
+        (recovery_requested, recovery_requested || marker_enabled)
+    }
+}
+
+fn compatibility_profile_ready_record(profile_source: &str) -> String {
+    format!("enterprise compatibility profile ready source={profile_source}")
+}
+
+fn configure_recovery_child(command: &mut std::process::Command, parent_pid: u32) {
+    command.env(RECOVERY_ATTEMPT_ENV, "1").env(RECOVERY_PARENT_PID_ENV, parent_pid.to_string());
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_recovery_parent_exit() -> &'static str {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+
+    let parent_pid = std::env::var(RECOVERY_PARENT_PID_ENV).ok().and_then(|value| value.parse::<u32>().ok());
+    std::env::remove_var(RECOVERY_PARENT_PID_ENV);
+    let Some(parent_pid) = parent_pid.filter(|pid| *pid != 0) else {
+        return "parent_pid_unavailable";
+    };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false.into(), parent_pid) };
+    if handle.is_null() {
+        return "parent_already_exited";
+    }
+    let wait_result = unsafe { WaitForSingleObject(handle, RECOVERY_PARENT_WAIT_TIMEOUT.as_millis() as u32) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    match wait_result {
+        WAIT_OBJECT_0 => "parent_exit_observed",
+        WAIT_TIMEOUT => "parent_exit_timeout",
+        _ => "parent_wait_failed",
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wait_for_recovery_parent_exit() -> &'static str {
+    "unsupported_platform"
 }
 
 fn ensure_parent_dir(path: &Path) -> bool {
@@ -123,15 +177,20 @@ fn append_persisted_record(message: impl AsRef<str>) {
 }
 
 pub(crate) fn initialize() {
-    let recovery_attempt = env_flag(RECOVERY_ATTEMPT_ENV);
+    let enterprise_compat_disabled = env_flag(DISABLE_ENTERPRISE_COMPAT_ENV);
+    let recovery_requested = env_flag(RECOVERY_ATTEMPT_ENV);
+    // The parent owns tauri-plugin-single-instance's mutex. Wait for process exit
+    // before building Tauri so the recovery child can acquire the same mutex.
+    let parent_handoff = (recovery_requested && !enterprise_compat_disabled).then(wait_for_recovery_parent_exit);
     let marker_path = compatibility_marker_path();
-    let marker_enabled = !env_flag(DISABLE_ENTERPRISE_COMPAT_ENV)
+    let marker_enabled = !enterprise_compat_disabled
         && marker_path
             .as_deref()
             .is_some_and(|path| compatibility_marker_matches_version(path, env!("CARGO_PKG_VERSION")));
-    let enterprise_compat = recovery_attempt || marker_enabled;
+    let (recovery_attempt, enterprise_compat) =
+        resolve_compatibility_mode(recovery_requested, marker_enabled, enterprise_compat_disabled);
 
-    if !marker_enabled && !env_flag(DISABLE_ENTERPRISE_COMPAT_ENV) {
+    if !marker_enabled && !enterprise_compat_disabled {
         if let Some(path) = marker_path.filter(|path| path.is_file()) {
             let _ = std::fs::remove_file(path);
         }
@@ -153,19 +212,24 @@ pub(crate) fn initialize() {
     STARTUP_PROBE_ACTIVE.store(true, Ordering::Release);
     RECOVERY_ATTEMPT.store(recovery_attempt, Ordering::Release);
     ENTERPRISE_COMPAT.store(enterprise_compat, Ordering::Release);
+    ENTERPRISE_COMPAT_DISABLED.store(enterprise_compat_disabled, Ordering::Release);
     RUN_EVENT_COUNT.store(0, Ordering::Release);
     *FRONTEND_READY_SIGNAL.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
 
     install_panic_hook();
     record(format!(
-        "process start version={} os={} arch={} recovery_attempt={} compatibility_marker={} enterprise_compat={}",
+        "process start version={} os={} arch={} recovery_attempt={} compatibility_marker={} enterprise_compat={} enterprise_compat_disabled={}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
         recovery_attempt,
         marker_enabled,
-        enterprise_compat
+        enterprise_compat,
+        enterprise_compat_disabled
     ));
+    if let Some(parent_handoff) = parent_handoff {
+        record(format!("single-instance recovery handoff status={parent_handoff}"));
+    }
     configure_webview2_compatibility(enterprise_compat);
 }
 
@@ -245,11 +309,12 @@ fn append_webview2_argument(argument: &str) {
 fn configure_webview2_compatibility(enterprise_compat: bool) {
     let manual_no_sandbox = env_flag(NO_SANDBOX_ENV);
     if enterprise_compat {
-        match compatibility_profile_path() {
+        let (profile_path, profile_source) = compatibility_profile_path();
+        match profile_path {
             Some(path) => match std::fs::create_dir_all(&path) {
                 Ok(()) => {
                     std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &path);
-                    record(format!("enterprise compatibility profile={}", path.display()));
+                    record(compatibility_profile_ready_record(profile_source));
                 }
                 Err(error) => record(format!("failed to create enterprise compatibility profile: {error}")),
             },
@@ -271,14 +336,11 @@ pub(crate) fn record_run_event() {
     }
 }
 
-pub(crate) fn is_recovery_attempt() -> bool {
-    RECOVERY_ATTEMPT.load(Ordering::Acquire)
-}
-
-fn probe_snapshot() -> (bool, bool, usize) {
+fn probe_snapshot() -> (bool, bool, bool, usize) {
     (
         STARTUP_PROBE_ACTIVE.load(Ordering::Acquire),
         ENTERPRISE_COMPAT.load(Ordering::Acquire),
+        ENTERPRISE_COMPAT_DISABLED.load(Ordering::Acquire),
         RUN_EVENT_COUNT.load(Ordering::Acquire),
     )
 }
@@ -286,10 +348,11 @@ fn probe_snapshot() -> (bool, bool, usize) {
 fn should_attempt_enterprise_recovery(
     active: bool,
     enterprise_compat: bool,
+    enterprise_compat_disabled: bool,
     run_event_count: usize,
     main_exists: bool,
 ) -> bool {
-    active && !enterprise_compat && run_event_count == 0 && !main_exists
+    active && !enterprise_compat && !enterprise_compat_disabled && run_event_count == 0 && !main_exists
 }
 
 pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
@@ -308,7 +371,7 @@ pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         }
         drop(ready);
 
-        let (active, enterprise_compat, run_event_count) = probe_snapshot();
+        let (active, enterprise_compat, enterprise_compat_disabled, run_event_count) = probe_snapshot();
         if !active {
             return;
         }
@@ -317,14 +380,20 @@ pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             "startup watchdog after {}s run_event_count={run_event_count} main_exists={main_exists}",
             STARTUP_WATCHDOG_DELAY.as_secs()
         ));
-        if should_attempt_enterprise_recovery(active, enterprise_compat, run_event_count, main_exists) {
+        if should_attempt_enterprise_recovery(
+            active,
+            enterprise_compat,
+            enterprise_compat_disabled,
+            run_event_count,
+            main_exists,
+        ) {
             persist_buffer();
             record("startup stalled before event loop; restarting once with enterprise compatibility mode");
             let restart_result = std::env::current_exe().and_then(|executable| {
-                std::process::Command::new(executable)
-                    .args(std::env::args_os().skip(1))
-                    .env(RECOVERY_ATTEMPT_ENV, "1")
-                    .spawn()
+                let mut command = std::process::Command::new(executable);
+                command.args(std::env::args_os().skip(1));
+                configure_recovery_child(&mut command, std::process::id());
+                command.spawn()
             });
             match restart_result {
                 Ok(child) => {
@@ -351,14 +420,14 @@ pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     });
 }
 
-fn write_compatibility_marker() -> Result<PathBuf, String> {
+fn write_compatibility_marker() -> Result<(), String> {
     let path = compatibility_marker_path().ok_or_else(|| "APPDATA is unavailable".to_string())?;
     if !ensure_parent_dir(&path) {
         return Err("failed to create compatibility marker directory".to_string());
     }
     std::fs::write(&path, compatibility_marker_contents(env!("CARGO_PKG_VERSION")))
         .map_err(|error| error.to_string())?;
-    Ok(path)
+    Ok(())
 }
 
 fn deactivate_probe() {
@@ -379,8 +448,7 @@ pub(crate) fn mark_frontend_ready() {
         deactivate_probe();
         let keep_compatibility = confirm_keep_compatibility_mode();
         let result = if keep_compatibility {
-            write_compatibility_marker()
-                .map(|path| format!("enterprise compatibility marker saved path={}", path.display()))
+            write_compatibility_marker().map(|()| "enterprise compatibility marker saved".to_string())
         } else {
             Ok("enterprise compatibility marker declined by user".to_string())
         };
@@ -467,8 +535,9 @@ fn show_recovery_failure_message() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        compatibility_marker_contents, compatibility_marker_path_from_appdata,
-        compatibility_profile_path_from_local_appdata, should_attempt_enterprise_recovery, startup_log_dir_from_inputs,
+        compatibility_marker_contents, compatibility_marker_path_from_appdata, compatibility_profile_path_from_inputs,
+        compatibility_profile_ready_record, configure_recovery_child, resolve_compatibility_mode,
+        should_attempt_enterprise_recovery, startup_log_dir_from_inputs, RECOVERY_ATTEMPT_ENV, RECOVERY_PARENT_PID_ENV,
     };
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -504,18 +573,68 @@ mod tests {
             )
         );
         assert_eq!(
-            compatibility_profile_path_from_local_appdata(Some(OsString::from(r"C:\Users\test\AppData\Local"))),
-            Some(PathBuf::from(r"C:\Users\test\AppData\Local").join("com.dbx.app").join("webview2-enterprise-compat"))
+            compatibility_profile_path_from_inputs(
+                Some(OsString::from(r"C:\Users\test\AppData\Local")),
+                Some(OsString::from(r"C:\Users\test\AppData\Roaming")),
+            ),
+            (
+                Some(
+                    PathBuf::from(r"C:\Users\test\AppData\Local")
+                        .join("com.dbx.app")
+                        .join("webview2-enterprise-compat")
+                ),
+                "local_appdata",
+            )
         );
     }
 
     #[test]
     fn recovery_only_triggers_for_the_observed_hard_startup_stall() {
-        assert!(should_attempt_enterprise_recovery(true, false, 0, false));
-        assert!(!should_attempt_enterprise_recovery(false, false, 0, false));
-        assert!(!should_attempt_enterprise_recovery(true, true, 0, false));
-        assert!(!should_attempt_enterprise_recovery(true, false, 1, false));
-        assert!(!should_attempt_enterprise_recovery(true, false, 0, true));
+        assert!(should_attempt_enterprise_recovery(true, false, false, 0, false));
+        assert!(!should_attempt_enterprise_recovery(false, false, false, 0, false));
+        assert!(!should_attempt_enterprise_recovery(true, true, false, 0, false));
+        assert!(!should_attempt_enterprise_recovery(true, false, false, 1, false));
+        assert!(!should_attempt_enterprise_recovery(true, false, false, 0, true));
+    }
+
+    #[test]
+    fn disable_enterprise_compat_prevents_recovery_during_a_hard_stall() {
+        assert!(!should_attempt_enterprise_recovery(true, false, true, 0, false));
+    }
+
+    #[test]
+    fn disable_enterprise_compat_overrides_recovery_and_marker_modes() {
+        assert_eq!(resolve_compatibility_mode(true, false, true), (false, false));
+        assert_eq!(resolve_compatibility_mode(false, true, true), (false, false));
+        assert_eq!(resolve_compatibility_mode(true, false, false), (true, true));
+        assert_eq!(resolve_compatibility_mode(false, true, false), (false, true));
+    }
+
+    #[test]
+    fn compatibility_profile_logs_only_its_source_category() {
+        let (profile, source) = compatibility_profile_path_from_inputs(
+            None,
+            Some(OsString::from(r"C:\Users\private-user\AppData\Roaming")),
+        );
+        assert!(profile.is_some());
+        assert_eq!(source, "appdata_fallback");
+        let record = compatibility_profile_ready_record(source);
+        assert_eq!(record, "enterprise compatibility profile ready source=appdata_fallback");
+        assert!(!record.contains("private-user"));
+        assert!(!record.contains(r"C:\Users"));
+    }
+
+    #[test]
+    fn recovery_child_receives_parent_handoff_without_disabling_single_instance() {
+        let mut command = std::process::Command::new("dbx-test");
+        configure_recovery_child(&mut command, 4242);
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs
+            .iter()
+            .any(|(key, value)| { *key == RECOVERY_ATTEMPT_ENV && value.is_some_and(|value| value == "1") }));
+        assert!(envs
+            .iter()
+            .any(|(key, value)| { *key == RECOVERY_PARENT_PID_ENV && value.is_some_and(|value| value == "4242") }));
     }
 
     #[test]

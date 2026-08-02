@@ -1423,7 +1423,7 @@ class SqlCompletionProvider {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table"));
       }
       if (isOracleLikeDatabase(this.databaseType)) {
-        this.items.push(...buildOracleTableFunctionItems(context.prefix));
+        this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase));
       }
       if (this.input.schemas && this.input.schemas.length > 0) {
         this.items.push(...buildSchemaItems(context.prefix, this.input.schemas, this.dialect));
@@ -3094,12 +3094,12 @@ function objectMatchesCompletionContext(object: SqlCompletionObject, context: Sq
   return matchesPrefix(object.name, context.prefix);
 }
 
-function buildOracleTableFunctionItems(prefix: string): SqlCompletionItem[] {
+function buildOracleTableFunctionItems(prefix: string, keywordCase?: SqlKeywordCase, functionCase?: SqlKeywordCase): SqlCompletionItem[] {
   const items = [
-    { label: "TABLE", detail: "Oracle table function", apply: "TABLE(${function_call})" },
-    { label: "THE", detail: "Oracle nested-table expression", apply: "THE(${subquery})" },
-    { label: "XMLTABLE", detail: "XML to relational rows", apply: "XMLTABLE(${xpath})" },
-    { label: "JSON_TABLE", detail: "JSON to relational rows", apply: "JSON_TABLE(${expr}, ${path})" },
+    { label: applySqlKeywordCase("TABLE", keywordCase), detail: "Oracle table function", apply: `${applySqlKeywordCase("TABLE", keywordCase)}(\${function_call})` },
+    { label: applySqlKeywordCase("THE", keywordCase), detail: "Oracle nested-table expression", apply: `${applySqlKeywordCase("THE", keywordCase)}(\${subquery})` },
+    { label: applySqlFunctionCase("XMLTABLE", functionCase), detail: "XML to relational rows", apply: `${applySqlFunctionCase("XMLTABLE", functionCase)}(\${xpath})` },
+    { label: applySqlFunctionCase("JSON_TABLE", functionCase), detail: "JSON to relational rows", apply: `${applySqlFunctionCase("JSON_TABLE", functionCase)}(\${expr}, \${path})` },
   ];
   return items
     .filter((item) => matchesPrefix(item.label, prefix))

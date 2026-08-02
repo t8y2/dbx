@@ -1901,6 +1901,29 @@ test("suggests Oracle table-function helpers in table reference context", () => 
   assert.ok(tableFunction.apply?.startsWith("TABLE("));
 });
 
+test("applies keyword and function casing to Oracle table-function helpers", () => {
+  const lowerKeywords = buildSqlCompletionItems("select * from ", "select * from ".length, {
+    tables,
+    columnsByTable,
+    databaseType: "oracle",
+    keywordCase: "lower",
+    functionCase: "preserve",
+  });
+  assert.equal(lowerKeywords.find((item) => item.label === "table")?.apply, "table(${function_call})");
+  assert.equal(lowerKeywords.find((item) => item.label === "XMLTABLE")?.apply, "XMLTABLE(${xpath})");
+
+  const lowerFunctions = buildSqlCompletionItems("select * from ", "select * from ".length, {
+    tables,
+    columnsByTable,
+    databaseType: "oracle",
+    keywordCase: "upper",
+    functionCase: "lower",
+  });
+  assert.equal(lowerFunctions.find((item) => item.label === "TABLE")?.apply, "TABLE(${function_call})");
+  assert.equal(lowerFunctions.find((item) => item.label === "xmltable")?.apply, "xmltable(${xpath})");
+  assert.equal(lowerFunctions.find((item) => item.label === "json_table")?.apply, "json_table(${expr}, ${path})");
+});
+
 test("suggests package members after package qualifier", () => {
   const items = buildSqlCompletionItems("begin PAYROLL.ca", "begin PAYROLL.ca".length, {
     tables,

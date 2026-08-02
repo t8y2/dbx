@@ -932,6 +932,71 @@ test("addRows clamps counts above the batch limit", () => {
   assert.equal(editor.newRows.value.length, DATA_GRID_MAX_BATCH_INSERT_ROWS);
 });
 
+test("addRows records the display placement alongside the pending rows", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  const firstId = editor.addRows(2, { anchorId: 0, position: "below" });
+  assert.equal(firstId, -1);
+  assert.equal(editor.newRowMeta.value.length, 2);
+  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [
+    { anchorId: 0, position: "below" },
+    { anchorId: 0, position: "below" },
+  ]);
+  // Stable tokens are unique and monotonic.
+  assert.equal(editor.newRowMeta.value[0].token, 1);
+  assert.equal(editor.newRowMeta.value[1].token, 2);
+});
+
+test("addRows with a null placement appends at the end", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(2, null);
+  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [null, null]);
+});
+
+test("addRows can anchor to another pending row by its token", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(1);
+  const firstToken = editor.newRowMeta.value[0].token;
+  editor.addRows(1, { anchorId: -firstToken, position: "below" });
+  assert.deepEqual(editor.newRowMeta.value[1].placement, { anchorId: -firstToken, position: "below" });
+});
+
+test("undo and redo restore the placement metadata", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(2, { anchorId: 0, position: "above" });
+  editor.undoPendingChange();
+  assert.equal(editor.newRows.value.length, 0);
+  assert.equal(editor.newRowMeta.value.length, 0);
+  editor.redoPendingChange();
+  assert.equal(editor.newRows.value.length, 2);
+  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [
+    { anchorId: 0, position: "above" },
+    { anchorId: 0, position: "above" },
+  ]);
+});
+
+test("deleting a pending row keeps the placement metadata aligned", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const editor = createPeopleGridEditor();
+  editor.addRows(3);
+  editor.applyDeleteRow(-1);
+  assert.equal(editor.newRows.value.length, 2);
+  assert.equal(editor.newRowMeta.value.length, 2);
+});
+
 test("batch row delete records a single undo snapshot", () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

@@ -212,6 +212,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { buildOrderedGridRows, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import { DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH, isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAddRowCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -2921,6 +2922,7 @@ const {
   scrollerRef,
   dirtyRows,
   newRows,
+  newRowMeta: editorNewRowMeta,
   deletedRows,
   quickEntryDraftRow,
   quickEntryDraftRowId,
@@ -3280,21 +3282,65 @@ const autoRefreshToolbarCapability = computed<DataGridToolbarAutoRefreshCapabili
   onToggle: toggleAutoRefresh,
   onSelectInterval: setAutoRefreshInterval,
 }));
-function handleAddRowMenuSelect(value: string) {
-  if (value !== "insert-multiple") return;
-  insertRowsDialogOpen.value = true;
+const canPlaceInsertAtSelection = computed(() => {
+  if (selectedRowCount.value !== 1) return false;
+  const selectedId = [...selectedRowIds.value][0];
+  if (selectedId === undefined) return false;
+  const item = getRowItem(selectedId);
+  if (!item || item.isDraft) return false;
+  return item.sourceIndex !== undefined || (item.isNew && item.newIndex !== undefined);
+});
+
+function selectedRowPlacement(position: "above" | "below"): GridNewRowPlacement | null {
+  if (!canPlaceInsertAtSelection.value) return null;
+  const selectedId = [...selectedRowIds.value][0]!;
+  const item = getRowItem(selectedId);
+  if (!item) return null;
+  if (item.isNew && item.newIndex !== undefined) {
+    const meta = editorNewRowMeta.value[item.newIndex];
+    if (meta) return { anchorId: -meta.token, position };
+  }
+  if (item.sourceIndex !== undefined) return { anchorId: item.sourceIndex, position };
+  return null;
 }
 
-function insertRows(count: number) {
-  addEditorRows(count);
+function insertRows(count: number, position: "above" | "below" | "end") {
+  const placement: GridNewRowPlacement | null = position === "end" ? null : selectedRowPlacement(position);
+  const firstNewRowId = addEditorRows(count, placement);
+  if (firstNewRowId !== undefined) {
+    nextTick(() => {
+      const displayIndex = displayRowIndexById(firstNewRowId);
+      if (displayIndex >= 0) scrollGridRowIntoView(displayIndex);
+    });
+  }
   focusAppendedTransposeRecord();
+}
+
+function handleAddRowMenuSelect(value: string) {
+  if (value === "insert-multiple") {
+    insertRowsDialogOpen.value = true;
+    return;
+  }
+  if (value === "insert-above") {
+    insertRows(1, "above");
+    return;
+  }
+  if (value === "insert-below") {
+    insertRows(1, "below");
+    return;
+  }
+  insertRows(1, "end");
 }
 
 const addRowToolbarCapability = computed<DataGridToolbarAddRowCapability>(() => ({
   label: t("grid.addRow"),
   tooltip: `${t("grid.addRow")} (${shortcutMod}+N)`,
   visible: canInsertRows.value,
-  items: [{ value: "insert-multiple", label: t("grid.insertMultipleRows") }],
+  items: [
+    { value: "insert-multiple", label: t("grid.insertMultipleRows") },
+    { value: "insert-above", label: t("grid.insertAboveSelected"), disabled: !canPlaceInsertAtSelection.value },
+    { value: "insert-below", label: t("grid.insertBelowSelected"), disabled: !canPlaceInsertAtSelection.value },
+  ],
   onTrigger: addRow,
   onSelect: handleAddRowMenuSelect,
 }));
@@ -3349,28 +3395,34 @@ function dirtyColumnsForRow(dirty: Map<number, CellValue> | undefined, columnCou
 
 const displayRowRefs = computed<DisplayRowRef[]>(() => {
   const refs: DisplayRowRef[] = [];
-  for (const sourceIndex of sortedRows.value) {
-    const dirty = dirtyRows.value.get(sourceIndex);
-    const isDeleted = deletedRows.value.has(sourceIndex);
-    const status: RowStatus = isDeleted ? "deleted" : dirty?.size ? "edited" : "clean";
-    const isActiveEditingRow = quickEntryEnabled.value && editingCell.value?.rowId === sourceIndex;
-    if (matchesRowStatusFilter(status, rowStatusFilter.value) || isActiveEditingRow) {
-      refs.push({ id: sourceIndex, displayIndex: refs.length, sourceIndex, isNew: false, isDeleted, status });
+  // Pending rows carry a display placement (anchor row + above/below) so they
+  // can render interleaved with the loaded rows; unplaced rows stay at the end.
+  for (const entry of buildOrderedGridRows(sortedRows.value, editorNewRowMeta.value, newRows.value.length)) {
+    if (entry.kind === "source") {
+      const sourceIndex = entry.sourceIndex;
+      const dirty = dirtyRows.value.get(sourceIndex);
+      const isDeleted = deletedRows.value.has(sourceIndex);
+      const status: RowStatus = isDeleted ? "deleted" : dirty?.size ? "edited" : "clean";
+      const isActiveEditingRow = quickEntryEnabled.value && editingCell.value?.rowId === sourceIndex;
+      if (matchesRowStatusFilter(status, rowStatusFilter.value) || isActiveEditingRow) {
+        refs.push({ id: sourceIndex, displayIndex: refs.length, sourceIndex, isNew: false, isDeleted, status });
+      }
+    } else {
+      const newIndex = entry.newIndex;
+      const row = newRows.value[newIndex];
+      if (!row || !rowMatchesLocalColumnFilters(row)) continue;
+      const status: RowStatus = "new";
+      if (!matchesRowStatusFilter(status, rowStatusFilter.value)) continue;
+      refs.push({
+        id: -(newIndex + 1),
+        displayIndex: refs.length,
+        newIndex,
+        isNew: true,
+        isDeleted: false,
+        status,
+      });
     }
   }
-  newRows.value.forEach((row, i) => {
-    if (!rowMatchesLocalColumnFilters(row)) return;
-    const status: RowStatus = "new";
-    if (!matchesRowStatusFilter(status, rowStatusFilter.value)) return;
-    refs.push({
-      id: -(i + 1),
-      displayIndex: refs.length,
-      newIndex: i,
-      isNew: true,
-      isDeleted: false,
-      status,
-    });
-  });
   if (showQuickEntryDraftRow.value) {
     ensureQuickEntryDraftRow();
     refs.push({

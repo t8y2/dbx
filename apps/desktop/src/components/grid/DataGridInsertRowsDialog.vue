@@ -7,15 +7,20 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 
 const MAX_INSERT_ROWS = DATA_GRID_MAX_BATCH_INSERT_ROWS;
+type GridInsertRowPosition = "above" | "below" | "end";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
-const emit = defineEmits<{ insert: [count: number] }>();
+const emit = defineEmits<{ insert: [count: number, position: GridInsertRowPosition] }>();
 
 const rowCount = ref("1");
+const position = ref<GridInsertRowPosition>("below");
 
 watch(open, (isOpen) => {
-  if (isOpen) rowCount.value = "1";
+  if (isOpen) {
+    rowCount.value = "1";
+    position.value = "below";
+  }
 });
 
 function parseIntegerOrNull(raw: string): number | null {
@@ -40,7 +45,7 @@ const inputInvalid = computed(() => {
 function confirmInsert() {
   const count = parsedCount.value;
   if (count === null) return;
-  emit("insert", count);
+  emit("insert", count, position.value);
   open.value = false;
 }
 </script>
@@ -52,11 +57,28 @@ function confirmInsert() {
         <DialogTitle>{{ t("grid.insertRowsTitle") }}</DialogTitle>
         <DialogDescription>{{ t("grid.insertRowsDescription") }}</DialogDescription>
       </DialogHeader>
-      <div class="space-y-2">
-        <label for="insert-rows-count" class="text-sm font-medium">{{ t("grid.insertRowCountLabel") }}</label>
-        <Input id="insert-rows-count" v-model="rowCount" type="number" min="1" :max="MAX_INSERT_ROWS" :aria-invalid="inputInvalid" class="w-40" @keydown.enter.prevent="confirmInsert" />
-        <p v-if="inputInvalid" class="text-sm text-destructive">{{ t("grid.insertRowCountInvalid") }}</p>
-        <p class="text-xs text-muted-foreground">{{ t("grid.insertRowsMaxHint", { max: MAX_INSERT_ROWS }) }}</p>
+      <div class="space-y-3">
+        <div class="space-y-2">
+          <label for="insert-rows-count" class="text-sm font-medium">{{ t("grid.insertRowCountLabel") }}</label>
+          <Input id="insert-rows-count" v-model="rowCount" type="number" min="1" :max="MAX_INSERT_ROWS" :aria-invalid="inputInvalid" class="w-40" @keydown.enter.prevent="confirmInsert" />
+          <p v-if="inputInvalid" class="text-sm text-destructive">{{ t("grid.insertRowCountInvalid") }}</p>
+          <p class="text-xs text-muted-foreground">{{ t("grid.insertRowsMaxHint", { max: MAX_INSERT_ROWS }) }}</p>
+        </div>
+        <div class="space-y-1.5">
+          <span class="text-sm font-medium">{{ t("grid.insertRowPositionLabel") }}</span>
+          <label class="flex items-center gap-2 text-sm">
+            <input v-model="position" type="radio" value="above" class="h-3.5 w-3.5 accent-primary" />
+            {{ t("grid.insertPositionAbove") }}
+          </label>
+          <label class="flex items-center gap-2 text-sm">
+            <input v-model="position" type="radio" value="below" class="h-3.5 w-3.5 accent-primary" />
+            {{ t("grid.insertPositionBelow") }}
+          </label>
+          <label class="flex items-center gap-2 text-sm">
+            <input v-model="position" type="radio" value="end" class="h-3.5 w-3.5 accent-primary" />
+            {{ t("grid.insertPositionEnd") }}
+          </label>
+        </div>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>

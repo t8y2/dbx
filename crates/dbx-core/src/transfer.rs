@@ -4466,16 +4466,20 @@ fn filter_object_sources_by_selection(
 }
 
 /// Whether non-table schema-object transfer should run for a request.
-/// Newer clients send an explicit `objects` selection; for those the answer
-/// is simply whether any object was selected. PG→PG keeps the legacy
-/// default: even an *empty* selection still transfers all views, functions,
-/// triggers, policies, ownership and grants (the old table-selection flow
-/// always did).
+/// Data-only transfers never include schema objects. In structure modes,
+/// newer clients send an explicit `objects` selection; for those the answer
+/// is simply whether any object was selected. PG→PG keeps the legacy default:
+/// even an *empty* selection still transfers all views, functions, triggers,
+/// policies, ownership and grants (the old table-selection flow always did).
 pub fn should_transfer_schema_objects(
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
+    content: &TransferContent,
     objects: &[TransferObjectSelection],
 ) -> bool {
+    if matches!(content, TransferContent::DataOnly) {
+        return false;
+    }
     if !objects.is_empty() {
         return true;
     }
@@ -4498,18 +4502,14 @@ pub async fn transfer_schema_objects<F>(
 where
     F: FnMut(TransferProgress),
 {
-    if request.objects.is_empty() {
-        // Legacy PG→PG flow: an empty selection still transfers all schema
-        // objects (views, functions, triggers, policies, ownership, grants).
-        // For every other combination an empty selection transfers nothing.
-        let source_db_type = get_db_type(state, &request.source_connection_id).await?;
-        let target_db_type = get_db_type(state, &request.target_connection_id).await?;
-        if !should_transfer_schema_objects(&source_db_type, &target_db_type, &request.objects) {
-            return Ok(TransferObjectOutcome::default());
-        }
+    if matches!(request.content, TransferContent::DataOnly) {
+        return Ok(TransferObjectOutcome::default());
     }
     let source_db_type = get_db_type(state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(state, &request.target_connection_id).await?;
+    if !should_transfer_schema_objects(&source_db_type, &target_db_type, &request.content, &request.objects) {
+        return Ok(TransferObjectOutcome::default());
+    }
     if !is_same_transfer_family(&source_db_type, &target_db_type) {
         return transfer_cross_family_schema_objects(
             state,
@@ -6930,23 +6930,85 @@ mod tests {
 
         #[test]
         fn should_transfer_schema_objects_matrix() {
-            // non-empty selection always transfers
+            // DataOnly never transfers schema objects, even for PG-family pairs.
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::Postgres,
+                &TransferContent::DataOnly,
+                &[]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::Postgres,
+                &TransferContent::DataOnly,
+                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Mysql,
+                &DatabaseType::Dameng,
+                &TransferContent::DataOnly,
+                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+            ));
+            // Non-empty selections participate in structure modes.
             assert!(should_transfer_schema_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Mysql,
+                &TransferContent::StructureOnly,
                 &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
             ));
-            // empty selection: PG→PG keeps the legacy transfer-everything default
-            assert!(should_transfer_schema_objects(&DatabaseType::Postgres, &DatabaseType::Postgres, &[]));
-            assert!(should_transfer_schema_objects(&DatabaseType::Kingbase, &DatabaseType::Postgres, &[]));
-            assert!(should_transfer_schema_objects(&DatabaseType::Postgres, &DatabaseType::OpenGauss, &[]));
+            // Empty selection: PG→PG keeps the legacy transfer-everything default
+            // only when structure participates in the transfer.
+            assert!(should_transfer_schema_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::Postgres,
+                &TransferContent::StructureOnly,
+                &[]
+            ));
+            assert!(should_transfer_schema_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Postgres,
+                &TransferContent::StructureAndData,
+                &[]
+            ));
+            assert!(should_transfer_schema_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::OpenGauss,
+                &TransferContent::StructureOnly,
+                &[]
+            ));
             // empty selection: every other combination transfers nothing
-            assert!(!should_transfer_schema_objects(&DatabaseType::Postgres, &DatabaseType::Mysql, &[]));
-            assert!(!should_transfer_schema_objects(&DatabaseType::Mysql, &DatabaseType::Mysql, &[]));
-            assert!(!should_transfer_schema_objects(&DatabaseType::Mysql, &DatabaseType::Dameng, &[]));
-            assert!(!should_transfer_schema_objects(&DatabaseType::Dameng, &DatabaseType::SqlServer, &[]));
-            assert!(!should_transfer_schema_objects(&DatabaseType::Sqlite, &DatabaseType::Sqlite, &[]));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::Mysql,
+                &TransferContent::StructureOnly,
+                &[]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Mysql,
+                &DatabaseType::Mysql,
+                &TransferContent::StructureAndData,
+                &[]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Mysql,
+                &DatabaseType::Dameng,
+                &TransferContent::StructureOnly,
+                &[]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Dameng,
+                &DatabaseType::SqlServer,
+                &TransferContent::StructureAndData,
+                &[]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Sqlite,
+                &DatabaseType::Sqlite,
+                &TransferContent::StructureOnly,
+                &[]
+            ));
         }
+
         #[test]
         fn rewrites_cross_family_view_ddl() {
             // mysql -> dameng

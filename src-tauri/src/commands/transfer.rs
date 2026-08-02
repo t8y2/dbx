@@ -245,10 +245,10 @@ pub async fn start_transfer(
         }
 
         // Transfer selected non-table objects (views, procedures, functions,
-        // triggers, sequences, events) after the per-table loop. The empty
-        // selection case is decided inside transfer_schema_objects: PG→PG
-        // keeps the legacy transfer-everything default, every other
-        // combination transfers nothing.
+        // triggers, sequences, events) after the per-table loop. The shared
+        // Core decision handles all content modes: DataOnly never
+        // transfers schema objects; PG→PG keeps the legacy empty-selection
+        // default only when structure participates in the transfer.
         let mut object_outcome = dbx_core::transfer::TransferObjectOutcome::default();
         match dbx_core::transfer::transfer_schema_objects(
             &state,

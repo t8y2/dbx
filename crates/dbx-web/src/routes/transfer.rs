@@ -338,10 +338,10 @@ pub async fn start_transfer(
         }
 
         // Transfer selected non-table objects (views, procedures, functions,
-        // triggers, sequences, events) after the per-table loop. The empty
-        // selection case is decided inside transfer_schema_objects: PG→PG
-        // keeps the legacy transfer-everything default, every other
-        // combination transfers nothing.
+        // triggers, sequences, events) after the per-table loop. The shared
+        // Core decision handles all content modes: DataOnly never
+        // transfers schema objects; PG→PG keeps the legacy empty-selection
+        // default only when structure participates in the transfer.
         let mut object_outcome = transfer::TransferObjectOutcome::default();
         let progress_channel_clone = progress_channel.clone();
         match transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_object_selection_flows_through_the_core_decision_without_shortcircuiting() {
+    async fn data_only_empty_object_selection_completes_through_the_core_noop() {
         let (state, dir) = test_web_state().await;
         let src = sqlite_config("src", &dir.join("src.db").to_string_lossy());
         let dst = sqlite_config("dst", &dir.join("dst.db").to_string_lossy());
@@ -631,9 +631,9 @@ mod tests {
         let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
         let _ = response.into_response();
 
-        // The handler spawns the transfer; the schema-object stage must run (not
-        // be short-circuited by a `!objects.is_empty()` guard) and the empty
-        // non-PG selection must resolve to "transfer nothing" without erroring.
+        // Both HTTP and Tauri call the same Core schema-object stage
+        // unconditionally. DataOnly must resolve there to a no-op without an
+        // object progress event or database-family fallback.
         let channel = {
             let channels = state.transfer_progress_channels.read().await;
             channels.get(&transfer_id).cloned().expect("transfer channel registered")
@@ -662,10 +662,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(saw_terminal, "transfer must reach a terminal event");
-        assert!(!saw_schema_objects, "empty non-PG selection must not transfer schema objects");
+        assert!(!saw_schema_objects, "DataOnly must not transfer schema objects");
         assert!(
             terminal_error.is_none(),
-            "empty non-PG selection must complete without error, got: {terminal_error:?}"
+            "DataOnly must complete without a schema-object error, got: {terminal_error:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

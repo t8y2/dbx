@@ -170,6 +170,38 @@ describe("useSqlExecution", () => {
     expect(activeOutputView.value).toBe("summary");
   });
 
+  it("shows SQL Server PRINT messages instead of leaving them behind the execution summary", async () => {
+    const sql = `IF 1 = 1
+BEGIN
+  PRINT 'x';
+END
+ELSE
+BEGIN
+  PRINT 'y';
+END
+GO`;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
+    expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+  });
+
   it("forwards execute-in-new-result-tab intent to the query store", async () => {
     const sql = "SELECT * FROM users";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });

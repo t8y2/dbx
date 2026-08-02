@@ -45,8 +45,7 @@ export function detectAndFormatStructured(text: string, options: { indentSize: n
       return { kind: "sql" };
     }
   }
-  const trimmed = text.trimStart();
-  if (looksLikeXml(trimmed)) {
+  if (looksLikeXml(text)) {
     try {
       return { kind: "xml", formatted: formatXmlSource(text, options.useTabs ? "\t" : " ".repeat(options.indentSize)) };
     } catch {
@@ -56,6 +55,7 @@ export function detectAndFormatStructured(text: string, options: { indentSize: n
   return { kind: "sql" };
 }
 
-function looksLikeXml(text: string): boolean {
-  return text.startsWith("<?") || text.startsWith("<!--") || /^<!DOCTYPE\b/i.test(text) || /^<\/?[A-Za-z_:]/.test(text);
+export function looksLikeXml(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith("<?") || trimmed.startsWith("<!--") || /^<!DOCTYPE\b/i.test(trimmed) || /^<\/?[A-Za-z_:]/.test(trimmed);
 }

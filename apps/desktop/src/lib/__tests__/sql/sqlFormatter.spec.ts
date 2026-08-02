@@ -73,6 +73,7 @@ describe("sqlFormatter", () => {
 
   it("still formats selected SQL comparison fragments", async () => {
     await expect(formatSqlText(`< 10`, "postgres")).resolves.toBe(`< 10`);
+    await expect(formatSqlText(`< 10 AND score > 2`, "postgres")).resolves.toBe(`< 10\nAND score > 2`);
   });
 
   it("keeps display formatting lossless for XML/JSON-looking input", async () => {

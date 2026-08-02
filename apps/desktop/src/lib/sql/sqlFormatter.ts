@@ -1,5 +1,5 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
-import { firstNonWhitespaceChar } from "@/lib/sql/autoFormat";
+import { looksLikeXml } from "@/lib/sql/autoFormat";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
 
@@ -81,10 +81,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     throw new Error("SQL is too large to format safely.");
   }
 
-  // XML guard: a document starts with `<` and has a tag terminator. Do not apply
-  // it to a selected SQL comparison fragment such as `< 10`.
-  const first = firstNonWhitespaceChar(sql);
-  if (first === "<" && sql.slice(sql.search(/\S/)).includes(">")) {
+  if (looksLikeXml(sql)) {
     throw new UnsupportedStructuredInputError("xml");
   }
 

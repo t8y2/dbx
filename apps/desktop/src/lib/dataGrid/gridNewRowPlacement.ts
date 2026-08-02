@@ -11,6 +11,9 @@
 
 export type GridNewRowPosition = "above" | "below";
 
+/** User-facing insert position state; `"end"` maps to a null placement. */
+export type GridInsertRowPosition = GridNewRowPosition | "end";
+
 export interface GridNewRowPlacement {
   /** Row id of the anchor: `>= 0` for a source row (its sourceIndex), `< 0` for another pending row (its stable token negated). */
   anchorId: number;

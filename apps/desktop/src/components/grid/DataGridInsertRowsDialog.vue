@@ -2,16 +2,16 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { DATA_GRID_MAX_BATCH_INSERT_ROWS } from "@/composables/useDataGridEditor";
+import { type GridInsertRowPosition } from "@/lib/dataGrid/gridNewRowPlacement";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
 const MAX_INSERT_ROWS = DATA_GRID_MAX_BATCH_INSERT_ROWS;
-type GridInsertRowPosition = "above" | "below" | "end";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
-const props = defineProps<{ canPlaceAtSelection?: boolean }>();
+const props = defineProps<{ canPlaceAtSelection?: boolean; initialPosition?: GridInsertRowPosition }>();
 const emit = defineEmits<{ insert: [count: number, position: GridInsertRowPosition] }>();
 
 const canUsePosition = computed(() => props.canPlaceAtSelection !== false);
@@ -22,7 +22,7 @@ const position = ref<GridInsertRowPosition>("below");
 watch(open, (isOpen) => {
   if (isOpen) {
     rowCount.value = "1";
-    position.value = canUsePosition.value ? "below" : "end";
+    position.value = canUsePosition.value ? (props.initialPosition ?? "below") : "end";
   }
 });
 

@@ -139,6 +139,8 @@ function actionLabelClass() {
           <template v-for="item in addRow?.items ?? []" :key="item.value">
             <DropdownMenuSeparator v-if="item.separatorBefore" />
             <DropdownMenuItem class="gap-2" :disabled="item.disabled" @select="void selectDataGridToolbarAddRowItem(addRow, item.value)">
+              <Check v-if="item.selected" class="h-3.5 w-3.5 shrink-0 text-primary" />
+              <span v-else class="h-3.5 w-3.5 shrink-0" />
               <span class="flex-1">{{ item.label }}</span>
             </DropdownMenuItem>
           </template>

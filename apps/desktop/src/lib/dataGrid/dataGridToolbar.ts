@@ -35,6 +35,8 @@ export interface DataGridToolbarMenuItem {
   label: string;
   disabled?: boolean;
   separatorBefore?: boolean;
+  /** Marks a menu item as the active choice in a mutually-exclusive group (rendered as a check). */
+  selected?: boolean;
 }
 
 export interface DataGridToolbarExportCapability {

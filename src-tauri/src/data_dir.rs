@@ -25,6 +25,10 @@ impl DataDirResolution {
         matches!(self.mode, DataDirMode::EnvOverride | DataDirMode::Portable { .. })
     }
 
+    pub fn custom_data_dir(&self) -> Option<&Path> {
+        self.uses_custom_data_dir().then_some(self.data_dir.as_path())
+    }
+
     pub fn is_portable_mode(&self) -> bool {
         matches!(self.mode, DataDirMode::Portable { .. })
     }
@@ -138,6 +142,7 @@ mod tests {
         let resolution = resolve_data_dir_from_inputs(default_dir, Some(exe_dir.clone()), true, false, None);
 
         assert_eq!(resolution.data_dir, exe_dir.join("data"));
+        assert_eq!(resolution.custom_data_dir(), Some(resolution.data_dir.as_path()));
         assert_eq!(resolution.mode, DataDirMode::Portable { exe_dir });
         assert!(resolution.uses_custom_data_dir());
         assert!(resolution.is_portable_mode());
@@ -151,6 +156,7 @@ mod tests {
         let resolution = resolve_data_dir_from_inputs(default_dir.clone(), Some(exe_dir), true, true, None);
 
         assert_eq!(resolution.data_dir, default_dir);
+        assert_eq!(resolution.custom_data_dir(), None);
         assert_eq!(resolution.mode, DataDirMode::Default);
         assert!(!resolution.uses_custom_data_dir());
         assert!(!resolution.is_portable_mode());
@@ -165,6 +171,7 @@ mod tests {
         let resolution = resolve_data_dir_from_inputs(default_dir, Some(exe_dir), true, true, Some(env_dir.clone()));
 
         assert_eq!(resolution.data_dir, env_dir);
+        assert_eq!(resolution.custom_data_dir(), Some(resolution.data_dir.as_path()));
         assert_eq!(resolution.mode, DataDirMode::EnvOverride);
         assert!(resolution.uses_custom_data_dir());
         assert!(!resolution.is_portable_mode());

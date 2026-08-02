@@ -3,6 +3,7 @@ import type { ConnectionConfig } from "@/types/database";
 import {
   GAUSSDB_M_JDBC_DRIVER_CLASS,
   connectionObjectTreeNodeSchema,
+  connectionObjectTreeQuerySchema,
   connectionQueryExecutionSchema,
   connectionShouldLoadIdentifierQuote,
   connectionUsesDatabaseObjectTreeMode,
@@ -222,5 +223,23 @@ describe("query execution schema", () => {
 describe("object tree node schema", () => {
   it("uses the SQLite database alias to qualify attached tables", () => {
     expect(connectionObjectTreeNodeSchema({ db_type: "sqlite" }, "analytics")).toBe("analytics");
+  });
+
+  it("keeps unqualified Informix metadata on the login owner", () => {
+    expect(connectionObjectTreeQuerySchema({ db_type: "informix" }, "prulife")).toBe("");
+    expect(connectionObjectTreeNodeSchema({ db_type: "informix" }, "prulife")).toBeUndefined();
+  });
+
+  it.each([
+    { db_type: "jdbc" as const, connection_string: "jdbc:informix-sqli://localhost:9088/prulife" },
+    { db_type: "gbase" as const, driver_profile: "gbase8s" },
+  ])("keeps compatible Informix metadata on the login owner", (connection) => {
+    expect(connectionObjectTreeQuerySchema(connection, "prulife")).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, "prulife")).toBeUndefined();
+  });
+
+  it("preserves explicit Informix owners", () => {
+    expect(connectionObjectTreeQuerySchema({ db_type: "informix" }, "prulife", "xtdpcky")).toBe("xtdpcky");
+    expect(connectionObjectTreeNodeSchema({ db_type: "informix" }, "prulife", "xtdpcky")).toBe("xtdpcky");
   });
 });

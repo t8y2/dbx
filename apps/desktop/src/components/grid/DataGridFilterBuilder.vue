@@ -1,15 +1,20 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
-import { Eye, EyeOff, Plus, Search, Trash2 } from "@lucide/vue";
+import { Eye, EyeOff, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { filterModeNeedsValue, filterModeUsesList, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 
 const { t } = useI18n();
+const VALUE_SHORTCUT_HINT_STORAGE_KEY = "dbx-filter-builder-value-shortcut-hint-days";
+const VALUE_SHORTCUT_HINT_MAX_DAYS = 3;
+const VALUE_SHORTCUT_HINT_MAX_PER_DAY = 2;
+type ValueShortcutHintDay = { date: string; count: number };
 const props = withDefaults(
   defineProps<{
     rules: DataGridStructuredFilterRule[];
@@ -38,10 +43,41 @@ const pendingValueFocus = new Set<string>();
 const pendingKeyboardAddFocus = new Set<string>();
 const openColumnSelectIds = ref(new Set<string>());
 const activeColumnIndexes = ref<Record<string, number>>({});
+const focusedValueRuleId = ref<string>();
+const valueShortcutHintRuleId = ref<string>();
+const valueShortcutHintShownDays = ref(readValueShortcutHintShownDays());
 let ruleIdsBeforeKeyboardAdd: Set<string> | undefined;
 
 function usesExpandedLayout(mode: DataGridContextFilterMode) {
   return filterModeUsesList(mode) || filterModeUsesRange(mode);
+}
+
+function currentLocalDateKey() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+function readValueShortcutHintShownDays(): ValueShortcutHintDay[] {
+  try {
+    const parsed = JSON.parse(safeLocalStorageGet(VALUE_SHORTCUT_HINT_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item): ValueShortcutHintDay | undefined => {
+        if (!item || typeof item !== "object") return undefined;
+        const date = (item as { date?: unknown }).date;
+        const count = (item as { count?: unknown }).count;
+        return typeof date === "string" && typeof count === "number" && Number.isFinite(count) && count > 0 ? { date, count } : undefined;
+      })
+      .filter((item): item is ValueShortcutHintDay => !!item);
+  } catch {
+    return [];
+  }
+}
+
+function shouldShowValueShortcutHint(rule: DataGridStructuredFilterRule, index: number) {
+  return focusedValueRuleId.value === rule.id && valueShortcutHintRuleId.value === rule.id && index > 0 && filterModeNeedsValue(rule.mode) && !filterModeUsesList(rule.mode);
 }
 
 function updateRuleColumn(rule: DataGridStructuredFilterRule, value: unknown, focusValue = true) {
@@ -194,13 +230,32 @@ function handleValueEditorKeydown(event: KeyboardEvent) {
   event.stopPropagation();
   if (!event.repeat) addRuleAndOpenColumnSelect();
 }
+
+function focusValueRule(id: string, index: number, mode: DataGridContextFilterMode) {
+  focusedValueRuleId.value = id;
+  valueShortcutHintRuleId.value = undefined;
+  if (index === 0 || !filterModeNeedsValue(mode) || filterModeUsesList(mode)) return;
+  const today = currentLocalDateKey();
+  const existingIndex = valueShortcutHintShownDays.value.findIndex((item) => item.date === today);
+  if (existingIndex >= 0 && valueShortcutHintShownDays.value[existingIndex].count >= VALUE_SHORTCUT_HINT_MAX_PER_DAY) return;
+  if (existingIndex < 0 && valueShortcutHintShownDays.value.length >= VALUE_SHORTCUT_HINT_MAX_DAYS) return;
+  const nextShownDays = existingIndex >= 0 ? valueShortcutHintShownDays.value.map((item, itemIndex) => (itemIndex === existingIndex ? { ...item, count: item.count + 1 } : item)) : [...valueShortcutHintShownDays.value, { date: today, count: 1 }];
+  valueShortcutHintShownDays.value = nextShownDays;
+  valueShortcutHintRuleId.value = id;
+  safeLocalStorageSet(VALUE_SHORTCUT_HINT_STORAGE_KEY, JSON.stringify(nextShownDays));
+}
+
+function blurValueRule(id: string) {
+  if (focusedValueRuleId.value === id) focusedValueRuleId.value = undefined;
+  if (valueShortcutHintRuleId.value === id) valueShortcutHintRuleId.value = undefined;
+}
 </script>
 
 <template>
   <div class="space-y-3">
     <div v-if="props.showHeader !== false" class="flex items-center justify-between gap-3">
       <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="props.disabled || !props.columns.length" @click="emit('add')"> <Plus class="mr-1 h-3.5 w-3.5" />{{ t("grid.filterBuilderAddRule") }} </Button>
+      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('clear')"> <Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }} </Button>
     </div>
 
     <div v-if="props.rules.length" class="space-y-2">
@@ -256,9 +311,20 @@ function handleValueEditorKeydown(event: KeyboardEvent) {
               :disabled="rule.disabled"
               :placeholder="t('grid.filterBuilderRangeStart')"
               @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+              @focus="focusValueRule(rule.id, index, rule.mode)"
+              @blur="blurValueRule(rule.id)"
               @keydown="handleValueEditorKeydown"
             />
-            <Input :model-value="rule.rawEndValue" class="h-8 text-xs" :disabled="rule.disabled" :placeholder="t('grid.filterBuilderRangeEnd')" @update:model-value="(value) => emit('updateRule', rule.id, { rawEndValue: String(value ?? '') })" @keydown="handleValueEditorKeydown" />
+            <Input
+              :model-value="rule.rawEndValue"
+              class="h-8 text-xs"
+              :disabled="rule.disabled"
+              :placeholder="t('grid.filterBuilderRangeEnd')"
+              @update:model-value="(value) => emit('updateRule', rule.id, { rawEndValue: String(value ?? '') })"
+              @focus="focusValueRule(rule.id, index, rule.mode)"
+              @blur="blurValueRule(rule.id)"
+              @keydown="handleValueEditorKeydown"
+            />
           </div>
           <textarea
             v-else-if="filterModeUsesList(rule.mode)"
@@ -280,19 +346,24 @@ function handleValueEditorKeydown(event: KeyboardEvent) {
             :disabled="rule.disabled"
             :placeholder="t('grid.filterBuilderValue')"
             @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+            @focus="focusValueRule(rule.id, index, rule.mode)"
+            @blur="blurValueRule(rule.id)"
             @keydown="handleValueEditorKeydown"
           />
           <div v-else class="flex h-8 items-center rounded-md border border-dashed px-2 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoValue") }}</div>
-          <div class="flex items-center gap-1" :class="usesExpandedLayout(rule.mode) ? 'col-start-3 row-start-1 row-span-2' : ''">
+          <div v-if="shouldShowValueShortcutHint(rule, index)" class="text-[11px] leading-none text-muted-foreground" :class="usesExpandedLayout(rule.mode) ? 'col-span-2 -mt-1' : 'col-start-3 row-start-2 -mt-1'">
+            {{ t("grid.filterBuilderValueShortcutHint") }}
+          </div>
+          <div class="flex items-center gap-1" :class="usesExpandedLayout(rule.mode) ? 'col-start-3 row-start-1 row-span-2' : 'col-start-4 row-start-1'">
             <Button variant="ghost" size="icon" class="h-8 w-8" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"><EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" /><Eye v-else class="h-3.5 w-3.5" /></Button>
-            <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><Trash2 class="h-3.5 w-3.5" /></Button>
+            <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
           </div>
         </div>
       </template>
     </div>
     <div v-else class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">{{ t("grid.filterBuilderEmpty") }}</div>
     <div v-if="props.showFooter !== false" class="flex justify-between gap-2 pt-1">
-      <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="emit('clear')">{{ t("grid.clearFilter") }}</Button>
+      <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" :disabled="props.disabled || !props.columns.length" @click="emit('add')"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("grid.filterBuilderAddRule") }}</Button>
       <div class="flex gap-2">
         <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="emit('reset')">{{ t("grid.resetFilterBuilder") }}</Button
         ><Button size="sm" class="h-8 px-3 text-xs" :disabled="props.disabled" @click="emit('apply')">{{ t("grid.applyFilter") }}</Button>

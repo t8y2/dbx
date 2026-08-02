@@ -2479,7 +2479,9 @@ pub async fn execute_query_with_max_rows(
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "EXEC", "WITH", "TABLE"]) {
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "EXEC", "WITH", "TABLE"])
+        || sqlserver_dml_output_returns_rows(sql)
+    {
         let query = match sqlserver_unsafe_type_query(client, sql).await {
             Ok(Some(query)) => query,
             Ok(None) => SqlServerUnsafeTypeQuery::plain(sql),
@@ -3154,6 +3156,32 @@ mod tests {
             "DECLARE @id INT = 1; UPDATE dbo.users SET active = 0 WHERE id = @id;"
         ));
         assert!(sqlserver_dml_output_returns_rows("DELETE FROM dbo.users OUTPUT deleted.id WHERE id = 1;"));
+    }
+
+    #[test]
+    fn sqlserver_dml_output_detection_distinguishes_client_rows_from_output_into() {
+        assert!(sqlserver_dml_output_returns_rows(
+            "INSERT INTO dbo.users(name) OUTPUT inserted.id, inserted.name VALUES (N'Ada')"
+        ));
+        assert!(sqlserver_dml_output_returns_rows("UPDATE dbo.users SET active = 1 OUTPUT inserted.id WHERE id = 1"));
+        assert!(sqlserver_dml_output_returns_rows("DELETE FROM dbo.users OUTPUT deleted.id WHERE id = 1"));
+        assert!(!sqlserver_dml_output_returns_rows(
+            "INSERT INTO dbo.audit OUTPUT inserted.id INTO dbo.audit_ids VALUES (1)"
+        ));
+        assert!(!sqlserver_dml_output_returns_rows(
+            "UPDATE dbo.users SET note = N'OUTPUT inserted.id' WHERE id = 1 -- OUTPUT deleted.id"
+        ));
+        assert!(!sqlserver_dml_output_returns_rows("SELECT N'OUTPUT inserted.id'"));
+    }
+
+    #[test]
+    fn sqlserver_dml_output_uses_the_result_set_execution_path() {
+        let source = include_str!("sqlserver.rs");
+        let execute_query = source.split("pub async fn execute_query_with_max_rows").nth(1).unwrap();
+        let execute_query = execute_query.split("pub async fn execute_batch").next().unwrap();
+
+        assert!(execute_query.contains("sqlserver_dml_output_returns_rows(sql)"));
+        assert!(execute_query.contains("client.query(query.sql.as_str(), &[])"));
     }
 
     #[test]

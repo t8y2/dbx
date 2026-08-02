@@ -825,6 +825,7 @@ mod tests {
             connection_id: "connection-1".to_string(),
             connection_name: "Test connection".to_string(),
             database: "dbx_test".to_string(),
+            schema: Some("reporting".to_string()),
             agent_mode: true,
             allow_writes: true,
             allow_dangerous: false,
@@ -852,6 +853,7 @@ mod tests {
         assert_eq!(env.get("DBX_MCP_SCOPE_CONNECTION_ID").map(String::as_str), Some("connection-1"));
         assert_eq!(env.get("DBX_MCP_SCOPE_CONNECTION_NAME").map(String::as_str), Some("Test connection"));
         assert_eq!(env.get("DBX_MCP_SCOPE_DATABASE").map(String::as_str), Some("dbx_test"));
+        assert_eq!(env.get("DBX_MCP_SCOPE_SCHEMA").map(String::as_str), Some("reporting"));
 
         let enabled_tools = serde_json::from_str::<Vec<String>>(env.get("DBX_PI_ENABLED_TOOLS").unwrap()).unwrap();
         assert!(enabled_tools.iter().any(|tool| tool == "dbx_execute_query"));

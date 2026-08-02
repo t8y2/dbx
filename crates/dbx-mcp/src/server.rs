@@ -160,6 +160,7 @@ pub struct McpScope {
     pub connection_ids: Vec<String>,
     pub connection_name: Option<String>,
     pub database: Option<String>,
+    pub schema: Option<String>,
 }
 
 struct ResolvedConnection {
@@ -179,11 +180,12 @@ impl McpScope {
             connection_ids,
             connection_name: non_empty_env("DBX_MCP_SCOPE_CONNECTION_NAME"),
             database: non_empty_env("DBX_MCP_SCOPE_DATABASE"),
+            schema: non_empty_env("DBX_MCP_SCOPE_SCHEMA"),
         }
     }
 
     fn enabled(&self) -> bool {
-        self.connection_scope_enabled() || self.database.is_some()
+        self.connection_scope_enabled() || self.database.is_some() || self.schema.is_some()
     }
 
     fn connection_scope_enabled(&self) -> bool {
@@ -257,7 +259,11 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        match self.backend.list_tables(&resolved.connection, &database, &request.schema.unwrap_or_default()).await {
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
+        match self.backend.list_tables(&resolved.connection, &database, &schema).await {
             Ok(tables) if tables.is_empty() => text("No tables found."),
             Ok(tables) => text(
                 tables
@@ -287,11 +293,11 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        match self
-            .backend
-            .get_columns(&resolved.connection, &database, &request.schema.unwrap_or_default(), &request.table)
-            .await
-        {
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
+        match self.backend.get_columns(&resolved.connection, &database, &schema, &request.table).await {
             Ok(columns) if columns.is_empty() => text("No columns found."),
             Ok(columns) => text(format_columns(&columns)),
             Err(error) => tool_error("TABLE_DESCRIPTION_ERROR", error),
@@ -375,6 +381,9 @@ impl DbxMcpServer {
                 Err(error) => return error,
             };
         let mut arguments = json!({ "sql": request.sql, "limit": 100 });
+        if let Some(schema) = self.scope.schema.as_deref() {
+            arguments["schema"] = json!(schema);
+        }
         if let Some(session) = &session {
             arguments["client_session_id"] = json!(session.client_session_id);
         }
@@ -523,7 +532,10 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let schema = request.schema.unwrap_or_default();
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
         let max_tables = request.max_tables.unwrap_or(8).clamp(1, 20);
         let available = match self.backend.list_tables(connection, &database, &schema).await {
             Ok(tables) => tables,
@@ -658,6 +670,10 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
         match self
             .backend
             .bridge_request(
@@ -667,7 +683,7 @@ impl DbxMcpServer {
                     "connection_name": connection.name,
                     "table": request.table,
                     "database": database,
-                    "schema": request.schema,
+                    "schema": schema,
                 }),
             )
             .await
@@ -763,6 +779,25 @@ impl DbxMcpServer {
             return Ok(scoped.to_string());
         }
         Ok(requested.or_else(|| connection.database.clone()).unwrap_or_default())
+    }
+
+    /// Resolve the schema for scoped CLI agents. A selected schema is a hard
+    /// bound, matching the existing database scope behavior.
+    #[allow(clippy::result_large_err)]
+    fn resolve_schema(&self, requested: Option<String>) -> Result<String, CallToolResult> {
+        let requested = requested.map(|schema| schema.trim().to_string()).filter(|schema| !schema.is_empty());
+        if let Some(scoped) = self.scope.schema.as_deref() {
+            if let Some(requested) = requested.as_deref() {
+                if requested != scoped {
+                    return Err(tool_error(
+                        "SCHEMA_OUT_OF_SCOPE",
+                        format!("Schema \"{requested}\" is outside the scoped schema \"{scoped}\"."),
+                    ));
+                }
+            }
+            return Ok(scoped.to_string());
+        }
+        Ok(requested.unwrap_or_default())
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -1351,6 +1386,7 @@ mod tests {
             connection_ids: vec!["first".to_string()],
             connection_name: Some("scope-name".to_string()),
             database: None,
+            schema: None,
         };
 
         assert!(scope.matches(&first));
@@ -1375,6 +1411,26 @@ mod tests {
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
+    }
+
+    #[test]
+    fn schema_scope_is_a_hard_bound() {
+        let dameng = connection("dameng-1", "Dameng", "dameng", "APPDB");
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend::default()),
+            McpScope {
+                database: Some("APPDB".to_string()),
+                schema: Some("REPORTING".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(server.resolve_database(None, &dameng).unwrap(), "APPDB");
+        assert_eq!(server.resolve_schema(None).unwrap(), "REPORTING");
+        assert_eq!(server.resolve_schema(Some("REPORTING".to_string())).unwrap(), "REPORTING");
+        let error = server.resolve_schema(Some("APP_USER".to_string())).unwrap_err();
+        assert!(result_text(&error).contains("SCHEMA_OUT_OF_SCOPE"));
     }
 
     #[test]

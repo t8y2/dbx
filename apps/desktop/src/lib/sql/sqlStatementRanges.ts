@@ -2005,7 +2005,7 @@ export function executableStatementRanges(sql: string, databaseType?: DatabaseTy
 
 export function currentExecutableStatementRange(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange | null {
   if (databaseType === "redis") return redisCommandRangeAtCursor(sql, cursorPos);
-  if (databaseType === "mongodb") return null;
+  if (databaseType === "mongodb") return mongoCommandRangeAtCursor(sql, cursorPos);
   return statementRangeAtCursor(sql, cursorPos, databaseType, parameterOptions);
 }
 

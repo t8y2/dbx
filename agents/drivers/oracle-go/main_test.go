@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sijms/go-ora/v2/configurations"
 )
 
 func TestHandshakeResponse(t *testing.T) {
@@ -647,6 +649,154 @@ func TestBuildDSNAddsSysDbaOption(t *testing.T) {
 	}
 }
 
+func TestParseOracleMajorVersion(t *testing.T) {
+	tests := []struct {
+		version string
+		major   int
+		ok      bool
+	}{
+		{version: "10.2.0.4.0", major: 10, ok: true},
+		{version: "11.2.0.4.0 Production", major: 11, ok: true},
+		{version: "Oracle Database 10g Enterprise Edition Release 10.2.0.4.0 - 64bit Production", major: 10, ok: true},
+		{version: "19.0.0.0.0", major: 19, ok: true},
+		{version: "", ok: false},
+		{version: "Oracle Database 10g", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			major, ok := parseOracleMajorVersion(tt.version)
+			if major != tt.major || ok != tt.ok {
+				t.Fatalf("parseOracleMajorVersion(%q) = (%d, %t), want (%d, %t)", tt.version, major, ok, tt.major, tt.ok)
+			}
+		})
+	}
+}
+
+func TestOracleServerMajorVersionUsesProductComponentVersion(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "PRODUCT_COMPONENT_VERSION",
+			args:          []driver.Value{},
+			rows:          [][]driver.Value{{"10.2.0.4.0"}},
+		},
+	})
+
+	major, ok := oracleServerMajorVersion(db, time.Second)
+	if !ok || major != 10 {
+		t.Fatalf("oracleServerMajorVersion() = (%d, %t), want (10, true)", major, ok)
+	}
+	if scripted.next != 1 {
+		t.Fatalf("expected one version query, got %d", scripted.next)
+	}
+}
+
+func TestOracleServerMajorVersionFallsBackToVersionBanner(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "PRODUCT_COMPONENT_VERSION",
+			args:          []driver.Value{},
+			err:           errors.New("view unavailable"),
+		},
+		{
+			queryContains: "V$VERSION",
+			args:          []driver.Value{},
+			rows: [][]driver.Value{{
+				"Oracle Database 11g Enterprise Edition Release 11.2.0.4.0 - 64bit Production",
+			}},
+		},
+	})
+
+	major, ok := oracleServerMajorVersion(db, time.Second)
+	if !ok || major != 11 {
+		t.Fatalf("oracleServerMajorVersion() = (%d, %t), want (11, true)", major, ok)
+	}
+	if scripted.next != 2 {
+		t.Fatalf("expected both version queries, got %d", scripted.next)
+	}
+}
+
+func TestWithOracleLOBFetchPostUsesURLParamsForGeneratedDSN(t *testing.T) {
+	params := withOracleLOBFetchPost(connectParams{
+		Host:      "db.example.com",
+		Port:      1521,
+		Database:  "ORCL",
+		Username:  "scott",
+		Password:  "tiger",
+		URLParams: "CHARSET=ZHS16GBK",
+	})
+
+	values, err := url.ParseQuery(params.URLParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values.Get("LOB FETCH") != "POST" || values.Get("CHARSET") != "ZHS16GBK" {
+		t.Fatalf("legacy LOB mode should preserve URL parameters, got: %s", params.URLParams)
+	}
+	config, err := configurations.ParseConfig(buildDSN(params))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Lob != configurations.STREAM {
+		t.Fatalf("generated DSN should enable streamed LOB reads, got: %s", buildDSN(params))
+	}
+}
+
+func TestWithOracleLOBFetchPostUpdatesRawOracleURL(t *testing.T) {
+	params := withOracleLOBFetchPost(connectParams{
+		ConnectionString: "oracle://scott:tiger@db.example.com:1521/ORCL?CHARSET=ZHS16GBK",
+	})
+	parsed, err := url.Parse(params.ConnectionString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("LOB FETCH") != "POST" || parsed.Query().Get("CHARSET") != "ZHS16GBK" {
+		t.Fatalf("raw Oracle URL should preserve query parameters, got: %s", params.ConnectionString)
+	}
+	config, err := configurations.ParseConfig(params.ConnectionString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Lob != configurations.STREAM {
+		t.Fatalf("raw Oracle URL should enable streamed LOB reads, got: %s", params.ConnectionString)
+	}
+}
+
+func TestHasOracleLOBFetchOptionHonorsExplicitModes(t *testing.T) {
+	tests := []connectParams{
+		{URLParams: "lob+fetch=inline"},
+		{URLParams: "LOB%20FETCH=POST"},
+		{ConnectionString: "oracle://scott:tiger@db.example.com:1521/ORCL?lob+fetch=stream"},
+	}
+	for _, params := range tests {
+		if !hasOracleLOBFetchOption(params) {
+			t.Fatalf("explicit LOB fetch mode should be detected: %+v", params)
+		}
+	}
+	if hasOracleLOBFetchOption(connectParams{URLParams: "CHARSET=ZHS16GBK"}) {
+		t.Fatal("unrelated URL parameters should not be treated as an explicit LOB fetch mode")
+	}
+}
+
+func TestShouldUseLegacyOracleLOBFetchOnlyForLegacyServers(t *testing.T) {
+	params := connectParams{URLParams: "CHARSET=ZHS16GBK"}
+	if !shouldUseLegacyOracleLOBFetch(params, 10, true) {
+		t.Fatal("Oracle 10g should use streamed LOB reads")
+	}
+	if !shouldUseLegacyOracleLOBFetch(params, 11, true) {
+		t.Fatal("Oracle 11g should use streamed LOB reads")
+	}
+	if shouldUseLegacyOracleLOBFetch(params, 12, true) || shouldUseLegacyOracleLOBFetch(params, 19, true) {
+		t.Fatal("modern Oracle versions should retain the driver's default LOB mode")
+	}
+	if shouldUseLegacyOracleLOBFetch(params, 0, false) {
+		t.Fatal("unknown Oracle versions should retain the driver's default LOB mode")
+	}
+	if shouldUseLegacyOracleLOBFetch(connectParams{URLParams: "LOB+FETCH=INLINE"}, 10, true) {
+		t.Fatal("an explicit user LOB mode should not be overridden")
+	}
+}
+
 func TestOracleGB18030ConverterRoundTrip(t *testing.T) {
 	converter := oracleGB18030Converter{}
 	input := "DBX \u4e2d\u6587 \U00020000"
@@ -663,6 +813,30 @@ func TestOracleGB18030ConverterRoundTrip(t *testing.T) {
 	}
 	if clone := converter.Clone(); clone.GetLangID() != oracleCharsetZHS32GB18030 {
 		t.Fatalf("GB18030 converter clone lang id = %d, want %d", clone.GetLangID(), oracleCharsetZHS32GB18030)
+	}
+}
+
+func TestOpenDBUsesIndependentOracleDrivers(t *testing.T) {
+	params := connectParams{
+		Host:     "127.0.0.1",
+		Port:     1521,
+		Database: "ORCL",
+		Username: "dbx",
+		Password: "secret",
+	}
+	first, err := openDB(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := openDB(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	if first.Driver() == second.Driver() {
+		t.Fatal("Oracle connections must not share the driver's cached charset converters")
 	}
 }
 

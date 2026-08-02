@@ -32,6 +32,8 @@ const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
+const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
+const SNIPPET_PENDING_CLEANUPS_KEY: &str = "snippet_pending_legacy_cleanups";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -50,6 +52,34 @@ pub enum DataDbImportResult {
     SkippedInvalidTarget,
     SkippedSourceEmpty,
     SkippedTargetHasData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetPendingCleanup {
+    pub snippet_id: String,
+    pub expected_content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnippetSyncState {
+    pub snippet_id: Option<String>,
+    pub pending_cleanup: Option<SnippetPendingCleanup>,
+}
+
+fn required_snippet_state_value<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{label} cannot be empty"));
+    }
+    Ok(value)
+}
+
+fn validate_snippet_pending_cleanup(mut cleanup: SnippetPendingCleanup) -> Result<SnippetPendingCleanup, String> {
+    cleanup.snippet_id = required_snippet_state_value(&cleanup.snippet_id, "legacy snippet id")?.to_string();
+    cleanup.expected_content_hash =
+        required_snippet_state_value(&cleanup.expected_content_hash, "legacy content hash")?.to_string();
+    Ok(cleanup)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1794,6 +1824,113 @@ impl Storage {
         let mut settings = self.load_app_settings_json().await?;
         settings.remove("webdav_sync_secrets_passphrase");
         self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn save_snippet_sync_id(&self, provider: &str, snippet_id: Option<&str>) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        let mut ids =
+            settings.remove(SNIPPET_SYNC_IDS_KEY).and_then(|value| value.as_object().cloned()).unwrap_or_default();
+        match snippet_id.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) => {
+                ids.insert(provider.to_string(), serde_json::Value::String(id.to_string()));
+            }
+            None => {
+                ids.remove(provider);
+            }
+        }
+        settings.insert(SNIPPET_SYNC_IDS_KEY.to_string(), serde_json::Value::Object(ids));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_snippet_sync_id(&self, provider: &str) -> Result<Option<String>, String> {
+        Ok(self.load_snippet_sync_state(provider).await?.snippet_id)
+    }
+
+    pub async fn save_snippet_migration_state(
+        &self,
+        provider: &str,
+        replacement_snippet_id: &str,
+        legacy_snippet_id: &str,
+        expected_content_hash: &str,
+    ) -> Result<(), String> {
+        let replacement_snippet_id = required_snippet_state_value(replacement_snippet_id, "replacement snippet id")?;
+        let legacy_snippet_id = required_snippet_state_value(legacy_snippet_id, "legacy snippet id")?;
+        let expected_content_hash = required_snippet_state_value(expected_content_hash, "legacy content hash")?;
+        let mut settings = self.load_app_settings_json().await?;
+        let mut ids =
+            settings.remove(SNIPPET_SYNC_IDS_KEY).and_then(|value| value.as_object().cloned()).unwrap_or_default();
+        ids.insert(provider.to_string(), serde_json::Value::String(replacement_snippet_id.to_string()));
+        settings.insert(SNIPPET_SYNC_IDS_KEY.to_string(), serde_json::Value::Object(ids));
+
+        let mut pending_cleanups = settings
+            .remove(SNIPPET_PENDING_CLEANUPS_KEY)
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        pending_cleanups.insert(
+            provider.to_string(),
+            serde_json::to_value(SnippetPendingCleanup {
+                snippet_id: legacy_snippet_id.to_string(),
+                expected_content_hash: expected_content_hash.to_string(),
+            })
+            .map_err(|e| e.to_string())?,
+        );
+        settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_snippet_sync_state(&self, provider: &str) -> Result<SnippetSyncState, String> {
+        let settings = self.load_app_settings_json().await?;
+        let snippet_id = settings
+            .get(SNIPPET_SYNC_IDS_KEY)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|ids| ids.get(provider))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let pending_cleanup = settings
+            .get(SNIPPET_PENDING_CLEANUPS_KEY)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|cleanups| cleanups.get(provider))
+            .cloned()
+            .map(serde_json::from_value::<SnippetPendingCleanup>)
+            .transpose()
+            .map_err(|e| format!("invalid pending snippet cleanup state: {e}"))?
+            .map(validate_snippet_pending_cleanup)
+            .transpose()?;
+        Ok(SnippetSyncState { snippet_id, pending_cleanup })
+    }
+
+    pub async fn clear_snippet_pending_cleanup_if_matches(
+        &self,
+        provider: &str,
+        expected: &SnippetPendingCleanup,
+    ) -> Result<bool, String> {
+        let mut settings = self.load_app_settings_json().await?;
+        let mut pending_cleanups = settings
+            .remove(SNIPPET_PENDING_CLEANUPS_KEY)
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        let Some(current) = pending_cleanups
+            .get(provider)
+            .cloned()
+            .map(serde_json::from_value::<SnippetPendingCleanup>)
+            .transpose()
+            .map_err(|e| format!("invalid pending snippet cleanup state: {e}"))?
+            .map(validate_snippet_pending_cleanup)
+            .transpose()?
+        else {
+            settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+            return Ok(false);
+        };
+        if current != *expected {
+            settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+            return Ok(false);
+        }
+        pending_cleanups.remove(provider);
+        settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+        self.save_app_settings_json(&settings).await?;
+        Ok(true)
     }
 
     pub async fn save_max_agent_turns(&self, max_agent_turns: u32) -> Result<(), String> {
@@ -5619,6 +5756,30 @@ mod tests {
         storage.save_ai_global_custom_instructions("   \n  \t  ").await.unwrap();
         let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
         assert_eq!(loaded, "");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn pending_snippet_cleanup_survives_restart_and_clears_only_when_matched() {
+        let db = temp_db_path("snippet-cleanup-restart");
+        let storage = Storage::open(&db).await.unwrap();
+        storage.save_snippet_migration_state("github", "replacement-id", "legacy-id", "content-hash").await.unwrap();
+        drop(storage);
+
+        let storage = Storage::open(&db).await.unwrap();
+        let state = storage.load_snippet_sync_state("github").await.unwrap();
+        assert_eq!(state.snippet_id.as_deref(), Some("replacement-id"));
+        let pending = state.pending_cleanup.unwrap();
+        assert_eq!(pending.snippet_id, "legacy-id");
+        assert_eq!(pending.expected_content_hash, "content-hash");
+
+        let mut wrong_pending = pending.clone();
+        wrong_pending.expected_content_hash = "newer-content-hash".to_string();
+        assert!(!storage.clear_snippet_pending_cleanup_if_matches("github", &wrong_pending).await.unwrap());
+        assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_some());
+        assert!(storage.clear_snippet_pending_cleanup_if_matches("github", &pending).await.unwrap());
+        assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_none());
 
         std::fs::remove_file(&db).ok();
     }

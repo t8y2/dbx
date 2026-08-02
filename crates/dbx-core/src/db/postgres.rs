@@ -8,13 +8,16 @@ use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
-use std::collections::BTreeSet;
+use sqlparser::ast::Statement;
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::types::{FromSql, Kind, Type};
@@ -3143,8 +3146,104 @@ pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearch
     format!("SET{scope} search_path TO {}{suffix}", pg_quote_ident(schema))
 }
 
+fn postgres_set_single_schema_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
+    let scope = if context == PostgresSearchPathContext::LocalTransaction { " LOCAL" } else { "" };
+    format!("SET{scope} search_path TO {}", pg_quote_ident(schema))
+}
+
+fn postgres_requires_single_schema_search_path(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("does not support search_path with multiple names")
+}
+
+fn postgres_single_schema_clients() -> &'static Mutex<HashMap<usize, Weak<deadpool_postgres::StatementCache>>> {
+    static CLIENTS: OnceLock<Mutex<HashMap<usize, Weak<deadpool_postgres::StatementCache>>>> = OnceLock::new();
+    CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn postgres_client_uses_single_schema_search_path(client: &deadpool_postgres::Client) -> bool {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut clients = postgres_single_schema_clients().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match clients.get(&key).and_then(Weak::upgrade) {
+        Some(cached) if Arc::ptr_eq(&cached, statement_cache) => true,
+        _ => {
+            clients.remove(&key);
+            false
+        }
+    }
+}
+
+fn mark_postgres_client_single_schema_search_path(client: &deadpool_postgres::Client) {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut clients = postgres_single_schema_clients().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    clients.retain(|_, cached| cached.strong_count() > 0);
+    clients.insert(key, Arc::downgrade(statement_cache));
+}
+
+pub(crate) async fn set_postgres_search_path(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    context: PostgresSearchPathContext,
+    timeout_duration: Duration,
+) -> Result<u64, String> {
+    if postgres_client_uses_single_schema_search_path(client) {
+        return execute_postgres_infra_statement(
+            client,
+            &postgres_set_single_schema_search_path_sql(schema, context),
+            timeout_duration,
+            "schema.set",
+        )
+        .await;
+    }
+
+    let primary_sql = postgres_set_search_path_sql(schema, context);
+    match execute_postgres_infra_statement(client, &primary_sql, timeout_duration, "schema.set").await {
+        Ok(affected) => Ok(affected),
+        Err(primary_error) if postgres_requires_single_schema_search_path(&primary_error) => {
+            mark_postgres_client_single_schema_search_path(client);
+            log::info!("[postgres][schema.set:single-schema-fallback] schema={schema}");
+            execute_postgres_infra_statement(
+                client,
+                &postgres_set_single_schema_search_path_sql(schema, context),
+                timeout_duration,
+                "schema.set",
+            )
+            .await
+            .map_err(|fallback_error| {
+                format!("{primary_error}; single-schema search_path fallback failed: {fallback_error}")
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
+}
+
+/// Returns whether PostgreSQL should execute this statement through the row
+/// retrieval path. DML without `RETURNING` needs `execute` for its command
+/// tag/affected-row count, while DML with `RETURNING` produces a result set.
+pub(crate) fn postgres_statement_returns_rows(sql: &str) -> bool {
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+        return true;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
+        return false;
+    };
+    let [statement] = statements.as_slice() else {
+        return false;
+    };
+
+    match statement {
+        Statement::Insert(insert) => insert.returning.is_some(),
+        Statement::Update(update) => update.returning.is_some(),
+        Statement::Delete(delete) => delete.returning.is_some(),
+        Statement::Merge(merge) => merge.output.is_some(),
+        _ => false,
+    }
 }
 
 pub async fn execute_query(pool: &Pool, sql: &str) -> Result<QueryResult, String> {
@@ -3159,7 +3258,7 @@ pub async fn execute_query_with_max_rows(
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if postgres_statement_returns_rows(sql) {
         let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
         execute_select_query(&client, sql, start, row_limit).await
     } else {
@@ -3227,13 +3326,7 @@ pub async fn stream_select_query_with_cancel(
     if let Some(schema) = schema.filter(|_| schema_was_set) {
         // Match normal query execution: export may reference unqualified names
         // in the active schema, so the streaming path must use the same search_path.
-        execute_postgres_infra_statement(
-            &client,
-            &postgres_set_search_path_sql(schema, PostgresSearchPathContext::Query),
-            budget.recycle_timeout,
-            "schema.set",
-        )
-        .await?;
+        set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
     }
 
     let setup_transaction_started = !setup_sql.is_empty();
@@ -3344,13 +3437,7 @@ pub async fn execute_query_with_schema_and_max_rows(
     }
 
     let set_schema_start = Instant::now();
-    execute_postgres_infra_statement(
-        &client,
-        &postgres_set_search_path_sql(schema, PostgresSearchPathContext::Query),
-        super::connection_timeout(),
-        "schema.set",
-    )
-    .await?;
+    set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, super::connection_timeout()).await?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),
@@ -3410,13 +3497,7 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     }
 
     let set_schema_start = Instant::now();
-    execute_postgres_infra_statement(
-        &client,
-        &postgres_set_search_path_sql(schema, PostgresSearchPathContext::Query),
-        budget.recycle_timeout,
-        "schema.set",
-    )
-    .await?;
+    set_postgres_search_path(&client, schema, PostgresSearchPathContext::Query, budget.recycle_timeout).await?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),
@@ -3675,7 +3756,7 @@ async fn execute_query_with_max_rows_inner(
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if postgres_statement_returns_rows(sql) {
         if prefer_text_protocol {
             execute_select_text(client, sql, start, row_limit, None).await
         } else {
@@ -3896,6 +3977,30 @@ pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result
             on_delete: postgres_foreign_key_action(pg_row_try_string(row, 6)),
         })
         .collect())
+}
+
+fn postgres_table_dependencies_sql() -> &'static str {
+    "SELECT DISTINCT child.relname AS table_name, parent.relname AS ref_table \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class child ON child.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace child_schema ON child_schema.oid = child.relnamespace \
+     JOIN pg_catalog.pg_class parent ON parent.oid = con.confrelid \
+     JOIN pg_catalog.pg_namespace parent_schema ON parent_schema.oid = parent.relnamespace \
+     WHERE con.contype = 'f' \
+       AND child_schema.nspname = $1 \
+       AND parent_schema.nspname = $1 \
+     ORDER BY child.relname, parent.relname"
+}
+
+/// Fetch all same-schema table dependencies in one round trip. Whole-database
+/// exports use this instead of issuing one information_schema query per table.
+pub async fn list_table_dependencies(pool: &Pool, schema: &str) -> Result<Vec<(String, String)>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_table_dependencies_sql(), &[&schema])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows.iter().map(|row| (pg_row_try_string(row, 0), pg_row_try_string(row, 1))).collect())
 }
 
 pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
@@ -4598,6 +4703,56 @@ mod tests {
     }
 
     #[test]
+    fn postgres_single_schema_search_path_preserves_scope_and_quoting() {
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql("application", PostgresSearchPathContext::Query),
+            "SET search_path TO \"application\""
+        );
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql("application", PostgresSearchPathContext::Transaction),
+            "SET search_path TO \"application\""
+        );
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql(
+                "tenant\"; RESET search_path; --",
+                PostgresSearchPathContext::LocalTransaction,
+            ),
+            "SET LOCAL search_path TO \"tenant\"\"; RESET search_path; --\""
+        );
+    }
+
+    #[test]
+    fn postgres_single_schema_fallback_only_matches_compatible_server_error() {
+        assert!(postgres_requires_single_schema_search_path(
+            "ERROR: Hologres does not support search_path with multiple names: admaterial."
+        ));
+        assert!(!postgres_requires_single_schema_search_path("ERROR: permission denied for schema admaterial"));
+    }
+
+    #[test]
+    fn postgres_statement_returns_rows_for_returning_dml_only() {
+        for sql in [
+            "INSERT INTO users (id) VALUES (1) RETURNING id",
+            "UPDATE users SET name = 'Ada' RETURNING id, name",
+            "DELETE FROM users WHERE id = 1 RETURNING id",
+            "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
+            "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
+        ] {
+            assert!(postgres_statement_returns_rows(sql), "expected result rows for: {sql}");
+        }
+
+        for sql in [
+            "INSERT INTO users (id) VALUES (1)",
+            "UPDATE users SET name = 'Ada'",
+            "DELETE FROM users WHERE id = 1",
+            "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name",
+            "INSERT INTO users (note) VALUES ('RETURNING is text')",
+        ] {
+            assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
+        }
+    }
+
+    #[test]
     fn database_list_does_not_collect_storage_usage() {
         assert!(list_databases_sql().contains("pg_database"));
         assert!(!list_databases_sql().contains("pg_database_size"));
@@ -4763,6 +4918,58 @@ mod tests {
                 Err(error) => panic!("docker postgres did not become ready: {error}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_dml_returning_preserves_result_rows() {
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+
+        execute_query(&pool, "CREATE TABLE dml_returning (id integer PRIMARY KEY, name text NOT NULL)")
+            .await
+            .expect("create table");
+
+        let inserted = execute_query(&pool, "INSERT INTO dml_returning VALUES (1, 'alice'), (2, 'bob')")
+            .await
+            .expect("insert rows");
+        let updated = execute_query(&pool, "UPDATE dml_returning SET name = 'bob-updated' WHERE id = 2")
+            .await
+            .expect("update rows");
+        let deleted = execute_query(&pool, "DELETE FROM dml_returning WHERE id = 1").await.expect("delete row");
+        let unmatched =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999").await.expect("update no rows");
+
+        assert_eq!(inserted.affected_rows, 2);
+        assert_eq!(updated.affected_rows, 1);
+        assert_eq!(deleted.affected_rows, 1);
+        assert_eq!(unmatched.affected_rows, 0);
+
+        let insert_returning = execute_query(&pool, "INSERT INTO dml_returning VALUES (3, 'carol') RETURNING id, name")
+            .await
+            .expect("insert returning");
+        let update_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = 'carol-updated' WHERE id = 3 RETURNING id, name")
+                .await
+                .expect("update returning");
+        let delete_returning = execute_query(&pool, "DELETE FROM dml_returning WHERE id = 3 RETURNING id, name")
+            .await
+            .expect("delete returning");
+        let empty_returning =
+            execute_query(&pool, "UPDATE dml_returning SET name = name WHERE id = 999 RETURNING id, name")
+                .await
+                .expect("empty returning");
+
+        for result in [&insert_returning, &update_returning, &delete_returning] {
+            assert_eq!(result.columns, vec!["id", "name"]);
+            assert_eq!(result.rows.len(), 1);
+        }
+        assert_eq!(insert_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol")]);
+        assert_eq!(update_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol-updated")]);
+        assert_eq!(delete_returning.rows[0], vec![serde_json::json!(3), serde_json::json!("carol-updated")]);
+        assert_eq!(empty_returning.columns, vec!["id", "name"]);
+        assert!(empty_returning.rows.is_empty());
     }
 
     async fn assert_postgres_18(pool: &Pool) {
@@ -5068,6 +5275,17 @@ mod tests {
         assert!(sql.contains("rc.update_rule AS on_update"));
         assert!(sql.contains("rc.delete_rule AS on_delete"));
         assert!(sql.contains("information_schema.referential_constraints rc"));
+    }
+
+    #[test]
+    fn postgres_table_dependencies_sql_batches_schema_foreign_keys() {
+        let sql = postgres_table_dependencies_sql();
+
+        assert!(sql.contains("pg_catalog.pg_constraint"));
+        assert!(sql.contains("con.contype = 'f'"));
+        assert!(sql.contains("child_schema.nspname = $1"));
+        assert!(sql.contains("parent_schema.nspname = $1"));
+        assert!(!sql.contains("information_schema"));
     }
 
     #[test]

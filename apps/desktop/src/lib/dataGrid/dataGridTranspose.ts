@@ -189,8 +189,17 @@ export function nextTransposeState(showTranspose: boolean, transposeRowIndex: nu
   return { showTranspose: true, transposeRowIndex: requestedRowIndex };
 }
 
-export function restoreDataGridAfterTranspose(options: { scroller: Pick<HTMLElement, "scrollLeft" | "scrollWidth" | "clientWidth"> | null; scrollLeftBeforeTranspose: number; attachCanvasResizeObserver: () => void; refreshGridScrollerMetrics: () => void }) {
+export function restoreDataGridAfterTranspose(options: {
+  scroller: Pick<HTMLElement, "scrollTop" | "scrollLeft" | "scrollHeight" | "scrollWidth" | "clientHeight" | "clientWidth"> | null;
+  scrollLeftBeforeTranspose: number;
+  scrollTopBeforeTranspose?: number;
+  attachCanvasResizeObserver: () => void;
+  refreshGridScrollerMetrics: () => void;
+}) {
   if (!options.scroller) return;
+  if (options.scrollTopBeforeTranspose !== undefined) {
+    options.scroller.scrollTop = Math.max(0, Math.min(Math.max(0, options.scroller.scrollHeight - options.scroller.clientHeight), options.scrollTopBeforeTranspose));
+  }
   options.scroller.scrollLeft = restoredDataGridScrollLeft(options.scrollLeftBeforeTranspose, options.scroller.scrollWidth, options.scroller.clientWidth);
   options.attachCanvasResizeObserver();
   options.refreshGridScrollerMetrics();

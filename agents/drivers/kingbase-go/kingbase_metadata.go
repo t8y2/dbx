@@ -547,9 +547,16 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 }
 
 func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeFullDataType bool) ([]columnInfo, error) {
-	fullDataTypeExpression := "c.column_type"
+	fullDataTypeExpression := `CASE
+	WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED')
+		AND UPPER(COALESCE(NULLIF(TRIM(c.column_type), ''), 'USER-DEFINED')) IN ('USER-DEFINED', 'USER_DEFINED')
+	THEN c.udt_name
+	ELSE c.column_type
+	END`
 	if !includeFullDataType {
-		fullDataTypeExpression = "NULL AS column_type"
+		fullDataTypeExpression = `CASE
+		WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED') THEN c.udt_name
+		END AS column_type`
 	}
 	query := fmt.Sprintf(`SELECT c.column_name, c.data_type, %s, c.is_nullable, c.column_default,
 	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use dbx_core::{
@@ -7,7 +11,7 @@ use dbx_core::{
     connection::AppState,
     db::{redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
-    storage::{McpGlobalPolicy, McpGlobalPolicyState, Storage},
+    storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -291,17 +295,31 @@ impl LocalBackend {
     pub async fn open(path: &Path) -> Result<Self, String> {
         let storage = Storage::open(path).await?;
         let configs = storage.load_connections().await?;
-        let state = Arc::new(AppState::new(storage));
+        let desktop_settings = storage.load_desktop_settings().await.unwrap_or_default();
+        let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let plugin_dir = local_plugin_dir(&desktop_settings, &data_dir);
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, plugin_dir));
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
         *state.configs.write().await = config_map;
-        let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
         Ok(Self { state, data_dir })
     }
 
     pub fn state(&self) -> &Arc<AppState> {
         &self.state
     }
+}
+
+fn local_plugin_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
+    let legacy_driver_base =
+        settings.driver_store_dir.as_ref().filter(|value| !value.trim().is_empty()).map(PathBuf::from);
+    settings
+        .plugin_store_dir
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| legacy_driver_base.map(|base| base.join("plugins")))
+        .unwrap_or_else(|| data_dir.join("plugins"))
 }
 
 #[async_trait]
@@ -322,9 +340,19 @@ impl DbxBackend for LocalBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
+        let schema = arguments.get("schema").and_then(|value| value.as_str()).map(ToOwned::to_owned);
         let call =
             ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
-        agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions).await
+        agent_tools::execute_tool(
+            &call,
+            &self.state,
+            &connection.id,
+            database,
+            schema.as_deref(),
+            &connection.db_type,
+            permissions,
+        )
+        .await
     }
 
     async fn execute_query(
@@ -1504,5 +1532,48 @@ mod tests {
         assert_eq!(parse_database_type("Postgres").unwrap(), DatabaseType::Postgres);
         assert_eq!(parse_database_type("mongodb").unwrap(), DatabaseType::MongoDb);
         assert!(parse_database_type("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn local_backend_uses_desktop_plugin_directory() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let jdbc_plugin_dir = data_dir.path().join("plugins").join("jdbc");
+        std::fs::create_dir_all(&jdbc_plugin_dir).unwrap();
+        std::fs::write(
+            jdbc_plugin_dir.join("manifest.json"),
+            r#"{
+                "id": "jdbc",
+                "name": "DBX JDBC Plugin",
+                "drivers": [{
+                    "id": "jdbc",
+                    "label": "JDBC",
+                    "kind": "external",
+                    "database_type": "jdbc"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let storage = Storage::open(&database_path).await.unwrap();
+        drop(storage);
+
+        let backend = LocalBackend::open(&database_path).await.unwrap();
+
+        assert_eq!(backend.state().plugins.root_dir(), data_dir.path().join("plugins"));
+        assert!(backend.state().plugins.find_driver("jdbc").unwrap().is_some());
+    }
+
+    #[test]
+    fn local_plugin_directory_honors_desktop_storage_settings() {
+        let data_dir = Path::new("C:/Users/user/AppData/Roaming/com.dbx.app");
+        let explicit = DesktopSettings {
+            plugin_store_dir: Some("D:/DBX/plugins-custom".to_string()),
+            ..DesktopSettings::default()
+        };
+        let legacy =
+            DesktopSettings { driver_store_dir: Some("D:/DBX/drivers".to_string()), ..DesktopSettings::default() };
+
+        assert_eq!(local_plugin_dir(&explicit, data_dir), PathBuf::from("D:/DBX/plugins-custom"));
+        assert_eq!(local_plugin_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/plugins"));
     }
 }

@@ -1,3 +1,4 @@
+use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::connection::{
     connection_url_for_endpoint, database_connection_config, gaussdb_uses_m_jdbc_driver, task_client_session_id,
     AppState, MysqlMode, PoolKind,
@@ -793,8 +794,9 @@ async fn list_schemas_once(
                                 .await
                                 .map(|schemas| filter_visible_schema_names(schemas, visible_schema_filter.as_deref()))
                                 .map_err(|fallback_error| {
-                                    format!(
-                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    crate::db::agent_driver::append_legacy_error_context(
+                                        &agent_error,
+                                        &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
                                 });
                         }
@@ -2043,7 +2045,10 @@ async fn list_tables_once(
                                 db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset).await
                             };
                             return result.map_err(|fallback_error| {
-                                format!("{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}")
+                                crate::db::agent_driver::append_legacy_error_context(
+                                    &agent_error,
+                                    &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
+                                )
                             });
                         }
                     }
@@ -3052,7 +3057,10 @@ for line in sys.stdin:
 
         let error = super::get_table_ddl_core(&state, "conn", "analytics", "APP", "EVENTS", None).await.unwrap_err();
 
-        assert_eq!(crate::db::agent_driver::agent_rpc_error_category(&error).as_deref(), Some("timeout"));
+        assert_eq!(
+            crate::db::agent_driver::try_agent_error_from_legacy(&error).and_then(|error| error.category()),
+            Some(crate::db::agent_driver::AgentErrorCategory::Timeout)
+        );
         assert_eq!(std::fs::read_to_string(call_count_path).unwrap(), "1");
         assert!(!state.connections.read().await.contains_key(pool_key));
         runtime.kill();
@@ -4686,8 +4694,9 @@ async fn list_objects_once(
                         {
                             return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list).map_err(
                                 |fallback_error| {
-                                    format!(
-                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    crate::db::agent_driver::append_legacy_error_context(
+                                        &agent_error,
+                                        &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
                                 },
                             );
@@ -4819,8 +4828,9 @@ async fn list_completion_objects_once(
                                 .await
                                 .map(filter_completion_objects)
                                 .map_err(|fallback_error| {
-                                    format!(
-                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    crate::db::agent_driver::append_legacy_error_context(
+                                        &agent_error,
+                                        &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
                                 });
                         }
@@ -4924,19 +4934,16 @@ where
     let mut retried = false;
     loop {
         let result = operation().await;
-        let action = result
-            .as_ref()
-            .err()
-            .map(|error| metadata_error_action(db_type, error, retried))
-            .unwrap_or(MetadataErrorAction::Return);
-        match action {
+        let recovery =
+            result.as_ref().err().map(|error| metadata_recovery(db_type, error, retried)).unwrap_or_default();
+        match recovery.action {
             MetadataErrorAction::ReplaceRuntime => {
                 state
-                    .detach_metadata_pool_after_error(
+                    .detach_metadata_pool_after_recovery(
                         connection_id,
                         database,
                         client_session_id,
-                        result.as_ref().err().expect("replace-runtime action requires an error"),
+                        recovery.agent_session_id.as_deref(),
                         true,
                     )
                     .await;
@@ -4944,11 +4951,11 @@ where
             }
             MetadataErrorAction::Discard => {
                 state
-                    .detach_metadata_pool_after_error(
+                    .detach_metadata_pool_after_recovery(
                         connection_id,
                         database,
                         client_session_id,
-                        result.as_ref().err().expect("discard action requires an error"),
+                        recovery.agent_session_id.as_deref(),
                         false,
                     )
                     .await;
@@ -4959,25 +4966,26 @@ where
                 if let Err(error) =
                     state.reconnect_metadata_pool_for_session(connection_id, database, client_session_id).await
                 {
-                    match metadata_error_action(db_type, &error, true) {
+                    let reconnect_recovery = metadata_recovery(db_type, &error, true);
+                    match reconnect_recovery.action {
                         MetadataErrorAction::ReplaceRuntime => {
                             state
-                                .detach_metadata_pool_after_error(
+                                .detach_metadata_pool_after_recovery(
                                     connection_id,
                                     database,
                                     client_session_id,
-                                    &error,
+                                    reconnect_recovery.agent_session_id.as_deref(),
                                     true,
                                 )
                                 .await;
                         }
                         MetadataErrorAction::Retry | MetadataErrorAction::Discard => {
                             state
-                                .detach_metadata_pool_after_error(
+                                .detach_metadata_pool_after_recovery(
                                     connection_id,
                                     database,
                                     client_session_id,
-                                    &error,
+                                    reconnect_recovery.agent_session_id.as_deref(),
                                     false,
                                 )
                                 .await;
@@ -4992,26 +5000,48 @@ where
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum MetadataErrorAction {
     Retry,
     Discard,
     ReplaceRuntime,
+    #[default]
     Return,
 }
 
+#[derive(Debug, Default)]
+struct MetadataRecovery {
+    action: MetadataErrorAction,
+    agent_session_id: Option<String>,
+}
+
+#[cfg(test)]
 fn metadata_error_action(db_type: Option<DatabaseType>, error: &str, retried: bool) -> MetadataErrorAction {
-    if crate::db::agent_driver::agent_session_disposition(error)
-        == Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
-    {
-        MetadataErrorAction::ReplaceRuntime
-    } else if !retried && is_retryable_metadata_error(error) {
+    metadata_recovery(db_type, error, retried).action
+}
+
+fn metadata_recovery(db_type: Option<DatabaseType>, error: &str, retried: bool) -> MetadataRecovery {
+    if db_type.is_some_and(|db_type| crate::database_capabilities::is_agent_type(&db_type)) {
+        if let Some(error) = crate::db::agent_driver::try_agent_error_from_legacy(error) {
+            let agent_session_id = error.session_id().map(str::to_string);
+            let action = match RecoveryPolicy::decide(&error, RecoveryScope::ReadOnlyMetadata { retried }) {
+                RecoveryDecision::RetryReadOnlyMetadata => MetadataErrorAction::Retry,
+                RecoveryDecision::QuarantineSession => MetadataErrorAction::Discard,
+                RecoveryDecision::ReplaceRuntime => MetadataErrorAction::ReplaceRuntime,
+                RecoveryDecision::KeepSession => MetadataErrorAction::Return,
+            };
+            return MetadataRecovery { action, agent_session_id };
+        }
+    }
+
+    let action = if !retried && is_retryable_metadata_error(error) {
         MetadataErrorAction::Retry
     } else if should_discard_pool_after_error(db_type, error) {
         MetadataErrorAction::Discard
     } else {
         MetadataErrorAction::Return
-    }
+    };
+    MetadataRecovery { action, agent_session_id: None }
 }
 
 #[cfg(test)]
@@ -5025,11 +5055,9 @@ async fn replace_metadata_runtime(
 }
 
 fn is_retryable_metadata_error(error: &str) -> bool {
-    let category = crate::db::agent_driver::agent_rpc_error_category(error);
-    if let Some(category) = category {
-        return category == "connection"
-            && crate::db::agent_driver::agent_session_disposition(error)
-                == Some(crate::db::agent_driver::AgentSessionDisposition::Quarantine);
+    if let Some(error) = crate::db::agent_driver::try_agent_error_from_legacy(error) {
+        return RecoveryPolicy::decide(&error, RecoveryScope::ReadOnlyMetadata { retried: false })
+            == RecoveryDecision::RetryReadOnlyMetadata;
     }
     error == "Pool not found" || crate::query::is_connection_error(error)
 }
@@ -5294,8 +5322,9 @@ async fn get_columns_core_for_session_inner(
                                     .await
                                     .map(deduplicate_column_infos)
                                     .map_err(|fallback_error| {
-                                        format!(
-                                            "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                        crate::db::agent_driver::append_legacy_error_context(
+                                            &agent_error,
+                                            &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                         )
                                     });
                             }

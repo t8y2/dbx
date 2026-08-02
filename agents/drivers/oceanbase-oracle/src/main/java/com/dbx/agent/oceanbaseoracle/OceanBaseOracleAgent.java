@@ -35,6 +35,7 @@ import java.util.stream.Collectors;
 
 public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private static final long MICROS_PER_SECOND = 1_000_000L;
+    private static final long UNLIMITED_QUERY_TIMEOUT_MICROS = 3_216_672_000_000_000L;
     private static final String COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion";
     private static final String DEFAULT_COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion=8";
     private static final Set<String> SYSTEM_SCHEMAS = Set.of(
@@ -120,7 +121,10 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         if (timeoutSecs < 0) {
             throw new IllegalArgumentException("Query timeout cannot be negative: " + timeoutSecs);
         }
-        return "ALTER SESSION SET ob_query_timeout = " + timeoutSecs * MICROS_PER_SECOND;
+        long timeoutMicros = timeoutSecs == 0
+            ? UNLIMITED_QUERY_TIMEOUT_MICROS
+            : timeoutSecs * MICROS_PER_SECOND;
+        return "ALTER SESSION SET ob_query_timeout = " + timeoutMicros;
     }
 
     private static boolean isReadOnlyTransactionError(SQLException error) {

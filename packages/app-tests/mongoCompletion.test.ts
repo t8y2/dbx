@@ -25,6 +25,14 @@ test("suggests MongoDB root snippets and methods", () => {
   );
 });
 
+test("continues getCollection snippets with collection-name completion", () => {
+  const rootItem = buildMongoCompletionItems("", 0).find((item) => item.label === "db.getCollection");
+  const methodItem = buildMongoCompletionItems("db.getC", "db.getC".length).find((item) => item.label === "getCollection");
+
+  assert.equal(rootItem?.apply, 'db.getCollection("${}")');
+  assert.equal(methodItem?.apply, 'getCollection("${}")');
+});
+
 test("suggests collections after db dot", () => {
   const items = buildMongoCompletionItems("db.us", "db.us".length, { collections });
 
@@ -59,11 +67,43 @@ test("suggests dotted names inside getCollection", () => {
   const item = buildMongoCompletionItems(text, text.length, { collections }).find((candidate) => candidate.label === "audit.logs");
 
   assert.equal(item?.apply, '"audit.logs"');
+  assert.equal(item?.filterText, '"audit.logs"');
+});
+
+test("replaces an existing closing quote when completing an emptied collection name", () => {
+  const text = 'db.getCollection("")';
+  const cursor = text.indexOf('""') + 1;
+  const context = getMongoCompletionContext(text, cursor);
+  const item = buildMongoCompletionItems(text, cursor, { collections }).find((candidate) => candidate.label === "users");
+
+  assert.equal(context.mode, "collectionRef");
+  assert.equal(context.from, text.indexOf('""'));
+  assert.equal(context.replaceClosingQuote, '"');
+  assert.equal(item?.replaceClosingQuote, '"');
+  assert.equal(item?.filterText, '"users"');
+  assert.equal(text.slice(0, context.from) + item?.apply + text.slice(cursor + 1), 'db.getCollection("users")');
+  assert.equal(shouldAutoOpenMongoCompletion(text, cursor), true);
 });
 
 test("suggests collection methods after direct and getCollection references", () => {
   assert.ok(labels("db.users.").includes("find"));
   assert.ok(labels('db.getCollection("users").ag').includes("aggregate"));
+});
+
+test("prioritizes common read helpers and keeps destructive helpers last", () => {
+  const methodLabels = labels("db.users.");
+  const getCollectionMethodLabels = labels('db.getCollection("order-events").');
+
+  assert.deepEqual(labels("").slice(0, 5), ["db.collection.find", "db.collection.aggregate", "db.getCollection", "use", "db.version"]);
+  assert.deepEqual(methodLabels.slice(0, 5), ["find", "findOne", "aggregate", "countDocuments", "distinct"]);
+  assert.deepEqual(getCollectionMethodLabels.slice(0, 5), ["find", "findOne", "aggregate", "countDocuments", "distinct"]);
+  assert.deepEqual(methodLabels.slice(-3), ["dropIndex", "dropIndexes", "drop"]);
+  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count"]);
+});
+
+test("keeps dotted collection names ahead of methods until the collection is resolved", () => {
+  assert.equal(labels("db.audit.", { collections })[0], "audit.logs");
+  assert.equal(labels("db.users.", { collections })[0], "find");
 });
 
 test("suggests collection stats methods after a collection reference", () => {
@@ -83,7 +123,7 @@ test("suggests cursor methods after find result chains", () => {
 
   assert.deepEqual(
     allItems.map((item) => item.label),
-    ["limit", "count", "skip", "sort"],
+    ["limit", "sort", "skip", "count"],
   );
   assert.deepEqual(
     prefixedItems.map((item) => item.label),
@@ -91,7 +131,7 @@ test("suggests cursor methods after find result chains", () => {
   );
   assert.deepEqual(
     formattedChainItems.map((item) => item.label),
-    ["limit", "count", "skip", "sort"],
+    ["limit", "sort", "skip", "count"],
   );
   assert.deepEqual(
     formattedPrefixedItems.map((item) => item.label),
@@ -241,6 +281,32 @@ test("suggests query operators against a field inside a $match stage", () => {
 
   assert.ok(items.includes("$gte"));
   assert.equal(items.includes("$group"), false, "a stage is not valid inside a $match constraint");
+});
+
+test("filters and replaces quoted fields, field references and operators", () => {
+  const quotedFieldText = 'db.users.find({ "" })';
+  const quotedFieldCursor = quotedFieldText.indexOf('""') + 1;
+  const quotedField = buildMongoCompletionItems(quotedFieldText, quotedFieldCursor, { fields }).find((item) => item.label === "name");
+  assert.equal(quotedField?.apply, '"name": ');
+  assert.equal(quotedField?.filterText, '"name": ');
+  assert.equal(quotedField?.replaceClosingQuote, '"');
+  assert.equal(quotedFieldText.slice(0, getMongoCompletionContext(quotedFieldText, quotedFieldCursor).from) + quotedField?.apply + quotedFieldText.slice(quotedFieldCursor + 1), 'db.users.find({ "name":  })');
+
+  const quotedRefText = 'db.users.aggregate([{ $group: { _id: "" } }])';
+  const quotedRefCursor = quotedRefText.indexOf('""') + 1;
+  const quotedRef = buildMongoCompletionItems(quotedRefText, quotedRefCursor, { fields }).find((item) => item.label === "$name");
+  assert.equal(quotedRef?.apply, '"$name"');
+  assert.equal(quotedRef?.filterText, '"$name"');
+  assert.equal(quotedRef?.replaceClosingQuote, '"');
+  assert.equal(quotedRefText.slice(0, getMongoCompletionContext(quotedRefText, quotedRefCursor).from) + quotedRef?.apply + quotedRefText.slice(quotedRefCursor + 1), 'db.users.aggregate([{ $group: { _id: "$name" } }])');
+
+  const quotedOperatorText = 'db.users.find({ age: { "" } })';
+  const quotedOperatorCursor = quotedOperatorText.indexOf('""') + 1;
+  const quotedOperator = buildMongoCompletionItems(quotedOperatorText, quotedOperatorCursor).find((item) => item.label === "$gte");
+  assert.equal(quotedOperator?.apply, '"$gte": ${}');
+  assert.equal(quotedOperator?.filterText, '"$gte": ${}');
+  assert.equal(quotedOperator?.replaceClosingQuote, '"');
+  assert.equal(quotedOperatorText.slice(0, getMongoCompletionContext(quotedOperatorText, quotedOperatorCursor).from) + quotedOperator?.apply + quotedOperatorText.slice(quotedOperatorCursor + 1), 'db.users.find({ age: { "$gte": ${} } })');
 });
 
 test("suggests accumulators, not stages, for a $group output field", () => {

@@ -108,7 +108,7 @@ export function useSidebarDataOpenRuntime() {
           });
           return;
         }
-        const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, tableSchema);
+        const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, { schema: tableSchema });
         queryStore.setTableMeta(targetTabId, nextTableMeta);
         openDataLog("info", "metadata:done", {
           traceId,
@@ -223,7 +223,7 @@ export function useSidebarDataOpenRuntime() {
     // 空列的共享缓存条目不算暖缓存：columns=[] 无法区分"表确实无列"与
     // 占位/异常态，按暖缓存跳过 pending 与刷新会让整行 WHERE 保存路径
     // 在行标识未知时重新可用（#3727 审查意见）
-    const cachedTableMeta = sharedCachedTableMeta?.metadata.columns.length ? tableMetadataToDataTabMeta(sharedCachedTableMeta.metadata, tableSchema) : tabCachedTableMeta;
+    const cachedTableMeta = sharedCachedTableMeta?.metadata.columns.length ? tableMetadataToDataTabMeta(sharedCachedTableMeta.metadata, { schema: tableSchema }) : tabCachedTableMeta;
     const cachedTableMetaAgeMs = sharedCachedTableMeta?.metadata.columns.length ? sharedCachedTableMeta.ageMs : existingTableMetaAgeMs;
     const cachedTableMetaSource = sharedCachedTableMeta?.metadata.columns.length ? "shared" : tabCachedTableMeta ? "tab" : undefined;
     queryStore.setTableMeta(

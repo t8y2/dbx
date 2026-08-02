@@ -1,13 +1,13 @@
 {
   "repository": "t8y2/dbx",
-  "generatedAt": "2026-07-31T18:32:24.162Z",
-  "stars": 12837,
+  "generatedAt": "2026-08-01T18:21:38.159Z",
+  "stars": 12909,
   "contributors": [
     {
       "login": "t8y2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/77960507?v=4",
       "profileUrl": "https://github.com/t8y2",
-      "commits": 2699,
+      "commits": 2729,
       "mergedPullRequests": 15,
       "firstContributionAt": "2026-04-30T08:14:51Z",
       "latestContributionAt": "2026-07-30T13:10:01Z"
@@ -994,6 +994,15 @@
       "latestContributionAt": "2026-07-08T10:53:49Z"
     },
     {
+      "login": "ekesaiting",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36790768?v=4",
+      "profileUrl": "https://github.com/ekesaiting",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-07-31T16:18:14Z",
+      "latestContributionAt": "2026-07-31T18:19:11Z"
+    },
+    {
       "login": "eninem123",
       "avatarUrl": "https://avatars.githubusercontent.com/u/35692409?v=4",
       "profileUrl": "https://github.com/eninem123",
@@ -1523,15 +1532,6 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-06-23T05:56:48Z",
       "latestContributionAt": "2026-06-23T17:44:46Z"
-    },
-    {
-      "login": "ekesaiting",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/36790768?v=4",
-      "profileUrl": "https://github.com/ekesaiting",
-      "commits": 0,
-      "mergedPullRequests": 1,
-      "firstContributionAt": "2026-07-31T16:18:14Z",
-      "latestContributionAt": "2026-07-31T18:19:11Z"
     }
   ]
 }

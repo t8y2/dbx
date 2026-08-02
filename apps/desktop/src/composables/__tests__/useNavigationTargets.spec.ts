@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   getColumns: vi.fn(),
+  invalidateCompletionTableCache: vi.fn(),
   listIndexes: vi.fn(),
   setTableMeta: vi.fn(),
   updateSql: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock("@/stores/connectionStore", () => ({
     ensureConnected: mocks.ensureConnected,
     connectionIdentifierQuote: () => undefined,
     refreshObjectListTreeNode: vi.fn(),
+    invalidateCompletionTableCache: mocks.invalidateCompletionTableCache,
   }),
 }));
 
@@ -142,9 +144,11 @@ describe("useNavigationTargets openTableTarget", () => {
       connectionId: target.connectionId,
       database: target.database,
       schema: target.schema,
+      catalog: target.catalog,
       tableName: target.tableName,
     });
 
+    expect(mocks.invalidateCompletionTableCache).toHaveBeenCalledWith("connection-1", "app", "users", "public", "catalog-1");
     expect(mocks.getColumns).toHaveBeenCalledTimes(2);
     expect(mocks.tabs.map((tab) => tab.tableMeta?.primaryKeys)).toEqual([["fresh_id"], ["fresh_id"]]);
   });

@@ -27,7 +27,7 @@ import java.util.function.Supplier;
 
 public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private static final String LEGACY_SESSION_ID = "__legacy__";
-    private static final int MAX_SESSIONS = 256;
+    static final int MAX_SESSIONS = 256;
     private static final int MAX_REQUEST_THREADS = 64;
     private static final int MAX_CLEANUP_THREADS = 16;
     private static final long MAINTENANCE_INTERVAL_MILLIS = 60_000L;
@@ -137,7 +137,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         try {
             Object result;
             if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
-                result = sessionHandlerFactory == null ? AgentProtocol.multiSessionHandshakeResult() : customHandshake();
+                result = sessionHandlerFactory == null ? AgentProtocol.multiSessionJdbcHandshakeResult() : customHandshake();
             } else if (AgentProtocol.METHOD_OPEN_SESSION.equals(method)) {
                 result = openSession(requiredSessionId(params), params);
             } else if (AgentProtocol.METHOD_CLOSE_SESSION.equals(method)) {
@@ -171,7 +171,10 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
 
     private Object openSession(String sessionId, JsonObject params) throws Exception {
         if (sessions.size() >= MAX_SESSIONS && !sessions.containsKey(sessionId)) {
-            throw new IllegalStateException("Agent session limit reached: " + MAX_SESSIONS);
+            throw AgentRpcError.backpressure(
+                "connect",
+                new IllegalStateException("Agent session limit reached: " + MAX_SESSIONS)
+            );
         }
         Session session;
         if (sessionHandlerFactory != null) {

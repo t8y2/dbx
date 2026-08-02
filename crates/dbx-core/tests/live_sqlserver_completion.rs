@@ -1361,6 +1361,8 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         target_catalog: None,
         tables: vec![source_table.clone()],
         create_table: true,
+        content: dbx_core::transfer::TransferContent::default(),
+        objects: Vec::new(),
         mode: dbx_core::transfer::TransferMode::Append,
         target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
         ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,

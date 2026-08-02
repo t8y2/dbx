@@ -23,6 +23,7 @@ docs/.next/
 docs/out/
 docs/.source/
 docs/superpowers/
+/docs/aegis/
 src-tauri/*.dylib
 
 # OS files

@@ -1,6 +1,7 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 
 export interface ExplainPlanNode {
   id: string;
@@ -376,7 +377,7 @@ export function flattenExplainPlanNodes(nodes: ExplainPlanNode[]): ExplainPlanNo
 }
 
 export function sqlServerExplainResult(results: QueryResult[]): { result?: QueryResult; error?: string } {
-  const errorResult = results.find((result) => result.columns.length === 1 && result.columns[0] === "Error" && result.rows.length > 0);
+  const errorResult = results.find((result) => isQueryExecutionErrorResult(result) && result.rows.length > 0);
   if (errorResult) return { error: String(errorResult.rows[0]?.[0] ?? "") };
 
   const result = results.find((candidate) => firstSqlServerShowplanXml(candidate) !== undefined);

@@ -1142,6 +1142,16 @@ fn xlsx_string_value(value: &str, empty_string_as_null: bool) -> serde_json::Val
     }
 }
 
+fn xlsx_number_value(value: f64) -> serde_json::Value {
+    if value.is_finite() && value.fract() == 0.0 && value >= i64::MIN as f64 && value < -(i64::MIN as f64) {
+        let integer = value as i64;
+        if integer as f64 == value {
+            return serde_json::Value::Number(integer.into());
+        }
+    }
+    serde_json::Number::from_f64(value).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+}
+
 fn xlsx_cell_value_with_temporal_kind(
     cell: &Data,
     temporal_kind: Option<XlsxTemporalKind>,
@@ -1150,9 +1160,7 @@ fn xlsx_cell_value_with_temporal_kind(
     match cell {
         Data::Empty => serde_json::Value::Null,
         Data::String(s) => xlsx_string_value(s, empty_string_as_null),
-        Data::Float(n) => {
-            serde_json::Number::from_f64(*n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
-        }
+        Data::Float(n) => xlsx_number_value(*n),
         Data::Int(n) => serde_json::Value::Number((*n).into()),
         Data::Bool(v) => serde_json::Value::Bool(*v),
         Data::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
@@ -1224,9 +1232,7 @@ fn xlsx_cell_ref_value_with_temporal_kind(
         DataRef::Empty => serde_json::Value::Null,
         DataRef::String(s) => xlsx_string_value(s, empty_string_as_null),
         DataRef::SharedString(s) => xlsx_string_value(s, empty_string_as_null),
-        DataRef::Float(n) => {
-            serde_json::Number::from_f64(*n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
-        }
+        DataRef::Float(n) => xlsx_number_value(*n),
         DataRef::Int(n) => serde_json::Value::Number((*n).into()),
         DataRef::Bool(v) => serde_json::Value::Bool(*v),
         DataRef::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
@@ -1858,7 +1864,7 @@ fn xlsx_preview_cell_value(
                 let value = ExcelDateTime::new(number, date_type, date_1904);
                 return serde_json::Value::String(xlsx_datetime_label(&value, Some(kind)));
             }
-            serde_json::Number::from_f64(number).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+            xlsx_number_value(number)
         }
     }
 }
@@ -7525,8 +7531,8 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
         assert_eq!(streamed_rows.len(), 2);
-        assert_eq!(streamed_rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
-        assert_eq!(streamed_rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
+        assert_eq!(streamed_rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(streamed_rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7879,8 +7885,8 @@ mod tests {
         assert_eq!(
             streamed_rows,
             vec![
-                vec![serde_json::json!(1.0), serde_json::json!("Ada")],
-                vec![serde_json::json!(2.0), serde_json::json!("Grace")],
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
             ]
         );
         let _ = std::fs::remove_file(path);
@@ -7946,10 +7952,7 @@ mod tests {
                 streamed_rows.extend(rows);
             }
         }
-        assert_eq!(
-            streamed_rows,
-            vec![vec![serde_json::json!(7.0), serde_json::Value::Null, serde_json::json!("Ada")]]
-        );
+        assert_eq!(streamed_rows, vec![vec![serde_json::json!(7), serde_json::Value::Null, serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7975,7 +7978,7 @@ mod tests {
 
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(7.0), serde_json::json!("Ada")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(7), serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -8002,7 +8005,7 @@ mod tests {
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
         assert_eq!(preview.columns, vec!["id", "column_2", "name"]);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(7.0), serde_json::Value::Null, serde_json::json!("Ada")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(7), serde_json::Value::Null, serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -8059,7 +8062,7 @@ mod tests {
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
         assert_eq!(preview.columns, vec!["id", "name"]);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(8.0), serde_json::json!("Grace")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(8), serde_json::json!("Grace")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -8133,7 +8136,7 @@ mod tests {
                 serde_json::json!("12.5%"),
                 serde_json::json!("€1.234,50"),
                 serde_json::json!("1,234.50"),
-                serde_json::json!(10.0),
+                serde_json::json!(10),
             ]
         );
         let _ = std::fs::remove_file(path);
@@ -8190,15 +8193,54 @@ mod tests {
     fn borrowed_excel_cells_preserve_owned_cell_conversion_semantics() {
         let shared_string = DataRef::SharedString("Ada");
         let number = DataRef::Float(42.5);
+        let integer = DataRef::Float(42.0);
         let date = DataRef::DateTime(ExcelDateTime::new(45996.0, calamine::ExcelDateTimeType::DateTime, false));
 
         assert_eq!(xlsx_cell_ref_label_with_temporal_kind(&shared_string, None), "Ada");
         assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&shared_string, None, true), serde_json::json!("Ada"));
         assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&number, None, true), serde_json::json!(42.5));
+        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&integer, None, true), serde_json::json!(42));
         assert_eq!(
             xlsx_cell_ref_value_with_temporal_kind(&date, Some(XlsxTemporalKind::Date), true),
             serde_json::json!("2025-12-05")
         );
+    }
+
+    #[test]
+    fn excel_zero_fraction_numbers_infer_integer_columns() {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-integer-inference-{}.xlsx", uuid::Uuid::new_v4()));
+        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
+            sheet_name: Some("Numbers".to_string()),
+            columns: vec!["id".to_string(), "amount".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!(1.5)],
+                vec![serde_json::json!(2), serde_json::json!(2.25)],
+            ],
+            numeric_column_right_align: false,
+        }])
+        .unwrap();
+        std::fs::write(&path, workbook).unwrap();
+
+        let parsed =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &TableImportParseOptions::default(), 10).unwrap();
+        let mappings = parsed
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = build_import_create_table_plan(&parsed, &mappings, "numbers", "app", &DatabaseType::Mysql).unwrap();
+
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!(1.5)]);
+        assert_eq!(plan.columns[0].data_type, "BIGINT");
+        assert_eq!(plan.columns[1].data_type, "DOUBLE");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -8291,8 +8333,8 @@ mod tests {
 
         assert_eq!(parsed.columns, vec!["id", "name"]);
         assert_eq!(parsed.total_rows, 2);
-        assert_eq!(parsed.rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
-        assert_eq!(parsed.rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
         assert_eq!(preview.rows, parsed.rows);
         let _ = std::fs::remove_file(path);
     }

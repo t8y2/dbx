@@ -31,13 +31,26 @@ const defaultMaxRows = 1000
 const oracleCharsetZHS32GB18030 = 854
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
+const oracleLegacyLOBMaxMajorVersion = 11
+const oracleDatabaseVersionProbeTimeout = 3 * time.Second
+
+const oracleDatabaseVersionSQL = `
+SELECT VERSION
+FROM PRODUCT_COMPONENT_VERSION
+WHERE PRODUCT LIKE 'Oracle Database%'
+  AND ROWNUM = 1`
 
 var (
 	oraclePlSQLBlockStartRegexp          = regexp.MustCompile(`(?is)^\s*(?:DECLARE|BEGIN|CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?))\b`)
 	oraclePlSQLBlockEndRegexp            = regexp.MustCompile(`(?is)\bEND\s*;\s*$`)
 	oracleNamedPlSQLBlockEndRegexp       = regexp.MustCompile(`(?is)\bEND\s+([A-Z0-9_$#]+)\s*;\s*$`)
 	oracleUnsupportedServerCharsetRegexp = regexp.MustCompile(`server use charset with id: ([0-9]+).*not supported by the driver`)
-	oracleStringConverters               = map[int]converters.IStringConverter{
+	oracleVersionNumberRegexp            = regexp.MustCompile(`(?:^|[^0-9])([0-9]+)\.[0-9]+`)
+	oracleDatabaseVersionQueries         = []string{
+		oracleDatabaseVersionSQL,
+		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle Database%' AND ROWNUM = 1`,
+	}
+	oracleStringConverters = map[int]converters.IStringConverter{
 		oracleCharsetZHS32GB18030: oracleGB18030Converter{},
 	}
 )
@@ -793,7 +806,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 
 func (s *server) connect(params connectParams) error {
 	_ = s.disconnect()
-	db, err := openAndPingDB(params, 15*time.Second)
+	db, effectiveParams, err := openSessionDB(params, 15*time.Second)
 	if err != nil {
 		return err
 	}
@@ -804,8 +817,107 @@ func (s *server) connect(params connectParams) error {
 		return err
 	}
 	s.db = db
-	s.params = params
+	s.params = effectiveParams
 	return nil
+}
+
+func openSessionDB(params connectParams, timeout time.Duration) (*sql.DB, connectParams, error) {
+	db, err := openAndPingDB(params, timeout)
+	if err != nil {
+		return nil, params, err
+	}
+	if hasOracleLOBFetchOption(params) {
+		return db, params, nil
+	}
+	majorVersion, ok := oracleServerMajorVersion(db, timeout)
+	if !shouldUseLegacyOracleLOBFetch(params, majorVersion, ok) {
+		return db, params, nil
+	}
+
+	effectiveParams := withOracleLOBFetchPost(params)
+	if effectiveParams == params {
+		return db, params, nil
+	}
+	if err := db.Close(); err != nil {
+		return nil, params, err
+	}
+	db, err = openAndPingDB(effectiveParams, timeout)
+	if err != nil {
+		return nil, params, err
+	}
+	return db, effectiveParams, nil
+}
+
+func oracleServerMajorVersion(db *sql.DB, timeout time.Duration) (int, bool) {
+	if timeout > oracleDatabaseVersionProbeTimeout {
+		timeout = oracleDatabaseVersionProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for _, query := range oracleDatabaseVersionQueries {
+		var version string
+		err := db.QueryRowContext(ctx, query).Scan(&version)
+		if err == nil {
+			if majorVersion, ok := parseOracleMajorVersion(version); ok {
+				return majorVersion, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseOracleMajorVersion(version string) (int, bool) {
+	match := oracleVersionNumberRegexp.FindStringSubmatch(strings.TrimSpace(version))
+	if len(match) != 2 {
+		return 0, false
+	}
+	value, err := strconv.Atoi(match[1])
+	return value, err == nil && value > 0
+}
+
+func shouldUseLegacyOracleLOBFetch(params connectParams, majorVersion int, versionKnown bool) bool {
+	return versionKnown && majorVersion <= oracleLegacyLOBMaxMajorVersion && !hasOracleLOBFetchOption(params)
+}
+
+func hasOracleLOBFetchOption(params connectParams) bool {
+	connectionString := strings.TrimSpace(params.ConnectionString)
+	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
+		parsed, err := url.Parse(connectionString)
+		return err == nil && hasURLValueKey(parsed.Query(), "LOB FETCH")
+	}
+	values, err := url.ParseQuery(params.URLParams)
+	return err == nil && hasURLValueKey(values, "LOB FETCH")
+}
+
+func hasURLValueKey(values url.Values, target string) bool {
+	for key := range values {
+		if strings.EqualFold(strings.TrimSpace(key), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func withOracleLOBFetchPost(params connectParams) connectParams {
+	connectionString := strings.TrimSpace(params.ConnectionString)
+	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
+		parsed, err := url.Parse(connectionString)
+		if err != nil {
+			return params
+		}
+		values := parsed.Query()
+		values.Set("LOB FETCH", "POST")
+		parsed.RawQuery = values.Encode()
+		params.ConnectionString = parsed.String()
+		return params
+	}
+	values, err := url.ParseQuery(params.URLParams)
+	if err != nil {
+		return params
+	}
+	values.Set("LOB FETCH", "POST")
+	params.URLParams = values.Encode()
+	return params
 }
 
 func (s *server) disconnect() error {
@@ -827,17 +939,11 @@ func openDBWithStringConverter(params connectParams, stringConverter converters.
 	if err != nil {
 		return nil, err
 	}
-	var db *sql.DB
-	if stringConverter == nil {
-		db, err = sql.Open("oracle", dsn)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		connector := go_ora.NewConnector(dsn)
+	connector := go_ora.NewConnector(dsn)
+	if stringConverter != nil {
 		go_ora.SetStringConverter(connector, stringConverter, nil)
-		db = sql.OpenDB(connector)
 	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)

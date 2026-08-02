@@ -1,3 +1,5 @@
+import type { BackendError } from "@/lib/backend/errorUtils";
+
 export type DatabaseType =
   | "mysql"
   | "postgres"
@@ -574,6 +576,8 @@ export interface QueryResult {
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Structured backend error; authoritative when execution_error is true. */
+  error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
   statement_index?: number;
   /** Internal row identifiers appended to editable query results. */
@@ -630,6 +634,7 @@ export interface BatchStatementExecutionItem {
   executionTimeMs?: number;
   affectedRows?: number;
   error?: string;
+  errorDetails?: BackendError;
 }
 
 export interface BatchSqlExecution {

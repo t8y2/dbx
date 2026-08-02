@@ -41,7 +41,7 @@ export function buildMcpJsonConfig(config?: McpLaunchConfig): string {
 }
 
 export function buildMcpTraeConfig(config?: McpLaunchConfig, nativeBinPath?: string): string {
-  return buildMcpJsonConfig(nativeBinPath ? { command: nativeBinPath } : config);
+  return buildMcpJsonConfig(nativeBinPath ? { command: nativeBinPath, env: config?.env } : config);
 }
 
 export function buildMcpVsCodeConfig(config?: McpLaunchConfig): string {

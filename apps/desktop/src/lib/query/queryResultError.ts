@@ -25,6 +25,6 @@ export function isQueryExecutionErrorResult(result: QueryResult): boolean {
 }
 
 export function isNoSnapshotErrorResult(result: QueryResult | undefined | null): boolean {
-  if (!result || !result.columns.includes("Error") || result.rows.length === 0) return false;
+  if (!result || !isQueryExecutionErrorResult(result) || result.rows.length === 0) return false;
   return NO_SNAPSHOT_ERROR_PATTERN.test(String(result.rows[0]?.[0] ?? ""));
 }

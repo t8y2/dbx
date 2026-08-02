@@ -79,6 +79,10 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals("MATERIALIZED_VIEW", DamengAgent.damengDdlObjectType("MATERIALIZED_VIEW"));
         assertEquals("PROCEDURE", DamengAgent.damengDdlObjectType("PROCEDURE"));
         assertEquals("FUNCTION", DamengAgent.damengDdlObjectType("function"));
+        assertEquals("SEQUENCE", DamengAgent.damengDdlObjectType("sequence"));
+        assertEquals("PKG_SPEC", DamengAgent.damengDdlObjectType("package"));
+        assertEquals("PKG_BODY", DamengAgent.damengDdlObjectType("package body"));
+        assertEquals("PKG_BODY", DamengAgent.damengDdlObjectType("PACKAGE_BODY"));
         assertEquals("TRIGGER", DamengAgent.damengDdlObjectType("trigger"));
         assertThrows(IllegalArgumentException.class, () -> DamengAgent.damengDdlObjectType("TABLE"));
     }
@@ -218,6 +222,29 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertTrue(query.sql().contains("WHEN 'PROCEDURE' THEN 3"));
         assertTrue(query.sql().endsWith("LIMIT ?"));
         assertEquals(List.of("APP", "PROCEDURE", "FUNCTION", "%S%Y%N%C%", 20), query.args());
+    }
+
+    @Test
+    void constrainedObjectQueryIncludesSequencesAndPackages() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildConstrainedObjectsQuery(
+            "APP",
+            new MetadataListConstraints(null, 20, null, List.of("SEQUENCE", "PACKAGE", "PACKAGE_BODY"))
+        );
+
+        assertFalse(query.sql().contains("SYS.SYSOBJECTS materialized_view"));
+        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?, ?)"));
+        assertEquals(List.of("APP", "SEQUENCE", "PACKAGE", "PACKAGE BODY", 20), query.args());
+    }
+
+    @Test
+    void rawObjectQueryIncludesDamengPackageBodyCatalogType() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildRawConstrainedObjectsQuery(
+            "APP",
+            new MetadataListConstraints(null, null, null, List.of("SEQUENCE", "PACKAGE", "PACKAGE_BODY"))
+        );
+
+        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?, ?)"));
+        assertEquals(List.of("APP", "SEQUENCE", "PACKAGE", "PACKAGE BODY"), query.args());
     }
 
     @Test

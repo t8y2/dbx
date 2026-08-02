@@ -1502,7 +1502,7 @@ function finishAgentDriverInstall() {
 function failAgentDriverInstall(error: unknown) {
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
-  agentInstallError.value = translateBackendError(t, errorMessage(error));
+  agentInstallError.value = translateBackendError(t, error);
   showAgentInstallDialog.value = true;
 }
 
@@ -1559,7 +1559,7 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
-    testResult.value = { ok: false, message: errorMessage(error) };
+    testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
   }
@@ -1601,7 +1601,7 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
-    testResult.value = { ok: false, message: errorMessage(error) };
+    testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
   }

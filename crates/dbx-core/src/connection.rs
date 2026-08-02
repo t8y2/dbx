@@ -15,9 +15,10 @@ use crate::agent_connection::{
     trino_like_jdbc_connection_string, AgentSessionRole,
 };
 use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
+use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::database_capabilities;
 use crate::db;
-use crate::db::agent_driver::AgentMethod;
+use crate::db::agent_driver::{AgentCallError, AgentMethod};
 use crate::db::http_tunnel::HttpTunnelManager;
 use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
@@ -550,8 +551,7 @@ fn fail_stop_removed_agent_pool(pool_key: &str, pool: &PoolKind) {
 }
 
 fn should_replace_agent_runtime(error: &str) -> bool {
-    crate::db::agent_driver::agent_session_disposition(error)
-        == Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
+    crate::db::agent_driver::agent_recovery_decision(error, RecoveryScope::ConnectionOpen).replaces_runtime()
 }
 
 pub fn metadata_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
@@ -681,10 +681,10 @@ pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
 }
 
 pub fn sqlserver_legacy_driver_error(agent_error: &str) -> String {
-    // AgentManager currently returns launch failures as strings. This exact marker is generated
-    // internally and only adds guidance for an explicitly selected compatibility driver.
+    // This mapper handles both AgentManager launch strings and Agent call errors, so context
+    // must remain before any structured-error compatibility marker.
     if agent_error.contains("driver is not installed") {
-        format!("{agent_error}\n\n{SQLSERVER_LEGACY_DRIVER_INSTALL_HINT}")
+        crate::db::agent_driver::append_legacy_error_context(agent_error, SQLSERVER_LEGACY_DRIVER_INSTALL_HINT)
     } else {
         agent_error.to_string()
     }
@@ -1462,12 +1462,14 @@ impl AppState {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
+                            let replace_runtime =
+                                err.recovery_decision().is_some_and(RecoveryDecision::replaces_runtime);
                             if !detach_keepalive_target_if_current(
                                 &routing,
                                 &connections,
                                 &key,
                                 target,
-                                should_replace_agent_runtime(&err),
+                                replace_runtime,
                             )
                             .await
                             {
@@ -2904,15 +2906,15 @@ impl AppState {
                         return false;
                     };
                     let timeout = crate::db::connection_timeout();
-                    match agent.validate_connection(Some(timeout)).await {
+                    match agent.validate_connection_typed(Some(timeout)).await {
                         Ok(_) => false,
-                        Err(err) if is_agent_validate_connection_unsupported(&err) => {
+                        Err(err) if is_agent_validate_connection_unsupported(&err.to_string()) => {
                             log::debug!(
                                 "Agent connection pool '{pool_key}' does not support validate_connection; keeping pool"
                             );
                             false
                         }
-                        Err(err) if should_replace_agent_runtime(&err) => {
+                        Err(err) if RecoveryPolicy::decide(&err, RecoveryScope::Keepalive).replaces_runtime() => {
                             log::warn!(
                                 "Agent connection pool '{pool_key}' requested runtime replacement during health probe: {err}"
                             );
@@ -3143,12 +3145,12 @@ impl AppState {
         self.detach_pool_by_key(&pool_key, true).await
     }
 
-    pub(crate) async fn detach_metadata_pool_after_error(
+    pub(crate) async fn detach_metadata_pool_after_recovery(
         &self,
         connection_id: &str,
         database: Option<&str>,
         client_session_id: Option<&str>,
-        error: &str,
+        agent_session_id: Option<&str>,
         replace_agent_runtime: bool,
     ) -> bool {
         let config = {
@@ -3159,11 +3161,11 @@ impl AppState {
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
-        if let Some(session_id) = crate::db::agent_driver::agent_rpc_error_session_id(error) {
+        if let Some(session_id) = agent_session_id {
             let expected_client = {
                 let connections = self.connections.read().await;
                 match connections.get(&pool_key) {
-                    Some(PoolKind::Agent(client)) if client.matches_session_id(&session_id) => Some(client.clone()),
+                    Some(PoolKind::Agent(client)) if client.matches_session_id(session_id) => Some(client.clone()),
                     Some(PoolKind::Agent(_)) => return false,
                     _ => None,
                 }
@@ -3786,9 +3788,9 @@ impl AppState {
                         log::debug!("Agent connection pool '{key}' is busy; skipping resume health probe");
                         continue;
                     };
-                    match agent.validate_connection(Some(timeout)).await {
+                    match agent.validate_connection_typed(Some(timeout)).await {
                         Ok(_) => true,
-                        Err(err) if is_agent_validate_connection_unsupported(&err) => {
+                        Err(err) if is_agent_validate_connection_unsupported(&err.to_string()) => {
                             log::debug!(
                                 "Agent connection pool '{key}' does not support validate_connection; keeping pool"
                             );
@@ -3796,7 +3798,11 @@ impl AppState {
                         }
                         Err(e) => {
                             log::warn!("Agent connection pool '{key}' is unhealthy: {e}");
-                            failed_agent_checks.push((key.clone(), client.clone(), should_replace_agent_runtime(&e)));
+                            failed_agent_checks.push((
+                                key.clone(),
+                                client.clone(),
+                                RecoveryPolicy::decide(&e, RecoveryScope::Keepalive).replaces_runtime(),
+                            ));
                             false
                         }
                     }
@@ -4030,6 +4036,36 @@ enum KeepaliveTarget {
     Agent(Arc<db::agent_driver::PooledAgentClient>),
 }
 
+#[derive(Debug)]
+enum KeepaliveError {
+    Agent(AgentCallError),
+    Legacy(String),
+}
+
+impl KeepaliveError {
+    fn recovery_decision(&self) -> Option<RecoveryDecision> {
+        match self {
+            Self::Agent(error) => Some(RecoveryPolicy::decide(error, RecoveryScope::Keepalive)),
+            Self::Legacy(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for KeepaliveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent(error) => error.fmt(formatter),
+            Self::Legacy(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<String> for KeepaliveError {
+    fn from(error: String) -> Self {
+        Self::Legacy(error)
+    }
+}
+
 impl KeepaliveTarget {
     fn matches_pool(&self, pool: &PoolKind) -> bool {
         match (self, pool) {
@@ -4095,41 +4131,55 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
     }
 }
 
-async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) -> Result<(), String> {
+async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) -> Result<(), KeepaliveError> {
     match target {
         KeepaliveTarget::Mysql(pool) => {
             let mut conn = db::mysql::get_conn_with_health_check(pool).await?;
-            conn.ping().await.map_err(|e| e.to_string())
+            conn.ping().await.map_err(|error| KeepaliveError::Legacy(error.to_string()))
         }
         KeepaliveTarget::Postgres(pool) => {
             let client = pool.get().await.map_err(|e| format!("PostgreSQL pool error: {e}"))?;
-            client.simple_query("SELECT 1").await.map(|_| ()).map_err(|e| e.to_string())
+            client.simple_query("SELECT 1").await.map(|_| ()).map_err(|error| KeepaliveError::Legacy(error.to_string()))
         }
-        KeepaliveTarget::Rqlite(client) => db::rqlite_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::Turso(client) => db::turso_driver::test_connection(client, timeout).await,
+        KeepaliveTarget::Rqlite(client) => {
+            db::rqlite_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::Turso(client) => db::turso_driver::test_connection(client, timeout).await.map_err(Into::into),
         KeepaliveTarget::MongoDb { client, database } => {
-            db::mongo_driver::test_connection(client, timeout, database.as_deref()).await
+            db::mongo_driver::test_connection(client, timeout, database.as_deref()).await.map_err(Into::into)
         }
-        KeepaliveTarget::ClickHouse(client) => db::clickhouse_driver::test_connection(client, timeout).await,
+        KeepaliveTarget::ClickHouse(client) => {
+            db::clickhouse_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
         KeepaliveTarget::SqlServer(client) => {
             let Ok(mut client) = client.try_lock() else {
                 return Ok(());
             };
-            db::sqlserver::test_connection(&mut client).await
+            db::sqlserver::test_connection(&mut client).await.map_err(Into::into)
         }
-        KeepaliveTarget::Elasticsearch(client) => db::elasticsearch_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::Easysearch(client) => db::easysearch_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::HBase(client) => db::hbase_driver::test_connection(client, timeout).await.map(|_| ()),
-        KeepaliveTarget::VectorDb(client) => db::vector_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::InfluxDb(client) => db::influxdb_driver::test_connection(client, timeout).await,
+        KeepaliveTarget::Elasticsearch(client) => {
+            db::elasticsearch_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::Easysearch(client) => {
+            db::easysearch_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::HBase(client) => {
+            db::hbase_driver::test_connection(client, timeout).await.map(|_| ()).map_err(Into::into)
+        }
+        KeepaliveTarget::VectorDb(client) => {
+            db::vector_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::InfluxDb(client) => {
+            db::influxdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
         KeepaliveTarget::Agent(client) => {
             let Ok(mut client) = client.try_lock() else {
                 return Ok(());
             };
-            match client.validate_connection(Some(timeout)).await {
+            match client.validate_connection_typed(Some(timeout)).await {
                 Ok(_) => Ok(()),
-                Err(err) if is_agent_validate_connection_unsupported(&err) => Ok(()),
-                Err(err) => Err(err),
+                Err(error) if is_agent_validate_connection_unsupported(&error.to_string()) => Ok(()),
+                Err(error) => Err(KeepaliveError::Agent(error)),
             }
         }
     }
@@ -4947,6 +4997,34 @@ mod tests {
 
         assert!(message.contains("Driver Manager"));
         assert!(message.contains("enable SQL Server legacy compatibility mode again"));
+    }
+
+    #[test]
+    fn sqlserver_legacy_driver_hint_preserves_structured_agent_error() {
+        let error = crate::db::agent_driver::AgentCallError::Structured {
+            rpc_code: -6007,
+            message: "driver is not installed".to_string(),
+            context: crate::db::agent_driver::AgentErrorContext {
+                contract_version: 1,
+                category: crate::db::agent_driver::AgentErrorCategory::Connection,
+                retryable: false,
+                session_disposition: crate::db::agent_driver::AgentSessionDisposition::Quarantine,
+                stage: crate::db::agent_driver::AgentErrorStage::Connect,
+                operation_outcome: crate::db::agent_driver::AgentOperationOutcome::NotStarted,
+                agent_session_id: None,
+                sql_state: None,
+                vendor_code: None,
+                exception_class: None,
+            },
+        }
+        .into_legacy_string();
+
+        let message = sqlserver_legacy_driver_error(&error);
+
+        assert!(matches!(
+            crate::db::agent_driver::agent_error_from_legacy(&message, None),
+            crate::db::agent_driver::AgentCallError::Structured { .. }
+        ));
     }
 
     #[test]
@@ -6788,12 +6866,11 @@ for line in sys.stdin:
         state.configs.write().await.insert(config.id.clone(), config);
         let pool_key = "conn:analytics:role:metadata";
         state.connections.write().await.insert(pool_key.to_string(), PoolKind::Agent(current_client.clone()));
-        let stale_error = concat!(
-            "Agent RPC error (-1): stale metadata failure\nDBX_AGENT_ERROR_DATA:",
-            r#"{"category":"resource","sessionDisposition":"replace_runtime","agentSessionId":"stale-session"}"#
+        assert!(
+            !state
+                .detach_metadata_pool_after_recovery("conn", Some("analytics"), None, Some("stale-session"), true,)
+                .await
         );
-
-        assert!(!state.detach_metadata_pool_after_error("conn", Some("analytics"), None, stale_error, true).await);
 
         let connections = state.connections.read().await;
         let PoolKind::Agent(routed_client) = connections.get(pool_key).expect("new metadata generation must remain")
@@ -6816,10 +6893,7 @@ for line in sys.stdin:
 
         let error = super::ping_keepalive_target(&mut target, Duration::from_secs(1)).await.unwrap_err();
 
-        assert_eq!(
-            crate::db::agent_driver::agent_session_disposition(&error),
-            Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
-        );
+        assert!(matches!(error.recovery_decision(), Some(crate::agent_recovery::RecoveryDecision::ReplaceRuntime)));
         assert!(!runtime.is_failed());
         runtime.kill();
         let _ = std::fs::remove_dir_all(dir);

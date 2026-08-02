@@ -876,11 +876,25 @@ func TestTableChildMetadataRPCsReturnCatalogObjects(t *testing.T) {
 }
 
 func TestXuguMetadataAccessErrorDetection(t *testing.T) {
-	if !isXuguMetadataAccessError(errors.New("[E18012] 权限不够")) {
-		t.Fatal("expected E18012 permission error to be treated as metadata access error")
+	tests := []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{name: "permission code", message: "[E18012] 权限不够", want: true},
+		{name: "permission text", message: "permission denied reading ALL_TABLES", want: true},
+		{name: "missing catalog view", message: `表或视图 "ALL_TABLES" 不存在`, want: true},
+		{name: "catalog name in syntax error", message: "syntax error near ALL_TABLES", want: false},
+		{name: "catalog name in network error", message: "network timeout while querying SYS_TABLES", want: false},
+		{name: "catalog name after missing endpoint", message: "network endpoint not found while querying SYS_TABLES", want: false},
+		{name: "unrelated network error", message: "network timeout", want: false},
 	}
-	if isXuguMetadataAccessError(errors.New("network timeout")) {
-		t.Fatal("network errors should not trigger database-list fallback")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isXuguMetadataAccessError(errors.New(test.message)); got != test.want {
+				t.Fatalf("isXuguMetadataAccessError(%q) = %t, want %t", test.message, got, test.want)
+			}
+		})
 	}
 }
 
@@ -1957,9 +1971,272 @@ func init() {
 	sql.Register("xugu-test-show-result", &xuguShowResultDriver{})
 	sql.Register("xugu-test-sequence-source", &xuguSequenceSourceDriver{})
 	sql.Register("xugu-test-synonym-source", &xuguSynonymSourceDriver{})
+	sql.Register("xugu-test-permission-metadata", &xuguPermissionMetadataDriver{})
+	sql.Register("xugu-test-fallback-errors", &xuguFallbackErrorDriver{})
+}
+
+func TestMetadataPermissionFallbackDoesNotReturnRPCError(t *testing.T) {
+	db, err := sql.Open("xugu-test-permission-metadata", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	s.params.Username = "APP"
+
+	tables, err := s.listTables("APP", metadataListConstraints{})
+	if err != nil || len(tables) != 1 || tables[0].Name != "PUBLIC_TABLE" {
+		t.Fatalf("listTables permission fallback = %#v, %v; want USER_TABLES result", tables, err)
+	}
+	objects, err := s.listObjects("APP", metadataListConstraints{})
+	if err != nil || len(objects) != 1 || objects[0].Name != "PUBLIC_TABLE" {
+		t.Fatalf("listObjects permission fallback = %#v, %v; want USER_TABLES result", objects, err)
+	}
+	indexes, err := s.listIndexes("APP", "PUBLIC_TABLE")
+	if err != nil || len(indexes) != 0 {
+		t.Fatalf("listIndexes permission fallback = %#v, %v; want empty success", indexes, err)
+	}
+	partitions, err := s.listPartitions("APP", "PUBLIC_TABLE")
+	if err != nil || len(partitions) != 0 {
+		t.Fatalf("listPartitions permission fallback = %#v, %v; want empty success", partitions, err)
+	}
+	subpartitions, err := s.listSubpartitions("APP", "PUBLIC_TABLE")
+	if err != nil || len(subpartitions) != 0 {
+		t.Fatalf("listSubpartitions permission fallback = %#v, %v; want empty success", subpartitions, err)
+	}
+}
+
+func TestGetColumnsFallsBackToDirectObjectAccessOnMetadataPermission(t *testing.T) {
+	db, err := sql.Open("xugu-test-permission-metadata", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	columns, err := s.getColumns("APP", "PUBLIC_TABLE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 2 || columns[0].Name != "ID" || columns[0].DataType != "INTEGER" || columns[1].Name != "NAME" {
+		t.Fatalf("direct column fallback = %#v", columns)
+	}
+}
+
+func TestTableDDLFallsBackToDirectObjectAccessOnMetadataPermission(t *testing.T) {
+	db, err := sql.Open("xugu-test-permission-metadata", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	ddl, err := s.getTableDDL("APP", "PUBLIC_TABLE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`CREATE TABLE "APP"."PUBLIC_TABLE"`,
+		`"ID" INTEGER`,
+		`"NAME" VARCHAR(40)`,
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("fallback table DDL missing %q:\n%s", want, ddl)
+		}
+	}
+}
+
+func TestMetadataFallbackPropagatesUserCatalogErrors(t *testing.T) {
+	db, err := sql.Open("xugu-test-fallback-errors", "user-catalog-error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	s.params.Username = "APP"
+
+	if tables, err := s.listTables("APP", metadataListConstraints{}); err == nil || !strings.Contains(err.Error(), "network timeout reading USER_TABLES") {
+		t.Fatalf("listTables fallback = %#v, %v; want USER_TABLES error", tables, err)
+	}
+	if objects, err := s.listObjects("APP", metadataListConstraints{}); err == nil || !strings.Contains(err.Error(), "network timeout reading USER_TABLES") {
+		t.Fatalf("listObjects fallback = %#v, %v; want USER_TABLES error", objects, err)
+	}
+}
+
+func TestTableDDLFallbackPropagatesDirectSelectError(t *testing.T) {
+	db, err := sql.Open("xugu-test-fallback-errors", "ddl-select-error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	ddl, err := s.getTableDDL("APP", "PUBLIC_TABLE")
+	if err == nil || !strings.Contains(err.Error(), "network timeout selecting APP.PUBLIC_TABLE") {
+		t.Fatalf("table DDL fallback = %q, %v; want direct SELECT error", ddl, err)
+	}
+}
+
+func TestTableDDLFallbackDegradesDirectPermissionError(t *testing.T) {
+	db, err := sql.Open("xugu-test-fallback-errors", "ddl-select-permission")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	ddl, err := s.getTableDDL("APP", "PUBLIC_TABLE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ddl, "did not expose enough metadata") {
+		t.Fatalf("permission-limited table DDL fallback = %q", ddl)
+	}
+}
+
+func TestObjectSourcePermissionFallbackIsExplicitAndReadOnly(t *testing.T) {
+	db, err := sql.Open("xugu-test-permission-metadata", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	for _, objectType := range []string{"PROCEDURE", "SEQUENCE", "SYNONYM"} {
+		source, err := s.getObjectSource("APP", "PRIVATE_OBJECT", objectType)
+		if err != nil {
+			t.Fatalf("%s source fallback: %v", objectType, err)
+		}
+		if source["editable"] != false || !strings.Contains(source["source"].(string), "did not expose source metadata") {
+			t.Fatalf("%s source fallback = %#v", objectType, source)
+		}
+	}
 }
 
 type xuguShowResultDriver struct{}
+
+type xuguPermissionMetadataDriver struct{}
+
+type xuguFallbackErrorDriver struct{}
+
+func (d *xuguFallbackErrorDriver) Open(name string) (driver.Conn, error) {
+	return &xuguFallbackErrorConn{mode: name}, nil
+}
+
+type xuguFallbackErrorConn struct {
+	mode string
+}
+
+func (c *xuguFallbackErrorConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguFallbackErrorConn) Close() error              { return nil }
+func (c *xuguFallbackErrorConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+func (c *xuguFallbackErrorConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
+	return driver.ResultNoRows, nil
+}
+func (c *xuguFallbackErrorConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	switch c.mode {
+	case "user-catalog-error":
+		if strings.Contains(upper, "FROM USER_TABLES") {
+			return nil, errors.New("network timeout reading USER_TABLES")
+		}
+		if strings.Contains(upper, "FROM ALL_TABLES") {
+			return nil, errors.New("[E18012] 权限不够")
+		}
+	case "ddl-select-error", "ddl-select-permission":
+		if strings.Contains(upper, `SELECT * FROM "APP"."PUBLIC_TABLE" WHERE 1 = 0`) {
+			if c.mode == "ddl-select-permission" {
+				return nil, errors.New("permission denied selecting APP.PUBLIC_TABLE")
+			}
+			return nil, errors.New("network timeout selecting APP.PUBLIC_TABLE")
+		}
+		if strings.Contains(upper, "SELECT S.SCHEMA_NAME, T.TABLE_NAME") && strings.Contains(upper, "FROM ALL_TABLES") {
+			return nil, errors.New("[E18012] 权限不够")
+		}
+	}
+	return nil, fmt.Errorf("unexpected fallback-error query for %s: %s", c.mode, query)
+}
+
+func (d *xuguPermissionMetadataDriver) Open(name string) (driver.Conn, error) {
+	return &xuguPermissionMetadataConn{}, nil
+}
+
+type xuguPermissionMetadataConn struct{}
+
+func (c *xuguPermissionMetadataConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguPermissionMetadataConn) Close() error { return nil }
+func (c *xuguPermissionMetadataConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguPermissionMetadataConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "SET SCHEMA") {
+		return nil, errors.New("[E18012] 权限不够")
+	}
+	return driver.ResultNoRows, nil
+}
+func (c *xuguPermissionMetadataConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	if strings.Contains(upper, "SELECT S.SCHEMA_NAME, T.TABLE_NAME") {
+		return &xuguStaticRows{columns: []string{"SCHEMA_NAME", "TABLE_NAME"}}, nil
+	}
+	if strings.Contains(upper, "FROM USER_TABLES") {
+		return &xuguStaticRows{
+			columns: []string{"TABLE_NAME", "TABLE_TYPE", "COMMENTS"},
+			values:  [][]driver.Value{{"PUBLIC_TABLE", "TABLE", nil}},
+		}, nil
+	}
+	if strings.Contains(upper, "FROM USER_VIEWS") {
+		return &xuguStaticRows{columns: []string{"VIEW_NAME", "TABLE_TYPE", "COMMENTS"}}, nil
+	}
+	if strings.Contains(upper, "ALL_") || strings.Contains(upper, "SYS_") {
+		return nil, errors.New("[E18012] 权限不够")
+	}
+	if strings.Contains(upper, `SELECT * FROM "APP"."PUBLIC_TABLE" WHERE 1 = 0`) {
+		return &xuguPermissionColumnsRows{}, nil
+	}
+	return nil, fmt.Errorf("unexpected permission-fallback query: %s", query)
+}
+
+type xuguPermissionColumnsRows struct {
+	index int
+}
+
+func (r *xuguPermissionColumnsRows) Columns() []string {
+	return []string{"ID", "NAME"}
+}
+func (r *xuguPermissionColumnsRows) Close() error { return nil }
+func (r *xuguPermissionColumnsRows) Next(dest []driver.Value) error {
+	if r.index > 0 {
+		return io.EOF
+	}
+	r.index++
+	return io.EOF
+}
+func (r *xuguPermissionColumnsRows) ColumnTypeDatabaseTypeName(index int) string {
+	return []string{"INTEGER", "VARCHAR"}[index]
+}
+func (r *xuguPermissionColumnsRows) ColumnTypeLength(index int) (length int64, ok bool) {
+	if index == 1 {
+		return 40, true
+	}
+	return 0, false
+}
+func (r *xuguPermissionColumnsRows) ColumnTypeNullable(index int) (nullable, ok bool) {
+	return index != 0, true
+}
 
 var xuguShowResultState struct {
 	sync.Mutex

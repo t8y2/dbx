@@ -2,9 +2,9 @@
   "protocolVersion": 2,
   "handshakeMethod": "handshake",
   "handshakeResponseFields": ["protocolVersion", "agentProtocolVersion", "capabilities"],
-  "allCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv", "kv_ttl", "kv_cas", "kv_list_values", "kv_status", "kv_history", "etcd_compaction", "etcd_defrag", "etcd_watch", "etcd_lease", "etcd_auth", "multi_session"],
+  "allCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv", "kv_ttl", "kv_cas", "kv_list_values", "kv_status", "kv_history", "etcd_compaction", "etcd_defrag", "etcd_watch", "etcd_lease", "etcd_auth", "multi_session", "structured_error_v1"],
   "capabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "multi_session"],
-  "defaultSqlCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "multi_session"],
+  "defaultSqlCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "multi_session", "structured_error_v1"],
   "commonMethods": [
     "handshake",
     "connect",

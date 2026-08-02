@@ -1,10 +1,12 @@
 package com.dbx.agent.neo4j;
 
 import com.dbx.agent.ConnectParams;
+import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.QueryResult;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -54,7 +56,37 @@ class Neo4jAgentTest {
         Assertions.assertFalse(calls.contains("executeUpdate"));
     }
 
+    @Test
+    void listsConfiguredMemgraphDatabaseWhenCatalogDiscoveryRequiresEnterprise() {
+        SQLException catalogError = new SQLException(
+            "Your license has an invalid type. To use multi-tenancy you need to have an enterprise license."
+        );
+        Neo4jAgent agent = connectedAgent(fakeCatalogConnection(Collections.emptyList(), catalogError, null), "memgraph");
+
+        Assertions.assertEquals(
+            Collections.singletonList(new DatabaseInfo("memgraph")),
+            agent.listDatabases()
+        );
+    }
+
+    @Test
+    void keepsDiscoveredNeo4jDatabasesSorted() {
+        Neo4jAgent agent = connectedAgent(
+            fakeCatalogConnection(Arrays.asList("system", "neo4j"), null, "neo4j"),
+            "neo4j"
+        );
+
+        Assertions.assertEquals(
+            Arrays.asList(new DatabaseInfo("neo4j"), new DatabaseInfo("system")),
+            agent.listDatabases()
+        );
+    }
+
     private static Neo4jAgent connectedAgent(Connection connection) {
+        return connectedAgent(connection, "");
+    }
+
+    private static Neo4jAgent connectedAgent(Connection connection, String database) {
         Neo4jAgent agent = new Neo4jAgent() {
             @Override
             protected void loadDriver(ConnectParams params) {
@@ -65,8 +97,61 @@ class Neo4jAgentTest {
                 return connection;
             }
         };
-        agent.connect(new ConnectParams());
+        ConnectParams params = new ConnectParams();
+        params.setDatabase(database);
+        agent.connect(params);
         return agent;
+    }
+
+    private static Connection fakeCatalogConnection(
+        List<String> catalogs,
+        SQLException catalogError,
+        String currentCatalog
+    ) {
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (unused, method, args) -> {
+            switch (method.getName()) {
+                case "getCatalogs":
+                    if (catalogError != null) {
+                        throw catalogError;
+                    }
+                    return fakeCatalogResultSet(catalogs);
+                case "getIdentifierQuoteString":
+                    return "`";
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, (unused, method, args) -> {
+            switch (method.getName()) {
+                case "getMetaData":
+                    return metadata;
+                case "getCatalog":
+                    return currentCatalog;
+                case "close":
+                    return null;
+                case "isClosed":
+                    return false;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static ResultSet fakeCatalogResultSet(List<String> catalogs) {
+        int[] index = {-1};
+        return proxy(ResultSet.class, (unused, method, args) -> {
+            switch (method.getName()) {
+                case "next":
+                    index[0] += 1;
+                    return index[0] < catalogs.size();
+                case "getString":
+                    return catalogs.get(index[0]);
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
     }
 
     private static Connection fakeConnection(List<String> calls) {

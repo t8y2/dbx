@@ -1018,10 +1018,11 @@ describe("currentExecutableStatementRange", () => {
     expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "redis")).toBeNull();
   });
 
-  it("does not expose current statement framing for MongoDB", () => {
-    const sql = "db.users.find({})";
+  it("uses the current MongoDB command range", () => {
+    const sql = 'db.users.find({})\n\ndb.getCollection("audit.logs").countDocuments({})';
 
-    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")).toBeNull();
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")?.sql).toBe("db.users.find({})");
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "audit.logs"), "mongodb")?.sql).toBe('db.getCollection("audit.logs").countDocuments({})');
   });
 });
 

@@ -113,6 +113,7 @@ public final class AgentProtocol {
     public static final String CAPABILITY_ETCD_LEASE = "etcd_lease";
     public static final String CAPABILITY_ETCD_AUTH = "etcd_auth";
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
+    public static final String CAPABILITY_STRUCTURED_ERROR_V1 = "structured_error_v1";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         CAPABILITY_CONNECT,
@@ -147,6 +148,8 @@ public final class AgentProtocol {
 
     public static final List<String> MULTI_SESSION_CAPABILITIES;
     public static final List<String> MULTI_SESSION_ALL_CAPABILITIES;
+    public static final List<String> MULTI_SESSION_JDBC_CAPABILITIES;
+    public static final List<String> MULTI_SESSION_JDBC_ALL_CAPABILITIES;
 
     public static final List<String> COMMON_METHODS = Collections.unmodifiableList(Arrays.asList(
         METHOD_HANDSHAKE,
@@ -193,6 +196,14 @@ public final class AgentProtocol {
         List<String> allCapabilities = new java.util.ArrayList<>(ALL_CAPABILITIES);
         allCapabilities.add(CAPABILITY_MULTI_SESSION);
         MULTI_SESSION_ALL_CAPABILITIES = Collections.unmodifiableList(allCapabilities);
+
+        List<String> jdbcCapabilities = new java.util.ArrayList<>(MULTI_SESSION_CAPABILITIES);
+        jdbcCapabilities.add(CAPABILITY_STRUCTURED_ERROR_V1);
+        MULTI_SESSION_JDBC_CAPABILITIES = Collections.unmodifiableList(jdbcCapabilities);
+
+        List<String> jdbcAllCapabilities = new java.util.ArrayList<>(MULTI_SESSION_ALL_CAPABILITIES);
+        jdbcAllCapabilities.add(CAPABILITY_STRUCTURED_ERROR_V1);
+        MULTI_SESSION_JDBC_ALL_CAPABILITIES = Collections.unmodifiableList(jdbcAllCapabilities);
 
         List<String> methods = new java.util.ArrayList<>(COMMON_METHODS);
         int insertAt = methods.indexOf(METHOD_CONNECT) + 1;
@@ -267,6 +278,18 @@ public final class AgentProtocol {
             MULTI_SESSION_PROTOCOL_VERSION,
             MULTI_SESSION_PROTOCOL_VERSION,
             MULTI_SESSION_CAPABILITIES
+        );
+    }
+
+    /**
+     * Handshake for pooled JDBC Agents that emit the v1 structured error contract.
+     * Generic/custom v2 handlers must continue using multiSessionHandshakeResult().
+     */
+    public static HandshakeResult multiSessionJdbcHandshakeResult() {
+        return new HandshakeResult(
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MULTI_SESSION_PROTOCOL_VERSION,
+            MULTI_SESSION_JDBC_CAPABILITIES
         );
     }
 

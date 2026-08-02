@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   loadTableMetadata: vi.fn(),
+  buildTableSelectSql: vi.fn(),
   setErrorResult: vi.fn(),
   cancelTabExecution: vi.fn(),
 }));
@@ -81,7 +82,7 @@ vi.mock("@/stores/settingsStore", () => ({
 vi.mock("@/lib/database/jdbcDialect", () => ({
   effectiveDatabaseTypeForConnection: () => mocks.databaseType,
   connectionObjectTreeNodeSchema: (_config: unknown, _database: string, schema?: string) => schema,
-  connectionObjectTreeQuerySchema: (_config: unknown, _database: string, schema?: string) => schema ?? "",
+  connectionObjectTreeQuerySchema: (_config: unknown, database: string, schema?: string) => schema ?? database,
 }));
 
 vi.mock("@/lib/metadata/tableMetadataCache", async (importOriginal) => {
@@ -97,7 +98,7 @@ vi.mock("@/lib/common/utils", () => ({ uuid: () => "open-data-id" }));
 vi.mock("@/lib/backend/debugLog", () => ({ appendDebugLog: vi.fn(), isDebugLoggingEnabled: () => false }));
 // dataTabOpenPolicy 使用真实实现，覆盖设置开关对应的复用范围
 vi.mock("@/lib/sidebar/treeNodeContext", () => ({ hasTreeNodeDatabaseContext: () => true }));
-vi.mock("@/lib/table/tableSelectSql", () => ({ buildTableSelectSql: async () => "SELECT * FROM users" }));
+vi.mock("@/lib/table/tableSelectSql", () => ({ buildTableSelectSql: mocks.buildTableSelectSql }));
 vi.mock("@/lib/table/tableEditing", () => ({ usesSyntheticRowIdKey: () => false }));
 vi.mock("@/lib/table/tableOpenPageLimit", () => ({ tableOpenPageLimit: () => 100 }));
 vi.mock("@/lib/tabs/dataTabActivation", () => ({ canActivateExistingDataTableTab: () => false }));
@@ -112,6 +113,14 @@ const tableNode: TreeNode = {
   tableType: "TABLE",
 };
 
+const mysqlTableNode: TreeNode = {
+  ...tableNode,
+  id: "table-zcyy-write-off-record",
+  label: "zcyy_write_off_record",
+  database: "yf_db",
+  schema: undefined,
+};
+
 describe("useSidebarDataOpenRuntime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -121,6 +130,7 @@ describe("useSidebarDataOpenRuntime", () => {
     mocks.cachedMetadata = undefined;
     mocks.reuseDataTab = false;
     mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM users");
     mocks.executeTabSql.mockImplementation(async () => {
       mocks.callOrder.push("query");
     });
@@ -186,6 +196,55 @@ describe("useSidebarDataOpenRuntime", () => {
       expect(mocks.callOrder).toEqual(["query", "metadata"]);
       expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]);
     });
+  });
+
+  it("keeps MySQL data-tab identity unqualified after metadata loads", async () => {
+    mocks.databaseType = "mysql";
+    mocks.loadTableMetadata.mockImplementation(async (request: { database: string; schema?: string; tableName: string; tableType?: string }) => ({
+      metadata: {
+        schema: request.schema,
+        tableName: request.tableName,
+        tableType: request.tableType,
+        database: request.database,
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    }));
+
+    await useSidebarDataOpenRuntime().openData(mysqlTableNode);
+
+    await vi.waitFor(() => expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]));
+    expect(mocks.loadTableMetadata).toHaveBeenCalledWith(expect.objectContaining({ database: "yf_db", schema: "yf_db" }));
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ database: "yf_db", schema: undefined, tableName: "zcyy_write_off_record" }));
+    expect(mocks.tabs[0]?.tableMeta).toMatchObject({ database: "yf_db", schema: undefined, tableName: "zcyy_write_off_record" });
+  });
+
+  it("keeps cached MySQL table metadata unqualified", async () => {
+    mocks.databaseType = "mysql";
+    mocks.cachedMetadata = {
+      metadata: {
+        schema: "yf_db",
+        tableName: "zcyy_write_off_record",
+        tableType: "TABLE",
+        database: "yf_db",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "hit",
+      ageMs: 0,
+    };
+
+    await useSidebarDataOpenRuntime().openData(mysqlTableNode);
+
+    expect(mocks.loadTableMetadata).not.toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ database: "yf_db", schema: undefined, tableName: "zcyy_write_off_record" }));
+    expect(mocks.tabs[0]?.tableMeta).toMatchObject({ database: "yf_db", schema: undefined, tableName: "zcyy_write_off_record" });
   });
 
   it("keeps row identity pending while delayed metadata is in flight and the query finishes first", async () => {

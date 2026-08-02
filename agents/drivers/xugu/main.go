@@ -1515,24 +1515,38 @@ func configuredDatabaseName(params connectParams) string {
 }
 
 func isXuguMetadataAccessError(err error) bool {
-	message := strings.ToUpper(err.Error())
-	return strings.Contains(message, "E18012") ||
-		strings.Contains(message, "权限不够") ||
-		strings.Contains(message, "ALL_DATABASES") ||
-		strings.Contains(message, "SYS_DATABASES") ||
-		strings.Contains(message, "ALL_SCHEMAS") ||
-		strings.Contains(message, "SYS_SCHEMAS") ||
-		strings.Contains(message, "ALL_TABLES") ||
-		strings.Contains(message, "SYS_TABLES") ||
-		strings.Contains(message, "ALL_VIEWS") ||
-		strings.Contains(message, "SYS_VIEWS") ||
-		strings.Contains(message, "ALL_COLUMNS") ||
-		strings.Contains(message, "ALL_CONSTRAINTS") ||
-		strings.Contains(message, "ALL_INDEXES") ||
-		strings.Contains(message, "SYS_COLUMNS") ||
-		strings.Contains(message, "SYS_CONSTRAINTS") ||
-		strings.Contains(message, "SYS_INDEXES") ||
-		strings.Contains(message, "SYS_TRIGGERS")
+	if err == nil {
+		return false
+	}
+	message := strings.ToUpper(strings.TrimSpace(strings.TrimRight(err.Error(), "\x00")))
+	for _, marker := range []string{
+		"E18012", "权限不够", "PERMISSION DENIED", "ACCESS DENIED", "INSUFFICIENT PRIVILEGE", "NOT AUTHORIZED",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	catalogObject := false
+	for _, object := range []string{
+		"DATABASES", "SCHEMAS", "TABLES", "VIEWS", "COLUMNS", "CONSTRAINTS", "INDEXES",
+		"TRIGGERS", "PARTIS", "SUBPARTIS", "SEQUENCES", "SYNONYMS", "PROCEDURES", "PACKAGES", "TYPES",
+	} {
+		if strings.Contains(message, "ALL_"+object) || strings.Contains(message, "SYS_"+object) {
+			catalogObject = true
+			break
+		}
+	}
+	if !catalogObject {
+		return false
+	}
+	for _, marker := range []string{
+		"不存在", "DOES NOT EXIST", "NOT EXIST", "UNKNOWN TABLE", "UNKNOWN VIEW", "UNDEFINED TABLE", "INVALID OBJECT NAME",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isXuguMissingOnNullColumnError(err error) bool {
@@ -1619,6 +1633,49 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 	query := xuguListTablesQuery(schema, constraints)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			fallback, fallbackErr := s.listOwnTables(schema, constraints)
+			if fallbackErr == nil {
+				return fallback, nil
+			}
+			if isXuguMetadataAccessError(fallbackErr) {
+				return []tableInfo{}, nil
+			}
+			return nil, fallbackErr
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var result []tableInfo
+	for rows.Next() {
+		var item tableInfo
+		if err := rows.Scan(&item.Name, &item.TableType, &item.Comment); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) listOwnTables(schema string, constraints metadataListConstraints) ([]tableInfo, error) {
+	if !strings.EqualFold(strings.TrimSpace(schema), strings.TrimSpace(s.params.Username)) {
+		return []tableInfo{}, nil
+	}
+	query := xuguConstrainedMetadataListQuery(
+		`
+SELECT TABLE_NAME, 'TABLE' AS TABLE_TYPE, COMMENTS
+FROM USER_TABLES
+UNION ALL
+SELECT VIEW_NAME, 'VIEW' AS TABLE_TYPE, COMMENTS
+FROM USER_VIEWS`,
+		"TABLE_NAME, TABLE_TYPE, COMMENTS",
+		"TABLE_NAME",
+		"TABLE_TYPE",
+		nil,
+		constraints,
+	)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
@@ -1641,6 +1698,21 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	query := xuguListObjectsQuery(schema, constraints)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			// A single inaccessible ALL_* view must not hide the fact that the
+			// table browser can still query the low-privilege table path.  The
+			// fallback deliberately exposes only tables/views; programmable
+			// objects are omitted rather than guessed from unavailable metadata.
+			tables, tableErr := s.listTables(schema, constraints)
+			if tableErr != nil {
+				return nil, tableErr
+			}
+			result := make([]objectInfo, 0, len(tables))
+			for _, table := range tables {
+				result = append(result, objectInfo{Name: table.Name, ObjectType: table.TableType, Schema: schema, Comment: table.Comment})
+			}
+			return result, nil
+		}
 		return nil, err
 	}
 	defer s.closeRows(rows)
@@ -1865,6 +1937,23 @@ func xuguFuzzyLikePattern(value string) string {
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
+		if isXuguMetadataAccessError(err) || isXuguTableNotFoundError(err) {
+			fallbackSchema, fallbackTable, fallbackErr := s.fallbackTableIdentity(schema, table)
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			columns, directErr := s.columnsFromSelect(fallbackSchema, fallbackTable, map[string]bool{})
+			if directErr == nil {
+				return columns, nil
+			}
+			if isXuguMetadataAccessError(err) && isXuguMetadataAccessError(directErr) {
+				return []columnInfo{}, nil
+			}
+			if isXuguTableNotFoundError(directErr) {
+				return nil, err
+			}
+			return nil, directErr
+		}
 		return nil, err
 	}
 	schema, table = catalogSchema, catalogTable
@@ -1951,6 +2040,26 @@ func (s *server) columnsFromSelect(schema, table string, primaryKeys map[string]
 	return emptyIfNil(result), nil
 }
 
+func (s *server) fallbackTableIdentity(schema, table string) (string, string, error) {
+	schema = strings.TrimSpace(schema)
+	if schema == "" {
+		var err error
+		schema, err = s.currentSchema()
+		if err != nil {
+			return "", "", err
+		}
+	}
+	table = strings.TrimSpace(table)
+	if table == "" {
+		return "", "", errors.New("table is required")
+	}
+	return schema, table, nil
+}
+
+func isXuguTableNotFoundError(err error) bool {
+	return strings.Contains(strings.ToUpper(err.Error()), "TABLE NOT FOUND:")
+}
+
 func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error) {
 	rows, err := s.queryRows(xuguTableCatalogQuery(xuguPrimaryKeyColumnsSQL, schema, table), nil)
 	if err != nil {
@@ -1976,6 +2085,9 @@ func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error
 func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
+		if isXuguMetadataAccessError(err) || isXuguTableNotFoundError(err) {
+			return []indexInfo{}, nil
+		}
 		return nil, err
 	}
 	rows, err := s.queryRows(xuguTableCatalogQuery(xuguListIndexesSQL, catalogSchema, catalogTable), nil)
@@ -2135,10 +2247,18 @@ func (s *server) listSubpartitions(schema, table string) ([]subpartitionInfo, er
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
 	if strings.EqualFold(strings.TrimSpace(objectType), "SEQUENCE") {
-		return s.getSequenceSource(schema, name)
+		result, err := s.getSequenceSource(schema, name)
+		if err != nil && isXuguMetadataAccessError(err) {
+			return xuguUnavailableObjectSource(schema, name, objectType), nil
+		}
+		return result, err
 	}
 	if strings.EqualFold(strings.TrimSpace(objectType), "SYNONYM") {
-		return s.getSynonymSource(schema, name)
+		result, err := s.getSynonymSource(schema, name)
+		if err != nil && isXuguMetadataAccessError(err) {
+			return xuguUnavailableObjectSource(schema, name, objectType), nil
+		}
+		return result, err
 	}
 	var err error
 	schema, err = s.normalizeSchema(schema)
@@ -2151,6 +2271,9 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 	}
 	rows, err := s.queryRows(sourceSQL, args)
 	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			return xuguUnavailableObjectSource(schema, name, objectType), nil
+		}
 		return nil, err
 	}
 	defer s.closeRows(rows)
@@ -2169,6 +2292,16 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		result["editable"] = false
 	}
 	return result, rows.Err()
+}
+
+func xuguUnavailableObjectSource(schema, name, objectType string) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"object_type": objectType,
+		"schema":      schema,
+		"source":      fmt.Sprintf("-- XuguDB did not expose source metadata for %s.%s (%s).\n-- The object can still be listed and managed, but its source cannot be reconstructed with the current privileges.", schema, name, objectType),
+		"editable":    false,
+	}
 }
 
 // getSequenceSource reconstructs sequence DDL from ALL_SEQUENCES. Unlike
@@ -2467,15 +2600,33 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	// schema/table/column spellings.
 	if strings.TrimSpace(schema) != "" {
 		if err := s.setSchema(schema); err != nil {
-			return "", err
+			if !isXuguMetadataAccessError(err) {
+				return "", err
+			}
 		}
 	}
 	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
+		if isXuguMetadataAccessError(err) || isXuguTableNotFoundError(err) {
+			fallbackSchema, fallbackTable, fallbackErr := s.fallbackTableIdentity(schema, table)
+			if fallbackErr != nil {
+				return "", fallbackErr
+			}
+			ddl, directErr := s.buildFallbackTableDDL(fallbackSchema, fallbackTable)
+			if directErr == nil {
+				return ddl, nil
+			}
+			if isXuguMetadataAccessError(directErr) {
+				return xuguUnavailableTableDDL(fallbackSchema, fallbackTable), nil
+			}
+			return "", directErr
+		}
 		return "", err
 	}
 	if err := s.setSchema(catalogSchema); err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
 	}
 	// DBMS_METADATA.GET_DDL can block indefinitely on XuguDB, even when the
 	// table metadata itself is accessible. Reconstruct the DDL from the same
@@ -2485,6 +2636,21 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 		return "", err
 	}
 	return s.appendTableIndexDDL(catalogSchema, catalogTable, ddl), nil
+}
+
+func (s *server) buildFallbackTableDDL(schema, table string) (string, error) {
+	columns, err := s.columnsFromSelect(schema, table, map[string]bool{})
+	if err != nil {
+		return "", err
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("table not found: %s.%s", schema, table)
+	}
+	return renderXuguTableDDL(schema, table, columns, xuguTableMetadata{}, nil, nil, nil, nil), nil
+}
+
+func xuguUnavailableTableDDL(schema, table string) string {
+	return fmt.Sprintf("-- XuguDB did not expose enough metadata to reconstruct %s.%s.\n-- The table may still be readable, but its DDL requires additional metadata privileges.", schema, table)
 }
 
 type xuguCatalogTableName struct {
@@ -3063,27 +3229,45 @@ func (s *server) buildTableDDL(schema, table string) (string, error) {
 	}
 	metadata, err := s.tableMetadata(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		metadata = xuguTableMetadata{}
 	}
 	identities, err := s.tableIdentities(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		identities = map[string]xuguIdentityInfo{}
 	}
 	constraints, err := s.tableConstraints(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		constraints = []xuguConstraintInfo{}
 	}
 	foreignKeys, err := s.tableForeignKeys(schema, table)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		foreignKeys = []xuguConstraintInfo{}
 	}
 	partitions, err := s.tablePartitions(schema, table, false)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		partitions = []xuguPartitionInfo{}
 	}
 	subpartitions, err := s.tablePartitions(schema, table, true)
 	if err != nil {
-		return "", err
+		if !isXuguMetadataAccessError(err) {
+			return "", err
+		}
+		subpartitions = []xuguPartitionInfo{}
 	}
 	allConstraints := make([]xuguConstraintInfo, 0, len(constraints)+len(foreignKeys))
 	allConstraints = append(allConstraints, constraints...)

@@ -1272,6 +1272,17 @@ fn concurrent_metadata_prefetch_allowed(pool_kind: Option<&crate::connection::Po
     )
 }
 
+fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize {
+    // PostgreSQL exports can hold a snapshot connection while metadata and UI
+    // requests share the base pool. Keep enough capacity available for normal
+    // browsing instead of filling nearly the entire ten-connection pool.
+    if db_type == DatabaseType::Postgres {
+        4
+    } else {
+        8
+    }
+}
+
 fn record_export_error(file: &mut std::fs::File, fail_on_error: bool, message: String) -> Result<(), String> {
     if fail_on_error {
         Err(message)
@@ -1598,7 +1609,6 @@ pub async fn export_database_sql_core(
         ddl: Option<Result<String, String>>,
         columns: Option<Result<Vec<crate::db::ColumnInfo>, String>>,
     }
-    const EXPORT_METADATA_PREFETCH_CONCURRENCY: usize = 8;
     let mut prefetched_table_metadata: Vec<Option<PrefetchedTableMetadata>> = Vec::new();
     prefetched_table_metadata.resize_with(tables.len(), || None);
     // 防护门按「实际连接池种类」放行，而非数据库类型的能力标记：只有确认底层
@@ -1662,7 +1672,7 @@ pub async fn export_database_sql_core(
                 };
                 (index, PrefetchedTableMetadata { ddl, columns })
             }))
-            .buffer_unordered(EXPORT_METADATA_PREFETCH_CONCURRENCY);
+            .buffer_unordered(database_export_metadata_prefetch_concurrency(db_type));
         while let Some((index, metadata)) = prefetch_stream.next().await {
             prefetched_table_metadata[index] = Some(metadata);
             if let Some(table_info) = tables.get(index) {
@@ -2228,7 +2238,6 @@ fn build_database_export_object_source_sql(
 
 #[cfg(test)]
 mod tests {
-    use super::concurrent_metadata_prefetch_allowed;
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
         database_export_total_objects, drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal,
@@ -2240,6 +2249,7 @@ mod tests {
         ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
+    use super::{concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency};
     use crate::models::connection::DatabaseType;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
     use serde_json::{json, Value};
@@ -2386,6 +2396,12 @@ mod tests {
         assert!(!concurrent_metadata_prefetch_allowed(Some(&agent)));
 
         assert!(!concurrent_metadata_prefetch_allowed(None));
+    }
+
+    #[test]
+    fn postgres_metadata_prefetch_reserves_pool_capacity() {
+        assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Postgres), 4);
+        assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Mysql), 8);
     }
 
     #[test]

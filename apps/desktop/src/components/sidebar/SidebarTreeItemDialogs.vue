@@ -171,7 +171,7 @@ watch(
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.confirmDeleteTitle") }}</DialogTitle>
       </DialogHeader>
-      <p class="text-sm text-muted-foreground">
+      <p class="min-w-0 break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
         {{ connectionDeleteConfirmMessage() }}
       </p>
       <DialogFooter>

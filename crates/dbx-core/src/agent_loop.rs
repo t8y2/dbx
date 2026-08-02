@@ -76,6 +76,8 @@ pub struct AgentLoopContext {
     pub state: Arc<AppState>,
     pub connection_id: String,
     pub database: String,
+    /// Selected schema that scopes Agent metadata and SQL execution.
+    pub schema: Option<String>,
     pub db_type: DatabaseType,
     pub cli_mcp_server_command: Option<CliAgentCommandSpec>,
     pub sql_permissions: agent_tools::AgentSqlPermissions,
@@ -149,6 +151,7 @@ pub async fn run_agent_loop(
             connection_id: agent_ctx.connection_id.clone(),
             connection_name,
             database: agent_ctx.database.clone(),
+            schema: agent_ctx.schema.clone(),
             agent_mode: is_agent_mode,
             allow_writes: agent_ctx.sql_permissions.allow_writes,
             allow_dangerous: agent_ctx.sql_permissions.allow_dangerous,
@@ -435,6 +438,7 @@ pub async fn run_agent_loop(
         let state2 = Arc::clone(&agent_ctx.state);
         let conn2 = agent_ctx.connection_id.clone();
         let db2 = agent_ctx.database.clone();
+        let schema2 = agent_ctx.schema.clone();
         let db_type = agent_ctx.db_type;
         let sql_permissions = agent_ctx.sql_permissions.clone();
 
@@ -452,25 +456,39 @@ pub async fn run_agent_loop(
         };
 
         // Run parallel group
-        let parallel_futures: Vec<_> = parallel_indices
-            .iter()
-            .map(|&i| {
-                let tc = make_tc(&collected_tool_calls[i]);
-                let state = Arc::clone(&state2);
-                let conn = conn2.clone();
-                let db = db2.clone();
-                let perms = sql_permissions.clone();
-                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, perms).await }
-            })
-            .collect();
+        let parallel_futures: Vec<_> =
+            parallel_indices
+                .iter()
+                .map(|&i| {
+                    let tc = make_tc(&collected_tool_calls[i]);
+                    let state = Arc::clone(&state2);
+                    let conn = conn2.clone();
+                    let db = db2.clone();
+                    let schema = schema2.clone();
+                    let perms = sql_permissions.clone();
+                    async move {
+                        agent_tools::execute_tool(&tc, &state, &conn, &db, schema.as_deref(), &db_type, perms).await
+                    }
+                })
+                .collect();
         let parallel_results = join_all(parallel_futures).await;
 
         // Run sequential group one-by-one
         let mut sequential_results = Vec::with_capacity(sequential_indices.len());
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
-            sequential_results
-                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions.clone()).await);
+            sequential_results.push(
+                agent_tools::execute_tool(
+                    &tc,
+                    &state2,
+                    &conn2,
+                    &db2,
+                    schema2.as_deref(),
+                    &db_type,
+                    sql_permissions.clone(),
+                )
+                .await,
+            );
         }
 
         // Merge results back into original order
@@ -866,7 +884,7 @@ async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) 
         &agent_ctx.state,
         &agent_ctx.connection_id,
         &agent_ctx.database,
-        "",
+        agent_ctx.schema.as_deref().unwrap_or(""),
         None,
         Some(50), // smaller limit for prompt injection
         None,
@@ -879,6 +897,9 @@ async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) 
         Ok(tables) if !tables.is_empty() => {
             enriched.push_str("\n\n## Database Schema (for context — no tools available)\n");
             enriched.push_str(&format!("Database: {}\n", agent_ctx.database));
+            if let Some(schema) = agent_ctx.schema.as_deref() {
+                enriched.push_str(&format!("Schema: {schema}\n"));
+            }
             enriched.push_str("Tables:\n");
             for t in &tables {
                 enriched.push_str(&format!("  - {} ({})", t.name, t.table_type));

@@ -637,11 +637,11 @@ pub async fn find_documents(
         _ => doc! {},
     };
 
-    let total_is_exact = !filter_doc.is_empty();
-    let total = if total_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    let count_is_exact = !filter_doc.is_empty();
+    let total_result = if count_is_exact {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
+        col.estimated_document_count().await.map_err(|e| e.to_string())
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -670,6 +670,7 @@ pub async fn find_documents(
         documents.push(bson_to_json(&Bson::Document(doc.clone())));
         extended_documents.push(Bson::Document(doc).into_canonical_extjson());
     }
+    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
 
     Ok(MongoDocumentResult {
         documents,
@@ -782,11 +783,11 @@ pub async fn find_documents_extended_json(
         _ => doc! {},
     };
 
-    let total_is_exact = !filter_doc.is_empty();
-    let total = if total_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    let count_is_exact = !filter_doc.is_empty();
+    let total_result = if count_is_exact {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
+        col.estimated_document_count().await.map_err(|e| e.to_string())
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -816,6 +817,7 @@ pub async fn find_documents_extended_json(
         documents.push(document);
         extended_documents.push(extended_document);
     }
+    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
 
     Ok(MongoDocumentResult {
         extended_documents: Some(extended_documents),
@@ -824,6 +826,27 @@ pub async fn find_documents_extended_json(
         total,
         total_is_exact,
     })
+}
+
+fn resolve_mongo_find_total(
+    total_result: Result<u64, String>,
+    count_is_exact: bool,
+    skip: u64,
+    document_count: usize,
+) -> (u64, bool) {
+    match total_result {
+        Ok(total) => (total, count_is_exact),
+        Err(error) => {
+            log::debug!(
+                "[mongo][find:count-fallback] count_mode={} skip={} documents={} error={}",
+                if count_is_exact { "exact" } else { "estimated" },
+                skip,
+                document_count,
+                error
+            );
+            (skip.saturating_add(u64::try_from(document_count).unwrap_or(u64::MAX)), false)
+        }
+    }
 }
 
 /// Run `db.collection.aggregate(pipeline, options)`.
@@ -1915,6 +1938,19 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mongo_find_count_failure_returns_loaded_lower_bound() {
+        let error = "invalid type: floating point `2053278871.0`, expected u64".to_string();
+
+        assert_eq!(resolve_mongo_find_total(Err(error), false, 100, 25), (125, false));
+    }
+
+    #[test]
+    fn mongo_find_count_success_preserves_count_semantics() {
+        assert_eq!(resolve_mongo_find_total(Ok(250), true, 100, 25), (250, true));
+        assert_eq!(resolve_mongo_find_total(Ok(250), false, 100, 25), (250, false));
+    }
 
     #[test]
     fn parse_aggregate_options_document_keeps_official_fields() {

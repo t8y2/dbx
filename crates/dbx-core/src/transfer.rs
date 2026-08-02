@@ -6947,6 +6947,7 @@ mod tests {
             assert!(!should_transfer_schema_objects(&DatabaseType::Dameng, &DatabaseType::SqlServer, &[]));
             assert!(!should_transfer_schema_objects(&DatabaseType::Sqlite, &DatabaseType::Sqlite, &[]));
         }
+        #[test]
         fn rewrites_cross_family_view_ddl() {
             // mysql -> dameng
             let mysql_view = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `src`.`v` AS select `t`.`id` AS `id` from `src`.`t`";

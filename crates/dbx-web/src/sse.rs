@@ -69,6 +69,7 @@ impl TransferProgressChannel {
 
     /// The most recently sent progress payload, if any. Used by tests to wait
     /// for a terminal event without subscribing to the live stream.
+    #[cfg(test)]
     pub fn latest(&self) -> Option<String> {
         self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest.clone()
     }

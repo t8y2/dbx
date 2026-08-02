@@ -5715,6 +5715,8 @@ export default withEnglishFallback({
     beginTime: "開始時間",
     endTime: "結束時間",
     maxNum: "最大條數",
+    invalidTimeRange: "開始時間或結束時間無效",
+    endTimeMustBeAfterBegin: "結束時間必須晚於開始時間",
     query: "查詢",
     querying: "查詢中...",
     messageOverview: "基本資訊",

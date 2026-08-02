@@ -22,14 +22,14 @@ pub async fn mq_test_connection_core(state: &AppState, conn_id: &str) -> Result<
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     let mqc = state.mq_admin_config_for_connection(conn_id, &cfg).await?;
     let agent_launch = resolve_mq_agent_launch_spec(&mqc, state);
-    let adapter = match state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await {
-        Ok(adapter) => adapter,
+    let build = match state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await {
+        Ok(build) => build,
         Err(err) => {
             state.mq_registry.drop_connection(conn_id).await;
             return Err(err);
         }
     };
-    match adapter.test_connection().await {
+    match build.adapter.test_connection().await {
         Ok(info) => Ok(info),
         Err(err) => {
             state.mq_registry.drop_connection(conn_id).await;
@@ -801,7 +801,7 @@ async fn get_adapter(
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     let mqc = state.mq_admin_config_for_connection(conn_id, &cfg).await?;
     let agent_launch = resolve_mq_agent_launch_spec(&mqc, state);
-    state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await
+    state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await.map(|build| build.adapter)
 }
 
 /// Resolve the MQ agent launch spec for agent-backed systems (Kafka, RocketMQ, RabbitMQ).

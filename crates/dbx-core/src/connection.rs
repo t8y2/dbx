@@ -2169,14 +2169,14 @@ impl AppState {
                 // connection_id is recognized as valid.
                 let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = crate::mq::service::resolve_mq_agent_launch_spec(&mqc, self);
-                let adapter = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
-                    Ok(adapter) => adapter,
+                let build = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
+                    Ok(build) => build,
                     Err(err) => {
                         self.mq_registry.drop_connection(connection_id).await;
                         return Err(err);
                     }
                 };
-                if let Err(err) = adapter.test_connection().await {
+                if let Err(err) = crate::mq::validate_mq_adapter_after_build(&build).await {
                     self.mq_registry.drop_connection(connection_id).await;
                     return Err(err);
                 }
@@ -3942,9 +3942,6 @@ impl AppState {
             }
         }
         drop(conns);
-        // Also drop the MQ admin adapter if this is an MQ connection.
-        #[cfg(feature = "mq-admin")]
-        self.mq_registry.drop_connection(connection_id).await;
         removed
     }
 

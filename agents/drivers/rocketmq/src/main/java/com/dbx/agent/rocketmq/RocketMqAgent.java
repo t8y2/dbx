@@ -364,24 +364,19 @@ public final class RocketMqAgent {
     private static Object connect(JsonObject params) throws Exception {
         JsonObject conn = connectionObject(params);
         DefaultMQAdminExt nextAdmin = null;
-        DefaultMQProducer nextProducer = null;
         try {
             nextAdmin = buildAdminClient(conn);
-            nextAdmin.examineBrokerClusterInfo();
-            nextProducer = buildProducer(conn);
+            // One ClusterInfo per connect — reuse for name/broker resolution and test payload.
+            ClusterInfo clusterInfo = nextAdmin.examineBrokerClusterInfo();
             closeClients();
             adminClient = nextAdmin;
-            producer = nextProducer;
             cachedConnection = conn.deepCopy();
-            cachedClusterName = resolveClusterName(nextAdmin, conn);
-            cachedBrokerAddr = resolveBrokerAddr(nextAdmin, conn);
-            return Collections.singletonMap("ok", true);
+            cachedClusterName = resolveClusterName(clusterInfo, conn);
+            cachedBrokerAddr = resolveBrokerAddr(nextAdmin, conn, clusterInfo);
+            return buildClusterTestResult(clusterInfo, nextAdmin, conn);
         } catch (Exception e) {
             if (nextAdmin != null) {
                 nextAdmin.shutdown();
-            }
-            if (nextProducer != null) {
-                nextProducer.shutdown();
             }
             throw e;
         }
@@ -389,27 +384,47 @@ public final class RocketMqAgent {
 
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject conn = connectionObject(params);
+        if (adminClient != null && cachedConnection != null && connectionMatches(cachedConnection, conn)) {
+            ClusterInfo clusterInfo = adminClient.examineBrokerClusterInfo();
+            return buildClusterTestResult(clusterInfo, adminClient, conn);
+        }
         DefaultMQAdminExt probe = null;
         try {
             probe = buildAdminClient(conn);
             ClusterInfo clusterInfo = probe.examineBrokerClusterInfo();
-            String clusterName = resolveClusterName(clusterInfo, conn);
-            List<Map<String, Object>> brokers = brokerNodes(clusterInfo);
-            boolean aclEnabled = probeAclSupport(probe);
-
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("ok", true);
-            result.put("clusterId", clusterName);
-            result.put("brokers", brokers);
-            result.put("nodeCount", brokers.size());
-            result.put("controller", brokers.isEmpty() ? null : brokers.get(0));
-            result.put("aclEnabled", aclEnabled);
-            return result;
+            return buildClusterTestResult(clusterInfo, probe, conn);
         } finally {
             if (probe != null) {
                 probe.shutdown();
             }
         }
+    }
+
+    private static Map<String, Object> buildClusterTestResult(
+        ClusterInfo clusterInfo,
+        DefaultMQAdminExt admin,
+        JsonObject conn
+    ) throws Exception {
+        String clusterName = resolveClusterName(clusterInfo, conn);
+        List<Map<String, Object>> brokers = brokerNodes(clusterInfo);
+        boolean aclEnabled = probeAclSupport(admin, clusterInfo);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("clusterId", clusterName);
+        result.put("brokers", brokers);
+        result.put("nodeCount", brokers.size());
+        result.put("controller", brokers.isEmpty() ? null : brokers.get(0));
+        result.put("aclEnabled", aclEnabled);
+        return result;
+    }
+
+    static boolean connectionMatches(JsonObject cached, JsonObject requested) {
+        return namesrvAddr(cached).equals(namesrvAddr(requested))
+            && clusterName(cached).equals(clusterName(requested))
+            && brokerAddress(cached).equals(brokerAddress(requested))
+            && credential(cached, "access_key", "accessKey").equals(credential(requested, "access_key", "accessKey"))
+            && credential(cached, "secret_key", "secretKey").equals(credential(requested, "secret_key", "secretKey"));
     }
 
     private static void closeClients() {
@@ -430,7 +445,9 @@ public final class RocketMqAgent {
         DefaultMQAdminExt admin = requireAdmin();
         String keyword = stringOrEmpty(params, "keyword").toLowerCase(Locale.ROOT);
         int offset = Math.max(0, intOrDefault(params, "offset", 0));
-        // limit <= 0 means return all rows from offset (single-shot list from Rust adapter).
+        // limit <= 0: return all rows from offset (legacy single-shot signal).
+        // Large positive limits (e.g. Integer.MAX_VALUE) also return the full remaining
+        // catalog and stay compatible with older agents that coerced limit<=0 to 200.
         int limit = intOrDefault(params, "limit", DEFAULT_LIST_LIMIT);
         JsonObject conn = connectionObject(params);
 
@@ -2090,9 +2107,11 @@ public final class RocketMqAgent {
         };
     }
 
-    private static boolean probeAclSupport(DefaultMQAdminExt admin) {
+    private static boolean probeAclSupport(DefaultMQAdminExt admin, ClusterInfo clusterInfo) {
         try {
-            ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
+            if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+                return false;
+            }
             for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
                 String brokerAddr = broker.selectBrokerAddr();
                 if (brokerAddr == null || brokerAddr.isBlank()) {
@@ -2574,9 +2593,12 @@ public final class RocketMqAgent {
         return adminClient;
     }
 
-    private static DefaultMQProducer requireProducer() {
+    private static DefaultMQProducer requireProducer() throws Exception {
         if (producer == null) {
-            throw new IllegalStateException("Producer is not initialized. Call connect first.");
+            if (cachedConnection == null) {
+                throw new IllegalStateException("Not connected. Call connect first.");
+            }
+            producer = buildProducer(cachedConnection);
         }
         return producer;
     }

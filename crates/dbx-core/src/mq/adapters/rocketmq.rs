@@ -52,13 +52,44 @@ const ROCKETMQ_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_cluster_monitoring: false,
 };
 
-/// `limit <= 0` tells the Java agent to return the full topic catalog in one response.
-/// Avoids fake client-side paging that rebuilt the entire catalog on every page.
-const TOPIC_LIST_FETCH_ALL: i32 = 0;
+/// Prefer one RPC for the full topic catalog.
+///
+/// Use a large *positive* limit (not `0`): older agents coerce `limit <= 0` back to 200,
+/// which truncates catalogs (e.g. 338 topics → 200 rows → ~167 after type filters).
+/// Current agents treat `limit <= 0` as "all"; a large positive limit returns the same
+/// full page via normal pagination math without that version skew.
+const TOPIC_LIST_FETCH_LIMIT: i32 = i32::MAX;
+/// Fallback page size when an agent still returns a truncated first page (`topics.len() < total`).
+const TOPIC_LIST_FALLBACK_PAGE_SIZE: i32 = 200;
 
 pub struct RocketMqAdmin {
     client: Arc<Mutex<AgentDriverClient>>,
     config: MqAdminConfig,
+}
+
+fn cluster_info_from_agent_result(result: &serde_json::Value) -> MqClusterInfo {
+    let cluster_id = result.get("clusterId").and_then(|v| v.as_str()).map(String::from);
+    let brokers = result.get("brokers").cloned().unwrap_or(serde_json::json!([]));
+
+    // When the broker has no authorizer configured, disable permissions in the UI
+    // so the frontend hides the tab instead of showing raw errors.
+    let acl_enabled = result.get("aclEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let mut caps = ROCKETMQ_CAPABILITIES;
+    if !acl_enabled {
+        caps.supports_permissions = false;
+    }
+
+    MqClusterInfo {
+        system_kind: MqSystemKind::RocketMq,
+        server_version: None,
+        resolved_profile: "rocketmq-agent".to_string(),
+        version_detection: "agent".to_string(),
+        capabilities: caps,
+        extra: serde_json::json!({
+            "clusterId": cluster_id,
+            "brokers": brokers,
+        }),
+    }
 }
 
 impl RocketMqAdmin {
@@ -106,33 +137,16 @@ impl MessageQueueAdmin for RocketMqAdmin {
         MqSystemKind::RocketMq
     }
 
+    fn build_includes_connect_test(&self) -> bool {
+        true
+    }
+
     async fn test_connection(&self) -> Result<MqClusterInfo, String> {
         let conn_params = build_connection_params(&self.config);
         let result: serde_json::Value =
             self.call("test_connection", serde_json::json!({ "connection": conn_params })).await?;
 
-        let cluster_id = result.get("clusterId").and_then(|v| v.as_str()).map(String::from);
-        let brokers = result.get("brokers").cloned().unwrap_or(serde_json::json!([]));
-
-        // When the broker has no authorizer configured, disable permissions in the UI
-        // so the frontend hides the tab instead of showing raw errors.
-        let acl_enabled = result.get("aclEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        let mut caps = ROCKETMQ_CAPABILITIES;
-        if !acl_enabled {
-            caps.supports_permissions = false;
-        }
-
-        Ok(MqClusterInfo {
-            system_kind: MqSystemKind::RocketMq,
-            server_version: None,
-            resolved_profile: "rocketmq-agent".to_string(),
-            version_detection: "agent".to_string(),
-            capabilities: caps,
-            extra: serde_json::json!({
-                "clusterId": cluster_id,
-                "brokers": brokers,
-            }),
-        })
+        Ok(cluster_info_from_agent_result(&result))
     }
 
     // ---- Tenants (not supported by RocketMQ) ----
@@ -178,21 +192,41 @@ impl MessageQueueAdmin for RocketMqAdmin {
     // ---- Topics ----
 
     async fn list_topics(&self, _ns: &NamespaceRef, _opts: ListTopicsOpts) -> Result<Vec<TopicInfo>, String> {
-        // Single RPC: agent builds the catalog once. Fake offset/limit paging used to
-        // re-run getAllTopicConfig for every 200-row page.
+        // Prefer a single RPC so the agent builds the catalog once. If the agent still
+        // truncates (old coerce-to-200 behavior), page the remainder using `total`.
         let result: serde_json::Value = self
             .call(
                 "mq_list_topics",
                 serde_json::json!({
                     "keyword": "",
-                    "limit": TOPIC_LIST_FETCH_ALL,
+                    "limit": TOPIC_LIST_FETCH_LIMIT,
                     "offset": 0,
                 }),
             )
             .await?;
 
-        let topics = result.get("topics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(topics.iter().map(topic_info_from_agent_value).collect())
+        let mut all = topic_infos_from_agent_list_response(&result);
+        let total = agent_list_total(&result, all.len());
+        let mut offset = all.len();
+        while (offset as u64) < total {
+            let page: serde_json::Value = self
+                .call(
+                    "mq_list_topics",
+                    serde_json::json!({
+                        "keyword": "",
+                        "limit": TOPIC_LIST_FALLBACK_PAGE_SIZE,
+                        "offset": offset,
+                    }),
+                )
+                .await?;
+            let batch = topic_infos_from_agent_list_response(&page);
+            if batch.is_empty() {
+                break;
+            }
+            offset = offset.saturating_add(batch.len());
+            all.extend(batch);
+        }
+        Ok(all)
     }
 
     async fn create_topic(&self, topic: &TopicRef, partitions: Option<u32>) -> Result<(), String> {
@@ -722,9 +756,13 @@ fn topic_info_from_agent_value(t: &serde_json::Value) -> TopicInfo {
     }
 }
 
-#[cfg(test)]
 fn topic_infos_from_agent_list_response(response: &serde_json::Value) -> Vec<TopicInfo> {
     response.get("topics").and_then(|v| v.as_array()).into_iter().flatten().map(topic_info_from_agent_value).collect()
+}
+
+/// Prefer agent-reported `total`; fall back to the page length when absent.
+fn agent_list_total(response: &serde_json::Value, page_len: usize) -> u64 {
+    response.get("total").and_then(|v| v.as_u64()).unwrap_or(page_len as u64)
 }
 
 /// Extract RocketMQ NameServer address from MqAdminConfig.extra.
@@ -1015,12 +1053,24 @@ mod tests {
         let topics: Vec<serde_json::Value> = (0..341)
             .map(|i| serde_json::json!({ "name": format!("topic-{i}"), "partitions": 4, "messageType": "UNSPECIFIED" }))
             .collect();
-        let response = serde_json::json!({ "topics": topics, "total": 341, "offset": 0, "limit": 0 });
+        let response = serde_json::json!({ "topics": topics, "total": 341, "offset": 0, "limit": i32::MAX });
         let parsed = topic_infos_from_agent_list_response(&response);
         assert_eq!(parsed.len(), 341);
+        assert_eq!(agent_list_total(&response, parsed.len()), 341);
         assert_eq!(parsed.first().map(|t| t.name.as_str()), Some("topic-0"));
         assert_eq!(parsed.last().map(|t| t.name.as_str()), Some("topic-340"));
         assert_eq!(parsed[0].message_type.as_deref(), Some("UNSPECIFIED"));
+    }
+
+    #[test]
+    fn agent_list_total_detects_truncated_first_page() {
+        let page: Vec<serde_json::Value> =
+            (0..200).map(|i| serde_json::json!({ "name": format!("topic-{i}"), "partitions": 4 })).collect();
+        let response = serde_json::json!({ "topics": page, "total": 338, "offset": 0, "limit": 200 });
+        let parsed = topic_infos_from_agent_list_response(&response);
+        assert_eq!(parsed.len(), 200);
+        assert_eq!(agent_list_total(&response, parsed.len()), 338);
+        assert!((parsed.len() as u64) < agent_list_total(&response, parsed.len()));
     }
 
     #[test]
@@ -1045,5 +1095,19 @@ mod tests {
         assert_eq!(peeked.properties.get("offset").map(String::as_str), Some("15"));
         assert_eq!(peeked.properties.get("tag").map(String::as_str), Some("cs-pt-dlq-test"));
         assert_eq!(peeked.publish_time.as_deref(), Some("1710000000000"));
+    }
+
+    #[test]
+    fn cluster_info_from_agent_result_parses_acl_and_brokers() {
+        let result = serde_json::json!({
+            "ok": true,
+            "clusterId": "DefaultCluster",
+            "brokers": [{"brokerName": "broker-a"}],
+            "aclEnabled": false
+        });
+        let info = super::cluster_info_from_agent_result(&result);
+        assert_eq!(info.system_kind, MqSystemKind::RocketMq);
+        assert!(!info.capabilities.supports_permissions);
+        assert_eq!(info.extra.get("clusterId").and_then(|v| v.as_str()), Some("DefaultCluster"));
     }
 }

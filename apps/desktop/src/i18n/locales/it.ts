@@ -5720,6 +5720,8 @@ export default withEnglishFallback({
     beginTime: "Ora inizio",
     endTime: "Ora fine",
     maxNum: "Numero massimo",
+    invalidTimeRange: "Ora di inizio o fine non valida",
+    endTimeMustBeAfterBegin: "L'ora di fine deve essere successiva all'ora di inizio",
     query: "Cerca",
     querying: "Ricerca in corso...",
     messageOverview: "Informazioni di base",

@@ -369,4 +369,23 @@ class RocketMqAgentTest {
         assertEquals("CLIENT_INNER_PRODUCER", producers.get(0).get("producerName"));
         assertEquals("127.0.0.1:39688", producers.get(0).get("address"));
     }
+
+    @Test
+    void connectionMatchesComparesRocketMqConnectFields() {
+        JsonObject base = JsonParser.parseString("""
+            {
+              "namesrv_addr": "127.0.0.1:9876",
+              "cluster_name": "DefaultCluster",
+              "broker_addr": "",
+              "access_key": "ak",
+              "secret_key": "sk"
+            }
+            """).getAsJsonObject();
+        JsonObject same = base.deepCopy();
+        JsonObject differentNamesrv = base.deepCopy();
+        differentNamesrv.addProperty("namesrv_addr", "127.0.0.1:9877");
+
+        assertTrue(RocketMqAgent.connectionMatches(base, same));
+        assertFalse(RocketMqAgent.connectionMatches(base, differentNamesrv));
+    }
 }

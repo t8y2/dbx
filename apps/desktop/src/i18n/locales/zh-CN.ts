@@ -5861,6 +5861,8 @@ export default withEnglishFallback({
     beginTime: "开始时间",
     endTime: "结束时间",
     maxNum: "最大条数",
+    invalidTimeRange: "开始时间或结束时间无效",
+    endTimeMustBeAfterBegin: "结束时间必须晚于开始时间",
     query: "查询",
     querying: "查询中...",
     messageOverview: "基本信息",

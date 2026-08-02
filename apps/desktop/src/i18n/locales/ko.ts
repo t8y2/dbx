@@ -5589,6 +5589,8 @@ export default withEnglishFallback({
     beginTime: "시작 시간",
     endTime: "종료 시간",
     maxNum: "최대 메시지 수",
+    invalidTimeRange: "시작 시간 또는 종료 시간이 유효하지 않습니다",
+    endTimeMustBeAfterBegin: "종료 시간은 시작 시간보다 늦어야 합니다",
     query: "쿼리",
     querying: "쿼리 중...",
     messageOverview: "개요",

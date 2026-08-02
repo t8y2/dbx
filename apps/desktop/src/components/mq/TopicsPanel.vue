@@ -15,7 +15,6 @@ import { isAllVhostsNamespace, resolveMqRowNamespace } from "@/lib/mq/mqConsoleD
 import { formatError } from "@/lib/backend/errorUtils";
 import { DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS, isProtectedRocketMqTopic, isRocketMqBusinessMessageType, matchesRocketMqTypeFilters, resolveRocketMqMessageType, ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES, ROCKETMQ_TOPIC_MESSAGE_TYPES } from "@/lib/mq/rocketmqTopicTypes";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 const TOPIC_ROW_HEIGHT = 44;
 
@@ -133,7 +132,8 @@ const topicsGridTemplate = computed(() => {
   if (showNamespaceColumn.value) cols.push("minmax(100px, 0.8fr)");
   cols.push("120px");
   if (!isRocketMqCluster.value) cols.push("140px");
-  cols.push(isRocketMqCluster.value ? "minmax(280px, 1.2fr)" : "minmax(200px, 1fr)");
+  // RocketMQ keeps tiled row actions (status/route/consumers/…) — reserve a wider actions column.
+  cols.push(isRocketMqCluster.value ? "minmax(560px, 2.2fr)" : "minmax(200px, 1fr)");
   return cols.join(" ");
 });
 
@@ -530,25 +530,17 @@ watch(newPartitions, () => {
               <div class="topics-col actions" @click.stop>
                 <template v-if="isRocketMqCluster">
                   <button type="button" class="btn-sm" @click="openRocketMqDialog('status', row.topic)">{{ t("mqTopics.actionStatus") }}</button>
+                  <button type="button" class="btn-sm" @click="openRocketMqDialog('route', row.topic)">{{ t("mqTopics.actionRoute") }}</button>
+                  <button type="button" class="btn-sm" @click="openRocketMqDialog('consumers', row.topic)">{{ t("mqTopics.actionConsumers") }}</button>
                   <button v-if="isDlqTopic(row.topic)" type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
                   <template v-else>
                     <button type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
                     <button type="button" class="btn-sm" :disabled="readOnly" @click="navigateToMessages(row.topic)">{{ t("mqRocketmq.actionSendMessage") }}</button>
                   </template>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger as-child>
-                      <button type="button" class="btn-sm">{{ t("mqRocketmq.actionMore") }}</button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem @select="openRocketMqDialog('route', row.topic)">{{ t("mqTopics.actionRoute") }}</DropdownMenuItem>
-                      <DropdownMenuItem @select="openRocketMqDialog('consumers', row.topic)">{{ t("mqTopics.actionConsumers") }}</DropdownMenuItem>
-                      <DropdownMenuItem @select="openRocketMqDialog('config', row.topic)">{{ t("mqTopics.actionConfig") }}</DropdownMenuItem>
-                      <DropdownMenuItem :disabled="readOnly || isTopicProtected(row.topic)" @select="openRocketMqDialog('reset', row.topic)">{{ t("mqTopics.actionReset") }}</DropdownMenuItem>
-                      <DropdownMenuItem :disabled="readOnly || isTopicProtected(row.topic)" @select="openRocketMqDialog('skip', row.topic)">{{ t("mqTopics.actionSkip") }}</DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem variant="destructive" :disabled="readOnly || isTopicProtected(row.topic)" @select="handleDelete(row.topic)">{{ t("mqTopics.delete") }}</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <button type="button" class="btn-sm" @click="openRocketMqDialog('config', row.topic)">{{ t("mqTopics.actionConfig") }}</button>
+                  <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('reset', row.topic)">{{ t("mqTopics.actionReset") }}</button>
+                  <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('skip', row.topic)">{{ t("mqTopics.actionSkip") }}</button>
+                  <button type="button" class="btn-sm btn-danger" :disabled="readOnly || isTopicProtected(row.topic)" @click="handleDelete(row.topic)">{{ t("mqTopics.delete") }}</button>
                 </template>
                 <template v-else>
                   <button v-if="row.topic.partitioned && supportsPartitionedTopics !== false && !isTopicProtected(row.topic)" type="button" @click="openPartitionsDialog(row.topic)" :disabled="readOnly || !row.topic.partitions" class="btn-sm">
@@ -968,6 +960,8 @@ watch(newPartitions, () => {
   flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-start;
+  overflow-x: auto;
+  min-width: 0;
 }
 
 .form-row-inline {

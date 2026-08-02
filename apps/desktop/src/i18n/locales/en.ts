@@ -5862,6 +5862,8 @@ export default {
     beginTime: "Begin time",
     endTime: "End time",
     maxNum: "Max messages",
+    invalidTimeRange: "Begin time or end time is invalid",
+    endTimeMustBeAfterBegin: "End time must be later than begin time",
     query: "Query",
     querying: "Querying...",
     messageOverview: "Overview",

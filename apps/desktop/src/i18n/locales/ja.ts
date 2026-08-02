@@ -5775,6 +5775,8 @@ export default withEnglishFallback({
     beginTime: "開始時間",
     endTime: "終了時間",
     maxNum: "最大件数",
+    invalidTimeRange: "開始時刻または終了時刻が無効です",
+    endTimeMustBeAfterBegin: "終了時刻は開始時刻より後である必要があります",
     query: "検索",
     querying: "検索中...",
     messageOverview: "基本情報",

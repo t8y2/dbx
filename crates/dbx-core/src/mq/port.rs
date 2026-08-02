@@ -18,6 +18,13 @@ pub trait MessageQueueAdmin: Send + Sync {
     /// Connectivity test; returns cluster/version info.
     async fn test_connection(&self) -> Result<MqClusterInfo, String>;
 
+    /// When true, the adapter's build path already validated connectivity (e.g.
+    /// RocketMQ agent `connect` RPC). Callers may skip an immediate follow-up
+    /// `test_connection` on first build, but should still test on cache reuse.
+    fn build_includes_connect_test(&self) -> bool {
+        false
+    }
+
     // ---- Tenants ----
     async fn list_tenants(&self) -> Result<Vec<TenantInfo>, String>;
     async fn get_tenant(&self, name: &str) -> Result<TenantInfo, String>;

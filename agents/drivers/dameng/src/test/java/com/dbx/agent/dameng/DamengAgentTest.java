@@ -12,6 +12,12 @@ import com.dbx.agent.test.JdbcAgentFake;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,6 +51,33 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals(List.of("PLAN"), result.getColumns());
         assertEquals(List.of(List.of("row-value")), result.getRows());
         assertEquals(List.of("executeQuery"), JdbcAgentFake.calls);
+    }
+
+    @Test
+    void physicalConnectionsEnableDbmsOutputWithoutChangingUserSql() {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+
+        agent.afterPhysicalConnect(null, printMessageConnection(null, executedSql));
+
+        assertEquals(List.of("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"), executedSql);
+    }
+
+    @Test
+    void executeQueryReturnsDamengPrintMessagesForLogOnlyProcedures() {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection("first\n中文日志\n", executedSql));
+
+        QueryResult result = agent.executeQuery(
+            "CALL LOG_ONLY_PROCEDURE('input')",
+            null,
+            new ExecuteQueryOptions()
+        );
+
+        assertEquals(List.of("Message"), result.getColumns());
+        assertEquals(List.of(List.of("first"), List.of("中文日志")), result.getRows());
+        assertEquals(List.of("CALL LOG_ONLY_PROCEDURE('input')"), executedSql);
     }
 
     @Test
@@ -273,5 +306,53 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
         assertTrue(query.sql().endsWith("LIMIT ? OFFSET ?"));
         assertEquals(List.of("REPORTING", "VIEW", "MATERIALIZED_VIEW", "%S%A%L%E%S%", 10, 30), query.args());
+    }
+
+    private static Connection printMessageConnection(String printMessage, List<String> executedSql) {
+        InvocationHandler statementHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "execute":
+                    executedSql.add((String) args[0]);
+                    return false;
+                case "getPrintMsg":
+                    return printMessage;
+                case "getUpdateCount":
+                    return -1;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        Statement statement = (Statement) Proxy.newProxyInstance(
+            DamengAgentTest.class.getClassLoader(),
+            new Class<?>[]{Statement.class, PrintMessageStatement.class},
+            statementHandler
+        );
+        InvocationHandler connectionHandler = (Object unused, Method method, Object[] args) -> {
+            if (method.getName().equals("createStatement")) {
+                return statement;
+            }
+            return defaultValue(method.getReturnType());
+        };
+        return (Connection) Proxy.newProxyInstance(
+            DamengAgentTest.class.getClassLoader(),
+            new Class<?>[]{Connection.class},
+            connectionHandler
+        );
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (type == Boolean.TYPE) return false;
+        if (type == Byte.TYPE) return (byte) 0;
+        if (type == Short.TYPE) return (short) 0;
+        if (type == Integer.TYPE) return 0;
+        if (type == Long.TYPE) return 0L;
+        if (type == Float.TYPE) return 0f;
+        if (type == Double.TYPE) return 0.0d;
+        if (type == Character.TYPE) return '\0';
+        return null;
+    }
+
+    public interface PrintMessageStatement {
+        String getPrintMsg();
     }
 }

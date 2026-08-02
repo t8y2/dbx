@@ -102,6 +102,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
         connectedUsername = params.getUsername();
     }
 
+    @Override
+    protected void afterPhysicalConnect(ConnectParams params, Connection connection) {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;");
+        } catch (SQLException ignored) {
+            // DBMS_OUTPUT is optional; a restricted package must not block the connection.
+        }
+    }
+
     /**
      * The DM JDBC driver writes a banner to {@code System.out} during
      * {@code Class.forName} / driver initialization.  This corrupts the
@@ -1040,11 +1049,36 @@ public final class DamengAgent extends AbstractJdbcAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            () -> "",
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::resultValue
+            this::resultValue,
+            DamengAgent::statementPrintMessages
         );
+    }
+
+    static List<String> statementPrintMessages(Statement statement) {
+        try {
+            Object target = statement;
+            Method method;
+            try {
+                method = statement.getClass().getMethod("getPrintMsg");
+            } catch (NoSuchMethodException ignored) {
+                // Pooled connections expose a Hikari proxy rather than DmdbStatement directly.
+                Class<?> damengStatementClass = Class.forName("dm.jdbc.driver.DmdbStatement");
+                target = statement.unwrap(damengStatementClass);
+                method = damengStatementClass.getMethod("getPrintMsg");
+            }
+            Object value = method.invoke(target);
+            if (!(value instanceof String)) {
+                return List.of();
+            }
+            String message = (String) value;
+            return message.isEmpty() ? List.of() : message.lines().toList();
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 
     private QueryResult executeExplainQuery(String sql, String schema, ExecuteQueryOptions options) {
@@ -1139,7 +1173,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::resultValue
+            this::resultValue,
+            DamengAgent::statementPrintMessages
         );
     }
 

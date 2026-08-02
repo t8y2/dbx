@@ -102,7 +102,6 @@ import {
   defaultTransposeRecordWidth,
   minTransposeFieldWidth,
   minTransposeRecordWidth,
-  nextAppendedTransposeState,
   nextContextTransposeState,
   nextKeyboardTransposeState,
   nextTransposeState,
@@ -3313,8 +3312,8 @@ function insertRows(count: number, position: "above" | "below" | "end") {
       const displayIndex = displayRowIndexById(firstNewRowId);
       if (displayIndex >= 0) scrollGridRowIntoView(displayIndex);
     });
+    focusInsertedTransposeRecord(firstNewRowId);
   }
-  focusAppendedTransposeRecord();
 }
 
 function handleAddRowMenuSelect(value: string) {
@@ -6746,10 +6745,13 @@ function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: 
   }
 }
 
-function focusAppendedTransposeRecord() {
+function focusInsertedTransposeRecord(rowId: number) {
   if (!showTranspose.value) return;
   nextTick(() => {
-    applyTransposeState(nextAppendedTransposeState(true, displayRowCount.value));
+    const displayIndex = displayRowIndexById(rowId);
+    if (displayIndex >= 0) {
+      applyTransposeState(nextTransposeStateForRecordCount(true, displayIndex, displayRowCount.value));
+    }
   });
 }
 

@@ -19,12 +19,16 @@ const canUsePosition = computed(() => props.canPlaceAtSelection !== false);
 const rowCount = ref("1");
 const position = ref<GridInsertRowPosition>("below");
 
-watch(open, (isOpen) => {
-  if (isOpen) {
-    rowCount.value = "1";
-    position.value = canUsePosition.value ? (props.initialPosition ?? "below") : "end";
-  }
-});
+watch(
+  open,
+  (isOpen) => {
+    if (isOpen) {
+      rowCount.value = "1";
+      position.value = canUsePosition.value ? (props.initialPosition ?? "below") : "end";
+    }
+  },
+  { immediate: true },
+);
 
 // Without a unique selected row the above/below placements are not meaningful;
 // fall back to the end instead of silently degrading on submit.

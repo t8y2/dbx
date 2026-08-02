@@ -10,6 +10,7 @@ interface DiagramCanvas {
 
 export interface TableDiagramRelationshipLayout {
   path: string;
+  routePoints: DiagramPosition[];
   sourceCardinality: DiagramPosition;
   targetCardinality: DiagramPosition;
 }
@@ -36,8 +37,18 @@ function svgNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
 }
 
-function svgHeader(canvas: DiagramCanvas): string {
-  return [`<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" viewBox="0 0 ${svgNumber(canvas.width)} ${svgNumber(canvas.height)}">`, '<rect width="100%" height="100%" fill="#fafafa"/>'].join("");
+interface SvgViewport {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function svgHeader(canvas: DiagramCanvas, viewport: SvgViewport = { x: 0, y: 0, width: canvas.width, height: canvas.height }): string {
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(viewport.width)}" height="${svgNumber(viewport.height)}" viewBox="${svgNumber(viewport.x)} ${svgNumber(viewport.y)} ${svgNumber(viewport.width)} ${svgNumber(viewport.height)}">`,
+    `<rect x="${svgNumber(viewport.x)}" y="${svgNumber(viewport.y)}" width="${svgNumber(viewport.width)}" height="${svgNumber(viewport.height)}" fill="#fafafa"/>`,
+  ].join("");
 }
 
 function svgText(
@@ -84,8 +95,28 @@ function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
   return table.foreignKeys.some((fk) => fk.column === columnName);
 }
 
+function tableDiagramViewport(options: TableDiagramSvgOptions): SvgViewport {
+  const relationshipPadding = 20;
+  let minX = 0;
+  let minY = 0;
+  let maxX = options.canvas.width;
+  let maxY = options.canvas.height;
+
+  for (const layout of Object.values(options.relationshipLayouts)) {
+    const points = [...layout.routePoints, layout.sourceCardinality, layout.targetCardinality];
+    for (const point of points) {
+      minX = Math.min(minX, point.x - relationshipPadding);
+      minY = Math.min(minY, point.y - relationshipPadding);
+      maxX = Math.max(maxX, point.x + relationshipPadding);
+      maxY = Math.max(maxY, point.y + relationshipPadding);
+    }
+  }
+
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
 export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
-  const parts = [svgHeader(options.canvas), tableDiagramDefs()];
+  const parts = [svgHeader(options.canvas, tableDiagramViewport(options)), tableDiagramDefs()];
 
   for (const relationship of options.relationships) {
     const layout = options.relationshipLayouts[relationship.id];

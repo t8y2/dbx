@@ -430,6 +430,7 @@ function relationshipLayout(relationship: DiagramRelationship): TableDiagramRela
   if (!source || !target) {
     return {
       path: "",
+      routePoints: [],
       sourceCardinality: { x: 0, y: 0 },
       targetCardinality: { x: 0, y: 0 },
     };
@@ -455,6 +456,12 @@ function relationshipLayout(relationship: DiagramRelationship): TableDiagramRela
   const cardinalityLift = 10;
   return {
     path: `M ${x1} ${y1} L ${routeX} ${y1} L ${routeX} ${y2} L ${x2} ${y2}`,
+    routePoints: [
+      { x: x1, y: y1 },
+      { x: routeX, y: y1 },
+      { x: routeX, y: y2 },
+      { x: x2, y: y2 },
+    ],
     sourceCardinality: {
       x: x1 + (routeX < source.x ? -cardinalityOffset : cardinalityOffset),
       y: y1 - cardinalityLift,
@@ -562,8 +569,12 @@ async function setSchema(value: string) {
 
 async function loadTableDiagramData(tableName: string, querySchema: string): Promise<DiagramTable> {
   try {
-    const [columns, foreignKeys] = await Promise.all([api.getColumns(connectionId.value, database.value, querySchema, tableName), api.listForeignKeys(connectionId.value, database.value, querySchema, tableName).catch(() => [])]);
-    return { name: tableName, columns, foreignKeys };
+    const [columns, foreignKeys, indexes] = await Promise.all([
+      api.getColumns(connectionId.value, database.value, querySchema, tableName),
+      api.listForeignKeys(connectionId.value, database.value, querySchema, tableName).catch(() => []),
+      api.listIndexes(connectionId.value, database.value, querySchema, tableName).catch(() => []),
+    ]);
+    return { name: tableName, columns, foreignKeys, indexes };
   } catch (e) {
     failedTableCount.value += 1;
     console.warn(`[diagram] failed to load table metadata: ${tableName}`, e);

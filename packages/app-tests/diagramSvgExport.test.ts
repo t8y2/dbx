@@ -35,6 +35,10 @@ test("exports the table diagram as standalone SVG", () => {
     relationshipLayouts: {
       [relationships[0].id]: {
         path: "M 360 96 L 310 96",
+        routePoints: [
+          { x: 360, y: 96 },
+          { x: 310, y: 96 },
+        ],
         sourceCardinality: { x: 346, y: 86 },
         targetCardinality: { x: 324, y: 86 },
       },
@@ -81,6 +85,10 @@ test("exports many-to-many cardinalities at both relationship endpoints", () => 
     relationshipLayouts: {
       [customRelationship.id]: {
         path: "M 310 96 L 360 96",
+        routePoints: [
+          { x: 310, y: 96 },
+          { x: 360, y: 96 },
+        ],
         sourceCardinality: { x: 324, y: 86 },
         targetCardinality: { x: 346, y: 86 },
       },
@@ -95,6 +103,60 @@ test("exports many-to-many cardinalities at both relationship endpoints", () => 
   assert.match(svg, /data-cardinality-end="source"[^>]*>N<\/text>/);
   assert.match(svg, /data-cardinality-end="target"[^>]*>N<\/text>/);
   assert.match(svg, /users\.id \(N:N\) -&gt; orders\.id/);
+});
+
+test("infers one-to-one foreign keys from primary and unique source columns", () => {
+  const primaryKeyTables: DiagramTable[] = [
+    tables[0],
+    {
+      ...tables[1],
+      columns: tables[1].columns.map((column) => ({ ...column, is_primary_key: column.name === "user_id" })),
+    },
+  ];
+  assert.equal(buildDiagramRelationships(primaryKeyTables)[0].sourceCardinality, "1");
+
+  const uniqueIndexTables: DiagramTable[] = [
+    tables[0],
+    {
+      ...tables[1],
+      indexes: [{ name: "orders_user_id_unique", columns: ["user_id"], is_unique: true, is_primary: false }],
+    },
+  ];
+  assert.equal(buildDiagramRelationships(uniqueIndexTables)[0].sourceCardinality, "1");
+});
+
+test("expands the exported viewBox for a relationship routed left of the canvas", () => {
+  const relationships = buildDiagramRelationships(tables);
+  const svg = buildTableDiagramSvg({
+    tables,
+    relationships,
+    positions: {
+      users: { x: 16, y: 40 },
+      orders: { x: 336, y: 40 },
+    },
+    relationshipLayouts: {
+      [relationships[0].id]: {
+        path: "M 14 96 L -20 96 L -20 120 L 14 120",
+        routePoints: [
+          { x: 14, y: 96 },
+          { x: -20, y: 96 },
+          { x: -20, y: 120 },
+          { x: 14, y: 120 },
+        ],
+        sourceCardinality: { x: 0, y: 86 },
+        targetCardinality: { x: 0, y: 110 },
+      },
+    },
+    canvas: { width: 720, height: 320 },
+    cardWidth: 270,
+    cardHeaderHeight: 44,
+    columnRowHeight: 24,
+    maxVisibleColumns: 9,
+  });
+
+  assert.match(svg, /viewBox="-40 0 760 320"/);
+  assert.match(svg, /<rect x="-40" y="0" width="760" height="320" fill="#fafafa"/);
+  assert.match(svg, /<path d="M 14 96 L -20 96 L -20 120 L 14 120"/);
 });
 
 test("exports the engineering ER diagram with Chen-style shapes and cardinalities", () => {

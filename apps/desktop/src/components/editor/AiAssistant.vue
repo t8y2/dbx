@@ -57,6 +57,7 @@ import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
 import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
@@ -345,7 +346,9 @@ const activeFullConfig = computed(() => {
 });
 
 function getModelsForConfig(configId: string) {
-  return modelCatalogs.get(configId)?.models ?? [];
+  const config = settings.aiConfigs.find((item) => item.id === configId);
+  if (!config) return [];
+  return aiModelOptions(config, modelCatalogs.get(configId)?.models ?? []);
 }
 
 function configMatchesModelQuery(config: AiConfigItem, query: string): boolean {
@@ -420,12 +423,21 @@ function startManualModel(configId: string) {
   nextTick(() => document.querySelector<HTMLInputElement>("[data-manual-model-input]")?.focus());
 }
 
-function applyManualModel(configId: string) {
+async function applyManualModel(configId: string) {
   const modelId = manualModelId.value.trim();
   if (!modelId) return;
-  handleModelSelect(configId, modelId);
-  manualModelConfigId.value = "";
-  manualModelId.value = "";
+  const config = settings.aiConfigs.find((item) => item.id === configId);
+  if (!config) return;
+  try {
+    if (config.model.trim() !== modelId) {
+      await settings.updateAiConfigItem(configId, { models: addConfiguredAiModel(config.models, modelId) });
+    }
+    handleModelSelect(configId, modelId);
+    manualModelConfigId.value = "";
+    manualModelId.value = "";
+  } catch (error) {
+    toast(translateBackendError(t, error));
+  }
 }
 
 const activeEffortEntry = computed(() => {

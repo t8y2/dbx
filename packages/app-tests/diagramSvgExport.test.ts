@@ -123,6 +123,26 @@ test("infers one-to-one foreign keys from primary and unique source columns", ()
     },
   ];
   assert.equal(buildDiagramRelationships(uniqueIndexTables)[0].sourceCardinality, "1");
+
+  const sourceColumnsContainingUniqueKey: DiagramTable[] = [
+    tables[0],
+    {
+      ...tables[1],
+      columns: [...tables[1].columns, { name: "tenant_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+      foreignKeys: [...tables[1].foreignKeys, { name: "orders_user_id_fk", column: "tenant_id", ref_table: "users", ref_column: "tenant_id" }],
+      indexes: [{ name: "orders_user_id_unique", columns: ["user_id"], is_unique: true, is_primary: false }],
+    },
+  ];
+  assert.equal(buildDiagramRelationships(sourceColumnsContainingUniqueKey)[0].sourceCardinality, "1");
+
+  const partialUniqueIndexTables: DiagramTable[] = [
+    tables[0],
+    {
+      ...tables[1],
+      indexes: [{ name: "orders_user_id_active_unique", columns: ["user_id"], is_unique: true, is_primary: false, filter: "deleted_at IS NULL" }],
+    },
+  ];
+  assert.equal(buildDiagramRelationships(partialUniqueIndexTables)[0].sourceCardinality, "N");
 });
 
 test("expands the exported viewBox for a relationship routed left of the canvas", () => {

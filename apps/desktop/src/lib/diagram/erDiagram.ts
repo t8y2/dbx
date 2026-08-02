@@ -57,10 +57,10 @@ function columnExists(table: DiagramTable | undefined, columnName: string): bool
   return !!table?.columns.some((column) => column.name === columnName);
 }
 
-function sameColumnSet(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) return false;
-  const rightColumns = new Set(right);
-  return left.every((column) => rightColumns.has(column));
+function sourceColumnsContainUniqueKey(sourceColumns: string[], keyColumns: string[]): boolean {
+  if (keyColumns.length === 0) return false;
+  const sourceColumnSet = new Set(sourceColumns);
+  return keyColumns.every((column) => sourceColumnSet.has(column));
 }
 
 function foreignKeySourceColumns(table: DiagramTable, foreignKey: ForeignKeyInfo): string[] {
@@ -71,8 +71,8 @@ function foreignKeySourceColumns(table: DiagramTable, foreignKey: ForeignKeyInfo
 function foreignKeySourceCardinality(table: DiagramTable, foreignKey: ForeignKeyInfo): "1" | "N" {
   const sourceColumns = foreignKeySourceColumns(table, foreignKey);
   const primaryKeyColumns = table.columns.filter((column) => column.is_primary_key).map((column) => column.name);
-  if (sameColumnSet(sourceColumns, primaryKeyColumns)) return "1";
-  return table.indexes?.some((index) => (index.is_unique || index.is_primary) && sameColumnSet(sourceColumns, index.columns)) ? "1" : "N";
+  if (sourceColumnsContainUniqueKey(sourceColumns, primaryKeyColumns)) return "1";
+  return table.indexes?.some((index) => (index.is_unique || index.is_primary) && !index.filter?.trim() && sourceColumnsContainUniqueKey(sourceColumns, index.columns)) ? "1" : "N";
 }
 
 function customRelationshipId(relationship: Omit<CustomDiagramRelationship, "id">): string {

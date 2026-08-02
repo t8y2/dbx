@@ -28,6 +28,7 @@ interface RowItem {
 }
 
 export const DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID = Number.MIN_SAFE_INTEGER;
+export const DATA_GRID_MAX_BATCH_INSERT_ROWS = 1000;
 
 type RowKind = "none" | "existing" | "new" | "draft";
 
@@ -946,6 +947,32 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     });
   }
 
+  // Batch-append N blank draft rows as a single undoable change. Each row is an
+  // independent clone so later edits to one row never alias another. Editing
+  // starts on the first inserted row, mirroring addRow.
+  function addRows(count: number) {
+    if (!Number.isInteger(count) || count <= 0) return;
+    const clampedCount = Math.min(count, DATA_GRID_MAX_BATCH_INSERT_ROWS);
+    const firstNewIndex = newRows.value.length;
+    pushUndoSnapshot();
+    rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
+    const blankRow = result.value.columns.map(() => null);
+    for (let i = 0; i < clampedCount; i++) {
+      newRows.value.push([...blankRow]);
+    }
+    newRows.value = [...newRows.value];
+    touchPendingChanges();
+    if (useTransaction.value && !transactionActive.value) {
+      enterTransaction();
+    }
+    const newRowId = -(firstNewIndex + 1);
+    nextTick(() => {
+      const el = getScrollerElement();
+      if (el) el.scrollTop = el.scrollHeight;
+      startEdit(newRowId, initialEditColumn?.value ?? 0);
+    });
+  }
+
   function isBlankNewRow(row: readonly CellValue[]): boolean {
     return row.every((value) => value === null || (typeof value === "string" && value.trim() === ""));
   }
@@ -1629,6 +1656,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     cancelEdit,
     onEditKeydown,
     addRow,
+    addRows,
     appendPastedRowsToNewRow,
     cloneRow,
     cloneRows,

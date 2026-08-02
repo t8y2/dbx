@@ -1169,7 +1169,7 @@ export default withEnglishFallback({
     addRow: "Adicionar Linha",
     insertMultipleRows: "Inserir várias linhas…",
     insertRowsTitle: "Inserir várias linhas",
-    insertRowsDescription: "Adiciona este número de linhas de rascunho não salvas ao final do resultado. Linhas vazias são ignoradas ao salvar.",
+    insertRowsDescription: "Cria este número de linhas de rascunho não salvas. Linhas vazias são ignoradas ao salvar; após salvar, a ordem de exibição segue a consulta atual.",
     insertRowCountLabel: "Número de linhas",
     insertRowCountInvalid: "Digite um número inteiro maior que 0.",
     insertRowsMaxHint: "Até {max} linhas.",

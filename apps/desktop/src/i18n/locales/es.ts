@@ -1170,7 +1170,7 @@ export default withEnglishFallback({
     addRow: "Agregar fila",
     insertMultipleRows: "Insertar varias filas…",
     insertRowsTitle: "Insertar varias filas",
-    insertRowsDescription: "Añade este número de filas de borrador sin guardar al final del resultado. Las filas vacías se ignoran al guardar.",
+    insertRowsDescription: "Crea este número de filas de borrador sin guardar. Las filas vacías se ignoran al guardar; después de guardar, el orden de visualización sigue la consulta actual.",
     insertRowCountLabel: "Número de filas",
     insertRowCountInvalid: "Introduce un número entero mayor que 0.",
     insertRowsMaxHint: "Hasta {max} filas.",

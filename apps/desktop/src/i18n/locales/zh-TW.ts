@@ -1168,7 +1168,7 @@ export default withEnglishFallback({
     addRow: "新增資料",
     insertMultipleRows: "插入多行…",
     insertRowsTitle: "新增多行",
-    insertRowsDescription: "在結果末尾追加指定數量的未儲存草稿列。儲存時未填寫的空白列會被忽略。",
+    insertRowsDescription: "建立指定數量的未儲存草稿列。儲存時未填寫的空白列會被忽略；儲存後的顯示位置由目前查詢排序決定。",
     insertRowCountLabel: "列數",
     insertRowCountInvalid: "請輸入大於 0 的整數。",
     insertRowsMaxHint: "最多 {max} 列。",

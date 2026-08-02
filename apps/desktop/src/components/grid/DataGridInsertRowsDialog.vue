@@ -11,7 +11,10 @@ type GridInsertRowPosition = "above" | "below" | "end";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
+const props = defineProps<{ canPlaceAtSelection?: boolean }>();
 const emit = defineEmits<{ insert: [count: number, position: GridInsertRowPosition] }>();
+
+const canUsePosition = computed(() => props.canPlaceAtSelection !== false);
 
 const rowCount = ref("1");
 const position = ref<GridInsertRowPosition>("below");
@@ -19,8 +22,14 @@ const position = ref<GridInsertRowPosition>("below");
 watch(open, (isOpen) => {
   if (isOpen) {
     rowCount.value = "1";
-    position.value = "below";
+    position.value = canUsePosition.value ? "below" : "end";
   }
+});
+
+// Without a unique selected row the above/below placements are not meaningful;
+// fall back to the end instead of silently degrading on submit.
+watch(canUsePosition, (canUse) => {
+  if (!canUse) position.value = "end";
 });
 
 function parseIntegerOrNull(raw: string): number | null {
@@ -67,11 +76,11 @@ function confirmInsert() {
         <div class="space-y-1.5">
           <span class="text-sm font-medium">{{ t("grid.insertRowPositionLabel") }}</span>
           <label class="flex items-center gap-2 text-sm">
-            <input v-model="position" type="radio" value="above" class="h-3.5 w-3.5 accent-primary" />
+            <input v-model="position" type="radio" value="above" :disabled="!canUsePosition" class="h-3.5 w-3.5 accent-primary disabled:cursor-not-allowed" />
             {{ t("grid.insertPositionAbove") }}
           </label>
           <label class="flex items-center gap-2 text-sm">
-            <input v-model="position" type="radio" value="below" class="h-3.5 w-3.5 accent-primary" />
+            <input v-model="position" type="radio" value="below" :disabled="!canUsePosition" class="h-3.5 w-3.5 accent-primary disabled:cursor-not-allowed" />
             {{ t("grid.insertPositionBelow") }}
           </label>
           <label class="flex items-center gap-2 text-sm">

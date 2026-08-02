@@ -44,8 +44,10 @@ export function buildOrderedGridRows(sourceIndices: readonly number[], newRowMet
   newRowMeta.forEach((meta, index) => {
     if (index < newRowCount) tokenToNewIndex.set(meta.token, index);
   });
-  // For "below" clusters, track the last inserted position per anchor so a
-  // second batch inserted below the same row lands after the first batch.
+  // For "below" clusters, track the last inserted row's newIndex per anchor so a
+  // second batch inserted below the same row lands after the first batch. The
+  // tail is re-located by its stable newIndex because an "above" insert on the
+  // same anchor shifts absolute positions.
   const belowTail = new Map<number, number>();
 
   for (let index = 0; index < newRowCount; index++) {
@@ -76,9 +78,16 @@ export function buildOrderedGridRows(sourceIndices: readonly number[], newRowMet
       // so inserting at the anchor's current position keeps creation order.
       order.splice(anchorPos, 0, entry);
     } else {
-      const tail = belowTail.get(anchorId) ?? anchorPos;
-      order.splice(tail + 1, 0, entry);
-      belowTail.set(anchorId, tail + 1);
+      const tailNewIndex = belowTail.get(anchorId);
+      let insertPos: number;
+      if (tailNewIndex === undefined) {
+        insertPos = anchorPos;
+      } else {
+        insertPos = order.findIndex((candidate) => candidate.kind === "new" && candidate.newIndex === tailNewIndex);
+        if (insertPos < 0) insertPos = anchorPos;
+      }
+      order.splice(insertPos + 1, 0, entry);
+      belowTail.set(anchorId, index);
     }
   }
   return order;

@@ -1185,7 +1185,7 @@ export default withEnglishFallback({
     addRow: "行を追加",
     insertMultipleRows: "複数行を挿入…",
     insertRowsTitle: "複数行を挿入",
-    insertRowsDescription: "結果の末尾に未保存の下書き行を指定数追加します。保存時、空の行は無視されます。",
+    insertRowsDescription: "未保存の下書き行を指定数作成します。保存時、空の行は無視されます。保存後の表示順は現在のクエリに従います。",
     insertRowCountLabel: "行数",
     insertRowCountInvalid: "0 より大きい整数を入力してください。",
     insertRowsMaxHint: "最大 {max} 行まで。",

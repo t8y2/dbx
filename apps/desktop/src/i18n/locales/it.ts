@@ -1167,7 +1167,7 @@ export default withEnglishFallback({
     addRow: "Aggiungi Riga",
     insertMultipleRows: "Inserisci più righe…",
     insertRowsTitle: "Inserisci più righe",
-    insertRowsDescription: "Aggiunge questo numero di righe di bozza non salvate alla fine del risultato. Le righe vuote vengono ignorate al salvataggio.",
+    insertRowsDescription: "Crea questo numero di righe di bozza non salvate. Le righe vuote vengono ignorate al salvataggio; dopo il salvataggio, l'ordine di visualizzazione segue la query corrente.",
     insertRowCountLabel: "Numero di righe",
     insertRowCountInvalid: "Inserisci un numero intero maggiore di 0.",
     insertRowsMaxHint: "Fino a {max} righe.",

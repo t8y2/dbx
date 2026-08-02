@@ -95,6 +95,25 @@ describe("buildOrderedGridRows", () => {
     ]);
   });
 
+  it("keeps below-cluster order when an above insert shifts the anchor", () => {
+    expect(
+      entries(
+        [0, 1],
+        [
+          { token: 1, placement: { anchorId: 0, position: "below" } },
+          { token: 2, placement: { anchorId: 0, position: "above" } },
+          { token: 3, placement: { anchorId: 0, position: "below" } },
+        ],
+      ),
+    ).toEqual([
+      { kind: "new", newIndex: 1 },
+      { kind: "source", sourceIndex: 0 },
+      { kind: "new", newIndex: 0 },
+      { kind: "new", newIndex: 2 },
+      { kind: "source", sourceIndex: 1 },
+    ]);
+  });
+
   it("places a row above another pending row", () => {
     expect(
       entries(

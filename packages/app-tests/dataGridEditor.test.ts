@@ -997,6 +997,24 @@ test("deleting a pending row keeps the placement metadata aligned", () => {
   assert.equal(editor.newRowMeta.value.length, 2);
 });
 
+test("restoring a cached snapshot resumes token allocation past restored tokens", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const firstEditor = createQuickEntryEditor({ quickEntryEnabled: true, cacheKey: "token-restore" });
+
+  firstEditor.addRows(2);
+  assert.deepEqual(firstEditor.newRowMeta.value.map((m) => m.token), [1, 2]);
+  firstEditor.savePendingSnapshot(false, false);
+
+  const restoredEditor = createQuickEntryEditor({ quickEntryEnabled: true, cacheKey: "token-restore" });
+  assert.deepEqual(restoredEditor.newRowMeta.value.map((m) => m.token), [1, 2]);
+
+  restoredEditor.addRows(1);
+  // The fresh instance restarts the allocator at 1; it must resume past the
+  // restored tokens so a new row never shares a token with a restored row.
+  assert.deepEqual(restoredEditor.newRowMeta.value.map((m) => m.token), [1, 2, 3]);
+});
+
 test("batch row delete records a single undo snapshot", () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

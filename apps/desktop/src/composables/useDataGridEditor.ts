@@ -224,6 +224,17 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function cloneNewRowMeta(meta: readonly GridNewRowMeta[]): GridNewRowMeta[] {
     return meta.map((item) => ({ token: item.token, placement: item.placement ? { ...item.placement } : null }));
   }
+  // Restore a metadata snapshot and resume token allocation past its maximum so
+  // newly created rows never collide with tokens held by restored rows (a fresh
+  // composable instance starts the counter at 1 again).
+  function restoreNewRowMeta(meta: readonly GridNewRowMeta[]) {
+    newRowMeta.value = cloneNewRowMeta(meta);
+    let maxToken = 0;
+    for (const item of newRowMeta.value) {
+      if (item.token > maxToken) maxToken = item.token;
+    }
+    nextNewRowToken = maxToken + 1;
+  }
   const deletedRows = ref<Set<number>>(new Set());
   const quickEntryDraftRow = ref<CellValue[]>([]);
   const undoStack = ref<PendingChangesHistorySnapshot[]>([]);
@@ -246,7 +257,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const cached = pendingChangesCache.get(key);
     if (cached && cached.columnCount === result.value.columns.length && cached.rowCount === result.value.rows.length) {
       newRows.value = cached.newRows;
-      newRowMeta.value = cached.newRowMeta ?? [];
+      restoreNewRowMeta(cached.newRowMeta ?? []);
       quickEntryDraftRow.value = cached.quickEntryDraftRow ? [...cached.quickEntryDraftRow] : [];
       dirtyRows.value = cached.dirtyRows;
       deletedRows.value = cached.deletedRows;
@@ -343,7 +354,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function restorePendingChangesSnapshot(snapshot: PendingChangesHistorySnapshot) {
     newRows.value = snapshot.newRows.map((row) => [...row]);
-    newRowMeta.value = cloneNewRowMeta(snapshot.newRowMeta ?? []);
+    restoreNewRowMeta(snapshot.newRowMeta ?? []);
     quickEntryDraftRow.value = snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : emptyDraftRow();
     dirtyRows.value = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
     deletedRows.value = new Set(snapshot.deletedRows);

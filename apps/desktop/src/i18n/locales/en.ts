@@ -1285,7 +1285,7 @@ export default {
     addRow: "Add Row",
     insertMultipleRows: "Insert Multiple Rows…",
     insertRowsTitle: "Insert Multiple Rows",
-    insertRowsDescription: "Append this many unsaved draft rows to the end of the result. Empty rows are ignored when saving.",
+    insertRowsDescription: "Create this many unsaved draft rows. Empty rows are ignored when saving; after saving, the display order follows the current query.",
     insertRowCountLabel: "Row count",
     insertRowCountInvalid: "Enter a whole number greater than 0.",
     insertRowsMaxHint: "Up to {max} rows.",

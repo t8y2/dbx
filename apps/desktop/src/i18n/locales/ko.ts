@@ -1263,7 +1263,7 @@ export default withEnglishFallback({
     addRow: "행 추가",
     insertMultipleRows: "여러 행 삽입…",
     insertRowsTitle: "여러 행 삽입",
-    insertRowsDescription: "결과 끝에 저장되지 않은 초안 행을 지정한 개수만큼 추가합니다. 저장 시 비어 있는 행은 무시됩니다.",
+    insertRowsDescription: "저장되지 않은 초안 행을 지정한 개수만큼 만듭니다. 저장 시 비어 있는 행은 무시되며, 저장 후 표시 순서는 현재 쿼리를 따릅니다.",
     insertRowCountLabel: "행 수",
     insertRowCountInvalid: "0보다 큰 정수를 입력하세요.",
     insertRowsMaxHint: "최대 {max}행까지.",

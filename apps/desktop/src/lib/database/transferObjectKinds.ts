@@ -62,6 +62,14 @@ export function crossFamilyTransferableKinds(a?: DatabaseType, b?: DatabaseType)
   if (isSameTransferFamily(a, b)) {
     return transferObjectKindsForDatabase(a);
   }
+  const aFam = transferObjectFamily(a);
+  const bFam = transferObjectFamily(b);
+  // Cross-family DDL conversion is only implemented and validated for
+  // MySQL / SQL Server / Oracle families. Postgres-family sources or
+  // targets (postgres/kingbase/gaussdb/kwdb/opengauss) are not supported
+  // by the cross-family executor, so nothing is selectable there.
+  const supported = new Set([TransferObjectFamily.Mysql, TransferObjectFamily.SqlServer, TransferObjectFamily.Oracle]);
+  if (!aFam || !bFam || !supported.has(aFam) || !supported.has(bFam)) return [];
   const aKinds = transferObjectKindsForDatabase(a);
   const bKinds = transferObjectKindsForDatabase(b);
   const allowed: TransferObjectKind[] = [];

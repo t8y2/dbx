@@ -35,9 +35,9 @@ describe("DataTransferDialog transfer prefill", () => {
   });
 
   it("sends content and objects in the transfer request", () => {
-    expect(dialogSource).toContain("content: transferContent.value");
-    expect(dialogSource).toContain("objects: (Object.keys(selectedObjects.value)");
-    expect(dialogSource).toContain("objectType: kind");
+    expect(dialogSource).toContain("buildTransferObjectSelections(selectedObjects.value, treeDisabledGroups.value)");
+    expect(dialogSource).toContain('import { buildTransferObjectSelections } from "./transferSelections"');
+    expect(dialogSource).toContain('createTable: transferContent.value !== "dataOnly"');
     expect(dialogSource).toContain('createTable: transferContent.value !== "dataOnly"');
   });
 

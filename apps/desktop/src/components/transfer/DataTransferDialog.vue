@@ -4,6 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { buildTransferObjectSelections } from "./transferSelections";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -532,12 +533,7 @@ async function startTransfer() {
     tables: [...selectedTables.value],
     createTable: transferContent.value !== "dataOnly",
     content: transferContent.value,
-    objects: (Object.keys(selectedObjects.value) as TransferObjectKind[])
-      .filter((kind) => kind !== "TABLE")
-      .map((kind) => ({
-        objectType: kind,
-        names: [...(selectedObjects.value[kind] ?? [])],
-      })),
+    objects: buildTransferObjectSelections(selectedObjects.value, treeDisabledGroups.value),
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
     ownershipPolicy: "preserve",

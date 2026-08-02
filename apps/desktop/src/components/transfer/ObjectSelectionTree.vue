@@ -130,10 +130,31 @@ function selectAllEnabled() {
 }
 
 function deselectAll() {
-  emit("update:modelValue", {});
+  // Clear only the visible, enabled selections; selections hidden by the
+  // current search and selections inside disabled groups are preserved so
+  // bulk actions never silently drop what the user cannot see.
+  const next: Record<string, string[]> = { ...props.modelValue };
+  for (const group of filteredGroups.value) {
+    if (isGroupDisabled(group.kind)) continue;
+    const kept = (next[group.kind] ?? []).filter((n) => !group.items.includes(n));
+    if (kept.length === 0) {
+      delete next[group.kind];
+    } else {
+      next[group.kind] = kept;
+    }
+  }
+  emit("update:modelValue", next);
 }
 
-const anySelection = computed(() => props.groups.some((g) => (props.modelValue[g.kind] ?? []).length > 0));
+// The bulk button flips between “select all” and “deselect all”. It shows
+// “deselect all” only when every visible, enabled item is already selected
+// (selecting more is then a no-op); otherwise “select all” is shown so the
+// user can fill the remaining visible items. Groups with no visible items
+// (fully filtered out by the search) and disabled groups are ignored.
+const allVisibleEnabledSelected = computed(() => {
+  const visibleEnabled = filteredGroups.value.filter((g) => !isGroupDisabled(g.kind) && g.items.length > 0);
+  return visibleEnabled.length > 0 && visibleEnabled.every((g) => g.items.every((item) => (props.modelValue[g.kind] ?? []).includes(item)));
+});
 </script>
 
 <template>
@@ -153,7 +174,7 @@ const anySelection = computed(() => props.groups.some((g) => (props.modelValue[g
           class="pl-8 pr-2.5 h-8 w-full rounded-md border border-input bg-transparent text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring transition-colors placeholder:text-muted-foreground/70"
         />
       </div>
-      <Button v-if="anySelection" variant="outline" size="sm" @click="deselectAll">
+      <Button v-if="allVisibleEnabledSelected" variant="outline" size="sm" @click="deselectAll">
         {{ t("transfer.deselectAll") }}
       </Button>
       <Button v-else variant="outline" size="sm" @click="selectAllEnabled">

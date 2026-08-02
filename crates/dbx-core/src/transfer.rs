@@ -136,21 +136,19 @@ pub fn is_same_transfer_family(a: &DatabaseType, b: &DatabaseType) -> bool {
     }
 }
 
-pub fn transfer_object_kinds(db_type: &DatabaseType) -> Vec<TransferObjectKind> {
+pub fn transfer_object_kinds_for_family(family: &TransferObjectFamily) -> Vec<TransferObjectKind> {
     use TransferObjectKind::*;
+    match family {
+        TransferObjectFamily::Mysql => vec![Table, View, Procedure, Function, Trigger, Event],
+        TransferObjectFamily::Postgres => vec![Table, View, MaterializedView, Procedure, Function, Trigger, Sequence],
+        TransferObjectFamily::Oracle => vec![Table, View, MaterializedView, Procedure, Function, Trigger, Sequence],
+        TransferObjectFamily::SqlServer => vec![Table, View, Procedure, Function, Trigger, Sequence],
+    }
+}
+
+pub fn transfer_object_kinds(db_type: &DatabaseType) -> Vec<TransferObjectKind> {
     match transfer_object_family(db_type) {
-        Some(TransferObjectFamily::Mysql) => {
-            vec![Table, View, Procedure, Function, Trigger, Event]
-        }
-        Some(TransferObjectFamily::Postgres) => {
-            vec![Table, View, MaterializedView, Procedure, Function, Trigger, Sequence]
-        }
-        Some(TransferObjectFamily::Oracle) => {
-            vec![Table, View, MaterializedView, Procedure, Function, Trigger, Sequence]
-        }
-        Some(TransferObjectFamily::SqlServer) => {
-            vec![Table, View, Procedure, Function, Trigger, Sequence]
-        }
+        Some(family) => transfer_object_kinds_for_family(&family),
         None => Vec::new(),
     }
 }
@@ -345,10 +343,28 @@ pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result
 /// Only DDL shapes that can be mechanically rewritten are allowed:
 /// views (CREATE ... VIEW ... AS SELECT) and sequences (CREATE SEQUENCE).
 /// Sequences additionally require both sides to support the type (MySQL does not).
+/// Cross-family transfer is only supported between the MySQL, SQL Server and
+/// Oracle/Dameng families; the Postgres family is not a validated source or
+/// target for the cross-family DDL pipeline (the executor rejects it).
 pub fn cross_family_transferable_object_kinds(source: &DatabaseType, target: &DatabaseType) -> Vec<TransferObjectKind> {
     use TransferObjectKind::*;
     if is_same_transfer_family(source, target) {
         return transfer_object_kinds(source);
+    }
+    // Narrow the matrix to validated directions: MySQL, SQL Server and
+    // Oracle/Dameng may act as either side. Postgres (and anything else) is
+    // excluded — the executor rejects Postgres sources and no dialect-aware
+    // conversion is validated for it.
+    let family_supported = |db_type: &DatabaseType| {
+        matches!(
+            transfer_object_family(db_type),
+            Some(TransferObjectFamily::Mysql)
+                | Some(TransferObjectFamily::SqlServer)
+                | Some(TransferObjectFamily::Oracle)
+        )
+    };
+    if !family_supported(source) || !family_supported(target) {
+        return Vec::new();
     }
     let source_kinds = transfer_object_kinds(source);
     let target_kinds = transfer_object_kinds(target);
@@ -399,21 +415,138 @@ pub fn convert_cross_family_object_ddl(
         },
         _ => {}
     }
-    sql = rewrite_identifiers_to_target(&sql, target_family);
+    // Mask string literals and comments before any identifier/schema
+    // rewrite, then restore them afterwards: regexes that re-quote
+    // identifiers must never touch text inside strings or comments. MySQL
+    // double-quoted text is a string literal (unless ANSI_QUOTES is on).
+    let (masked, restores) = protect_sql_literals(&sql, matches!(source_family, TransferObjectFamily::Mysql));
+    sql = rewrite_identifiers_to_target(&masked, target_family);
     if !source_schema.is_empty() && !target_schema.is_empty() && !source_schema.eq_ignore_ascii_case(target_schema) {
         sql = rewrite_cross_family_schema_qualifier(&sql, target_family, source_schema, target_schema);
     }
     if kind == &TransferObjectKind::View {
         sql = qualify_cross_family_view_target(&sql, target_family, target_schema);
     }
+    for (placeholder, original) in restores {
+        sql = sql.replace(&placeholder, &original);
+    }
     sql
+}
+
+/// Locates string literals and comments in SQL: single-quoted strings
+/// (with `''` and backslash escapes), MySQL double-quoted strings when
+/// `double_quote_is_string` is set, `--`/`#` line comments and `/* */`
+/// block comments. Returns byte ranges `(start, end)` of those spans.
+fn sql_non_code_spans(sql: &str, double_quote_is_string: bool) -> Vec<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let starts_non_code = match b {
+            b'\'' => true,
+            b'"' if double_quote_is_string => true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => true,
+            b'#' => true, // MySQL line comment
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => true,
+            _ => false,
+        };
+        if !starts_non_code {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i = match b {
+            b'\'' | b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2; // backslash escape (MySQL style)
+                        continue;
+                    }
+                    if bytes[i] == b && i + 1 < bytes.len() && bytes[i + 1] == b {
+                        i += 2; // '' / "" doubled quote
+                        continue;
+                    }
+                    if bytes[i] == b {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                i
+            }
+            b'-' | b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                i
+            }
+            _ => {
+                i += 2; // /* ... */
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                (i + 2).min(bytes.len())
+            }
+        };
+        spans.push((start, i));
+    }
+    spans
+}
+
+/// Applies `f` to every code span of `sql`; string literals and comments
+/// (see `sql_non_code_spans`) pass through verbatim so rewrites never touch
+/// text inside them.
+fn map_sql_code_spans<F>(sql: &str, double_quote_is_string: bool, mut f: F) -> String
+where
+    F: FnMut(&str) -> String,
+{
+    let spans = sql_non_code_spans(sql, double_quote_is_string);
+    let mut out = String::with_capacity(sql.len());
+    let mut prev = 0;
+    for (start, end) in spans {
+        if start > prev {
+            out.push_str(&f(&sql[prev..start]));
+        }
+        out.push_str(&sql[start..end]);
+        prev = end;
+    }
+    if prev < sql.len() {
+        out.push_str(&f(&sql[prev..]));
+    }
+    out
+}
+
+/// Masks string literals and comments with placeholders so subsequent regex
+/// rewrites cannot touch them, and returns the restore map to swap the
+/// original text back afterwards.
+fn protect_sql_literals(sql: &str, double_quote_is_string: bool) -> (String, Vec<(String, String)>) {
+    let spans = sql_non_code_spans(sql, double_quote_is_string);
+    let mut out = String::with_capacity(sql.len());
+    let mut restores = Vec::new();
+    let mut prev = 0;
+    for (start, end) in spans {
+        if start > prev {
+            out.push_str(&sql[prev..start]);
+        }
+        let placeholder = format!("__DBX_LIT_{}__", restores.len());
+        out.push_str(&placeholder);
+        restores.push((placeholder, sql[start..end].to_string()));
+        prev = end;
+    }
+    if prev < sql.len() {
+        out.push_str(&sql[prev..]);
+    }
+    (out, restores)
 }
 
 /// Aligns a cross-family view DDL with the target schema: the `CREATE VIEW`
 /// target and bare table references in the body (`FROM`/`JOIN`/`INTO`/`UPDATE`)
 /// are qualified with the target schema, matching how table transfer creates
 /// tables (`"schema"."table"`). References that already carry a prefix are left
-/// untouched. Best-effort: identifiers inside string literals are not guarded.
+/// untouched. String literals and comments are preserved verbatim (see
+/// `map_sql_code_spans`).
 fn qualify_cross_family_view_target(sql: &str, target_family: &TransferObjectFamily, target_schema: &str) -> String {
     if target_schema.is_empty() {
         return sql.to_string();
@@ -435,7 +568,6 @@ fn qualify_cross_family_view_target(sql: &str, target_family: &TransferObjectFam
         TransferObjectFamily::Oracle => r#"[^"]+"#,
         _ => "[A-Za-z_][A-Za-z0-9_]*",
     };
-    // CREATE VIEW "name" -> CREATE VIEW "schema"."name" (skip already-prefixed)
     let create_re = Regex::new(&format!(r"(?i)\bCREATE\s+VIEW\s+(?:{qo}({ident}){qc}\.)?{qo}({ident}){qc}")).unwrap();
     let mut out = create_re
         .replace_all(sql, |caps: &regex::Captures| {
@@ -482,7 +614,7 @@ fn strip_sql_view_prefix(sql: &str) -> String {
 /// view definitions.
 fn strip_sqlserver_view_with_clause(sql: &str) -> String {
     let re = Regex::new(r"(?i)\s+WITH\s+SCHEMABINDING\s+").unwrap();
-    re.replace_all(sql, " ").to_string()
+    map_sql_code_spans(sql, false, |code| re.replace_all(code, " ").to_string())
 }
 
 /// Removes the ` AS <type>` clause from a SQL Server CREATE SEQUENCE so the
@@ -490,11 +622,15 @@ fn strip_sqlserver_view_with_clause(sql: &str) -> String {
 fn strip_sqlserver_sequence_as_type(sql: &str) -> String {
     let re =
         Regex::new(r"(?i)\s+AS\s+(?:BIGINT|INT|SMALLINT|TINYINT|DECIMAL\s*\([^)]*\)|NUMERIC\s*\([^)]*\))\s+").unwrap();
-    re.replace_all(sql, " ").to_string()
+    map_sql_code_spans(sql, false, |code| re.replace_all(code, " ").to_string())
 }
 
 /// Rewrites backtick / double-quote / bracket identifier quoting to the
-/// target family's style.
+/// target family's style. Only identifiers in code positions are rewritten:
+/// string literals and comments are preserved verbatim (see
+/// `map_sql_code_spans`). The source family decides whether double-quoted
+/// text is a string literal (MySQL, unless ANSI_QUOTES is on) or an
+/// identifier (SQL Server / Oracle).
 fn rewrite_identifiers_to_target(sql: &str, target: &TransferObjectFamily) -> String {
     let (open, close, pattern) = match target {
         TransferObjectFamily::Mysql => ("`", "`", r#""([^"]+)"|\[([^\]]+)\]"#),
@@ -4281,6 +4417,14 @@ pub fn selected_object_names(selections: &[TransferObjectSelection], kind: &Tran
     selections.iter().filter(|s| &s.object_type == kind).flat_map(|s| s.names.clone()).collect::<Vec<_>>()
 }
 
+/// Whether a kind participates in a transfer. An empty selection is the legacy
+/// PG→PG default: every kind participates (views, functions, triggers,
+/// materialized views are all transferred). Once the caller explicitly selects
+/// objects, only kinds with a non-empty selection participate.
+pub fn object_kind_selected_or_defaulted(selections: &[TransferObjectSelection], kind: &TransferObjectKind) -> bool {
+    selections.is_empty() || !selected_object_names(selections, kind).is_empty()
+}
+
 pub fn should_copy_data(content: &TransferContent) -> bool {
     !matches!(content, TransferContent::StructureOnly)
 }
@@ -4302,6 +4446,10 @@ fn filter_object_sources_by_selection(
     sources: Vec<db::ObjectSource>,
     selections: &[TransferObjectSelection],
 ) -> Vec<db::ObjectSource> {
+    // Empty selection is the legacy PG→PG default: transfer everything.
+    if selections.is_empty() {
+        return sources;
+    }
     sources
         .into_iter()
         .filter(|source| {
@@ -4311,6 +4459,24 @@ fn filter_object_sources_by_selection(
             selected_object_names(selections, &kind).contains(&source.name)
         })
         .collect()
+}
+
+/// Whether non-table schema-object transfer should run for a request.
+/// Newer clients send an explicit `objects` selection; for those the answer
+/// is simply whether any object was selected. PG→PG keeps the legacy
+/// default: even an *empty* selection still transfers all views, functions,
+/// triggers, policies, ownership and grants (the old table-selection flow
+/// always did).
+pub fn should_transfer_schema_objects(
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    objects: &[TransferObjectSelection],
+) -> bool {
+    if !objects.is_empty() {
+        return true;
+    }
+    transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
+        && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
 }
 
 /// Transfers selected non-table objects from source to target.
@@ -4329,7 +4495,14 @@ where
     F: FnMut(TransferProgress),
 {
     if request.objects.is_empty() {
-        return Ok(TransferObjectOutcome::default());
+        // Legacy PG→PG flow: an empty selection still transfers all schema
+        // objects (views, functions, triggers, policies, ownership, grants).
+        // For every other combination an empty selection transfers nothing.
+        let source_db_type = get_db_type(state, &request.source_connection_id).await?;
+        let target_db_type = get_db_type(state, &request.target_connection_id).await?;
+        if !should_transfer_schema_objects(&source_db_type, &target_db_type, &request.objects) {
+            return Ok(TransferObjectOutcome::default());
+        }
     }
     let source_db_type = get_db_type(state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(state, &request.target_connection_id).await?;
@@ -4343,18 +4516,50 @@ where
         )
         .await;
     }
+    // Same-family path: drop selections whose object type is not transferable
+    // for the source family (defense in depth — the UI already filters disabled
+    // types at the request boundary, but requests can also arrive from older
+    // clients or be crafted directly).
+    let mut filtered_request = request.clone();
+    if let Some(family) = transfer_object_family(&source_db_type) {
+        let supported = transfer_object_kinds_for_family(&family);
+        filtered_request.objects =
+            request.objects.iter().filter(|sel| supported.contains(&sel.object_type)).cloned().collect();
+    }
     match transfer_object_family(&source_db_type) {
         Some(TransferObjectFamily::Postgres) => {
-            transfer_postgres_schema_objects(state, request, source_pool_key, target_pool_key, progress_callback).await
+            transfer_postgres_schema_objects(
+                state,
+                &filtered_request,
+                source_pool_key,
+                target_pool_key,
+                progress_callback,
+            )
+            .await
         }
         Some(TransferObjectFamily::Mysql) => {
-            transfer_mysql_schema_objects(state, request, source_pool_key, target_pool_key, progress_callback).await
+            transfer_mysql_schema_objects(state, &filtered_request, source_pool_key, target_pool_key, progress_callback)
+                .await
         }
         Some(TransferObjectFamily::Oracle) => {
-            transfer_oracle_schema_objects(state, request, source_pool_key, target_pool_key, progress_callback).await
+            transfer_oracle_schema_objects(
+                state,
+                &filtered_request,
+                source_pool_key,
+                target_pool_key,
+                progress_callback,
+            )
+            .await
         }
         Some(TransferObjectFamily::SqlServer) => {
-            transfer_sqlserver_schema_objects(state, request, source_pool_key, target_pool_key, progress_callback).await
+            transfer_sqlserver_schema_objects(
+                state,
+                &filtered_request,
+                source_pool_key,
+                target_pool_key,
+                progress_callback,
+            )
+            .await
         }
         None => Ok(TransferObjectOutcome::default()),
     }
@@ -6130,7 +6335,9 @@ where
             .await?
             .into_iter()
             .filter(|view| {
-                selected_object_names(&request.objects, &TransferObjectKind::MaterializedView).contains(&view.view_name)
+                object_kind_selected_or_defaulted(&request.objects, &TransferObjectKind::MaterializedView)
+                    && selected_object_names(&request.objects, &TransferObjectKind::MaterializedView)
+                        .contains(&view.view_name)
             })
             .collect::<Vec<_>>();
     let trigger_sources =
@@ -6138,7 +6345,9 @@ where
             .await?
             .into_iter()
             .filter(|trigger| {
-                selected_object_names(&request.objects, &TransferObjectKind::Trigger).contains(&trigger.trigger_name)
+                object_kind_selected_or_defaulted(&request.objects, &TransferObjectKind::Trigger)
+                    && selected_object_names(&request.objects, &TransferObjectKind::Trigger)
+                        .contains(&trigger.trigger_name)
             })
             .collect::<Vec<_>>();
     let policy_statements = get_postgres_policy_statements_for_transfer(
@@ -6705,6 +6914,16 @@ mod tests {
             assert!(same.contains(&Event));
             // unsupported databases
             assert!(cross_family_transferable_object_kinds(&DatabaseType::Sqlite, &DatabaseType::Mysql).is_empty());
+            // postgres is not a validated cross-family source or target:
+            // the executor rejects postgres sources and no dialect-aware
+            // conversion exists for it (postgres <-> postgres stays same-family)
+            assert!(cross_family_transferable_object_kinds(&DatabaseType::Postgres, &DatabaseType::Mysql).is_empty());
+            assert!(cross_family_transferable_object_kinds(&DatabaseType::Mysql, &DatabaseType::Postgres).is_empty());
+            assert!(
+                cross_family_transferable_object_kinds(&DatabaseType::Postgres, &DatabaseType::SqlServer).is_empty()
+            );
+            assert!(cross_family_transferable_object_kinds(&DatabaseType::Postgres, &DatabaseType::Postgres)
+                .contains(&View));
         }
 
         #[test]
@@ -6765,6 +6984,76 @@ mod tests {
             );
             assert!(my2.starts_with("CREATE VIEW `tgt`.`V` ("), "{my2}");
             assert!(my2.contains("`tgt`.`T`"));
+        }
+
+        #[test]
+        fn does_not_rewrite_identifiers_inside_strings_and_comments() {
+            // MySQL -> Dameng: string literals and comments must not have
+            // their content re-quoted or schema-qualified.
+            let mysql_view = concat!(
+                "CREATE DEFINER=`root`@`%` VIEW `v` AS ",
+                "-- from `hidden`.`table` join \"hidden\"\n",
+                "SELECT `t`.`id`, 'from \"lit\"', \"double\" ",
+                "/* join \"quoted\" */ FROM `src`.`t` ",
+                "WHERE `t`.`name` = 'join \"src\".\"t\"'",
+            );
+            let dm = convert_cross_family_object_ddl(
+                &TransferObjectFamily::Mysql,
+                &TransferObjectFamily::Oracle,
+                &TransferObjectKind::View,
+                "src",
+                "TGT",
+                mysql_view,
+            );
+            assert!(dm.starts_with("CREATE VIEW \"TGT\".\"v\" AS"), "{dm}");
+            // code identifiers are rewritten and qualified
+            assert!(dm.contains("SELECT \"t\".\"id\""), "{dm}");
+            assert!(dm.contains("FROM \"TGT\".\"t\""), "{dm}");
+            // the comment is untouched
+            assert!(dm.contains("-- from `hidden`.`table` join \"hidden\""), "{dm}");
+            assert!(dm.contains("/* join \"quoted\" */"), "{dm}");
+            // the single-quoted string literal is untouched (including the
+            // fake qualifier inside it)
+            assert!(dm.contains("'join \"src\".\"t\"'"), "{dm}");
+            // MySQL double-quoted text is a string literal, not an identifier
+            assert!(dm.contains("\"double\""), "{dm}");
+
+            // SqlServer -> MySQL: brackets inside comments/strings stay put
+            let ss_view = concat!(
+                "CREATE VIEW [dbo].[v] AS ",
+                "-- SELECT [dbo].[x]\n",
+                "SELECT [a].[id], 'literal [dbo].[y]' FROM [dbo].[a]",
+            );
+            let my = convert_cross_family_object_ddl(
+                &TransferObjectFamily::SqlServer,
+                &TransferObjectFamily::Mysql,
+                &TransferObjectKind::View,
+                "dbo",
+                "tgt",
+                ss_view,
+            );
+            assert!(my.starts_with("CREATE VIEW `tgt`.`v` AS"), "{my}");
+            assert!(my.contains("`tgt`.`a`"), "{my}");
+            assert!(my.contains("-- SELECT [dbo].[x]"), "{my}");
+            assert!(my.contains("'literal [dbo].[y]'"), "{my}");
+        }
+
+        #[test]
+        fn sequence_rewrite_keeps_strings_intact() {
+            // SqlServer -> Dameng: `AS BIGINT` stripping must not touch a
+            // string literal that merely contains the token.
+            let ss_seq = "CREATE SEQUENCE [dbo].[s] AS BIGINT START WITH 1 COMMENT 'AS BIGINT in comment'";
+            let dm = convert_cross_family_object_ddl(
+                &TransferObjectFamily::SqlServer,
+                &TransferObjectFamily::Oracle,
+                &TransferObjectKind::Sequence,
+                "dbo",
+                "TGT",
+                ss_seq,
+            );
+            assert!(dm.starts_with("CREATE SEQUENCE \"TGT\".\"s\" START WITH 1"), "{dm}");
+            assert!(!dm.contains("\"s\" AS BIGINT"), "{dm}");
+            assert!(dm.contains("'AS BIGINT in comment'"), "{dm}");
         }
 
         #[test]

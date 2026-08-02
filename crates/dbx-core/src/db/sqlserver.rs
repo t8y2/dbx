@@ -2496,30 +2496,9 @@ pub async fn execute_query_with_max_rows(
         let mut result = query_result_with_server_messages(result?, messages);
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
         Ok(result)
-    } else if requires_simple_query_batch(sql) || contains_transaction_control(sql) {
-        let (result, messages) = capture_sqlserver_messages(async {
-            let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-            sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await
-        })
-        .await;
-        let _ = result?;
-        Ok(query_result_with_server_messages(
-            QueryResult {
-                columns: vec![],
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                spatial_columns: vec![],
-                spatial_values: vec![],
-                rows: vec![],
-                affected_rows: 0,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-                elasticsearch_raw_body: None,
-            },
-            messages,
-        ))
+    } else if !sqlserver_batch_can_use_execute(sql) {
+        let mut results = execute_simple_batch_with_max_rows(client, sql, max_rows).await?;
+        Ok(results.remove(0))
     } else {
         let (result, messages) = capture_sqlserver_messages(sqlserver_driver_result(client.execute(sql, &[]))).await;
         let result = result?;
@@ -3146,6 +3125,9 @@ mod tests {
         assert!(!sqlserver_batch_can_use_execute("EXEC dbo.list_users;"));
         assert!(!sqlserver_batch_can_use_execute("DECLARE @id INT = 1; EXEC dbo.list_users @id;"));
         assert!(!sqlserver_batch_can_use_execute(
+            "SET NOCOUNT OFF; DECLARE @rows TABLE (id INT); INSERT INTO @rows VALUES (1), (2); SELECT id FROM @rows;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
             "DECLARE @id INT = 1; CREATE TABLE #t(id INT); INSERT INTO #t VALUES (@id); SELECT id FROM #t;"
         ));
         assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;"));
@@ -3192,6 +3174,16 @@ mod tests {
 
         assert!(execute_query.contains("sqlserver_dml_output_returns_rows(sql)"));
         assert!(execute_query.contains("client.query(query.sql.as_str(), &[])"));
+    }
+
+    #[test]
+    fn sqlserver_single_result_entrypoint_keeps_result_returning_batches() {
+        let source = include_str!("sqlserver.rs");
+        let execute_query = source.split("pub async fn execute_query_with_max_rows").nth(1).unwrap();
+        let execute_query = execute_query.split("pub async fn execute_batch").next().unwrap();
+
+        assert!(execute_query.contains("!sqlserver_batch_can_use_execute(sql)"));
+        assert!(execute_query.contains("execute_simple_batch_with_max_rows(client, sql, max_rows)"));
     }
 
     #[test]

@@ -131,18 +131,64 @@ class InformixAgentTest {
     }
 
     @Test
-    void listsSchemasFromUserObjectOwnersAndExcludesSystemVersionRow() {
+    void listsSchemasFromTableRoutineAndCurrentLoginOwners() {
+        InformixAgent agent = new InformixAgent();
+        java.sql.Connection connection = JdbcMetadataSqlFake.connection();
+        TestSupport.setPrivateConnection(agent, connection);
+        ConnectParams params = new ConnectParams();
+        params.setUsername("current_owner");
+        agent.afterConnect(params, connection);
+
+        Assertions.assertEquals(List.of("current_owner"), agent.listSchemas());
+
+        Assertions.assertEquals(
+            List.of("SELECT owner FROM systables WHERE tabid >= 100 AND owner IS NOT NULL "
+                    + "UNION SELECT owner FROM sysprocedures WHERE owner IS NOT NULL ORDER BY owner"),
+            JdbcMetadataSqlFake.statements
+        );
+        Assertions.assertEquals(
+            List.of("current_owner", "routine_owner", "table_owner"),
+            InformixAgent.mergeSchemaOwners(
+                List.of("table_owner", "routine_owner", "routine_owner", " "),
+                "current_owner"
+            )
+        );
+        Assertions.assertNotEquals(InformixAgent.databaseCatalogSql(), InformixAgent.schemaCatalogSql());
+    }
+
+    @Test
+    void unqualifiedMetadataUsesCurrentLoginOwnerWithoutCrossOwnerFallback() {
+        InformixAgent agent = new InformixAgent();
+        java.sql.Connection connection = JdbcMetadataSqlFake.connection();
+        TestSupport.setPrivateConnection(agent, connection);
+        ConnectParams params = new ConnectParams();
+        params.setUsername("app_owner");
+        agent.afterConnect(params, connection);
+
+        agent.listTables("");
+        agent.listObjects(null, new MetadataListConstraints("sync", 10, null, List.of("PROCEDURE", "FUNCTION")));
+
+        Assertions.assertTrue(JdbcMetadataSqlFake.statements.get(0).contains("AND owner = ?"));
+        Assertions.assertEquals("param:1=app_owner", JdbcMetadataSqlFake.statements.get(1));
+        String objectSql = JdbcMetadataSqlFake.statements.get(2);
+        Assertions.assertTrue(objectSql.contains("isproc = 'f' AND owner = ?"), objectSql);
+        Assertions.assertTrue(objectSql.contains("isproc = 't' AND owner = ?"), objectSql);
+        Assertions.assertFalse(objectSql.contains("owner <> 'informix'"), objectSql);
+        Assertions.assertEquals("param:1=app_owner", JdbcMetadataSqlFake.statements.get(3));
+        Assertions.assertEquals("param:3=app_owner", JdbcMetadataSqlFake.statements.get(5));
+    }
+
+    @Test
+    void unqualifiedMetadataFailsClosedWithoutALoginOwner() {
         InformixAgent agent = new InformixAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
 
-        agent.listSchemas();
-
-        Assertions.assertEquals(
-            List.of("SELECT DISTINCT owner FROM systables "
-                    + "WHERE tabid >= 100 AND owner IS NOT NULL ORDER BY owner"),
-            JdbcMetadataSqlFake.statements
+        IllegalStateException error = Assertions.assertThrows(
+            IllegalStateException.class,
+            () -> agent.listTables("")
         );
-        Assertions.assertNotEquals(InformixAgent.databaseCatalogSql(), InformixAgent.schemaCatalogSql());
+
+        Assertions.assertTrue(error.getMessage().contains("metadata owner is unavailable"), error.getMessage());
     }
 
     @Test

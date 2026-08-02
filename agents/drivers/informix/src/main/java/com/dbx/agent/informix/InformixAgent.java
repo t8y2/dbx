@@ -27,8 +27,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.TreeSet;
 
 public final class InformixAgent extends AbstractJdbcAgent {
+    private String loginOwner = "";
+
     @Override
     protected String driverClass() {
         return "com.informix.jdbc.IfxDriver";
@@ -37,6 +40,16 @@ public final class InformixAgent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return jdbcUrl(params);
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        loginOwner = normalizeOwner(params.getUsername());
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        loginOwner = "";
     }
 
     public static String jdbcUrl(ConnectParams params) {
@@ -170,24 +183,39 @@ public final class InformixAgent extends AbstractJdbcAgent {
     @Override
     public List<String> listSchemas() {
         return unchecked(() -> {
-            List<String> result = new ArrayList<>();
+            List<String> catalogOwners = new ArrayList<>();
             try (java.sql.Statement stmt = requireConnected().createStatement();
                  ResultSet rs = stmt.executeQuery(schemaCatalogSql())) {
                 while (rs.next()) {
                     String owner = normalizeOwner(rs.getString(1));
                     if (!owner.isEmpty()) {
-                        result.add(owner);
+                        catalogOwners.add(owner);
                     }
                 }
             }
-            return result;
+            return mergeSchemaOwners(catalogOwners, loginOwner);
         });
     }
 
     static String schemaCatalogSql() {
         // Informix JDBC catalogs are databases; schemas are the object owners in the current database.
-        return "SELECT DISTINCT owner FROM systables "
-                + "WHERE tabid >= 100 AND owner IS NOT NULL ORDER BY owner";
+        return "SELECT owner FROM systables WHERE tabid >= 100 AND owner IS NOT NULL "
+                + "UNION SELECT owner FROM sysprocedures WHERE owner IS NOT NULL ORDER BY owner";
+    }
+
+    static List<String> mergeSchemaOwners(List<String> catalogOwners, String loginOwner) {
+        Set<String> owners = new TreeSet<>();
+        for (String owner : catalogOwners) {
+            String normalized = normalizeOwner(owner);
+            if (!normalized.isEmpty()) {
+                owners.add(normalized);
+            }
+        }
+        String normalizedLoginOwner = normalizeOwner(loginOwner);
+        if (!normalizedLoginOwner.isEmpty()) {
+            owners.add(normalizedLoginOwner);
+        }
+        return new ArrayList<>(owners);
     }
 
     @Override
@@ -520,23 +548,28 @@ public final class InformixAgent extends AbstractJdbcAgent {
         }
     }
 
-    private static void appendOwnerPredicate(StringBuilder sql, List<Object> args, String ownerColumn, String schema) {
-        String owner = normalizeOwner(schema);
-        if (owner.isEmpty()) {
-            return;
-        }
+    private void appendOwnerPredicate(StringBuilder sql, List<Object> args, String ownerColumn, String schema) {
+        String owner = metadataOwner(schema);
         sql.append(" AND ").append(ownerColumn).append(" = ?");
         args.add(owner);
     }
 
-    private static void appendRoutineOwnerPredicate(StringBuilder sql, List<Object> args, String schema) {
-        String owner = normalizeOwner(schema);
-        if (owner.isEmpty()) {
-            sql.append(" AND owner <> 'informix'");
-            return;
-        }
+    private void appendRoutineOwnerPredicate(StringBuilder sql, List<Object> args, String schema) {
+        String owner = metadataOwner(schema);
         sql.append(" AND owner = ?");
         args.add(owner);
+    }
+
+    private String metadataOwner(String schema) {
+        String owner = normalizeOwner(schema);
+        if (!owner.isEmpty()) {
+            return owner;
+        }
+        owner = normalizeOwner(loginOwner);
+        if (!owner.isEmpty()) {
+            return owner;
+        }
+        throw new IllegalStateException("Informix metadata owner is unavailable for an unqualified request");
     }
 
     private static String normalizeOwner(String schema) {

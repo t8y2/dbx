@@ -146,6 +146,7 @@ export function connectionQueryExecutionSchema(connection: JdbcDialectConnection
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
+  if (effectiveDatabaseTypeForConnection(connection) === "informix") return schema || "";
   return schema || database;
 }
 
@@ -160,6 +161,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   if (schema) return schema;
   const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "informix") return undefined;
   if (type === "sqlite") return database;
   return isSchemaAware(type) ? database : undefined;
 }

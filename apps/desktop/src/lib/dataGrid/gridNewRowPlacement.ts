@@ -29,6 +29,12 @@ export interface GridNewRowMeta {
 
 export type GridOrderedRowEntry = { kind: "source"; sourceIndex: number } | { kind: "new"; newIndex: number };
 
+interface GridOrderedRowNode {
+  entry: GridOrderedRowEntry;
+  previous: GridOrderedRowNode | null;
+  next: GridOrderedRowNode | null;
+}
+
 /**
  * Merge pending rows into the source rows in display order.
  *
@@ -42,56 +48,87 @@ export type GridOrderedRowEntry = { kind: "source"; sourceIndex: number } | { ki
  * rows in creation order keeps every anchor placed before it is referenced.
  */
 export function buildOrderedGridRows(sourceIndices: readonly number[], newRowMeta: readonly GridNewRowMeta[], newRowCount: number): GridOrderedRowEntry[] {
-  const order: GridOrderedRowEntry[] = sourceIndices.map((sourceIndex) => ({ kind: "source", sourceIndex }));
-  const tokenToNewIndex = new Map<number, number>();
-  newRowMeta.forEach((meta, index) => {
-    if (index < newRowCount) tokenToNewIndex.set(meta.token, index);
-  });
-  // For "below" clusters, track the last inserted row's newIndex per anchor so a
-  // second batch inserted below the same row lands after the first batch. The
-  // tail is re-located by its stable newIndex because an "above" insert on the
-  // same anchor shifts absolute positions.
-  const belowTail = new Map<number, number>();
+  const list: { head: GridOrderedRowNode | null; tail: GridOrderedRowNode | null } = {
+    head: null,
+    tail: null,
+  };
+  const sourceNodes = new Map<number, GridOrderedRowNode>();
+  const pendingTokenNodes = new Map<number, GridOrderedRowNode>();
+  const belowTailNodes = new Map<number, GridOrderedRowNode>();
+
+  const append = (node: GridOrderedRowNode) => {
+    if (!list.tail) {
+      list.head = node;
+      list.tail = node;
+      return;
+    }
+    list.tail.next = node;
+    node.previous = list.tail;
+    list.tail = node;
+  };
+
+  const insertBefore = (anchor: GridOrderedRowNode, node: GridOrderedRowNode) => {
+    node.previous = anchor.previous;
+    node.next = anchor;
+    if (anchor.previous) anchor.previous.next = node;
+    else list.head = node;
+    anchor.previous = node;
+  };
+
+  const insertAfter = (anchor: GridOrderedRowNode, node: GridOrderedRowNode) => {
+    node.previous = anchor;
+    node.next = anchor.next;
+    if (anchor.next) anchor.next.previous = node;
+    else list.tail = node;
+    anchor.next = node;
+  };
+
+  for (const sourceIndex of sourceIndices) {
+    const node: GridOrderedRowNode = {
+      entry: { kind: "source", sourceIndex },
+      previous: null,
+      next: null,
+    };
+    append(node);
+    if (!sourceNodes.has(sourceIndex)) sourceNodes.set(sourceIndex, node);
+  }
 
   for (let index = 0; index < newRowCount; index++) {
     const meta = newRowMeta[index];
-    const entry: GridOrderedRowEntry = { kind: "new", newIndex: index };
+    const node: GridOrderedRowNode = {
+      entry: { kind: "new", newIndex: index },
+      previous: null,
+      next: null,
+    };
     const anchorId = meta?.placement?.anchorId;
     if (anchorId === undefined) {
-      order.push(entry);
+      append(node);
+      if (meta) pendingTokenNodes.set(meta.token, node);
       continue;
     }
 
-    let anchorPos = -1;
-    if (anchorId >= 0) {
-      anchorPos = order.findIndex((candidate) => candidate.kind === "source" && candidate.sourceIndex === anchorId);
-    } else {
-      const targetNewIndex = tokenToNewIndex.get(-anchorId);
-      if (targetNewIndex !== undefined) {
-        anchorPos = order.findIndex((candidate) => candidate.kind === "new" && candidate.newIndex === targetNewIndex);
-      }
-    }
-    if (anchorPos < 0) {
-      order.push(entry);
+    const anchorNode = anchorId >= 0 ? sourceNodes.get(anchorId) : pendingTokenNodes.get(-anchorId);
+    if (!anchorNode) {
+      append(node);
+      pendingTokenNodes.set(meta.token, node);
       continue;
     }
 
-    if (meta!.placement!.position === "above") {
-      // Re-resolve the anchor each time: "above" groups grow before the anchor,
-      // so inserting at the anchor's current position keeps creation order.
-      order.splice(anchorPos, 0, entry);
+    if (meta.placement!.position === "above") {
+      insertBefore(anchorNode, node);
     } else {
-      const tailNewIndex = belowTail.get(anchorId);
-      let insertPos: number;
-      if (tailNewIndex === undefined) {
-        insertPos = anchorPos;
-      } else {
-        insertPos = order.findIndex((candidate) => candidate.kind === "new" && candidate.newIndex === tailNewIndex);
-        if (insertPos < 0) insertPos = anchorPos;
-      }
-      order.splice(insertPos + 1, 0, entry);
-      belowTail.set(anchorId, index);
+      const insertAfterNode = belowTailNodes.get(anchorId) ?? anchorNode;
+      insertAfter(insertAfterNode, node);
+      belowTailNodes.set(anchorId, node);
     }
+    pendingTokenNodes.set(meta.token, node);
+  }
+
+  const order: GridOrderedRowEntry[] = [];
+  let current = list.head;
+  while (current) {
+    order.push(current.entry);
+    current = current.next;
   }
   return order;
 }

@@ -16,13 +16,18 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -54,13 +59,60 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void physicalConnectionsEnableDbmsOutputWithoutChangingUserSql() {
+    void physicalConnectionsEnableDbmsOutputWithoutChangingUserSql() throws Exception {
         List<String> executedSql = new ArrayList<>();
         DamengAgent agent = new DamengAgent();
 
         agent.afterPhysicalConnect(null, printMessageConnection(null, executedSql));
 
         assertEquals(List.of("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"), executedSql);
+    }
+
+    @Test
+    void physicalConnectionsIgnoreUnsupportedOrRestrictedDbmsOutput() {
+        DamengAgent agent = new DamengAgent();
+
+        assertDoesNotThrow(() -> agent.afterPhysicalConnect(
+            null,
+            failingDbmsOutputConnection(new SQLFeatureNotSupportedException("unsupported", "0A000"))
+        ));
+        assertDoesNotThrow(() -> agent.afterPhysicalConnect(
+            null,
+            failingDbmsOutputConnection(new SQLException("permission denied", "42000"))
+        ));
+    }
+
+    @Test
+    void physicalConnectionsPropagateConnectionFailures() {
+        DamengAgent agent = new DamengAgent();
+        SQLException transientFailure = new SQLTransientConnectionException("connection closed");
+        SQLException sqlStateFailure = new SQLException("connection failure", "08006");
+        SQLException wrappedFailure = new SQLException("permission denied", "42000");
+        wrappedFailure.initCause(new SQLTransientConnectionException("connection closed"));
+
+        assertSame(transientFailure, assertThrows(
+            SQLException.class,
+            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(transientFailure))
+        ));
+        assertSame(sqlStateFailure, assertThrows(
+            SQLException.class,
+            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(sqlStateFailure))
+        ));
+        assertSame(wrappedFailure, assertThrows(
+            SQLException.class,
+            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(wrappedFailure))
+        ));
+    }
+
+    @Test
+    void physicalConnectionsPropagateUnrelatedSetupFailures() {
+        DamengAgent agent = new DamengAgent();
+        SQLException failure = new SQLException("resource busy", "HY000");
+
+        assertSame(failure, assertThrows(
+            SQLException.class,
+            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(failure))
+        ));
     }
 
     @Test
@@ -309,9 +361,24 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     private static Connection printMessageConnection(String printMessage, List<String> executedSql) {
+        return statementConnection(printMessage, executedSql, null);
+    }
+
+    private static Connection failingDbmsOutputConnection(SQLException failure) {
+        return statementConnection(null, new ArrayList<>(), failure);
+    }
+
+    private static Connection statementConnection(
+        String printMessage,
+        List<String> executedSql,
+        SQLException executeFailure
+    ) {
         InvocationHandler statementHandler = (Object unused, Method method, Object[] args) -> {
             switch (method.getName()) {
                 case "execute":
+                    if (executeFailure != null) {
+                        throw executeFailure;
+                    }
                     executedSql.add((String) args[0]);
                     return false;
                 case "getPrintMsg":

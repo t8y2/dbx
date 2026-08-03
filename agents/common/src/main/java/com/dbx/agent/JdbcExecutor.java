@@ -765,6 +765,10 @@ public final class JdbcExecutor {
             for (SQLWarning warning = stmt.getWarnings(); warning != null && seen.add(warning); warning = warning.getNextWarning()) {
                 String message = warning.getMessage();
                 if (message != null && !message.trim().isEmpty()) {
+                    if (rows.size() >= effectiveMaxRows) {
+                        truncated = true;
+                        break;
+                    }
                     rows.add(Collections.singletonList(message));
                 }
             }

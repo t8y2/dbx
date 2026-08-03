@@ -28,6 +28,11 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLNonTransientConnectionException;
+import java.sql.SQLRecoverableException;
+import java.sql.SQLSyntaxErrorException;
+import java.sql.SQLTransientConnectionException;
 import java.sql.SQLXML;
 import java.sql.Statement;
 import java.sql.Types;
@@ -103,12 +108,74 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    protected void afterPhysicalConnect(ConnectParams params, Connection connection) {
+    protected void afterPhysicalConnect(ConnectParams params, Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;");
-        } catch (SQLException ignored) {
-            // DBMS_OUTPUT is optional; a restricted package must not block the connection.
+        } catch (SQLException error) {
+            if (!isIgnorableDbmsOutputError(error)) {
+                throw error;
+            }
         }
+    }
+
+    private static boolean isIgnorableDbmsOutputError(SQLException error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof SQLException sqlError) {
+                for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                    if (isConnectionError(candidate)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof SQLException sqlError) {
+                for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                    if (candidate instanceof SQLFeatureNotSupportedException || candidate instanceof SQLSyntaxErrorException) {
+                        return true;
+                    }
+                    String sqlState = candidate.getSQLState();
+                    if ("0A000".equalsIgnoreCase(sqlState)
+                        || "42000".equalsIgnoreCase(sqlState)
+                        || "42501".equalsIgnoreCase(sqlState)) {
+                        return true;
+                    }
+                    String message = candidate.getMessage();
+                    if (message != null && isDbmsOutputUnavailableMessage(message.toLowerCase(Locale.ROOT))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isConnectionError(SQLException error) {
+        String sqlState = error.getSQLState();
+        return error instanceof SQLNonTransientConnectionException
+            || error instanceof SQLRecoverableException
+            || error instanceof SQLTransientConnectionException
+            || (sqlState != null && sqlState.toUpperCase(Locale.ROOT).startsWith("08"));
+    }
+
+    private static boolean isDbmsOutputUnavailableMessage(String message) {
+        if (!message.contains("dbms_output")) {
+            return false;
+        }
+        return message.contains("权限")
+            || message.contains("privilege")
+            || message.contains("permission")
+            || message.contains("access denied")
+            || message.contains("not authorized")
+            || message.contains("不支持")
+            || message.contains("unsupported")
+            || message.contains("not supported")
+            || message.contains("不存在")
+            || message.contains("not exist")
+            || message.contains("not found")
+            || message.contains("未找到")
+            || message.contains("undefined")
+            || message.contains("未定义");
     }
 
     /**

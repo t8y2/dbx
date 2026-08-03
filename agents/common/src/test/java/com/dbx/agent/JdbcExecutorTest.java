@@ -168,6 +168,29 @@ class JdbcExecutorTest {
     }
 
     @Test
+    void executeLimitsCombinedWarningsAndDriverMessages() {
+        SQLWarning first = new SQLWarning("first warning");
+        first.setNextWarning(new SQLWarning("second warning"));
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, -1, first, new AtomicInteger(), null, null),
+            "CALL LOG_ONLY_PROCEDURE()",
+            "",
+            schema -> "",
+            () -> "",
+            1,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            statement -> Arrays.asList("driver message")
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList("first warning")), result.getRows());
+        assertTrue(result.getTruncated());
+    }
+
+    @Test
     void executePageReturnsDriverMessagesForNoResultStatements() {
         QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
             executionConnection(false, -1, null, new AtomicInteger(), null, null),

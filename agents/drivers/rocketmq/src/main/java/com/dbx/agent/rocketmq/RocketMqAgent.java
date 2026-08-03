@@ -459,19 +459,17 @@ public final class RocketMqAgent {
         Set<String> brokerSystemTopics = collectBrokerSystemTopics(admin);
         Set<String> brokerNames = collectBrokerNames(clusterInfo);
         String cluster = resolveClusterName(clusterInfo, conn);
-        Map<String, TopicConfig> brokerTopics = collectBrokerTopicConfigs(admin, conn, clusterInfo);
+        BrokerTopicConfigSnapshot brokerSnapshot = collectBrokerTopicConfigSnapshot(admin, conn, clusterInfo);
+        Map<String, TopicConfig> brokerTopics = brokerSnapshot.topics();
         Map<String, Map<String, String>> topicAttributes = topicAttributesFromConfigs(brokerTopics);
 
-        // Prefer broker topic configs (Dashboard ground truth); nameserver routes can outlive broker deletion.
-        // Skip fetchTopicList when broker configs already provide the catalog.
-        Set<String> topicNames;
-        if (brokerTopics.isEmpty()) {
+        Set<String> nameserverTopics = Set.of();
+        if (!brokerSnapshot.complete() || brokerTopics.isEmpty()) {
             // Reuse resolved cluster — do not call examineBrokerClusterInfo again via clusterName(conn, admin).
             TopicList topicList = fetchTopicList(admin, cluster);
-            topicNames = new TreeSet<>(topicList.getTopicList());
-        } else {
-            topicNames = brokerTopics.keySet();
+            nameserverTopics = topicList.getTopicList();
         }
+        Set<String> topicNames = topicCatalogNames(brokerSnapshot, nameserverTopics);
 
         List<Map<String, Object>> topics = buildTopicCatalogRows(
             topicNames,
@@ -500,6 +498,39 @@ public final class RocketMqAgent {
     @FunctionalInterface
     interface TopicRouteLookup {
         TopicRouteData load(String topic) throws Exception;
+    }
+
+    @FunctionalInterface
+    interface BrokerTopicConfigLookup {
+        TopicConfigSerializeWrapper load(String brokerAddr) throws Exception;
+    }
+
+    static final class BrokerTopicConfigSnapshot {
+        private final Map<String, TopicConfig> topics;
+        private final boolean complete;
+
+        private BrokerTopicConfigSnapshot(Map<String, TopicConfig> topics, boolean complete) {
+            this.topics = topics;
+            this.complete = complete;
+        }
+
+        Map<String, TopicConfig> topics() {
+            return topics;
+        }
+
+        boolean complete() {
+            return complete;
+        }
+    }
+
+    static Set<String> topicCatalogNames(
+        BrokerTopicConfigSnapshot brokerSnapshot, Set<String> nameserverTopics) {
+        if (brokerSnapshot.complete() && !brokerSnapshot.topics().isEmpty()) {
+            return new TreeSet<>(brokerSnapshot.topics().keySet());
+        }
+        Set<String> topics = new TreeSet<>(brokerSnapshot.topics().keySet());
+        topics.addAll(nameserverTopics);
+        return topics;
     }
 
     /**
@@ -2548,38 +2579,43 @@ public final class RocketMqAgent {
 
     private static Map<String, TopicConfig> collectBrokerTopicConfigs(DefaultMQAdminExt admin, JsonObject conn) {
         try {
-            return collectBrokerTopicConfigs(admin, conn, admin.examineBrokerClusterInfo());
+            return collectBrokerTopicConfigSnapshot(admin, conn, admin.examineBrokerClusterInfo()).topics();
         } catch (Exception ignored) {
-            // Fall back to nameserver topic list in listTopics.
             return new LinkedHashMap<>();
         }
     }
 
-    private static Map<String, TopicConfig> collectBrokerTopicConfigs(
-        DefaultMQAdminExt admin, JsonObject conn, ClusterInfo clusterInfo) {
+    private static BrokerTopicConfigSnapshot collectBrokerTopicConfigSnapshot(
+        DefaultMQAdminExt admin, JsonObject conn, ClusterInfo clusterInfo) throws Exception {
+        List<String> brokerAddrs = resolveMasterBrokerAddrs(admin, conn, null, clusterInfo);
+        return collectBrokerTopicConfigs(
+            brokerAddrs,
+            brokerAddr -> admin.getAllTopicConfig(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS)
+        );
+    }
+
+    static BrokerTopicConfigSnapshot collectBrokerTopicConfigs(
+        List<String> brokerAddrs, BrokerTopicConfigLookup lookup) {
         Map<String, TopicConfig> merged = new LinkedHashMap<>();
-        try {
-            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn, null, clusterInfo)) {
-                try {
-                    TopicConfigSerializeWrapper wrapper =
-                        admin.getAllTopicConfig(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS);
-                    if (wrapper == null || wrapper.getTopicConfigTable() == null) {
+        boolean complete = !brokerAddrs.isEmpty();
+        for (String brokerAddr : brokerAddrs) {
+            try {
+                TopicConfigSerializeWrapper wrapper = lookup.load(brokerAddr);
+                if (wrapper == null || wrapper.getTopicConfigTable() == null) {
+                    complete = false;
+                    continue;
+                }
+                for (TopicConfig config : wrapper.getTopicConfigTable().values()) {
+                    if (config.getTopicName() == null || config.getTopicName().isBlank()) {
                         continue;
                     }
-                    for (TopicConfig config : wrapper.getTopicConfigTable().values()) {
-                        if (config.getTopicName() == null || config.getTopicName().isBlank()) {
-                            continue;
-                        }
-                        merged.merge(config.getTopicName(), config, RocketMqAgent::preferTopicConfig);
-                    }
-                } catch (Exception ignored) {
-                    // Some brokers may reject bulk config reads.
+                    merged.merge(config.getTopicName(), config, RocketMqAgent::preferTopicConfig);
                 }
+            } catch (Exception ignored) {
+                complete = false;
             }
-        } catch (Exception ignored) {
-            // Fall back to nameserver topic list in listTopics.
         }
-        return merged;
+        return new BrokerTopicConfigSnapshot(merged, complete);
     }
 
     private static TopicConfig preferTopicConfig(TopicConfig left, TopicConfig right) {

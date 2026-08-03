@@ -14,6 +14,7 @@ import org.apache.rocketmq.remoting.protocol.admin.TopicStatsTable;
 import org.apache.rocketmq.remoting.protocol.admin.TopicOffset;
 import org.apache.rocketmq.remoting.protocol.body.ProducerInfo;
 import org.apache.rocketmq.remoting.protocol.body.ProducerTableInfo;
+import org.apache.rocketmq.remoting.protocol.body.TopicConfigSerializeWrapper;
 import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
 import org.apache.rocketmq.remoting.protocol.route.QueueData;
 import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
@@ -447,6 +448,48 @@ class RocketMqAgentTest {
         assertEquals(0, routeCalls.get(), "broker catalog path must not call examineTopicRouteInfo");
         assertEquals(12, rows.get(0).get("partitions"));
         assertEquals("NORMAL", rows.get(0).get("messageType"));
+    }
+
+    @Test
+    void partialBrokerTopicConfigsMergeNameServerCatalog() {
+        TopicConfig orders = new TopicConfig("Orders");
+        TopicConfigSerializeWrapper wrapper = new TopicConfigSerializeWrapper();
+        wrapper.setTopicConfigTable(new ConcurrentHashMap<>(Map.of("Orders", orders)));
+
+        RocketMqAgent.BrokerTopicConfigSnapshot snapshot = RocketMqAgent.collectBrokerTopicConfigs(
+            List.of("broker-a", "broker-b"),
+            brokerAddr -> {
+                if (brokerAddr.equals("broker-b")) {
+                    throw new IllegalStateException("broker unavailable");
+                }
+                return wrapper;
+            }
+        );
+
+        assertFalse(snapshot.complete());
+        assertEquals(Set.of("Orders"), snapshot.topics().keySet());
+        assertEquals(
+            Set.of("Invoices", "Orders"),
+            RocketMqAgent.topicCatalogNames(snapshot, Set.of("Invoices", "Orders"))
+        );
+    }
+
+    @Test
+    void completeBrokerTopicConfigsRemainAuthoritative() {
+        TopicConfig orders = new TopicConfig("Orders");
+        TopicConfigSerializeWrapper wrapper = new TopicConfigSerializeWrapper();
+        wrapper.setTopicConfigTable(new ConcurrentHashMap<>(Map.of("Orders", orders)));
+
+        RocketMqAgent.BrokerTopicConfigSnapshot snapshot = RocketMqAgent.collectBrokerTopicConfigs(
+            List.of("broker-a"),
+            brokerAddr -> wrapper
+        );
+
+        assertTrue(snapshot.complete());
+        assertEquals(
+            Set.of("Orders"),
+            RocketMqAgent.topicCatalogNames(snapshot, Set.of("DeletedButStillRouted", "Orders"))
+        );
     }
 
     private static TopicRouteData routeWithReadQueues(int readQueueNums) {

@@ -195,6 +195,7 @@ export default withEnglishFallback({
     notePlaceholder: "Não salve senhas em texto simples nas observações",
     type: "Tipo",
     host: "Host",
+    addHost: "Adicionar Host",
     filePath: "Caminho do Arquivo",
     h2FileMode: "Arquivo",
     h2TcpMode: "TCP",

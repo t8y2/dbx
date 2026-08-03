@@ -194,6 +194,7 @@ export default withEnglishFallback({
     notePlaceholder: "メモにパスワードを平文で保存しないでください",
     type: "タイプ",
     host: "ホスト",
+    addHost: "ホストを追加",
     filePath: "ファイルパス",
     h2FileMode: "ファイル",
     h2TcpMode: "TCP",

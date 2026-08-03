@@ -194,6 +194,7 @@ export default withEnglishFallback({
     notePlaceholder: "Non salvare password in chiaro nelle note",
     type: "Tipo",
     host: "Host",
+    addHost: "Aggiungi Host",
     filePath: "Percorso File",
     h2FileMode: "File",
     h2TcpMode: "TCP",

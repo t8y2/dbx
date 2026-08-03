@@ -195,6 +195,7 @@ export default withEnglishFallback({
     notePlaceholder: "No guardes contraseñas en texto plano en las notas",
     type: "Tipo",
     host: "Host",
+    addHost: "Añadir Host",
     filePath: "Ruta del archivo",
     h2FileMode: "Archivo",
     h2TcpMode: "TCP",

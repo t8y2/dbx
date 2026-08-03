@@ -195,6 +195,7 @@ export default withEnglishFallback({
     notePlaceholder: "請勿在備註中以明文儲存密碼",
     type: "類型",
     host: "主機",
+    addHost: "新增主機",
     filePath: "檔案路徑",
     h2FileMode: "檔案",
     h2TcpMode: "TCP",

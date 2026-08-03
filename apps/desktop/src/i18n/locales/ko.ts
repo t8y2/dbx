@@ -189,6 +189,7 @@ export default withEnglishFallback({
     notePlaceholder: "메모에 비밀번호를 평문으로 저장하지 마세요",
     type: "유형",
     host: "호스트",
+    addHost: "호스트 추가",
     filePath: "파일 경로",
     h2FileMode: "파일",
     h2TcpMode: "TCP",

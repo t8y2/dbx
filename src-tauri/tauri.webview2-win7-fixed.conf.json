@@ -3,8 +3,8 @@
     "createUpdaterArtifacts": false,
     "windows": {
       "webviewInstallMode": {
-        "silent": true,
-        "type": "offlineInstaller"
+        "type": "fixedRuntime",
+        "path": "webview2-fixed-runtime"
       }
     }
   }

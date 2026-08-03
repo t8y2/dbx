@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { shouldAbortWindowsWebView2RuntimeFallback } from "@/lib/app/windowsWebView2RuntimePolicy";
 
 const template = readFileSync(resolve(process.cwd(), "src-tauri/windows/nsis/installer.nsi"), "utf8");
+const win7Config = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
+const win7RuntimeScript = readFileSync(resolve(process.cwd(), ".github/scripts/prepare-webview2-win7-runtime.ps1"), "utf8");
 
 describe("Windows offline installer template", () => {
   it.each([
@@ -61,5 +63,27 @@ describe("Windows offline installer template", () => {
     expect(runtimeChecks).toHaveLength(2);
     expect(template).toContain('ReadRegStr ${RESULT} HKLM "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\${WEBVIEW2APPGUID}" "pv"');
     expect(template).toContain('ReadRegStr ${RESULT} HKCU "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\${WEBVIEW2APPGUID}" "pv"');
+  });
+});
+
+describe("Windows 7 fixed WebView2 runtime bundle", () => {
+  it("bundles a fixed runtime instead of invoking a system Runtime installer", () => {
+    expect(win7Config.bundle.windows.webviewInstallMode).toEqual({
+      type: "fixedRuntime",
+      path: "webview2-fixed-runtime",
+    });
+    expect(win7RuntimeScript).toContain("Microsoft.WebView2.FixedVersionRuntime.$runtimeVersion.x64");
+    expect(win7RuntimeScript).toContain("msedgewebview2.exe");
+    expect(win7RuntimeScript).not.toContain("microsoftedgestandaloneinstaller");
+    expect(win7RuntimeScript).not.toContain("go.microsoft.com/fwlink");
+  });
+
+  it("pins the archived Microsoft runtime before extracting it", () => {
+    expect(win7RuntimeScript).toContain('$runtimeVersion = "109.0.1518.78"');
+    expect(win7RuntimeScript).toContain('$runtimeSha256 = "7622281cf83de1a35e3a471f432f7a897d65f0a7d3975df08512b7b253dd45c7"');
+    expect(win7RuntimeScript).toContain("Get-FileHash -LiteralPath $archivePath -Algorithm SHA256");
+    expect(win7RuntimeScript).toContain("Get-AuthenticodeSignature -LiteralPath $archivePath");
+    expect(win7RuntimeScript).toContain('$signature.SignerCertificate.Subject -notmatch "Microsoft Corporation"');
+    expect(win7RuntimeScript).toContain('& $expand $archivePath "-F:*" $extractDirectory');
   });
 });

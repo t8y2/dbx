@@ -130,23 +130,31 @@ jobs:
       - name: Build DBX for Windows 7
         run: cargo build --locked --package dbx --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
-      - name: Prepare WebView2 109 offline runtime
+      - name: Prepare WebView2 109 fixed runtime
         shell: pwsh
         run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
 
-      - name: Bundle Windows 7 offline installer
+      - name: Bundle Windows 7 fixed-runtime installer
         shell: pwsh
         run: |
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-offline.conf.json
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-fixed.conf.json
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
           if (!$installer) {
-            Write-Error "Missing Windows 7 WebView2 offline installer in ${bundleDir}"
+            Write-Error "Missing Windows 7 fixed-runtime installer in ${bundleDir}"
             exit 1
           }
           Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+
+      - name: Upload Windows 7 test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBX-win7-fixed-runtime-test
+          path: target/x86_64-win7-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
 
   duckdb-windows-driver:
     needs: changes
@@ -491,7 +499,7 @@ jobs:
               - '.github/scripts/prepare-webview2-win7-runtime.ps1'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'
-              - 'src-tauri/tauri.webview2-win7-offline.conf.json'
+              - 'src-tauri/tauri.webview2-win7-fixed.conf.json'
               - 'src-tauri/windows/nsis/**'
               - 'src-tauri/src/commands/update.rs'
               - 'crates/dbx-core/src/update.rs'

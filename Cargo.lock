@@ -2028,8 +2028,6 @@ dependencies = [
 [[package]]
 name = "dirs-sys"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
  "libc",
  "option-ext",
@@ -5264,8 +5262,6 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f3a5ae18f65a85c67a77d18d42d3606c07948e3c17c1e5f74852b26589e88a5"
 dependencies = [
  "base16ct",
  "byteorder",

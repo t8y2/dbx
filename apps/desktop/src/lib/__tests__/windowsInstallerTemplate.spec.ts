@@ -6,6 +6,7 @@ import { shouldAbortWindowsWebView2RuntimeFallback } from "@/lib/app/windowsWebV
 const template = readFileSync(resolve(process.cwd(), "src-tauri/windows/nsis/installer.nsi"), "utf8");
 const win7Config = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
 const win7RuntimeScript = readFileSync(resolve(process.cwd(), ".github/scripts/prepare-webview2-win7-runtime.ps1"), "utf8");
+const win7PeAuditScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-win7-pe-compat.ps1"), "utf8");
 
 describe("Windows offline installer template", () => {
   it.each([
@@ -85,5 +86,12 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(win7RuntimeScript).toContain("Get-AuthenticodeSignature -LiteralPath $archivePath");
     expect(win7RuntimeScript).toContain('$signature.SignerCertificate.Subject -notmatch "Microsoft Corporation"');
     expect(win7RuntimeScript).toContain('& $expand $archivePath "-F:*" $extractDirectory');
+  });
+
+  it("rejects executable imports that cannot load on Windows 7", () => {
+    expect(win7PeAuditScript).toContain('"combase.dll"');
+    expect(win7PeAuditScript).toContain('"api-ms-win-core-winrt-"');
+    expect(win7PeAuditScript).toContain('"GetSystemTimePreciseAsFileTime"');
+    expect(win7PeAuditScript).toContain("dumpbin.exe");
   });
 });

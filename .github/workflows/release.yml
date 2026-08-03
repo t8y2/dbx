@@ -418,6 +418,10 @@ jobs:
       - name: Build DBX for Windows 7
         run: cargo build --locked --package dbx --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
       - name: Prepare WebView2 109 fixed runtime
         shell: pwsh
         run: ./.github/scripts/prepare-webview2-win7-runtime.ps1

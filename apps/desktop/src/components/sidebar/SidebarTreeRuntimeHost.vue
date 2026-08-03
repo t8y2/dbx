@@ -720,7 +720,7 @@ async function toggle() {
     if (!wasExpanded) node.isExpanded = false;
     const errMsg = e?.message || String(e);
     if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-    toast(t("connection.connectFailed", { message: translateBackendError(t, errMsg) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(errMsg);
   }
 }

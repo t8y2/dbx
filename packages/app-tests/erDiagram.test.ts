@@ -206,3 +206,187 @@ FROM orders t1
 LEFT JOIN customers t2 ON t1.customer_id = t2.id AND t1.customer_region = t2.region`,
   );
 });
+
+test("R1: single-column unique FK is 1:1", () => {
+  const relationships = buildDiagramRelationships([
+    {
+      name: "users",
+      columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      foreignKeys: [],
+    },
+    {
+      name: "user_profiles",
+      columns: [
+        { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      foreignKeys: [{ name: "user_profiles_user_id_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
+      indexes: [{ name: "user_profiles_user_id_uq", columns: ["user_id"], is_unique: true, is_primary: false }],
+    },
+  ]);
+  assert.equal(relationships[0].sourceCardinality, "1");
+  assert.equal(relationships[0].targetCardinality, "1");
+});
+
+test("R2: composite unique covering composite FK is 1:1", () => {
+  const relationships = buildDiagramRelationships([
+    {
+      name: "tenants",
+      columns: [
+        { name: "org_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      ],
+      foreignKeys: [],
+    },
+    {
+      name: "memberships",
+      columns: [
+        { name: "org_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+        { name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      foreignKeys: [
+        { name: "memberships_tenant_fk", column: "org_id", ref_table: "tenants", ref_column: "org_id" },
+        { name: "memberships_tenant_fk", column: "user_id", ref_table: "tenants", ref_column: "id" },
+      ],
+      indexes: [{ name: "memberships_uq", columns: ["user_id", "org_id"], is_unique: true, is_primary: false }],
+    },
+  ]);
+  assert.ok(relationships.every((r) => r.sourceCardinality === "1" && r.targetCardinality === "1"));
+});
+
+test("R3: ordinary FK remains N:1", () => {
+  const relationships = buildDiagramRelationships([
+    {
+      name: "users",
+      columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      foreignKeys: [],
+    },
+    {
+      name: "orders",
+      columns: [
+        { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      foreignKeys: [{ name: "orders_user_id_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
+    },
+  ]);
+  assert.equal(relationships[0].sourceCardinality, "N");
+  assert.equal(relationships[0].targetCardinality, "1");
+});
+
+test("E1: column.is_unique alone yields 1:1 without indexes", () => {
+  const relationships = buildDiagramRelationships([
+    {
+      name: "users",
+      columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      foreignKeys: [],
+    },
+    {
+      name: "profiles",
+      columns: [
+        { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, is_unique: true, extra: null },
+      ],
+      foreignKeys: [{ name: "profiles_user_id_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
+    },
+  ]);
+  assert.equal(relationships[0].sourceCardinality, "1");
+});
+
+test("E2: unique index superset of FK columns stays N:1", () => {
+  const relationships = buildDiagramRelationships([
+    {
+      name: "users",
+      columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      foreignKeys: [],
+    },
+    {
+      name: "orders",
+      columns: [
+        { name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+        { name: "tenant_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      foreignKeys: [{ name: "orders_user_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
+      indexes: [{ name: "orders_uq", columns: ["user_id", "tenant_id"], is_unique: true, is_primary: false }],
+    },
+  ]);
+  assert.equal(relationships[0].sourceCardinality, "N");
+});
+
+test("E4/E5: partial unique and markedForDrop unique indexes do not force 1:1", () => {
+  const partial = buildDiagramRelationships([
+    { name: "users", columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }], foreignKeys: [] },
+    {
+      name: "orders",
+      columns: [{ name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+      foreignKeys: [{ name: "orders_user_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
+      indexes: [{ name: "orders_uq", columns: ["user_id"], is_unique: true, is_primary: false, filter: "deleted_at IS NULL" }],
+    },
+  ]);
+  assert.equal(partial[0].sourceCardinality, "N");
+
+  const dropped = buildDiagramRelationships([
+    { name: "users", columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }], foreignKeys: [] },
+    {
+      name: "orders",
+      columns: [{ name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+      foreignKeys: [{ name: "orders_user_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
+      indexes: [
+        {
+          id: "idx-1",
+          name: "orders_uq",
+          columns: ["user_id"],
+          isUnique: true,
+          isPrimary: false,
+          filter: "",
+          indexType: "",
+          includedColumns: [],
+          comment: "",
+          markedForDrop: true,
+        },
+      ],
+    },
+  ]);
+  assert.equal(dropped[0].sourceCardinality, "N");
+});
+
+test("E6: PK column set equal to FK columns is 1:1", () => {
+  const relationships = buildDiagramRelationships([
+    { name: "users", columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }], foreignKeys: [] },
+    {
+      name: "profiles",
+      columns: [{ name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      foreignKeys: [{ name: "profiles_pk_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
+    },
+  ]);
+  assert.equal(relationships[0].sourceCardinality, "1");
+});
+
+test("E7: custom relationship cardinalities are preserved", () => {
+  const custom = normalizeCustomDiagramRelationship({
+    name: "custom_nn",
+    sourceTable: "users",
+    sourceColumn: "id",
+    targetTable: "orders",
+    targetColumn: "id",
+    sourceCardinality: "N",
+    targetCardinality: "N",
+  });
+  const relationships = buildDiagramRelationships(
+    [
+      {
+        name: "users",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        foreignKeys: [],
+      },
+      {
+        name: "orders",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        foreignKeys: [],
+      },
+    ],
+    [custom],
+  );
+  assert.equal(relationships[0].sourceCardinality, "N");
+  assert.equal(relationships[0].targetCardinality, "N");
+});

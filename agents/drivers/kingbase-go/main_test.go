@@ -1156,6 +1156,16 @@ func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *test
 	if ddl := renderTableDDL("public", "orders", columns, nil); !strings.Contains(ddl, `"created_at" datetime`) || strings.Contains(ddl, "USER-DEFINED") {
 		t.Fatalf("unexpected user-defined type DDL:\n%s", ddl)
 	}
+
+	if _, err := server.informationSchemaColumns("public", "events", map[string]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 3 || strings.Contains(queries[2], "c.column_type") {
+		t.Fatalf("missing column_type capability must be cached: %v", queries)
+	}
 }
 
 func TestInformationSchemaColumnsPreserveColumnTypeWithoutUdtName(t *testing.T) {
@@ -1174,20 +1184,23 @@ func TestInformationSchemaColumnsPreserveColumnTypeWithoutUdtName(t *testing.T) 
 	server := newServer()
 	server.db = openMetadataDB(t, state)
 
-	columns, err := server.informationSchemaColumns("public", "orders", map[string]bool{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(columns) != 1 || columns[0].FullDataType != "enum('new','done')" {
-		t.Fatalf("unexpected metadata columns: %#v", columns)
-	}
-	if ddl := renderTableDDL("public", "orders", columns, nil); !strings.Contains(ddl, `"status" enum('new','done')`) {
-		t.Fatalf("unexpected table DDL:\n%s", ddl)
+	for _, table := range []string{"orders", "events"} {
+		columns, err := server.informationSchemaColumns("public", table, map[string]bool{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columns[0].FullDataType != "enum('new','done')" {
+			t.Fatalf("unexpected metadata columns: %#v", columns)
+		}
+		if ddl := renderTableDDL("public", table, columns, nil); !strings.Contains(ddl, `"status" enum('new','done')`) {
+			t.Fatalf("unexpected table DDL:\n%s", ddl)
+		}
 	}
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if len(state.queries) != 2 {
-		t.Fatalf("unexpected query count: got %d, want 2: %v", len(state.queries), state.queries)
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 3 || !strings.Contains(queries[0], "c.udt_name") || strings.Contains(queries[1], "c.udt_name") || strings.Contains(queries[2], "c.udt_name") {
+		t.Fatalf("missing udt_name capability must be detected once and cached: %v", queries)
 	}
 }
 
@@ -1210,17 +1223,20 @@ func TestInformationSchemaColumnsFallbackWithoutExtendedTypeColumns(t *testing.T
 	server := newServer()
 	server.db = openMetadataDB(t, state)
 
-	columns, err := server.informationSchemaColumns("public", "orders", map[string]bool{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(columns) != 1 || columnDDLDefinition(columns[0]) != `"label" varchar(64)` {
-		t.Fatalf("unexpected fallback columns: %#v", columns)
+	for _, table := range []string{"orders", "events"} {
+		columns, err := server.informationSchemaColumns("public", table, map[string]bool{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columnDDLDefinition(columns[0]) != `"label" varchar(64)` {
+			t.Fatalf("unexpected fallback columns: %#v", columns)
+		}
 	}
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if len(state.queries) != 3 {
-		t.Fatalf("unexpected query count: got %d, want 3: %v", len(state.queries), state.queries)
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 4 || !strings.Contains(queries[2], "NULL AS column_type") || !strings.Contains(queries[3], "NULL AS column_type") {
+		t.Fatalf("missing extended type capabilities must be detected once and cached: %v", queries)
 	}
 }
 
@@ -1275,6 +1291,19 @@ func TestInformationSchemaColumnsRetriesOnlyForMissingTypeMetadataColumns(t *tes
 				t.Fatalf("unexpected query count: got %d, want %d: %v", len(queries), wantQueries, queries)
 			}
 		})
+	}
+}
+
+func TestDisconnectResetsInformationSchemaCapabilityCache(t *testing.T) {
+	server := newServer()
+	server.infoColumnTypeUnsupported = true
+	server.infoUdtNameUnsupported = true
+
+	if err := server.disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if server.infoColumnTypeUnsupported || server.infoUdtNameUnsupported {
+		t.Fatal("disconnect must reset cached information_schema capabilities")
 	}
 }
 

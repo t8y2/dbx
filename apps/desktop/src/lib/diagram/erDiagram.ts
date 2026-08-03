@@ -1,16 +1,84 @@
 import type { ColumnInfo, ForeignKeyInfo, IndexInfo } from "@/types/database";
+import type { EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
+
+export type DiagramTableOrigin = "live" | "draft";
+
+/** Live metadata (`IndexInfo`) or draft editor indexes (`EditableStructureIndex`). */
+export type DiagramTableIndex = IndexInfo | EditableStructureIndex;
+
+export function isEditableStructureIndex(index: DiagramTableIndex): index is EditableStructureIndex {
+  return "isUnique" in index || "markedForDrop" in index;
+}
+
+export function editableStructureIndexes(table: DiagramTable): EditableStructureIndex[] {
+  return (table.indexes ?? []).filter(isEditableStructureIndex);
+}
 
 export interface DiagramTable {
   name: string;
   columns: ColumnInfo[];
   foreignKeys: ForeignKeyInfo[];
-  indexes?: IndexInfo[];
+  /** Unique/PK indexes used for FK cardinality; drafts also sync via buildCreateTableSql */
+  indexes?: DiagramTableIndex[];
+  /** live = from DB metadata; draft = local design not yet synced */
+  origin?: DiagramTableOrigin;
+  syncStatus?: "pending" | "synced" | "error";
+  /**
+   * Live tables only: column names not yet in DB (subset of `columns`).
+   * Editable in Inspector; synced via ALTER ADD COLUMN.
+   */
+  pendingColumnNames?: string[];
+  /**
+   * Live tables only: existing column names marked for DROP COLUMN on sync.
+   * Columns remain in `columns` until sync/reload.
+   */
+  droppedColumnNames?: string[];
+  /** Live tables only: marked for DROP TABLE on sync (hidden from canvas). */
+  pendingDrop?: boolean;
+}
+
+export function isDraftTable(table: DiagramTable): boolean {
+  return (table.origin ?? "live") === "draft";
+}
+
+export function isLiveTable(table: DiagramTable): boolean {
+  return !isDraftTable(table);
+}
+
+export function hasPendingColumns(table: DiagramTable): boolean {
+  return (table.pendingColumnNames?.length ?? 0) > 0;
+}
+
+export function isPendingColumn(table: DiagramTable, columnName: string): boolean {
+  return (table.pendingColumnNames ?? []).some((name) => name === columnName);
+}
+
+export function hasDroppedColumns(table: DiagramTable): boolean {
+  return (table.droppedColumnNames?.length ?? 0) > 0;
+}
+
+export function isDroppedColumn(table: DiagramTable, columnName: string): boolean {
+  return (table.droppedColumnNames ?? []).some((name) => name === columnName);
+}
+
+/** Tables that need sync: draft creates, live column adds/drops, or pending DROP TABLE. */
+export function needsDiagramSync(table: DiagramTable): boolean {
+  return isDraftTable(table) || hasPendingColumns(table) || hasDroppedColumns(table) || !!table.pendingDrop;
+}
+
+/** Soft-deleted tables stay in state for Sync but must not be re-added to layers/canvas pickers. */
+export function isDiagramTableAssignable(table: DiagramTable): boolean {
+  return !table.pendingDrop;
+}
+
+export function filterAssignableDiagramTables(tables: DiagramTable[]): DiagramTable[] {
+  return tables.filter(isDiagramTableAssignable);
 }
 
 export interface DiagramRelationship {
   id: string;
   name: string;
-  kind: "foreign-key" | "custom";
+  kind: "foreign-key" | "custom" | "inferred";
   sourceTable: string;
   sourceColumn: string;
   targetTable: string;
@@ -43,6 +111,7 @@ export interface DiagramPosition {
 export interface DiagramLayoutOptions {
   columnsPerRow?: number;
   cardWidth?: number;
+  /** When set, every row advances by this height (legacy/tests). When omitted, row height follows tallest table in the row. */
   rowHeight?: number;
   gapX?: number;
   gapY?: number;
@@ -57,6 +126,7 @@ function columnExists(table: DiagramTable | undefined, columnName: string): bool
   return !!table?.columns.some((column) => column.name === columnName);
 }
 
+/** True when every unique-key column appears among the FK source columns (unique ⊆ FK). */
 function sourceColumnsContainUniqueKey(sourceColumns: string[], keyColumns: string[]): boolean {
   if (keyColumns.length === 0) return false;
   const sourceColumnSet = new Set(sourceColumns);
@@ -68,11 +138,31 @@ function foreignKeySourceColumns(table: DiagramTable, foreignKey: ForeignKeyInfo
   return table.foreignKeys.filter((candidate) => candidate.name === foreignKey.name && candidate.ref_table === foreignKey.ref_table).map((candidate) => candidate.column);
 }
 
-function foreignKeySourceCardinality(table: DiagramTable, foreignKey: ForeignKeyInfo): "1" | "N" {
+function diagramIndexIsUnique(index: DiagramTableIndex): boolean {
+  if ("isUnique" in index) return !!(index.isUnique || index.isPrimary);
+  return !!(index.is_unique || index.is_primary);
+}
+
+function diagramIndexFilter(index: DiagramTableIndex): string {
+  return (index.filter ?? "").trim();
+}
+
+function diagramIndexMarkedForDrop(index: DiagramTableIndex): boolean {
+  return "markedForDrop" in index && !!index.markedForDrop;
+}
+
+export function foreignKeySourceCardinality(table: DiagramTable, foreignKey: ForeignKeyInfo): "1" | "N" {
   const sourceColumns = foreignKeySourceColumns(table, foreignKey);
   const primaryKeyColumns = table.columns.filter((column) => column.is_primary_key).map((column) => column.name);
   if (sourceColumnsContainUniqueKey(sourceColumns, primaryKeyColumns)) return "1";
-  return table.indexes?.some((index) => (index.is_unique || index.is_primary) && !index.filter?.trim() && sourceColumnsContainUniqueKey(sourceColumns, index.columns)) ? "1" : "N";
+
+  if (sourceColumns.length === 1) {
+    const col = table.columns.find((column) => column.name === sourceColumns[0]);
+    if (col?.is_unique) return "1";
+  }
+
+  const hasUniqueIndex = (table.indexes ?? []).some((index) => diagramIndexIsUnique(index) && !diagramIndexFilter(index) && !diagramIndexMarkedForDrop(index) && sourceColumnsContainUniqueKey(sourceColumns, index.columns));
+  return hasUniqueIndex ? "1" : "N";
 }
 
 function customRelationshipId(relationship: Omit<CustomDiagramRelationship, "id">): string {
@@ -114,7 +204,60 @@ export function buildDiagramRelationships(tables: DiagramTable[], customRelation
       kind: "custom" as const,
     }));
 
-  return [...foreignKeyRelationships, ...custom];
+  return deduplicateRelationships([...foreignKeyRelationships, ...custom]);
+}
+
+export function deduplicateRelationships(relationships: DiagramRelationship[]): DiagramRelationship[] {
+  const seen = new Set<string>();
+  const unique: DiagramRelationship[] = [];
+
+  for (const rel of relationships) {
+    const key = `${rel.sourceTable}:${rel.sourceColumn}:${rel.targetTable}:${rel.targetColumn}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(rel);
+    }
+  }
+
+  return unique;
+}
+
+export interface InferredRelationshipInput {
+  id: string;
+  sourceTable: string;
+  sourceColumn: string;
+  targetTable: string;
+  targetColumn: string;
+  confidence?: "high" | "medium";
+  strategy?: string;
+}
+
+export function toDiagramRelationship(input: InferredRelationshipInput): DiagramRelationship {
+  return {
+    id: input.id,
+    name: `${input.sourceTable}_${input.sourceColumn}_${input.targetTable}_${input.targetColumn}`,
+    kind: "inferred",
+    sourceTable: input.sourceTable,
+    sourceColumn: input.sourceColumn,
+    targetTable: input.targetTable,
+    targetColumn: input.targetColumn,
+    sourceCardinality: "N",
+    targetCardinality: "1",
+  };
+}
+
+export function mergeRelationshipsWithInferred(existing: DiagramRelationship[], inferred: InferredRelationshipInput[]): DiagramRelationship[] {
+  const existingIds = new Set(existing.map((r) => r.id));
+  const merged: DiagramRelationship[] = [...existing];
+
+  for (const inf of inferred) {
+    if (!existingIds.has(inf.id)) {
+      merged.push(toDiagramRelationship(inf));
+      existingIds.add(inf.id);
+    }
+  }
+
+  return deduplicateRelationships(merged);
 }
 
 export function filterDiagramTables(tables: DiagramTable[], query: string): DiagramTable[] {
@@ -131,24 +274,32 @@ export function filterDiagramTables(tables: DiagramTable[], query: string): Diag
 export function layoutDiagramTables(tables: Pick<DiagramTable, "name" | "columns">[], options: DiagramLayoutOptions = {}): Record<string, DiagramPosition> {
   const columnsPerRow = Math.max(1, options.columnsPerRow ?? Math.ceil(Math.sqrt(Math.max(tables.length, 1))));
   const cardWidth = options.cardWidth ?? 260;
-  const rowHeight = options.rowHeight ?? 220;
   const gapX = options.gapX ?? 56;
   const gapY = options.gapY ?? 40;
   const margin = options.margin ?? 40;
+  const fixedRowHeight = options.rowHeight;
 
-  return Object.fromEntries(
-    tables.map((table, index) => {
-      const col = index % columnsPerRow;
-      const row = Math.floor(index / columnsPerRow);
-      return [
-        table.name,
-        {
-          x: margin + col * (cardWidth + gapX),
-          y: margin + row * (rowHeight + gapY),
-        },
-      ];
-    }),
-  );
+  const measureHeight = (table: Pick<DiagramTable, "columns">): number => {
+    if (fixedRowHeight != null) return fixedRowHeight;
+    const columnCount = table.columns?.length ?? 0;
+    return 44 + columnCount * 24 + 12;
+  };
+
+  const positions: Record<string, DiagramPosition> = {};
+  let y = margin;
+  for (let start = 0; start < tables.length; start += columnsPerRow) {
+    const rowTables = tables.slice(start, start + columnsPerRow);
+    const rowContentHeight = Math.max(...rowTables.map(measureHeight));
+    rowTables.forEach((table, col) => {
+      positions[table.name] = {
+        x: margin + col * (cardWidth + gapX),
+        y,
+      };
+    });
+    y += rowContentHeight + gapY;
+  }
+
+  return positions;
 }
 
 function quoteIdentifier(value: string): string {

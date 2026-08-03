@@ -539,8 +539,10 @@ func isUndefinedColumn(err error, columnName string) bool {
 }
 
 func (s *server) informationSchemaColumns(schema, table string, primary map[string]bool) ([]columnInfo, error) {
-	includeColumnType := true
-	includeUdtName := true
+	// Cache the optional information_schema capabilities for this connection so
+	// subsequent table metadata requests do not repeat known failing probes.
+	includeColumnType := !s.infoColumnTypeUnsupported
+	includeUdtName := !s.infoUdtNameUnsupported
 	for {
 		result, err := s.queryInformationSchemaColumns(schema, table, primary, includeColumnType, includeUdtName)
 		if err == nil {
@@ -549,8 +551,10 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 		switch {
 		case includeColumnType && isUndefinedColumn(err, "column_type"):
 			includeColumnType = false
+			s.infoColumnTypeUnsupported = true
 		case includeUdtName && isUndefinedColumn(err, "udt_name"):
 			includeUdtName = false
+			s.infoUdtNameUnsupported = true
 		default:
 			return nil, err
 		}

@@ -18,6 +18,7 @@ export type ShortcutActionId =
   | "undo"
   | "redo"
   | "selectAll"
+  | "extendSelection"
   | "uppercaseSelection"
   | "lowercaseSelection"
   | "exPasteSqlInCondition"
@@ -184,6 +185,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutSelectAll",
     scope: "editor",
     defaultShortcut: "Mod+A",
+  },
+  {
+    id: "extendSelection",
+    labelKey: "settings.shortcutExtendSelection",
+    scope: "editor",
+    defaultShortcut: "Alt+W",
   },
   {
     id: "uppercaseSelection",

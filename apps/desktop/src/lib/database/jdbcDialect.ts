@@ -175,11 +175,11 @@ export function metadataSchemaForConnection(connection: JdbcDialectConnection | 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
-  if (schema) return schema;
   const type = effectiveDatabaseTypeForConnection(connection);
-  if (type === "informix") return undefined;
-  if (type === "sqlite") return database;
-  return isSchemaAware(type) ? database : undefined;
+  if (type === "informix") return schema || undefined;
+  if (type === "sqlite") return schema || database;
+  if (!type) return schema;
+  return isSchemaAware(type) ? schema || database : undefined;
 }
 
 /** Maps a database type to the corresponding CodeMirror SQL dialect name used by QueryEditor and DdlViewDialog. */

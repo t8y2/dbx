@@ -22,14 +22,20 @@ class CassandraAgentTest extends JdbcFakeExecutionBehaviorTest {
     void buildsServerUrlWhenKeyspaceIsEmpty() {
         ConnectParams params = new ConnectParams("127.0.0.1", 9042, "", "cassandra", "cassandra", "", "", false);
 
-        assertEquals("jdbc:cassandra://127.0.0.1:9042", CassandraAgent.buildUrl(params));
+        assertEquals(
+            "jdbc:cassandra://127.0.0.1:9042?loadbalancing=DcInferringLoadBalancingPolicy",
+            CassandraAgent.buildUrl(params)
+        );
     }
 
     @Test
     void buildsKeyspaceUrlWhenKeyspaceIsSet() {
         ConnectParams params = new ConnectParams("127.0.0.1", 9042, "app_keyspace", "cassandra", "cassandra", "", "", false);
 
-        assertEquals("jdbc:cassandra://127.0.0.1:9042/app_keyspace", CassandraAgent.buildUrl(params));
+        assertEquals(
+            "jdbc:cassandra://127.0.0.1:9042/app_keyspace?loadbalancing=DcInferringLoadBalancingPolicy",
+            CassandraAgent.buildUrl(params)
+        );
     }
 
     @Test
@@ -48,5 +54,41 @@ class CassandraAgentTest extends JdbcFakeExecutionBehaviorTest {
         );
 
         assertEquals("jdbc:cassandra://127.0.0.1:9042?localdatacenter=dc1", CassandraAgent.buildUrl(params));
+    }
+
+    @Test
+    void appendsInferringPolicyAfterOtherUrlParams() {
+        ConnectParams params = new ConnectParams(
+            "127.0.0.1", 9042, "", "cassandra", "cassandra", "requesttimeout=10000", "", false
+        );
+
+        assertEquals(
+            "jdbc:cassandra://127.0.0.1:9042?requesttimeout=10000&loadbalancing=DcInferringLoadBalancingPolicy",
+            CassandraAgent.buildUrl(params)
+        );
+    }
+
+    @Test
+    void appendsInferringPolicyAfterTrailingSeparator() {
+        ConnectParams params = new ConnectParams(
+            "127.0.0.1", 9042, "", "cassandra", "cassandra", "requesttimeout=10000&", "", false
+        );
+
+        assertEquals(
+            "jdbc:cassandra://127.0.0.1:9042?requesttimeout=10000&loadbalancing=DcInferringLoadBalancingPolicy",
+            CassandraAgent.buildUrl(params)
+        );
+    }
+
+    @Test
+    void preservesCustomLoadBalancingPolicy() {
+        ConnectParams params = new ConnectParams(
+            "127.0.0.1", 9042, "", "cassandra", "cassandra", "loadbalancing=CustomPolicy", "", false
+        );
+
+        assertEquals(
+            "jdbc:cassandra://127.0.0.1:9042?loadbalancing=CustomPolicy",
+            CassandraAgent.buildUrl(params)
+        );
     }
 }

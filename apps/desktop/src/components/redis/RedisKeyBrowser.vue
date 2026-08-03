@@ -141,6 +141,7 @@ const createKeyTypeHelpPanel = ref<{ element?: HTMLElement }>();
 const createKeyTypeHelpOffsetTop = ref(0);
 let nextEntryId = 0;
 let searchRequestId = 0;
+let loadMoreOperationId = 0;
 let redisBrowserIsActive = true;
 let reloadKeysOnActivation = false;
 let redisDbFlushedListenerRegistered = false;
@@ -397,15 +398,28 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
   expandedGroupIds.value = nextExpanded;
 }
 
-async function fetchScanPage(requestId = searchRequestId): Promise<RedisScanResult> {
+function invalidateScanRequests(): number {
+  searchRequestId++;
+  loadMoreOperationId++;
+  loadingMore.value = false;
+  return searchRequestId;
+}
+
+function isCurrentScanOperation(requestId: number, operationId?: number): boolean {
+  return requestId === searchRequestId && (operationId === undefined || operationId === loadMoreOperationId);
+}
+
+async function fetchScanPage(requestId = searchRequestId, operationId?: number): Promise<RedisScanResult> {
   const pageSize = redisScanPageSize.value;
   if (isValueSearchMode.value) {
     return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
   }
 
   // Keep each backend call small so a changed search can cancel between calls.
-  // The total COUNT budget bounds Redis work while giving sparse MATCH patterns
-  // substantially more coverage than a fixed number of SCAN calls.
+  // COUNT is only a hint, so an empty batch does not mean the iteration is
+  // complete. Bound every user-triggered page to a cumulative COUNT budget,
+  // preserve the returned cursor, and let the existing "Load more" action
+  // continue sparse searches without turning one request into a full scan.
   const scanCountBudget = 50_000;
   const iterationsPerCall = 8;
   const maxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
@@ -414,7 +428,7 @@ async function fetchScanPage(requestId = searchRequestId): Promise<RedisScanResu
   let totalKeys = 0;
 
   while (completedIterations < maxIterations) {
-    if (requestId !== searchRequestId) {
+    if (!isCurrentScanOperation(requestId, operationId)) {
       return { cursor, keys: [], total_keys: totalKeys };
     }
     const iterations = Math.min(iterationsPerCall, maxIterations - completedIterations);
@@ -479,9 +493,9 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
   return newKeys.length;
 }
 
-async function scanNextPage(requestId = searchRequestId): Promise<boolean> {
-  const result = await fetchScanPage(requestId);
-  if (requestId !== searchRequestId) return false;
+async function scanNextPage(requestId = searchRequestId, operationId?: number): Promise<boolean> {
+  const result = await fetchScanPage(requestId, operationId);
+  if (!isCurrentScanOperation(requestId, operationId)) return false;
   appendScanResult(result);
   return true;
 }
@@ -498,7 +512,7 @@ async function loadKeys() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;
   searchPending.value = false;
-  const requestId = ++searchRequestId;
+  const requestId = invalidateScanRequests();
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = 0;
@@ -531,11 +545,14 @@ async function loadKeys() {
 async function loadMore() {
   if (!hasMore.value || loadingMore.value) return;
   const requestId = searchRequestId;
+  const operationId = ++loadMoreOperationId;
   loadingMore.value = true;
   try {
-    await scanNextPage(requestId);
+    await scanNextPage(requestId, operationId);
   } finally {
-    loadingMore.value = false;
+    if (isCurrentScanOperation(requestId, operationId)) {
+      loadingMore.value = false;
+    }
   }
 }
 
@@ -713,7 +730,7 @@ function onRedisRowContextMenu(event: MouseEvent, node: RedisKeyTreeNode, openCo
 }
 
 function resetLoadedKeys() {
-  searchRequestId++;
+  invalidateScanRequests();
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = 0;
@@ -733,7 +750,7 @@ async function deleteKeyRaws(keys: string[]) {
   if (uniqueKeys.length === 0 || deletingKeys.value) return;
 
   // Ignore a late SCAN page while an explicit mutation changes this result set.
-  searchRequestId++;
+  invalidateScanRequests();
   fetchAllStopRequested.value = true;
   deletingKeys.value = true;
   try {
@@ -1256,6 +1273,13 @@ let hasAutoFocusedSearch = false;
 
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
+  // Invalidate in-flight SCAN work as soon as the query changes instead of
+  // waiting for the debounce timer to start the replacement search.
+  invalidateScanRequests();
+  loading.value = false;
+  isFetchingAll.value = false;
+  fetchAllStopRequested.value = true;
+  fetchAllLoadedCount.value = 0;
   searchPending.value = true;
   searchTimer = setTimeout(() => {
     void loadKeys();
@@ -1336,12 +1360,11 @@ function pauseRedisBrowserBackgroundWork() {
   // keys that were never rendered.
   const discardIncompleteFetchAll = isFetchingAll.value;
   redisBrowserIsActive = false;
-  searchRequestId++;
+  invalidateScanRequests();
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = 0;
   loading.value = false;
-  loadingMore.value = false;
   searchPending.value = false;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;

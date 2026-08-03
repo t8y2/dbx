@@ -2496,30 +2496,8 @@ pub async fn execute_query_with_max_rows(
         let mut result = query_result_with_server_messages(result?, messages);
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
         Ok(result)
-    } else if requires_simple_query_batch(sql) || contains_transaction_control(sql) {
-        let (result, messages) = capture_sqlserver_messages(async {
-            let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-            sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await
-        })
-        .await;
-        let _ = result?;
-        Ok(query_result_with_server_messages(
-            QueryResult {
-                columns: vec![],
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                spatial_columns: vec![],
-                spatial_values: vec![],
-                rows: vec![],
-                affected_rows: 0,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-                elasticsearch_raw_body: None,
-            },
-            messages,
-        ))
+    } else if !sqlserver_batch_can_use_execute(sql) {
+        execute_simple_batch_first_result_with_max_rows(client, sql, max_rows).await
     } else {
         let (result, messages) = capture_sqlserver_messages(sqlserver_driver_result(client.execute(sql, &[]))).await;
         let result = result?;
@@ -2645,6 +2623,22 @@ pub async fn execute_simple_batch_with_max_rows(
     Ok(results)
 }
 
+async fn execute_simple_batch_first_result_with_max_rows(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<QueryResult, String> {
+    let start = Instant::now();
+    let (result, messages) = capture_sqlserver_messages(async {
+        let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
+        sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, &[])).await
+    })
+    .await;
+    let mut result = query_result_with_server_messages(result?, messages);
+    strip_dbx_sqlserver_row_number_column(&mut result, sql);
+    Ok(result)
+}
+
 fn strip_dbx_sqlserver_row_number_column(result: &mut QueryResult, sql: &str) {
     if !is_dbx_sqlserver_row_number_page_sql(sql) {
         return;
@@ -2685,13 +2679,18 @@ fn sqlserver_batch_can_use_execute(sql: &str) -> bool {
 }
 
 fn sqlserver_batch_may_return_result_set(sql: &str) -> bool {
-    let tokens = top_level_sqlserver_tokens(sql);
-    let starts_with_cte_dml = tokens.first().is_some_and(|token| token.text == "WITH")
-        && tokens.iter().any(|token| matches!(token.text.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE"))
-        && crate::sql::split_sql_statements(sql).len() == 1;
-    tokens.iter().any(|token| {
-        matches!(token.text.as_str(), "SELECT" | "EXEC" | "EXECUTE" | "TABLE")
-            || (token.text == "WITH" && !starts_with_cte_dml)
+    crate::sql::split_sql_statements(sql).iter().any(|statement| {
+        let tokens = top_level_sqlserver_tokens(statement);
+        let starts_with_dml = starts_with_executable_sql_keyword(statement, &["INSERT", "UPDATE", "DELETE", "MERGE"]);
+        if starts_with_dml {
+            return false;
+        }
+        let starts_with_cte_dml = tokens.first().is_some_and(|token| token.text == "WITH")
+            && tokens.iter().any(|token| matches!(token.text.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE"));
+        tokens.iter().any(|token| {
+            matches!(token.text.as_str(), "SELECT" | "EXEC" | "EXECUTE" | "TABLE")
+                || (token.text == "WITH" && !starts_with_cte_dml)
+        })
     })
 }
 
@@ -3053,6 +3052,12 @@ mod tests {
     fn sqlserver_cud_batches_use_execute_for_affected_rows() {
         assert!(sqlserver_batch_can_use_execute("UPDATE dbo.users SET active = 0 WHERE id = 1;"));
         assert!(sqlserver_batch_can_use_execute("INSERT INTO dbo.users(id) VALUES (1);"));
+        assert!(sqlserver_batch_can_use_execute(
+            "INSERT INTO dbo.user_archive(id, name) SELECT id, name FROM dbo.users WHERE active = 0;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "INSERT INTO dbo.user_archive(id) SELECT id FROM dbo.users; SELECT COUNT(*) FROM dbo.user_archive;"
+        ));
         assert!(sqlserver_batch_can_use_execute("DELETE FROM dbo.users WHERE id = 1;"));
         assert!(sqlserver_batch_can_use_execute(
             "MERGE dbo.t AS t USING dbo.s AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name;"
@@ -3146,6 +3151,9 @@ mod tests {
         assert!(!sqlserver_batch_can_use_execute("EXEC dbo.list_users;"));
         assert!(!sqlserver_batch_can_use_execute("DECLARE @id INT = 1; EXEC dbo.list_users @id;"));
         assert!(!sqlserver_batch_can_use_execute(
+            "SET NOCOUNT OFF; DECLARE @rows TABLE (id INT); INSERT INTO @rows VALUES (1), (2); SELECT id FROM @rows;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
             "DECLARE @id INT = 1; CREATE TABLE #t(id INT); INSERT INTO #t VALUES (@id); SELECT id FROM #t;"
         ));
         assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;"));
@@ -3192,6 +3200,22 @@ mod tests {
 
         assert!(execute_query.contains("sqlserver_dml_output_returns_rows(sql)"));
         assert!(execute_query.contains("client.query(query.sql.as_str(), &[])"));
+    }
+
+    #[test]
+    fn sqlserver_single_result_entrypoint_keeps_result_returning_batches() {
+        let source = include_str!("sqlserver.rs");
+        let execute_query = source.split("pub async fn execute_query_with_max_rows").nth(1).unwrap();
+        let execute_query = execute_query.split("pub async fn execute_batch").next().unwrap();
+
+        assert!(execute_query.contains("!sqlserver_batch_can_use_execute(sql)"));
+        assert!(execute_query.contains("execute_simple_batch_first_result_with_max_rows(client, sql, max_rows)"));
+        assert!(!execute_query.contains("execute_simple_batch_with_max_rows(client, sql, max_rows)"));
+
+        let first_result = source.split("async fn execute_simple_batch_first_result_with_max_rows").nth(1).unwrap();
+        let first_result = first_result.split("fn strip_dbx_sqlserver_row_number_column").next().unwrap();
+        assert!(first_result.contains("collect_first_result_limited(stream, start, max_rows, &[])"));
+        assert!(!first_result.contains("collect_result_sets_limited"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it as test } from "vitest";
 import { createI18n } from "vue-i18n";
 import { translateBackendError, type BackendErrorTranslate } from "@/i18n/backend-errors";
-import { BackendErrorException, normalizeBackendError } from "@/lib/backend/errorUtils";
+import { BackendErrorException, formatError, normalizeBackendError, sanitizeBackendErrorMessage } from "@/lib/backend/errorUtils";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import it from "@/i18n/locales/it";
@@ -171,6 +171,23 @@ describe("backend error translation", () => {
     expect(translateBackendError(t, "some driver specific failure")).toBe("some driver specific failure");
   });
 
+  test("hides internal Agent error data from user-facing messages", () => {
+    const t = translatorFor("zh-CN");
+    const message = 'Agent RPC error (-1): driver: bad connection\nDBX_AGENT_ERROR_DATA:{"category":null,"retryable":null,"sessionDisposition":null,"stage":null,"operationOutcome":null,"agentSessionId":"e1a4d0a2907947b8adf31abb10c4dff9"}';
+    const expected = "Agent RPC error (-1): driver: bad connection";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(expected);
+    expect(formatError(new Error(message))).toBe(expected);
+    expect(new BackendErrorException(message).message).toBe(expected);
+    expect(translateBackendError(t, message)).toBe(expected);
+  });
+
+  test("preserves marker-like database messages without valid internal data", () => {
+    const message = "database returned\nDBX_AGENT_ERROR_DATA:not-json";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(message);
+  });
+
   test("normalizes Error and structural message objects before translation", () => {
     const t = translatorFor("zh-CN");
     const message = "file does not exist: /tmp/missing.sqlite";
@@ -211,6 +228,22 @@ describe("backend error translation", () => {
     } as const;
 
     expect(translateBackendError(t, error)).toBe(`${t(error.messageKey)}\n\n${error.detail}`);
+  });
+
+  test("hides internal Agent error data from structured error details", () => {
+    const t = translatorFor("zh-CN");
+    const detail = 'driver: bad connection\nDBX_AGENT_ERROR_DATA:{"category":null,"agentSessionId":"session-1"}';
+    const error = {
+      version: 1,
+      code: "DBX-JDBC-9001",
+      messageKey: "backendErrors.jdbc.legacyFailure",
+      messageParams: {},
+      source: "jdbcAgentLegacy",
+      operationOutcome: "unknown",
+      detail,
+    } as const;
+
+    expect(translateBackendError(t, error)).toBe(`${t(error.messageKey)}\n\ndriver: bad connection`);
   });
 
   test.each([

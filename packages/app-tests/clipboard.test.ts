@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test, vi } from "vitest";
-import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetAllowsNativeClipboard, eventTargetUsesNativeClipboard, hasNativeClipboardSelection, isPlainClipboardShortcut, readTextFromClipboard, type ClipboardEnvironment } from "../../apps/desktop/src/lib/common/clipboard.ts";
+import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetAllowsNativeClipboard, eventTargetUsesNativeClipboard, hasNativeClipboardSelection, isPlainClipboardShortcut, readTextFromClipboard, shouldBlockAppNativeSelectAll, type ClipboardEnvironment } from "../../apps/desktop/src/lib/common/clipboard.ts";
 
 const tauriClipboardMock = vi.hoisted(() => ({
   writeText: vi.fn<(text: string) => Promise<void>>(),
@@ -142,6 +142,22 @@ test("clipboard shortcut detection requires a plain mod shortcut", () => {
   assert.equal(isPlainClipboardShortcut({ key: "c", metaKey: true }, "c"), true);
   assert.equal(isPlainClipboardShortcut({ key: "c", ctrlKey: true, shiftKey: true }, "c"), false);
   assert.equal(isPlainClipboardShortcut({ key: "c", altKey: true }, "c"), false);
+});
+
+test("app native select-all is blocked outside editable controls", () => {
+  const containerTarget = { closest: () => null } as unknown as EventTarget;
+  const inputTarget = {
+    closest: (selector: string) => (selector.includes("input") ? {} : null),
+  } as unknown as EventTarget;
+  const dataGridTarget = {
+    closest: (selector: string) => (selector.includes("data-grid-root") ? {} : null),
+  } as unknown as EventTarget;
+
+  assert.equal(shouldBlockAppNativeSelectAll({ key: "a", metaKey: true, target: containerTarget }), true);
+  assert.equal(shouldBlockAppNativeSelectAll({ key: "A", ctrlKey: true, target: containerTarget }), true);
+  assert.equal(shouldBlockAppNativeSelectAll({ key: "a", metaKey: true, target: inputTarget }), false);
+  assert.equal(shouldBlockAppNativeSelectAll({ key: "a", metaKey: true, target: dataGridTarget }), false);
+  assert.equal(shouldBlockAppNativeSelectAll({ key: "a", metaKey: true, shiftKey: true, target: containerTarget }), false);
 });
 
 test("eventTargetAllowsNativeClipboard lets editable targets keep clipboard shortcuts", () => {

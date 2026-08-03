@@ -95,6 +95,10 @@ pub async fn start_transfer(
         let total_tables = sorted_tables.len();
         log::info!("[transfer] starting transfer_id={} tables={}", transfer_id, total_tables);
 
+        let mut failed_tables: Vec<String> = Vec::new();
+        let mut last_rows_transferred = 0_u64;
+        let mut last_total_rows = None;
+
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
             && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
         {
@@ -103,7 +107,11 @@ pub async fn start_transfer(
                 &request,
                 &source_pool_key,
                 &target_pool_key,
-                |progress| emit_progress(&app, progress),
+                |progress| {
+                    last_rows_transferred = progress.rows_transferred;
+                    last_total_rows = progress.total_rows;
+                    emit_progress(&app, progress);
+                },
             )
             .await
             {
@@ -116,8 +124,8 @@ pub async fn start_transfer(
                             table: "schema dependencies".to_string(),
                             table_index: 0,
                             total_tables,
-                            rows_transferred: 0,
-                            total_rows: None,
+                            rows_transferred: last_rows_transferred,
+                            total_rows: last_total_rows,
                             status: TransferStatus::Cancelled,
                             error: None,
                             terminal: true,
@@ -134,8 +142,8 @@ pub async fn start_transfer(
                             table: "schema dependencies".to_string(),
                             table_index: 0,
                             total_tables,
-                            rows_transferred: 0,
-                            total_rows: None,
+                            rows_transferred: last_rows_transferred,
+                            total_rows: last_total_rows,
                             status: TransferStatus::Error,
                             error: Some(e),
                             terminal: true,
@@ -146,8 +154,6 @@ pub async fn start_transfer(
                 }
             }
         }
-
-        let mut failed_tables: Vec<String> = Vec::new();
         for (i, table) in sorted_tables.iter().enumerate() {
             if dbx_core::transfer::is_cancelled(&transfer_id).await {
                 emit_progress(
@@ -157,8 +163,8 @@ pub async fn start_transfer(
                         table: table.clone(),
                         table_index: i,
                         total_tables,
-                        rows_transferred: 0,
-                        total_rows: None,
+                        rows_transferred: last_rows_transferred,
+                        total_rows: last_total_rows,
                         status: TransferStatus::Cancelled,
                         error: None,
                         terminal: true,
@@ -169,9 +175,6 @@ pub async fn start_transfer(
             }
 
             log::info!("[transfer] table {}/{}: {}", i + 1, total_tables, table);
-
-            let mut last_rows_transferred = 0_u64;
-            let mut last_total_rows = None;
 
             match dbx_core::transfer::transfer_table(
                 &state,
@@ -215,8 +218,8 @@ pub async fn start_transfer(
                                 table: table.clone(),
                                 table_index: i,
                                 total_tables,
-                                rows_transferred: 0,
-                                total_rows: None,
+                                rows_transferred: last_rows_transferred,
+                                total_rows: last_total_rows,
                                 status: TransferStatus::Cancelled,
                                 error: None,
                                 terminal: true,
@@ -316,8 +319,8 @@ pub async fn start_transfer(
                 table: String::new(),
                 table_index: total_tables,
                 total_tables,
-                rows_transferred: 0,
-                total_rows: None,
+                rows_transferred: last_rows_transferred,
+                total_rows: last_total_rows,
                 status: if failed_tables.is_empty() { TransferStatus::Done } else { TransferStatus::Error },
                 error: if failed_tables.is_empty() {
                     if skip_suffix.is_empty() {

@@ -127,6 +127,8 @@ pub struct ColumnInfo {
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub is_primary_key: bool,
+    #[serde(default)]
+    pub is_unique: bool,
     pub extra: Option<String>,
     pub comment: Option<String>,
     pub numeric_precision: Option<i32>,
@@ -138,6 +140,14 @@ pub struct ColumnInfo {
     pub character_set: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableColumnsResult {
+    pub table_name: String,
+    pub columns: Vec<ColumnInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -2948,13 +2948,14 @@ export const useConnectionStore = defineStore("connection", () => {
       return;
     }
 
-    let request = sidebarTableStorageInFlight.get(requestKey);
+    let request = options?.force ? undefined : sidebarTableStorageInFlight.get(requestKey);
     if (!request) {
       request = api.listObjectStatistics(scope.connectionId, scope.database, scope.schema);
       sidebarTableStorageInFlight.set(requestKey, request);
     }
     try {
       const statistics = await request;
+      if (sidebarTableStorageInFlight.get(requestKey) !== request) return;
       sidebarTableStorageCache.set(requestKey, {
         expiresAt: Date.now() + SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
         value: statistics,
@@ -5264,9 +5265,10 @@ export const useConnectionStore = defineStore("connection", () => {
     const node = shouldRefreshSchemaNode ? findNode(treeNodes.value, `${connectionId}:${database}:${schema}`) : null;
     if (node) {
       await refreshTreeNode(node);
-      return;
+    } else {
+      await refreshDatabaseTreeNode(connectionId, database, catalog);
     }
-    await refreshDatabaseTreeNode(connectionId, database, catalog);
+    void loadSidebarTableStorage({ connectionId, database, schema: schema || "" }, { force: true });
   }
 
   function isSchemaAwareDatabase(connectionId: string): boolean {

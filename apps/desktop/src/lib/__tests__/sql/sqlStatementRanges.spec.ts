@@ -346,6 +346,24 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
   });
 
+  it("splits large Dameng package bodies without repeated prefix parsing", () => {
+    const body = Array.from({ length: 3000 }, (_, index) => `    v_value := v_value + ${index % 10};`).join("\n");
+    const packageBody = `CREATE OR REPLACE PACKAGE BODY app.big_pkg AS
+  PROCEDURE run IS
+    v_value NUMBER := 0;
+  BEGIN
+${body}
+  END run;
+END big_pkg;`;
+    const sql = `${packageBody}\n/\nSELECT 1;`;
+    const startedAt = performance.now();
+    const ranges = splitSqlStatementRanges(sql, "dameng");
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(rangeSqlTexts(ranges)).toEqual([packageBody, "SELECT 1"]);
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
   it("keeps nested GaussDB procedure blocks together", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbNestedProcedure, "gaussdb"))).toEqual([gaussDbNestedProcedure]);
   });

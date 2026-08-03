@@ -315,6 +315,7 @@ test("defaults shortcut settings", () => {
 
   assert.equal(settings.shortcuts.executeSql, "Mod+Enter");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
+  assert.equal(settings.shortcuts.extendSelection, "Alt+W");
   assert.equal(settings.shortcuts.copyCurrentRow, "Mod+D");
   assert.equal(settings.shortcuts.deleteCurrentRow, "Delete");
   assert.equal(settings.shortcuts.newQuery, "Mod+T");

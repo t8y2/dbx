@@ -1035,6 +1035,28 @@ async function fetchTableTriggers() {
   }
 }
 
+async function refreshActiveTableInfo() {
+  if (sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
+  sidePanelGuard.bump();
+
+  if (tableInfoTab.value === "ddl") {
+    tableDdlContent.value = "";
+    await fetchTableDdl();
+  } else if (tableInfoTab.value === "columns") {
+    tableColumns.value = [];
+    await fetchTableColumns();
+  } else if (tableInfoTab.value === "indexes") {
+    tableIndexes.value = [];
+    await fetchTableIndexes();
+  } else if (tableInfoTab.value === "foreignKeys") {
+    tableForeignKeys.value = [];
+    await fetchTableForeignKeys();
+  } else if (tableInfoTab.value === "triggers") {
+    tableTriggers.value = [];
+    await fetchTableTriggers();
+  }
+}
+
 function copyTableDdl() {
   void copyToClipboard(tableDdlContent.value);
   toast(t("grid.copyDdl"), 2000);
@@ -2405,7 +2427,7 @@ async function loadObjects(options?: { allowCached?: boolean }) {
     void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-    error.value = e?.message || String(e);
+    error.value = translateBackendError(t, e);
   } finally {
     if (objectBrowserRowsLoadGuard.isCurrent(request)) finishObjectBrowserRowsLoad();
   }
@@ -2454,6 +2476,7 @@ async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: n
 
 function refresh(): boolean {
   void reload();
+  void refreshActiveTableInfo();
   return true;
 }
 
@@ -2778,7 +2801,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
         <Square v-else class="h-3.5 w-3.5" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="reload">
+      <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects }" />
       </Button>
       <Button v-if="canPasteTableClipboard()" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openPasteTableDialog">

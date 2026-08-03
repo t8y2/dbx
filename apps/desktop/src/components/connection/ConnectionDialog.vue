@@ -35,6 +35,7 @@ import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/con
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
+import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
@@ -2662,6 +2663,13 @@ const zookeeperConnectString = computed({
     form.value.connection_string = normalizeZooKeeperConnectString(value);
   },
 });
+const zookeeperAuthScheme = computed<ZooKeeperAuthScheme>({
+  get: () => resolveZooKeeperAuthScheme(form.value.url_params),
+  set: (scheme) => {
+    form.value.url_params = setZooKeeperAuthScheme(form.value.url_params, scheme);
+    resetTestState();
+  },
+});
 const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isCloudflareD1Connection(form.value) && !isH2FileMode.value && !(form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns"));
 const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
@@ -4877,6 +4885,10 @@ function openExternalUrl(url: string) {
                     </Tooltip>
                   </div>
                 </div>
+                <div v-if="form.db_type === 'zookeeper'" class="grid grid-cols-4 items-start gap-4">
+                  <span />
+                  <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">{{ t("connection.zookeeperClusterInputHint") }}</p>
+                </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.name") }}</Label>
@@ -5696,6 +5708,18 @@ function openExternalUrl(url: string) {
                         {{ t("connection.zookeeperConnectStringHint") }}
                       </p>
                     </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.zookeeperAuthMethod") }}</Label>
+                    <Select v-model="zookeeperAuthScheme">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="digest">{{ t("connection.zookeeperAuthDigest") }}</SelectItem>
+                        <SelectItem value="sasl_digest">{{ t("connection.zookeeperAuthSaslDigest") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>

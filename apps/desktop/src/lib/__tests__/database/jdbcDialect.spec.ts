@@ -221,6 +221,10 @@ describe("query execution schema", () => {
 });
 
 describe("object tree node schema", () => {
+  it("ignores database-shaped schema metadata for MySQL tables", () => {
+    expect(connectionObjectTreeNodeSchema({ db_type: "mysql" }, "app", "app")).toBeUndefined();
+  });
+
   it("uses the SQLite database alias to qualify attached tables", () => {
     expect(connectionObjectTreeNodeSchema({ db_type: "sqlite" }, "analytics")).toBe("analytics");
   });

@@ -1500,6 +1500,22 @@ body.dbx-table-reference-dragging * {
   -webkit-user-select: none !important;
 }
 
+html.dbx-data-grid-native-selection-blocked body,
+html.dbx-data-grid-native-selection-blocked body * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+html.dbx-data-grid-native-selection-blocked input,
+html.dbx-data-grid-native-selection-blocked textarea,
+html.dbx-data-grid-native-selection-blocked [contenteditable="true"],
+html.dbx-data-grid-native-selection-blocked [contenteditable="true"] *,
+html.dbx-data-grid-native-selection-blocked [role="textbox"],
+html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

@@ -33,18 +33,21 @@ function significantTokens(tokens: readonly SqlSemanticToken[]): SqlSemanticToke
   return tokens.filter((item) => item.kind !== "comment");
 }
 
-function statementSpans(sql: string, tokens: readonly SqlSemanticToken[]): SqlSemanticSpan[] {
-  const spans: SqlSemanticSpan[] = [];
+function statementTokenGroups(sql: string, tokens: readonly SqlSemanticToken[]): Array<{ span: SqlSemanticSpan; tokens: SqlSemanticToken[] }> {
+  const groups: Array<{ span: SqlSemanticSpan; tokens: SqlSemanticToken[] }> = [];
   let start = 0;
-  for (const item of tokens) {
+  let tokenStart = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const item = tokens[index]!;
     if (item.kind !== "punctuation" || item.text !== ";" || item.depth !== 0) continue;
     const span = trimSpan(sql, start, item.span.start);
-    if (span.end > span.start) spans.push(span);
+    if (span.end > span.start) groups.push({ span, tokens: significantTokens(tokens.slice(tokenStart, index)) });
     start = item.span.end;
+    tokenStart = index + 1;
   }
   const last = trimSpan(sql, start, sql.length);
-  if (last.end > last.start) spans.push(last);
-  return spans;
+  if (last.end > last.start) groups.push({ span: last, tokens: significantTokens(tokens.slice(tokenStart)) });
+  return groups;
 }
 
 function trimSpan(sql: string, start: number, end: number): SqlSemanticSpan {
@@ -444,10 +447,8 @@ export function parseInsertValuesClausesInRanges(sql: string, ranges: readonly T
 export function parseInsertValuesClauses(sql: string): InsertValuesClause[] {
   if (!sql.trim()) return [];
   const allTokens = tokenizeSqlSemantic(sql);
-  const spans = statementSpans(sql, allTokens);
   const clauses: InsertValuesClause[] = [];
-  for (const span of spans) {
-    const tokens = significantTokens(tokensInSpan(allTokens, span));
+  for (const { span, tokens } of statementTokenGroups(sql, allTokens)) {
     const clause = parseInsertClause(tokens, span);
     if (clause) clauses.push(clause);
   }

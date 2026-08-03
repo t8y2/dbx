@@ -4,6 +4,10 @@ export function currentStatementFrameRangeTo(nextChar: string, range: SqlTextRan
   return nextChar === ";" ? range.to + 1 : range.to;
 }
 
+export function shouldRebuildCurrentStatementFrame(update: { docChanged: boolean; selectionSet: boolean; configurationChanged: boolean }): boolean {
+  return update.docChanged || update.selectionSet || update.configurationChanged;
+}
+
 export function visualSqlColumns(text: string): number {
   let columns = 0;
   for (const ch of text) {

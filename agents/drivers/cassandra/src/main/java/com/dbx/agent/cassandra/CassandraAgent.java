@@ -20,6 +20,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class CassandraAgent extends AbstractJdbcAgent {
+    private static final String DC_INFERRING_LOAD_BALANCING = "loadbalancing=DcInferringLoadBalancingPolicy";
     private static final Pattern TARGET_PATTERN = Pattern.compile("target[\"']?\\s*[:=]\\s*[\"']?([\\w]+)");
 
     @Override
@@ -164,12 +165,28 @@ public final class CassandraAgent extends AbstractJdbcAgent {
         String keyspace = coalesce(params.getDatabase()).trim();
         // Cassandra rejects an empty keyspace path; omit it so DBX can connect first and list keyspaces.
         String url = keyspace.isEmpty() ? baseUrl : baseUrl + "/" + keyspace;
-        // Multi-DC clusters require localdatacenter=<dc>
         String extraParams = coalesce(params.getUrl_params()).trim();
         while (extraParams.startsWith("?") || extraParams.startsWith("&")) {
             extraParams = extraParams.substring(1);
         }
+        if (!hasDatacenterOrLoadBalancingParameter(extraParams)) {
+            extraParams = extraParams.isEmpty()
+                ? DC_INFERRING_LOAD_BALANCING
+                : extraParams + (extraParams.endsWith("&") ? "" : "&") + DC_INFERRING_LOAD_BALANCING;
+        }
         return extraParams.isEmpty() ? url : url + "?" + extraParams;
+    }
+
+    private static boolean hasDatacenterOrLoadBalancingParameter(String urlParams) {
+        for (String param : urlParams.split("&")) {
+            int valueSeparator = param.indexOf('=');
+            String paramName = valueSeparator < 0 ? param : param.substring(0, valueSeparator);
+            paramName = paramName.trim();
+            if (paramName.equals("localdatacenter") || paramName.equals("loadbalancing")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<String> targetColumns(String options) {

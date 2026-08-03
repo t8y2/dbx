@@ -18,6 +18,13 @@ jobs:
       versions: ${{ steps.bump.outputs.versions }}
       prev_versions: ${{ steps.bump.outputs.prev_versions }}
       prev_tag: ${{ steps.bump.outputs.prev_tag }}
+      effective_prev_ref: ${{ steps.bump.outputs.effective_prev_ref }}
+      changed_modules: ${{ steps.bump.outputs.changed_modules }}
+      java_modules: ${{ steps.bump.outputs.java_modules }}
+      native_modules: ${{ steps.bump.outputs.native_modules }}
+      reuse_modules: ${{ steps.bump.outputs.reuse_modules }}
+      build_jre: ${{ steps.bump.outputs.build_jre }}
+      reuse_jre: ${{ steps.bump.outputs.reuse_jre }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,6 +128,7 @@ jobs:
 
   build-agents:
     needs: [bump-versions]
+    if: ${{ needs.bump-versions.outputs.java_modules != '[]' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -129,7 +137,16 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew shadowJar --parallel
+      - name: Build changed Java agents
+        env:
+          JAVA_MODULES: ${{ needs.bump-versions.outputs.java_modules }}
+        run: |
+          mapfile -t MODULES < <(echo "$JAVA_MODULES" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))')
+          TASKS=()
+          for module in "${MODULES[@]}"; do
+            TASKS+=(":${module}:shadowJar")
+          done
+          ./gradlew "${TASKS[@]}" --parallel
         working-directory: agents
       - run: python3 scripts/validate_agent_jars.py
         working-directory: agents
@@ -141,6 +158,7 @@ jobs:
 
   build-oracle-native:
     needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'oracle') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -180,6 +198,7 @@ jobs:
 
   build-xugu-native:
     needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'xugu') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -219,6 +238,7 @@ jobs:
 
   build-rabbitmq-native:
     needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'rabbitmq') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -258,6 +278,7 @@ jobs:
 
   build-kingbase-native:
     needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'kingbase') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -297,6 +318,7 @@ jobs:
 
   build-duckdb-native:
     needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'duckdb') }}
     strategy:
       fail-fast: false
       matrix:
@@ -401,6 +423,8 @@ jobs:
           path: "release-native/dbx-agent-duckdb-*"
 
   build-jre:
+    needs: [bump-versions]
+    if: ${{ needs.bump-versions.outputs.build_jre == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -474,8 +498,41 @@ jobs:
           name: jre-${{ matrix.jre-key }}
           path: "dbx-jre-*.tar.zst"
 
+  reuse-previous-assets:
+    name: Reuse unchanged agent artifacts
+    needs: [bump-versions]
+    if: ${{ needs.bump-versions.outputs.reuse_modules != '[]' || needs.bump-versions.outputs.reuse_jre == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install artifact tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+      - name: Download and verify previous release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREV_TAG: ${{ needs.bump-versions.outputs.prev_tag }}
+          PREV_VERSIONS: ${{ needs.bump-versions.outputs.prev_versions }}
+          REUSE_MODULES: ${{ needs.bump-versions.outputs.reuse_modules }}
+          REUSE_JRE: ${{ needs.bump-versions.outputs.reuse_jre }}
+        run: |
+          node .github/scripts/reuse-agent-release-assets.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$PREV_TAG" \
+            --versions "$PREV_VERSIONS" \
+            --modules "$REUSE_MODULES" \
+            --reuse-jre "$REUSE_JRE" \
+            --output reused-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reused-agent-artifacts
+          path: reused-release/*
+          retention-days: 1
+
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-kingbase-native, build-duckdb-native, build-jre]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-kingbase-native, build-duckdb-native, build-jre, reuse-previous-assets]
+    if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
       - name: Create DBX bot release token
@@ -499,17 +556,31 @@ jobs:
         with:
           path: artifacts
 
+      - name: Install artifact tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find artifacts/agent-jars -name '*.jar' -exec cp {} release/ \;
-          find artifacts/oracle-native -type f -name 'dbx-agent-oracle-*' -exec cp {} release/ \;
-          find artifacts/xugu-native -type f -name 'dbx-agent-xugu-*' -exec cp {} release/ \;
-          find artifacts/rabbitmq-native -type f -name 'dbx-agent-rabbitmq-*' -exec cp {} release/ \;
-          find artifacts/kingbase-native -type f -name 'dbx-agent-kingbase-*' -exec cp {} release/ \;
-          find artifacts/duckdb-native-* -type f -name 'dbx-agent-duckdb-*' -exec cp {} release/ \;
+          find artifacts -type f -name 'dbx-agent-*.jar' -exec cp {} release/ \;
+          find artifacts -type f -name 'dbx-agent-*' ! -name '*.jar' ! -name '*.tar.zst' -exec cp {} release/ \;
+          find artifacts -type f -name 'dbx-agent-*.tar.zst' -exec cp {} release/ \;
           find artifacts -name 'dbx-jre-*.tar.zst' -exec cp {} release/ \;
           ls -lh release/
+
+      - name: Extract reused raw agent artifacts
+        if: ${{ needs.bump-versions.outputs.reuse_modules != '[]' }}
+        env:
+          PREV_VERSIONS: ${{ needs.bump-versions.outputs.prev_versions }}
+          REUSE_MODULES: ${{ needs.bump-versions.outputs.reuse_modules }}
+        run: |
+          node .github/scripts/reuse-agent-release-assets.mjs \
+            --extract-packages release \
+            --versions "$PREV_VERSIONS" \
+            --modules "$REUSE_MODULES" \
+            --output release
 
       - name: Add versions to agent artifact filenames
         env:
@@ -681,8 +752,6 @@ jobs:
 
       - name: Build single-driver packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
           python3 agents/scripts/build_driver_zips.py release --cleanup-sources
           python3 -m json.tool release/agent-registry.json > /dev/null
           echo "=== final agent-registry.json ==="

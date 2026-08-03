@@ -16,6 +16,23 @@ export interface BackendError {
   helpUrl?: string;
 }
 
+const AGENT_RPC_ERROR_DATA_MARKER = "\nDBX_AGENT_ERROR_DATA:";
+
+export function sanitizeBackendErrorMessage(message: string): string {
+  const markerIndex = message.lastIndexOf(AGENT_RPC_ERROR_DATA_MARKER);
+  if (markerIndex < 0) return message;
+
+  const rawData = message.slice(markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length).trim();
+  try {
+    const data: unknown = JSON.parse(rawData);
+    if (!data || typeof data !== "object" || Array.isArray(data)) return message;
+  } catch {
+    return message;
+  }
+
+  return message.slice(0, markerIndex).trimEnd();
+}
+
 function isBackendError(value: unknown): value is BackendError {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
@@ -56,8 +73,8 @@ export class BackendErrorException extends Error {
 
   constructor(error: unknown) {
     const backendError = normalizeRawBackendError(error);
-    const fallbackMessage = typeof error === "string" ? error : error instanceof Error ? error.message : "Backend request failed";
-    super(backendError?.detail || fallbackMessage);
+    const fallbackMessage = sanitizeBackendErrorMessage(typeof error === "string" ? error : error instanceof Error ? error.message : "Backend request failed");
+    super(backendError?.detail ? sanitizeBackendErrorMessage(backendError.detail) : fallbackMessage);
     this.name = "BackendErrorException";
     this.backendError = backendError ?? {
       version: 1,
@@ -99,14 +116,14 @@ function normalizeRawBackendError(error: unknown): BackendError | null {
  */
 export function formatError(e: unknown): string {
   const backendError = normalizeBackendError(e);
-  if (backendError?.detail) return backendError.detail;
+  if (backendError?.detail) return sanitizeBackendErrorMessage(backendError.detail);
 
   if (e instanceof Error) {
-    return e.message;
+    return sanitizeBackendErrorMessage(e.message);
   }
 
   if (typeof e === "string") {
-    return e;
+    return sanitizeBackendErrorMessage(e);
   }
 
   if (e === null || e === undefined) {
@@ -117,13 +134,13 @@ export function formatError(e: unknown): string {
   if (typeof e === "object" && "message" in e) {
     const message = (e as { message: unknown }).message;
     if (typeof message === "string") {
-      return message;
+      return sanitizeBackendErrorMessage(message);
     }
   }
 
   // Fallback: attempt to stringify
   try {
-    return String(e);
+    return sanitizeBackendErrorMessage(String(e));
   } catch {
     return "Unknown error occurred";
   }

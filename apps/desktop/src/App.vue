@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
-import { invoke } from "@tauri-apps/api/core";
 import { ChevronsRight } from "@lucide/vue";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import AppToolbar from "@/components/layout/AppToolbar.vue";
@@ -86,10 +85,11 @@ import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
-import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/connection/agentDriverUpdateBadge";
+import { countAvailableAgentDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { apiUrl, webPath } from "@/lib/common/webPath";
+import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
 import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
@@ -244,7 +244,7 @@ function updateAgentDriverUpdateCount(count: number) {
 async function refreshAgentDriverUpdateCount() {
   if (!isDesktop || !settingsStore.editorSettings.updateNotificationsEnabled) return;
   try {
-    const drivers = await invoke<AgentDriverUpdateBadgeState[]>("list_installed_agents");
+    const drivers = await api.listInstalledAgents();
     if (!settingsStore.editorSettings.updateNotificationsEnabled) return;
     updateAgentDriverUpdateCount(countAvailableAgentDriverUpdates(drivers));
   } catch {
@@ -1873,6 +1873,10 @@ function activateAdjacentTab(direction: -1 | 1): boolean {
   return activateTabByIndex(nextIndex);
 }
 
+function handleNativeSelectAll(e: KeyboardEvent) {
+  if (shouldBlockAppNativeSelectAll(e)) e.preventDefault();
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
@@ -2138,6 +2142,7 @@ onMounted(async () => {
   });
   applyTheme();
   void applyUiScale(settingsStore.editorSettings.uiScale);
+  window.addEventListener("keydown", handleNativeSelectAll, true);
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   if (isDesktop) {
@@ -2204,6 +2209,7 @@ onUnmounted(() => {
   if (updateCheckTimer) {
     clearInterval(updateCheckTimer);
   }
+  window.removeEventListener("keydown", handleNativeSelectAll, true);
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   document.removeEventListener("contextmenu", handleContextMenu);

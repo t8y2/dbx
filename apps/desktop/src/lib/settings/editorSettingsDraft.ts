@@ -34,6 +34,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tableOpenPageSize",
   "infiniteScroll",
   "infiniteScrollMaxRows",
+  "regexMaxMatchCount",
   "autoCalculateTotalRows",
   "tableColumnTemplateFields",
   "shortcuts",

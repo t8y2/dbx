@@ -2,7 +2,7 @@ import { matchesModifierOnlyShortcut, type ShortcutLikeEvent } from "@/lib/edito
 import type { QueryTab, TreeNodeType } from "@/types/database";
 
 export type DataTabOpenMode = "default" | "new-tab";
-export type DataTabReuseScope = "none" | "same-table" | "database";
+export type DataTabReuseScope = "none" | "same-table";
 
 type DataTabLike = Pick<QueryTab, "id" | "mode" | "connectionId" | "database" | "schema" | "title" | "tableMeta" | "tableMetaUpdatedAt">;
 
@@ -16,7 +16,7 @@ export interface DataTabTarget {
 
 export type ExistingDataTabCandidate<T extends DataTabLike> = {
   tab: T;
-  match: "same-table" | "database";
+  match: "same-table";
 };
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
@@ -53,8 +53,5 @@ export function findExistingDataTabCandidate<T extends DataTabLike>(tabs: T[], t
 
   const sameTable = tabs.find((tab) => isSameTable(tab, target));
   if (sameTable) return { tab: sameTable, match: "same-table" };
-  if (options.reuseScope === "same-table") return undefined;
-
-  const sameDatabase = tabs.find((tab) => isSameDatabase(tab, target));
-  return sameDatabase ? { tab: sameDatabase, match: "database" } : undefined;
+  return undefined;
 }

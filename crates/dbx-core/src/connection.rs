@@ -620,6 +620,7 @@ pub fn prestosql_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str,
     let mut jdbc_config = config.clone();
     jdbc_config.connection_string =
         Some(trino_like_jdbc_connection_string(config, host, port, config.effective_database().unwrap_or("")));
+    jdbc_config.url_params = None;
     if jdbc_config.jdbc_driver_class.as_deref().is_none_or(|value| value.trim().is_empty()) {
         jdbc_config.jdbc_driver_class = Some(PRESTOSQL_JDBC_DRIVER_CLASS.to_string());
     }
@@ -4894,6 +4895,26 @@ mod tests {
 
         assert_eq!(jdbc_config.jdbc_driver_class.as_deref(), Some("custom.PrestoDriver"));
         assert_eq!(jdbc_config.jdbc_driver_paths, vec!["D:\\software\\jar\\presto-jdbc-350.jar"]);
+    }
+
+    #[test]
+    fn prestosql_jdbc_config_consumes_url_params_after_building_url() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::PrestoSql;
+        config.ssl = true;
+        config.url_params = Some(
+            "SSL=true&SSLKeyStorePassword=secret&SSLKeyStorePath=D:/keystore/presto/presto_keystore.jks".to_string(),
+        );
+
+        let jdbc_config = prestosql_jdbc_config_for_endpoint(&config, "presto.example.com", 8443);
+
+        assert_eq!(
+            jdbc_config.connection_string.as_deref(),
+            Some(
+                "jdbc:presto://presto.example.com:8443?SSL=true&SSLKeyStorePassword=secret&SSLKeyStorePath=D:/keystore/presto/presto_keystore.jks"
+            )
+        );
+        assert_eq!(jdbc_config.url_params, None);
     }
 
     #[test]

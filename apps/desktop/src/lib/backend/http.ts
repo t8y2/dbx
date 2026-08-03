@@ -744,6 +744,16 @@ export async function getSqlServerColumnMetadata(connectionId: string, database:
   return get(`/api/schema/sqlserver/column-metadata?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
+export interface TableColumnsResult {
+  table_name: string;
+  columns: ColumnInfo[];
+  error?: string;
+}
+
+export async function getAllColumns(connectionId: string, database: string, schema: string): Promise<TableColumnsResult[]> {
+  return get(`/api/schema/all-columns?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
 export async function listDataTypes(connectionId: string, database: string): Promise<string[]> {
   return get(`/api/schema/data-types?${qs({ connection_id: connectionId, database })}`);
 }

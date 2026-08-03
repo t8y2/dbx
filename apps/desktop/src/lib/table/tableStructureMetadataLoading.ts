@@ -1,4 +1,5 @@
 import type { TableInfoTab } from "@/types/database";
+import type { ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 
 export interface TableStructureRefreshScope {
   columns: boolean;
@@ -23,14 +24,17 @@ export function visibleTableStructureRefreshScope(activeTab: TableInfoTab): Tabl
   }
 }
 
-export const TRIGGERS_ONLY_REFRESH_SCOPE: TableStructureRefreshScope = {
-  columns: false,
-  indexes: false,
-  foreignKeys: false,
-  triggers: true,
-  tableComment: false,
-};
+export function unloadedTableStructureRefreshScope(activeTab: TableInfoTab, loadedFacets: ReadonlySet<ObjectMetadataFacet>): TableStructureRefreshScope {
+  const visibleScope = visibleTableStructureRefreshScope(activeTab);
+  return {
+    columns: visibleScope.columns && !loadedFacets.has("columns"),
+    indexes: visibleScope.indexes && !loadedFacets.has("indexes"),
+    foreignKeys: visibleScope.foreignKeys && !loadedFacets.has("foreign-keys"),
+    triggers: visibleScope.triggers && !loadedFacets.has("triggers"),
+    tableComment: visibleScope.tableComment && !loadedFacets.has("comment"),
+  };
+}
 
-export function shouldLoadTableStructureTriggers(options: { activeTab: TableInfoTab; isCreateMode: boolean; supported: boolean; loaded: boolean; loading: boolean; structureLoading: boolean }): boolean {
-  return options.activeTab === "triggers" && !options.isCreateMode && options.supported && !options.loaded && !options.loading && !options.structureLoading;
+export function hasTableStructureRefreshWork(scope: TableStructureRefreshScope): boolean {
+  return scope.columns || scope.indexes || scope.foreignKeys || scope.triggers || scope.tableComment;
 }

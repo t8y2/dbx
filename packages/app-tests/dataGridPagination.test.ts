@@ -166,7 +166,7 @@ test("auto-redirect: total is undefined — guard prevents redirect attempt", ()
 
 test("last-page COUNT shows grid busy overlay before executeQuery", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => props\.loading === true \|\| totalRowCountBusy\.value\)/);
+  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| totalRowCountBusy\.value\)/);
   assert.match(source, /v-if="gridSurfaceBusy"/);
   assert.match(source, /async function beginManualTotalRowCount/);
   assert.match(source, /await nextTick\(\);/);

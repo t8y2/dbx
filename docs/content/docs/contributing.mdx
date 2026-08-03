@@ -340,7 +340,7 @@ Restart DBX or disconnect and reconnect the database so the old agent process ex
 #### When to Change `agents/versions.json`
 
 <Callout type="warn">
-  Do not edit `agents/versions.json` when changing an existing driver. The agent release workflow compares against the previous `agents-v*` tag and automatically increments the patch version of changed modules.
+  Do not edit `agents/versions.json` when changing an existing driver. The agent release workflow compares runtime files against the previous `agents-v*` tag, uses that release's post-release version-sync commit as the effective version baseline, and automatically increments the patch version of changed modules. Unchanged modules reuse verified artifacts from the previous immutable release.
 </Callout>
 
 - A change under `agents/drivers/<module>/` automatically bumps that module during release

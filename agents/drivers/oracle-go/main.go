@@ -1956,12 +1956,26 @@ ORDER BY CASE
          OWNER`, baseSQL, preferredParam, nameColumn, exactParam, typeColumn, nameColumn)
 }
 
+func oracleObjectNameCandidates(name string) (string, string, bool) {
+	exact := strings.TrimSpace(name)
+	uppercase := strings.ToUpper(exact)
+	return exact, uppercase, exact != uppercase
+}
+
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(table)
+	result, err := s.getColumnsByName(schema, exact)
+	if err != nil || len(result) > 0 || !hasUppercaseFallback {
+		return result, err
+	}
+	return s.getColumnsByName(schema, uppercase)
+}
+
+func (s *server) getColumnsByName(schema, table string) ([]columnInfo, error) {
 	rows, err := s.queryRows(`
 SELECT c.COLUMN_NAME,
        c.DATA_TYPE,
@@ -2017,7 +2031,15 @@ func (s *server) loadOracleColumnMeta(schema, table string) ([]oracleColumnMeta,
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(table)
+	result, err := s.loadOracleColumnMetaByName(schema, exact)
+	if err != nil || len(result) > 0 || !hasUppercaseFallback {
+		return result, err
+	}
+	return s.loadOracleColumnMetaByName(schema, uppercase)
+}
+
+func (s *server) loadOracleColumnMetaByName(schema, table string) ([]oracleColumnMeta, error) {
 	rows, err := s.queryRows(`
 SELECT COLUMN_NAME, DATA_TYPE
 FROM ALL_TAB_COLUMNS
@@ -2255,7 +2277,7 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	objectType, err = s.resolveDDLObjectType(schema, table, objectType)
+	objectType, table, err = s.resolveDDLObject(schema, table, objectType)
 	if err != nil {
 		return "", err
 	}
@@ -2263,7 +2285,7 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 		return s.buildViewDDL(schema, table)
 	}
 	var ddl string
-	err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, strings.ToUpper(table), schema).Scan(&ddl)
+	err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, table, schema).Scan(&ddl)
 	if err == nil && strings.TrimSpace(ddl) != "" {
 		return ddl, nil
 	}
@@ -2273,16 +2295,18 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 	return "", err
 }
 
-func (s *server) resolveDDLObjectType(schema, name, requested string) (string, error) {
+func (s *server) resolveDDLObject(schema, name, requested string) (string, string, error) {
+	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(name)
 	objectType := normalizeDDLObjectType(requested)
 	if objectType != "" {
-		return objectType, nil
+		return objectType, exact, nil
 	}
 	db, err := s.requireDB()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	err = db.QueryRow(`
+	resolve := func(objectName string) error {
+		return db.QueryRow(`
 SELECT OBJECT_TYPE
 FROM (
   SELECT OBJECT_TYPE
@@ -2292,14 +2316,22 @@ FROM (
     AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW')
   ORDER BY CASE OBJECT_TYPE WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 ELSE 2 END
 )
-WHERE ROWNUM = 1`, schema, strings.ToUpper(name)).Scan(&objectType)
+WHERE ROWNUM = 1`, schema, objectName).Scan(&objectType)
+	}
+	err = resolve(exact)
+	if errors.Is(err, sql.ErrNoRows) && hasUppercaseFallback {
+		err = resolve(uppercase)
+		if err == nil {
+			exact = uppercase
+		}
+	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("object not found: %s.%s", schema, name)
+		return "", "", fmt.Errorf("object not found: %s.%s", schema, name)
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return normalizeDDLObjectType(objectType), nil
+	return normalizeDDLObjectType(objectType), exact, nil
 }
 
 func normalizeDDLObjectType(value string) string {

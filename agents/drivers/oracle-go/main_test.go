@@ -290,6 +290,146 @@ func TestNormalizeDDLObjectType(t *testing.T) {
 	}
 }
 
+func TestGetTableDDLPreservesQuotedObjectName(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const table = "ZGJ_FlowSealTemplate"
+	const ddl = `CREATE TABLE "ZTZS_ERP2"."ZGJ_FlowSealTemplate" ("FlowId" NUMBER)`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", table, schema},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ddl {
+		t.Fatalf("getTableDDL() = %q, want %q", got, ddl)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableDDLUppercaseObjectDoesNotAddFallbackQuery(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const table = "ORDERS"
+	const ddl = `CREATE TABLE "ZTZS_ERP2"."ORDERS" ("ID" NUMBER)`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", table, schema},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ddl {
+		t.Fatalf("getTableDDL() = %q, want %q", got, ddl)
+	}
+	if scripted.next != 2 {
+		t.Fatalf("uppercase object should use two queries, got %d", scripted.next)
+	}
+}
+
+func TestGetTableDDLFallsBackToUppercaseAfterExactMiss(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const ddl = `CREATE TABLE "ZTZS_ERP2"."ORDERS" ("ID" NUMBER)`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, "orders"},
+			rows:          nil,
+		},
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, "ORDERS"},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", "ORDERS", schema},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, "orders", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ddl {
+		t.Fatalf("getTableDDL() = %q, want %q", got, ddl)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableDDLFallbackPreservesQuotedColumnNames(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const table = "ZGJ_FlowSealTemplate"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", table, schema},
+			err:           errors.New("ORA-31603: object not found"),
+		},
+		{
+			queryContains: "FROM ALL_TAB_COLUMNS",
+			args:          []driver.Value{schema, table},
+			columns: []string{
+				"COLUMN_NAME", "DATA_TYPE", "NULLABLE", "DATA_DEFAULT", "IS_PRIMARY_KEY",
+				"COMMENTS", "DATA_PRECISION", "DATA_SCALE", "CHAR_LENGTH",
+			},
+			rows: [][]driver.Value{{"FlowId", "VARCHAR2", "N", nil, int64(1), nil, nil, nil, int64(50)}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `CREATE TABLE "ZTZS_ERP2"."ZGJ_FlowSealTemplate" (
+  "FlowId" VARCHAR2(50) NOT NULL,
+  PRIMARY KEY ("FlowId")
+)`
+	if got != want {
+		t.Fatalf("getTableDDL() = %q, want %q", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
 func TestIsQuerySQLSkipsLeadingComments(t *testing.T) {
 	tests := []string{
 		"-- 测试\nSELECT * FROM (SELECT * FROM \"DBX_TEST\".\"ORDERS_10K\") WHERE ROWNUM <= 100",
@@ -1482,6 +1622,7 @@ func contains(values []string, target string) bool {
 type oracleViewSourceQueryStep struct {
 	queryContains string
 	args          []driver.Value
+	columns       []string
 	rows          [][]driver.Value
 	err           error
 }
@@ -1534,7 +1675,11 @@ func (c *oracleViewSourceConn) QueryContext(
 	if step.err != nil {
 		return nil, step.err
 	}
-	return &oracleViewSourceRows{columns: []string{"SOURCE"}, values: step.rows}, nil
+	columns := step.columns
+	if len(columns) == 0 {
+		columns = []string{"SOURCE"}
+	}
+	return &oracleViewSourceRows{columns: columns, values: step.rows}, nil
 }
 
 type oracleViewSourceRows struct {

@@ -14,7 +14,7 @@ import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
-import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
+import { currentStatementFrameRangeTo, shouldRebuildCurrentStatementFrame, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlText, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -89,6 +89,7 @@ import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
 import { startsQueryEditorRectangularSelection, usesQueryEditorObjectNavigationModifier } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
+import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -1439,6 +1440,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.undo, (view) => codeMirrorUndo?.(view) ?? false),
         ...binding(shortcuts.redo, (view) => codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorSelectAll?.(view) ?? false),
+        ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.uppercaseSelection, () => convertSelectedSqlCase("upper")),
         ...binding(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
         ...binding(shortcuts.toggleLineComment, (view) => codeMirrorToggleLineComment?.(view) ?? false),
@@ -1467,6 +1469,16 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       })),
     ),
   ];
+}
+
+function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
+  const databaseType = props.databaseType;
+  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" ? "text" : "sql";
+  return extendQueryEditorSelection(currentView, {
+    databaseType,
+    dialect: props.syntaxDialect ?? props.dialect,
+    language,
+  });
 }
 
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
@@ -3932,11 +3944,19 @@ onMounted(async () => {
   const currentStatementFrameHighlighter = ViewPlugin.fromClass(
     class {
       decorations: import("@codemirror/view").DecorationSet;
+      private configuration: string;
       constructor(view: import("@codemirror/view").EditorView) {
+        this.configuration = this.currentConfiguration();
         this.decorations = this.getDeco(view);
       }
       update(update: import("@codemirror/view").ViewUpdate) {
+        const configuration = this.currentConfiguration();
+        if (!shouldRebuildCurrentStatementFrame({ docChanged: update.docChanged, selectionSet: update.selectionSet, configurationChanged: configuration !== this.configuration })) return;
+        this.configuration = configuration;
         this.decorations = this.getDeco(update.view);
+      }
+      currentConfiguration() {
+        return `${settingsStore.editorSettings.showCurrentStatementFrame}:${settingsStore.editorSettings.showInsertValueHints}:${props.databaseType ?? ""}`;
       }
       getDeco(view: import("@codemirror/view").EditorView) {
         if (!settingsStore.editorSettings.showCurrentStatementFrame) return Decoration.none;
@@ -3950,10 +3970,13 @@ onMounted(async () => {
         let insertValueHints: Array<{ from: number; column: string }> = [];
         try {
           if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch") {
-            insertValueHints = parseInsertValueHints(view.state.doc.sliceString(range.from, range.to), { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
-              ...hint,
-              from: hint.from + range.from,
-            }));
+            const statementSql = view.state.doc.sliceString(range.from, range.to);
+            if (/\binsert\b/i.test(statementSql)) {
+              insertValueHints = parseInsertValueHints(statementSql, { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
+                ...hint,
+                from: hint.from + range.from,
+              }));
+            }
           }
         } catch {
           insertValueHints = [];
@@ -4119,6 +4142,14 @@ onMounted(async () => {
         ]),
       ),
       runKeymapComp.of(runKeymapExtension(keymap)),
+      Prec.highest(
+        EditorView.domEventHandlers({
+          keydown(event, currentView) {
+            const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+            return runQueryEditorAltExtendSelection(event, shortcuts.extendSelection, currentView, extendQueryEditorSelectionForView);
+          },
+        }),
+      ),
       wordWrapComp.of(props.forceWordWrap || initialSettings.wordWrap ? EditorView.lineWrapping : []),
       readOnlyComp.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
       indentComp.of(indentExtension()),

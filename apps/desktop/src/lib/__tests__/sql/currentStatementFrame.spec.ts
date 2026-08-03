@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentStatementFrameRangeTo, estimateInlineHintVisualColumns, isWideSqlChar, visualSqlColumns, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
+import { currentStatementFrameRangeTo, estimateInlineHintVisualColumns, isWideSqlChar, shouldRebuildCurrentStatementFrame, visualSqlColumns, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import type { SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 
 describe("currentStatementFrameRangeTo", () => {
@@ -11,6 +11,18 @@ describe("currentStatementFrameRangeTo", () => {
   it("does not extend the frame when the next character is not a semicolon", () => {
     const range: SqlTextRange = { from: 0, to: "SELECT 1".length, sql: "SELECT 1" };
     expect(currentStatementFrameRangeTo("\n", range)).toBe(range.to);
+  });
+});
+
+describe("shouldRebuildCurrentStatementFrame", () => {
+  it("reuses frame decorations for pure viewport updates", () => {
+    expect(shouldRebuildCurrentStatementFrame({ docChanged: false, selectionSet: false, configurationChanged: false })).toBe(false);
+  });
+
+  it("rebuilds after document, selection, or configuration updates", () => {
+    expect(shouldRebuildCurrentStatementFrame({ docChanged: true, selectionSet: false, configurationChanged: false })).toBe(true);
+    expect(shouldRebuildCurrentStatementFrame({ docChanged: false, selectionSet: true, configurationChanged: false })).toBe(true);
+    expect(shouldRebuildCurrentStatementFrame({ docChanged: false, selectionSet: false, configurationChanged: true })).toBe(true);
   });
 });
 

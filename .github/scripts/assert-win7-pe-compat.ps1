@@ -42,6 +42,7 @@ $forbiddenImports = [ordered]@{
   "combase.dll" = "COMBASE is only available starting with Windows 8; use OLE32 imports."
   "api-ms-win-core-winrt-" = "WinRT API sets are unavailable on Windows 7."
   "CoIncrementMTAUsage" = "CoIncrementMTAUsage is unavailable on Windows 7."
+  "EventSetInformation" = "EventSetInformation is unavailable on Windows 7. Use the legacy WebView2 loader."
   "GetSystemTimePreciseAsFileTime" = "GetSystemTimePreciseAsFileTime is unavailable on Windows 7."
   "GetDpiForWindow" = "GetDpiForWindow is unavailable on Windows 7."
   "GetSystemMetricsForDpi" = "GetSystemMetricsForDpi is unavailable on Windows 7."

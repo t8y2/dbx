@@ -124,6 +124,10 @@ jobs:
           toolchain: nightly-2026-07-22
           components: rust-src
 
+      - name: Prepare Win7-compatible WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
+
       - name: Build frontend
         run: pnpm build
 
@@ -501,6 +505,7 @@ jobs:
               - '.github/workflows/update-nix-pnpm-hash.yml'
             windows_win7_bundle:
               - '.github/scripts/assert-win7-pe-compat.ps1'
+              - '.github/scripts/prepare-webview2-win7-loader.ps1'
               - '.github/scripts/prepare-webview2-win7-runtime.ps1'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'

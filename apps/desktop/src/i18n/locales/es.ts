@@ -4606,7 +4606,7 @@ export default withEnglishFallback({
     disconnectTabHandlingModeKeepTabsKeepResults: "No cerrar pestañas relacionadas",
     disconnectTabHandlingModeKeepTabsKeepResultsDescription: "Conserva las pestañas relacionadas, el texto SQL y los resultados actuales sin limpieza adicional.",
     reuseDataTab: "Reutilizar pestaña de datos",
-    reuseDataTabDescription: "Reutiliza las pestañas de datos al abrir tablas desde la barra lateral; al volver a abrir la misma tabla desde el explorador de objetos, cambia a su pestaña existente.",
+    reuseDataTabDescription: "Al volver a abrir la misma tabla, cambia a su pestaña de datos existente; las tablas diferentes siempre usan pestañas separadas.",
     sidebarHiddenTablePrefixes: "Prefijos ocultos de tablas",
     sidebarHiddenTablePrefixesDescription: "Un prefijo por linea. Solo acorta etiquetas de tablas, vistas y colecciones en la barra lateral; las acciones y ayudas usan el nombre completo.",
     sidebarHiddenTablePrefixesPlaceholder: "Ejemplo:\nODS_\nT8Y2_LONG_",

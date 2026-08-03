@@ -169,11 +169,32 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.tabs).toHaveLength(1);
   });
 
+  it("keeps different sidebar tables independent when reuse is enabled", async () => {
+    mocks.reuseDataTab = true;
+    const ordersNode = { ...tableNode, id: "table-orders", label: "orders" };
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData(ordersNode);
+
+    expect(mocks.tabs).toHaveLength(2);
+    expect(mocks.tabs.map((tab) => tab.title)).toEqual(["users", "orders"]);
+  });
+
   it("creates a new HBase tab for the same table when reuse is disabled", async () => {
     mocks.databaseType = "hbase";
 
     await useSidebarDataOpenRuntime().openData(tableNode);
     await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs).toHaveLength(2);
+  });
+
+  it("keeps different HBase tables independent when reuse is enabled", async () => {
+    mocks.databaseType = "hbase";
+    mocks.reuseDataTab = true;
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData({ ...tableNode, id: "table-orders", label: "orders" });
 
     expect(mocks.tabs).toHaveLength(2);
   });

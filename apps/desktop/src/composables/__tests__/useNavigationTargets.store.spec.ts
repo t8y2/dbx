@@ -172,6 +172,19 @@ describe("useNavigationTargets with the real query store", () => {
     expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
   });
 
+  it("keeps different sidebar tables independent when data-tab reuse is enabled", async () => {
+    const { queryStore } = await setupNavigation();
+    const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
+    const runtime = useSidebarDataOpenRuntime();
+    const users = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", schema: "public", tableType: "TABLE" };
+
+    await runtime.openData(users);
+    await runtime.openData({ ...users, id: "orders", label: "orders" });
+
+    expect(queryStore.tabs).toHaveLength(2);
+    expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual(["users", "orders"]);
+  });
+
   it("creates a new target tab even when the same table was restored", async () => {
     mocks.loadOpenTabsState.mockResolvedValue({
       tabs: [

@@ -30,7 +30,7 @@ export function useSidebarDataOpenRuntime() {
   async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default", options: { reuseScope?: DataTabReuseScope } = {}) {
     if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
     const config = connectionStore.getConfig(node.connectionId);
-    const reuseScope = options.reuseScope ?? (settingsStore.editorSettings.reuseDataTab ? "database" : "none");
+    const reuseScope = options.reuseScope ?? (settingsStore.editorSettings.reuseDataTab ? "same-table" : "none");
     if (config?.db_type === "hbase") {
       await connectionStore.ensureConnected(node.connectionId);
       const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, { forceNew: openMode === "new-tab" || reuseScope === "none" });

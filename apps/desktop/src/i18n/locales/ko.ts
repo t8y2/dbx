@@ -4568,7 +4568,7 @@ export default withEnglishFallback({
     disconnectTabHandlingModeKeepTabsKeepResults: "관련 탭 닫지 않기",
     disconnectTabHandlingModeKeepTabsKeepResultsDescription: "관련 탭, SQL 텍스트, 현재 결과를 추가 정리 없이 유지합니다.",
     reuseDataTab: "데이터 탭 재사용",
-    reuseDataTabDescription: "사이드바에서 테이블을 열 때 데이터 탭을 재사용하고, 개체 브라우저에서 같은 테이블을 다시 열면 기존 탭으로 전환합니다.",
+    reuseDataTabDescription: "같은 테이블을 다시 열면 기존 데이터 탭으로 전환하고, 다른 테이블은 항상 별도 탭에서 엽니다.",
     sidebarHiddenTablePrefixes: "숨겨진 테이블 이름 접두사",
     sidebarHiddenTablePrefixesDescription: "한 줄에 하나의 접두사. 사이드바의 테이블, 뷰, 컬렉션 라벨만 줄이며 툴팁과 작업은 전체 이름을 계속 사용합니다.",
     sidebarHiddenTablePrefixesPlaceholder: "예:\nODS_\nT8Y2_LONG_",

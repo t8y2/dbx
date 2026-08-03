@@ -4608,7 +4608,7 @@ export default withEnglishFallback({
     disconnectTabHandlingModeKeepTabsKeepResults: "Não fechar abas relacionadas",
     disconnectTabHandlingModeKeepTabsKeepResultsDescription: "Manter abas relacionadas, texto SQL e resultados atuais sem limpeza adicional.",
     reuseDataTab: "Reutilizar aba de dados",
-    reuseDataTabDescription: "Reutiliza abas de dados ao abrir tabelas pela barra lateral; ao reabrir a mesma tabela pelo navegador de objetos, alterna para a aba existente.",
+    reuseDataTabDescription: "Ao reabrir a mesma tabela, alterna para a aba de dados existente; tabelas diferentes sempre usam abas separadas.",
     sidebarHiddenTablePrefixes: "Prefixos de nome de tabela ocultos",
     sidebarHiddenTablePrefixesDescription: "Um prefixo por linha. Apenas os rótulos de tabela, view e coleção da barra lateral são encurtados; tooltips e ações ainda usam o nome completo.",
     sidebarHiddenTablePrefixesPlaceholder: "Exemplo:\nODS_\nT8Y2_LONG_",

@@ -4637,7 +4637,7 @@ export default withEnglishFallback({
     disconnectTabHandlingModeKeepTabsKeepResults: "関連タブを閉じない",
     disconnectTabHandlingModeKeepTabsKeepResultsDescription: "関連タブ、SQLテキスト、現在の結果を追加のクリーンアップなしで保持します。",
     reuseDataTab: "データタブを再利用",
-    reuseDataTabDescription: "サイドバーからテーブルを開く際はデータタブを再利用し、オブジェクトブラウザーから同じテーブルを再度開く際は既存のタブに切り替えます。",
+    reuseDataTabDescription: "同じテーブルを再度開くと既存のデータタブに切り替え、異なるテーブルは常に別のタブで開きます。",
     sidebarHiddenTablePrefixes: "非表示テーブル名プレフィックス",
     sidebarHiddenTablePrefixesDescription: "1行に1つのプレフィックス。サイドバーのテーブル、ビュー、コレクションラベルのみ短縮されます。ツールチップと操作は完全な名前を使用します。",
     sidebarHiddenTablePrefixesPlaceholder: "Example:\nODS_\nT8Y2_LONG_",

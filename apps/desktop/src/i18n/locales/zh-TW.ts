@@ -4069,7 +4069,7 @@ export default withEnglishFallback({
     disconnectTabHandlingModeKeepTabsKeepResults: "不關閉相關分頁",
     disconnectTabHandlingModeKeepTabsKeepResultsDescription: "保留相關分頁、SQL 文字與目前結果，不另外做清理。",
     reuseDataTab: "重複使用資料分頁",
-    reuseDataTabDescription: "從側邊欄開啟資料表時重複使用資料分頁；從瀏覽物件重複開啟同一資料表時切換到現有分頁。",
+    reuseDataTabDescription: "重複開啟同一資料表時切換到現有資料分頁，不同資料表一律使用獨立分頁。",
     sidebarHiddenTablePrefixes: "隱藏資料表名稱字首",
     sidebarHiddenTablePrefixesDescription: "每行一個字首。只縮短側邊欄中的資料表、檢視和集合標籤；工具提示和實際操作仍使用完整名稱。",
     sidebarHiddenTablePrefixesPlaceholder: "範例：\nODS_\nT8Y2_LONG_",

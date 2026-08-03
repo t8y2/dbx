@@ -99,6 +99,11 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     params: { labels: "Prod MySQL, Stage PG" },
   },
   {
+    name: "GBase 8s server name mismatch",
+    message: "Agent RPC error (-1): java.sql.SQLException: GBASEDBTSERVER 与 DBSERVERNAME 或 DBSERVERALIASES 不匹配。",
+    key: "connection.gbaseServerMismatch",
+  },
+  {
     name: "Kafka topic unload unsupported",
     message: "Kafka does not support unloading topics",
     key: "mqClients.unloadTopicUnsupportedKafka",

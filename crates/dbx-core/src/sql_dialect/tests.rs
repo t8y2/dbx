@@ -372,6 +372,17 @@ fn builds_table_data_where_and_schema_queries() {
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Informix),
+            identifier_quote: Some(String::new()),
+            schema: Some("gbasedbt".to_string()),
+            table_name: "connection_smoke".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT FIRST 100 * FROM gbasedbt.connection_smoke"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Gaussdb),
             identifier_quote: Some("\"".to_string()),
             schema: Some("schema_01".to_string()),

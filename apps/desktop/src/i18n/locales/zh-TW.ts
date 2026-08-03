@@ -248,6 +248,8 @@ export default withEnglishFallback({
     d1TokenHint: "Token 至少需要 D1 Read 權限；執行寫入、DDL 或匯入時還需要 D1 Write 權限。",
     d1FieldsRequired: "必須填寫 Cloudflare Account ID、D1 Database ID 和 API Token。",
     gbaseServer: "GBASEDBTSERVER",
+    gbaseServerHint: "必須與服務端 DBSERVERNAME 或 DBSERVERALIASES 一致。",
+    gbaseServerMismatch: "GBase 8s 連線失敗：GBASEDBTSERVER 與服務端 DBSERVERNAME 或 DBSERVERALIASES 不匹配。請在連線設定中填寫實際服務名。",
     informixServer: "INFORMIXSERVER",
     sslEnable: "啟用加密連線",
     caCertPath: "CA 憑證",

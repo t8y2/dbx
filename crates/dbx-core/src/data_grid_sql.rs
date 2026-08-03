@@ -4832,6 +4832,40 @@ mod tests {
     }
 
     #[test]
+    fn gbase8s_save_keeps_unquoted_owner_when_driver_reports_no_identifier_quote() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Informix),
+            identifier_quote: Some(String::new()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("dbx_test".to_string()),
+                schema: Some("gbasedbt".to_string()),
+                table_name: "connection_smoke".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "integer", false, None), column("product", "varchar", false, None)]),
+            },
+            columns: vec!["id".to_string(), "product".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("GBase 8s")]],
+            dirty_rows: vec![(0, vec![(1, json!("GBase 8s updated"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE gbasedbt.connection_smoke SET product = 'GBase 8s updated' WHERE id = 1;"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "UPDATE gbasedbt.connection_smoke SET product = 'GBase 8s' WHERE id = 1 AND product = 'GBase 8s updated';"
+            ]
+        );
+    }
+
+    #[test]
     fn gaussdb_jdbc_save_selectively_quotes_identifiers() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Gaussdb),

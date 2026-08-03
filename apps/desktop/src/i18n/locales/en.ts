@@ -263,6 +263,8 @@ export default {
     hiveJvmOptions: "JVM Options",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
     gbaseServer: "GBASEDBTSERVER",
+    gbaseServerHint: "Must match the server DBSERVERNAME or DBSERVERALIASES.",
+    gbaseServerMismatch: "GBase 8s connection failed because GBASEDBTSERVER does not match the server DBSERVERNAME or DBSERVERALIASES. Fill GBASEDBTSERVER with the actual server name.",
     informixServer: "INFORMIXSERVER",
     sslEnable: "Enable encrypted connection",
     caCertPath: "CA Certificate",

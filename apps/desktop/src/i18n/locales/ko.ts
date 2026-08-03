@@ -259,6 +259,8 @@ export default withEnglishFallback({
     hiveJvmOptions: "JVM 옵션",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
     gbaseServer: "GBASEDBTSERVER",
+    gbaseServerHint: "서버의 DBSERVERNAME 또는 DBSERVERALIASES와 일치해야 합니다.",
+    gbaseServerMismatch: "GBase 8s 연결 실패: GBASEDBTSERVER가 서버의 DBSERVERNAME 또는 DBSERVERALIASES와 일치하지 않습니다. 연결 설정에 실제 서버 이름을 입력하세요.",
     informixServer: "INFORMIXSERVER",
     sslEnable: "암호화된 연결 사용",
     caCertPath: "CA 인증서",

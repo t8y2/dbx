@@ -247,6 +247,8 @@ export default withEnglishFallback({
     d1TokenHint: "トークンには少なくともD1 Read権限が必要です。書き込み、DDL、インポートにはD1 Write権限も必要です。",
     d1FieldsRequired: "CloudflareアカウントID、D1データベースID、APIトークンは必須です。",
     gbaseServer: "GBASEDBTSERVER",
+    gbaseServerHint: "サーバー側の DBSERVERNAME または DBSERVERALIASES と一致させる必要があります。",
+    gbaseServerMismatch: "GBase 8s の接続に失敗しました。GBASEDBTSERVER がサーバー側の DBSERVERNAME または DBSERVERALIASES と一致していません。接続設定に実際のサーバー名を入力してください。",
     informixServer: "INFORMIXSERVER",
     sslEnable: "暗号化接続を有効にする",
     caCertPath: "CA証明書",

@@ -51,6 +51,7 @@ import { JDBCX_DEFAULT_URL, JDBCX_DRIVER_PROFILE, JDBCX_JDBC_DRIVER_CLASS, ensur
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
+import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
 import { postgresTlsModeForForm } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
@@ -4735,7 +4736,7 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape">
+    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
       <DialogHeader>
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
@@ -6000,7 +6001,10 @@ function openExternalUrl(url: string) {
 
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.gbaseServer") }}</Label>
-                    <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="form.gbase_server" placeholder="gbase01" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.gbaseServerHint") }}</p>
+                    </div>
                   </div>
 
                   <div v-if="form.db_type === 'informix'" class="grid grid-cols-4 items-center gap-4">
@@ -7126,7 +7130,7 @@ function openExternalUrl(url: string) {
   </Dialog>
 
   <Dialog v-model:open="showVisibleDatabasesDialog">
-    <DialogContent class="sm:max-w-[460px]">
+    <DialogContent class="sm:max-w-[520px]" @keydown="preventDialogDocumentSelectAll">
       <DialogHeader>
         <DialogTitle>{{ t(visibleObjectTitleKey) }}</DialogTitle>
         <p class="text-sm text-muted-foreground">
@@ -7174,9 +7178,7 @@ function openExternalUrl(url: string) {
           <Loader2 class="h-4 w-4 animate-spin" />
           {{ t("common.loading") }}
         </div>
-        <div v-else-if="visibleDatabaseError" class="p-3 text-sm text-destructive">
-          {{ t(visibleObjectLoadFailedKey, { message: visibleDatabaseError }) }}
-        </div>
+        <textarea v-else-if="visibleDatabaseError" class="h-full w-full resize-none overflow-auto border-0 bg-transparent p-3 text-sm leading-5 text-destructive outline-none" :value="t(visibleObjectLoadFailedKey, { message: visibleDatabaseError })" readonly />
         <div v-else-if="!filteredVisibleDatabaseNames.length" class="p-3 text-sm text-muted-foreground">
           {{ t("grid.noSearchResults") }}
         </div>

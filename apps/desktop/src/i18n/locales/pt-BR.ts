@@ -248,6 +248,8 @@ export default withEnglishFallback({
     d1TokenHint: "O token precisa de pelo menos a permissão D1 Read; gravações, DDL e importações também exigem D1 Write.",
     d1FieldsRequired: "O ID da conta Cloudflare, o ID do banco de dados D1 e o token da API são obrigatórios.",
     gbaseServer: "GBASEDBTSERVER",
+    gbaseServerHint: "Deve corresponder ao DBSERVERNAME do servidor ou a DBSERVERALIASES.",
+    gbaseServerMismatch: "Falha na conexão de GBase 8s: GBASEDBTSERVER não corresponde ao DBSERVERNAME do servidor nem a um dos DBSERVERALIASES. Informe o nome real do servidor.",
     informixServer: "INFORMIXSERVER",
     sslEnable: "Habilitar conexão criptografada",
     caCertPath: "Certificado CA",

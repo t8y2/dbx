@@ -265,6 +265,8 @@ export default withEnglishFallback({
     hiveJvmOptions: "JVM 参数",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
     gbaseServer: "GBASEDBTSERVER",
+    gbaseServerHint: "必须与服务端 DBSERVERNAME 或 DBSERVERALIASES 一致。",
+    gbaseServerMismatch: "GBase 8s 连接失败：GBASEDBTSERVER 与服务端 DBSERVERNAME 或 DBSERVERALIASES 不匹配。请在连接配置中填写实际服务名。",
     informixServer: "INFORMIXSERVER",
     sslEnable: "启用加密连接",
     caCertPath: "CA 证书",

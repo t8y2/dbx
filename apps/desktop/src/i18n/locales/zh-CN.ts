@@ -195,6 +195,7 @@ export default withEnglishFallback({
     notePlaceholder: "请勿在备注中明文保存密码",
     type: "类型",
     host: "主机",
+    addHost: "添加主机",
     filePath: "文件路径",
     h2FileMode: "文件",
     h2TcpMode: "TCP",

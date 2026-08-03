@@ -22,7 +22,11 @@ export function connectionEndpointLabel(connection?: ConnectionPresentationConfi
   if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connection.host || connection.database || "local";
   }
-  if (connection.host && connection.port) return `${connection.host}:${connection.port}`;
+  if (connection.host && connection.port) {
+    // Multi-host format: host1:port1,host2:port2 — already includes ports
+    if (connection.host.includes(",")) return connection.host;
+    return `${connection.host}:${connection.port}`;
+  }
   return connection.host || connection.database || "";
 }
 
@@ -30,7 +34,26 @@ function redactConnectionHost(host: string): string {
   const normalizedHost = host.trim();
   if (!normalizedHost) return "";
 
-  const unwrappedHost = normalizedHost.startsWith("[") && normalizedHost.endsWith("]") ? normalizedHost.slice(1, -1) : normalizedHost;
+  // Multi-host format: host1:port1,host2:port2 — redact each host separately
+  if (normalizedHost.includes(",")) {
+    return normalizedHost
+      .split(",")
+      .map((part) => {
+        const trimmed = part.trim();
+        const colonIdx = trimmed.lastIndexOf(":");
+        if (colonIdx > 0) {
+          return `${redactSingleHost(trimmed.slice(0, colonIdx))}:${trimmed.slice(colonIdx + 1)}`;
+        }
+        return redactSingleHost(trimmed);
+      })
+      .join(",");
+  }
+
+  return redactSingleHost(normalizedHost);
+}
+
+function redactSingleHost(host: string): string {
+  const unwrappedHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   const separator = unwrappedHost.includes(":") ? ":" : ".";
   const segments = unwrappedHost.split(separator).filter(Boolean);
 
@@ -54,6 +77,8 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
 
   const redactedHost = connection.host ? redactConnectionHost(connection.host) : "";
   if (redactedHost && connection.port) {
+    // Multi-host format already includes ports
+    if (redactedHost.includes(",")) return redactedHost;
     const endpointHost = redactedHost.includes(":") ? `[${redactedHost}]` : redactedHost;
     return `${endpointHost}:${REDACTED_PORT}`;
   }

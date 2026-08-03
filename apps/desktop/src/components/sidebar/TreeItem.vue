@@ -361,6 +361,8 @@ type DetailTooltipRow = {
   label: string;
   value: string;
   multiline?: boolean;
+  /** When set, renders each value on its own line (e.g. one host per line) */
+  values?: string[];
 };
 
 function cleanTooltipValue(value: string | number | null | undefined): string {
@@ -376,7 +378,7 @@ function redactedConnectionString(value: string): string {
 }
 
 function hostForDisplay(host: string): string {
-  if (!host.includes(":") || host.startsWith("[") || host.includes("://")) return host;
+  if (!host.includes(":") || host.startsWith("[") || host.includes("://") || host.includes(",")) return host;
   return `[${host}]`;
 }
 
@@ -410,10 +412,17 @@ const detailTooltip = computed(() => {
     const config = connectionStore.getConfig(node.connectionId);
     if (!config) return null;
     const hostLabel = isLocalFileConnection(config) ? t("connection.filePath") : t("connection.host");
+    const hostValue = cleanTooltipValue(config.host);
+    const hostValues = hostValue.includes(",")
+      ? hostValue
+          .split(",")
+          .map((h) => h.trim())
+          .filter(Boolean)
+      : [];
     const rows: DetailTooltipRow[] = [
       { label: t("connection.name"), value: cleanTooltipValue(config.name) },
       { label: "URL", value: connectionTooltipUrl(config), multiline: true },
-      { label: hostLabel, value: cleanTooltipValue(config.host), multiline: isLocalFileConnection(config) },
+      ...(hostValues.length > 0 ? [{ label: hostLabel, value: hostValues[0], values: hostValues } as DetailTooltipRow] : [{ label: hostLabel, value: hostValue, multiline: isLocalFileConnection(config) } as DetailTooltipRow]),
       { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
       { label: t("connection.database"), value: cleanTooltipValue(config.database) },
       { label: t("connection.user"), value: cleanTooltipValue(config.username) },
@@ -1220,8 +1229,13 @@ function onKeydown(event: KeyboardEvent) {
         <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">
           <div class="space-y-1">
             <div v-for="row in detailTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
-              <span class="text-muted-foreground">{{ row.label }}</span>
-              <span v-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
+              <span class="text-muted-foreground shrink-0">{{ row.label }}</span>
+              <template v-if="row.values">
+                <div class="flex flex-col gap-0.5 font-mono text-foreground/90">
+                  <span v-for="(v, vi) in row.values" :key="vi" class="break-all">{{ v }}</span>
+                </div>
+              </template>
+              <span v-else-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
                 {{ row.value }}
               </span>
               <span v-else class="truncate font-mono text-foreground/90" :title="row.value">{{ row.value }}</span>

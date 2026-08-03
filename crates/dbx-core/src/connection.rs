@@ -4639,7 +4639,22 @@ pub async fn probe_connection_endpoint(config: &ConnectionConfig, host: &str, po
         return Ok(());
     }
     let timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
-    db::probe_tcp_endpoint(&format!("{:?}", config.db_type), host, port, timeout).await
+    // For multi-host connections (host1:port1,host2:port2), probe the first host only
+    let (probe_host, probe_port) = if host.contains(',') {
+        host.split(',')
+            .next()
+            .and_then(|part| {
+                let trimmed = part.trim();
+                let colon_idx = trimmed.rfind(':')?;
+                let h = trimmed[..colon_idx].trim();
+                let p: u16 = trimmed[colon_idx + 1..].trim().parse().ok()?;
+                Some((h.to_string(), p))
+            })
+            .unwrap_or_else(|| (host.to_string(), port))
+    } else {
+        (host.to_string(), port)
+    };
+    db::probe_tcp_endpoint(&format!("{:?}", config.db_type), &probe_host, probe_port, timeout).await
 }
 
 fn validate_h2_file_connection(config: &ConnectionConfig) -> Result<(), String> {

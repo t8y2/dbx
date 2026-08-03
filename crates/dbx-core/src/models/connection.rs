@@ -983,7 +983,11 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                format!("postgres://{host}:{port}{db_part}{suffix}")
+                if raw_host.contains(',') {
+                    format!("postgres://{raw_host}{db_part}{suffix}")
+                } else {
+                    format!("postgres://{host}:{port}{db_part}{suffix}")
+                }
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
@@ -1029,7 +1033,13 @@ impl ConnectionConfig {
             DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
-            DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
+            DatabaseType::Gaussdb => {
+                if raw_host.contains(',') {
+                    format!("gaussdb://{raw_host}{db_part}")
+                } else {
+                    format!("gaussdb://{host}:{port}{db_part}")
+                }
+            }
             DatabaseType::Kwdb => format!("kwdb://{host}:{port}{db_part}"),
             DatabaseType::Yashandb => format!("yashandb://{host}:{port}{db_part}"),
             DatabaseType::Databricks => format!("databricks://{host}:{port}{db_part}"),
@@ -1124,7 +1134,12 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
+                if raw_host.contains(',') {
+                    // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
+                    format!("postgres://{}:{}@{raw_host}{db_part}{suffix}", username, password)
+                } else {
+                    format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
+                }
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
@@ -1192,7 +1207,12 @@ impl ConnectionConfig {
                 format!("goldendb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Gaussdb => {
-                format!("gaussdb://{}:{}@{host}:{port}{db_part}", username, password)
+                if raw_host.contains(',') {
+                    // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
+                    format!("gaussdb://{}:{}@{raw_host}{db_part}", username, password)
+                } else {
+                    format!("gaussdb://{}:{}@{host}:{port}{db_part}", username, password)
+                }
             }
             DatabaseType::Kwdb => {
                 format!("kwdb://{}:{}@{host}:{port}{db_part}", username, password)

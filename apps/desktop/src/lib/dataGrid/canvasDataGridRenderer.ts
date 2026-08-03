@@ -1,7 +1,7 @@
 import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
-import { BOOLEAN_CHECKBOX_SIZE, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { BOOLEAN_CHECKBOX_SIZE, isBooleanCheckboxValue, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 
@@ -463,7 +463,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
       ctx.clip();
       const value = item.data[actualColIdx];
-      const isBooleanCell = columnIsBoolean?.(actualColIdx) === true;
+      const isBooleanCell = columnIsBoolean?.(actualColIdx) === true && isBooleanCheckboxValue(value);
       const isRightAlign = columnAligns?.[visibleColIdx] === "right";
       const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
       const isBooleanNullCell = isBooleanCell && value === null && !isEditingThisCell;

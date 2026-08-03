@@ -1,9 +1,16 @@
+import type { DatabaseType } from "@/types/database";
+
 export const BOOLEAN_CHECKBOX_SIZE = 13;
 
-export function isBooleanColumnType(dataType: string | undefined): boolean {
+const MYSQL_BIT_BOOLEAN_DATABASE_TYPES = new Set<DatabaseType>(["mysql"]);
+
+export function isBooleanColumnType(dataType: string | undefined, databaseType?: DatabaseType): boolean {
   if (!dataType) return false;
   const normalized = dataType.trim().toLowerCase();
-  return normalized === "boolean" || normalized === "bool" || normalized === "bit" || normalized === "bit(1)";
+  if (normalized === "boolean" || normalized === "bool") return true;
+  if (databaseType === "sqlserver") return normalized === "bit";
+  if (databaseType && MYSQL_BIT_BOOLEAN_DATABASE_TYPES.has(databaseType)) return normalized === "bit" || normalized === "bit(1)";
+  return false;
 }
 
 export function normalizeBooleanCellValue(value: unknown): boolean | null {
@@ -17,6 +24,10 @@ export function normalizeBooleanCellValue(value: unknown): boolean | null {
     return null;
   }
   return null;
+}
+
+export function isBooleanCheckboxValue(value: unknown): boolean {
+  return value === null || normalizeBooleanCellValue(value) !== null;
 }
 
 export function nextBooleanCellValue(current: unknown, nullable: boolean): boolean | null {

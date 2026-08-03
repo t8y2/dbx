@@ -135,7 +135,8 @@ import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, default
 import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, type DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOptions, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
-import { isBooleanColumnType, isPointInBooleanCheckbox, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { isBooleanCheckboxValue, isBooleanColumnType, isPointInBooleanCheckbox, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
@@ -3114,7 +3115,7 @@ function showReadonlyCellDetailsOnDblClick(item: RowItem, rowIndex: number, visi
 }
 
 function onDomCellDblClick(item: RowItem, rowIndex: number, visibleColIdx: number, actualColIdx: number, event: MouseEvent) {
-  if (isBooleanGridColumn(actualColIdx) && canEditCellItem(item, actualColIdx)) return;
+  if (isBooleanGridCell(item, actualColIdx) && canEditCellItem(item, actualColIdx)) return;
   if (showReadonlyCellDetailsOnDblClick(item, rowIndex, visibleColIdx, actualColIdx)) return;
   startDomCellEdit(item.id, actualColIdx, formatCellCached(item.data[actualColIdx], actualColIdx), event);
 }
@@ -3167,10 +3168,16 @@ function measureCellTextWidthCached(text: string, font: string): number {
   return width;
 }
 
+const tableColumnsByResultIndex = computed(() =>
+  resolveDataGridColumnsByResultIndex({
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    tableColumns: props.tableMeta?.columns ?? [],
+  }),
+);
+
 function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
-  const columnName = props.sourceColumns?.[columnIndex] ?? props.result.columns[columnIndex];
-  if (!columnName) return undefined;
-  return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
+  return tableColumnsByResultIndex.value[columnIndex];
 }
 
 function resultColumnInfoForGridColumn(columnIndex: number): Pick<ColumnInfo, "data_type"> | undefined {
@@ -3199,12 +3206,19 @@ function isEnumEditorInitialNull(rowId: number | undefined, columnIndex: number)
   return getRowItem(rowId)?.data[columnIndex] === null;
 }
 
-function booleanColumnInfoForGridColumn(columnIndex: number): Pick<ColumnInfo, "data_type"> | undefined {
-  return tableColumnForGridColumn(columnIndex) ?? resultColumnInfoForGridColumn(columnIndex);
-}
+const booleanGridColumns = computed(() =>
+  props.result.columns.map((_, columnIndex) => {
+    const columnInfo = tableColumnsByResultIndex.value[columnIndex] ?? resultColumnInfoForGridColumn(columnIndex);
+    return isBooleanColumnType(columnInfo?.data_type, props.databaseType);
+  }),
+);
 
 function isBooleanGridColumn(columnIndex: number): boolean {
-  return isBooleanColumnType(booleanColumnInfoForGridColumn(columnIndex)?.data_type);
+  return booleanGridColumns.value[columnIndex] === true;
+}
+
+function isBooleanGridCell(item: RowItem | undefined, columnIndex: number): boolean {
+  return !!item && isBooleanGridColumn(columnIndex) && isBooleanCheckboxValue(item.data[columnIndex]);
 }
 
 function isBooleanGridColumnNullable(columnIndex: number): boolean {
@@ -3216,7 +3230,7 @@ function booleanCellChecked(value: unknown): boolean {
 }
 
 function cycleBooleanGridCell(item: RowItem | undefined, actualColIdx: number, event: MouseEvent) {
-  if (!item || !isBooleanGridColumn(actualColIdx) || !canEditCellItem(item, actualColIdx)) return;
+  if (!item || !isBooleanGridCell(item, actualColIdx) || !canEditCellItem(item, actualColIdx)) return;
   event.stopPropagation();
   void cycleBooleanCellValue(item.id, actualColIdx, isBooleanGridColumnNullable(actualColIdx));
 }
@@ -5005,7 +5019,7 @@ function onCanvasMouseMove(event: MouseEvent) {
   const next = hit && hitItem ? { rowIndex: hitItem.displayIndex, visibleColIdx: hit.rowNumber ? -1 : hit.visibleColIdx } : null;
   const actualColIdx = next ? visibleColumnIndexes.value[next.visibleColIdx] : undefined;
   if (canvasRef.value) {
-    const overBooleanInteractive = hit != null && !hit.rowNumber && hitItem != null && actualColIdx !== undefined && isBooleanGridColumn(actualColIdx) && canEditCellItem(hitItem, actualColIdx) && booleanInteractiveHitFromCanvasEvent(hitItem, hit, actualColIdx, event);
+    const overBooleanInteractive = hit != null && !hit.rowNumber && hitItem != null && actualColIdx !== undefined && isBooleanGridCell(hitItem, actualColIdx) && canEditCellItem(hitItem, actualColIdx) && booleanInteractiveHitFromCanvasEvent(hitItem, hit, actualColIdx, event);
     canvasRef.value.style.cursor = hit?.rowNumber ? "default" : overBooleanInteractive ? "pointer" : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx) ? "text" : "cell";
   }
   if (next?.rowIndex === canvasHoverCell.value?.rowIndex && next?.visibleColIdx === canvasHoverCell.value?.visibleColIdx) {
@@ -5080,12 +5094,9 @@ function booleanInteractiveHitFromCanvasEvent(item: RowItem, hit: { rowIndex: nu
 }
 
 function tryCycleBooleanCheckboxOnCanvasMouseDown(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
-  if (!isBooleanGridColumn(actualColIdx) || !canEditCellItem(item, actualColIdx)) return false;
+  if (!isBooleanGridCell(item, actualColIdx) || !canEditCellItem(item, actualColIdx)) return false;
   if (!booleanInteractiveHitFromCanvasEvent(item, hit, actualColIdx, event)) return false;
-  commitHiddenCanvasEditBeforeCellInteraction();
   void cycleBooleanCellValue(item.id, actualColIdx, isBooleanGridColumnNullable(actualColIdx));
-  gridRef.value?.focus({ preventScroll: true });
-  scheduleCanvasDraw();
   return true;
 }
 
@@ -5098,7 +5109,6 @@ function onCanvasMouseDown(event: MouseEvent) {
   }
   const item = displayItemAt(hit.rowIndex);
   const actualColIdx = hit.rowNumber ? undefined : visibleColumnIndexes.value[hit.visibleColIdx];
-  if (item && actualColIdx !== undefined && tryCycleBooleanCheckboxOnCanvasMouseDown(item, hit, actualColIdx, event)) return;
   if (item && actualColIdx !== undefined) prepareDataCellMouseDown(item, actualColIdx);
   commitHiddenCanvasEditBeforeCellInteraction();
   if (!item) return;
@@ -5106,6 +5116,7 @@ function onCanvasMouseDown(event: MouseEvent) {
     onRowNumberMouseDown(item, event);
   } else {
     handleDataCellMousedown(item.displayIndex, hit.visibleColIdx, item.id, event);
+    if (actualColIdx !== undefined) tryCycleBooleanCheckboxOnCanvasMouseDown(item, hit, actualColIdx, event);
   }
   gridRef.value?.focus({ preventScroll: true });
   scheduleCanvasDraw();
@@ -5138,7 +5149,7 @@ function onCanvasDblClick(event: MouseEvent) {
   const actualColIdx = visibleColumnIndexes.value[hit.visibleColIdx];
   if (!item || actualColIdx === undefined) return;
   if (showReadonlyCellDetailsOnDblClick(item, item.displayIndex, hit.visibleColIdx, actualColIdx)) return;
-  if (isBooleanGridColumn(actualColIdx) && canEditCellItem(item, actualColIdx)) return;
+  if (isBooleanGridCell(item, actualColIdx) && canEditCellItem(item, actualColIdx)) return;
   startCellEdit(item.id, actualColIdx, canvasCellContentOverflows(item, actualColIdx, hit.visibleColIdx));
 }
 
@@ -5794,7 +5805,7 @@ function onTransposeCellDblClick(rowIndex: number, actualColIdx: number, display
     showTransposeCellDetails(rowIndex, actualColIdx);
     return;
   }
-  if (isBooleanGridColumn(actualColIdx)) return;
+  if (isBooleanGridCell(item, actualColIdx)) return;
   startDomCellEdit(item.id, actualColIdx, displayText, event);
 }
 
@@ -6295,7 +6306,7 @@ function editSelectedCell(): boolean {
   const item = displayItemAt(position.rowIndex);
   const actualColIndex = actualColumnIndex(position.colIndex);
   if (!item || !canEditCellItem(item, actualColIndex)) return false;
-  if (isBooleanGridColumn(actualColIndex)) {
+  if (isBooleanGridCell(item, actualColIndex)) {
     void cycleBooleanCellValue(item.id, actualColIndex, isBooleanGridColumnNullable(actualColIndex));
     return true;
   }
@@ -8726,7 +8737,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <template v-if="draftCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex)">
                           <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex) }}</span>
                         </template>
-                        <template v-else-if="isBooleanGridColumn(cell.valueIndex) && !cell.isNull">
+                        <template v-else-if="isBooleanGridCell(displayItems[cell.recordIndex], cell.valueIndex) && !cell.isNull">
                           <span class="flex w-full justify-center">
                             <span
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded border"
@@ -8737,7 +8748,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             </span>
                           </span>
                         </template>
-                        <template v-else-if="isBooleanGridColumn(cell.valueIndex)">
+                        <template v-else-if="isBooleanGridCell(displayItems[cell.recordIndex], cell.valueIndex)">
                           <span class="flex w-full justify-center">
                             <span :class="canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) ? 'cursor-pointer' : ''" @click="cycleBooleanGridCell(displayItems[cell.recordIndex], cell.valueIndex, $event)">{{ firstLineCellDisplayValue(cell.display) }}</span>
                           </span>
@@ -9410,7 +9421,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <template v-if="draftCellPlaceholder(item, col.actualColIdx)">
                           <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(item, col.actualColIdx) }}</span>
                         </template>
-                        <template v-else-if="isBooleanGridColumn(col.actualColIdx) && !isNull(item.data[col.actualColIdx])">
+                        <template v-else-if="isBooleanGridCell(item, col.actualColIdx) && !isNull(item.data[col.actualColIdx])">
                           <span class="flex w-full justify-center">
                             <span
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded border"
@@ -9421,7 +9432,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             </span>
                           </span>
                         </template>
-                        <template v-else-if="isBooleanGridColumn(col.actualColIdx)">
+                        <template v-else-if="isBooleanGridCell(item, col.actualColIdx)">
                           <span class="flex w-full justify-center">
                             <span :class="canEditCellItem(item, col.actualColIdx) ? 'cursor-pointer' : ''" @click="cycleBooleanGridCell(item, col.actualColIdx, $event)">{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</span>
                           </span>

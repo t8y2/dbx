@@ -47,6 +47,14 @@ impl SshPromptHub {
         (replay, receiver)
     }
 
+    /// Snapshot of all currently-pending prompt requests. The frontend uses this
+    /// as a fallback alongside the SSE stream: an SSE `Prompt` event that was
+    /// lost (e.g. the EventSource was not yet open when the prompt fired) is
+    /// recovered by polling this endpoint. Duplicates are deduped by the caller.
+    pub fn pending_requests(&self) -> Vec<SshPromptRequest> {
+        self.pending.lock().unwrap().iter().map(|prompt| prompt.request.clone()).collect()
+    }
+
     pub fn resolve(&self, id: &str, answer: SshPromptAnswer) -> Result<(), String> {
         let pending = {
             let mut pending = self.pending.lock().unwrap();
@@ -158,5 +166,25 @@ mod tests {
 
         hub.resolve("prompt-2", SshPromptAnswer::Reject).unwrap();
         assert!(matches!(receiver.await.unwrap(), SshPromptAnswer::Reject));
+    }
+
+    #[tokio::test]
+    async fn pending_requests_snapshots_unresolved_prompts_and_drops_resolved() {
+        let hub = SshPromptHub::new();
+        let (responder_a, _ra) = tokio::sync::oneshot::channel();
+        let (responder_b, _rb) = tokio::sync::oneshot::channel();
+        hub.register(SshPromptEnvelope { request: request("prompt-a"), responder: responder_a });
+        hub.register(SshPromptEnvelope { request: request("prompt-b"), responder: responder_b });
+
+        let pending = hub.pending_requests();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, "prompt-a");
+        assert_eq!(pending[1].id, "prompt-b");
+
+        // A resolved prompt is removed from the pending snapshot.
+        hub.resolve("prompt-a", SshPromptAnswer::Reject).unwrap();
+        let pending = hub.pending_requests();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "prompt-b");
     }
 }

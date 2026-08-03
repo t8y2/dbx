@@ -312,6 +312,7 @@ async fn main() {
         .route("/system/fonts", get(routes::jdbc::list_system_fonts))
         .route("/ssh/config-hosts", get(routes::ssh_config::list_ssh_config_hosts))
         .route("/ssh/prompts", get(routes::ssh_prompt::stream_ssh_prompts))
+        .route("/ssh/prompts/pending", get(routes::ssh_prompt::list_pending_ssh_prompts))
         .route("/ssh/prompts/resolve", post(routes::ssh_prompt::resolve_ssh_prompt))
         // Tunnel profiles
         .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))

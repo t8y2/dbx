@@ -201,6 +201,35 @@ describe("useNavigationTargets with the real query store", () => {
     expect(queryStore.activeTabId).toBe(sidebarTabId);
   });
 
+  it("reuses a restored legacy MySQL tab when the same table is opened from the sidebar", async () => {
+    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mysql" }));
+    mocks.loadOpenTabsState.mockResolvedValue({
+      tabs: [
+        {
+          id: "restored-users",
+          title: "app.users",
+          connectionId: "connection-1",
+          database: "app",
+          schema: "app",
+          mode: "data",
+          sql: "SELECT * FROM users",
+          tableMeta: { schema: "app", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
+        },
+      ],
+      activeTabId: "restored-users",
+    });
+    const { queryStore } = await setupNavigation();
+    await queryStore.initOpenTabs({ validConnectionIds: ["connection-1"] });
+    const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
+    const runtime = useSidebarDataOpenRuntime();
+
+    await runtime.openData({ id: "users", label: "users", type: "table", connectionId: "connection-1", database: "app", tableType: "TABLE" });
+
+    expect(queryStore.tabs).toHaveLength(1);
+    expect(queryStore.activeTabId).toBe("restored-users");
+    expect(queryStore.tabs[0]?.schema).toBeUndefined();
+  });
+
   it("creates a new target tab even when the same table was restored", async () => {
     mocks.loadOpenTabsState.mockResolvedValue({
       tabs: [

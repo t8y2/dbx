@@ -2,6 +2,7 @@ import type { Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { executableStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 
 export interface ExecutableStatementRangeCache {
   doc: Text;
@@ -61,7 +62,7 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
     }
 
     const next = cache.ranges[index + 1];
-    if (pos > range.to && (!next || pos < next.from) && range.to >= line.from && range.to <= line.to && cursorRemainsOnRangeLine(cache.doc, range.to, pos)) {
+    if (pos > range.to && (!next || pos < next.from) && cursorBelongsToTrailingStatementDelimiter(cache.doc, range.to, pos)) {
       return range;
     }
   }
@@ -79,15 +80,4 @@ function isCursorOnLeadingBlockComment(lineText: string, lineOffset: number): bo
   if (!afterComment.trim()) return true;
 
   return lineOffset <= commentEnd + 2;
-}
-
-function cursorRemainsOnRangeLine(doc: Text, rangeTo: number, cursorPos: number): boolean {
-  const between = doc.sliceString(rangeTo, cursorPos);
-  if (between.includes("\n")) return false;
-  const delimiterIndex = between.lastIndexOf(";");
-  if (delimiterIndex === -1) return between.trim() === "";
-
-  const beforeDelimiter = between.slice(0, delimiterIndex);
-  const afterDelimiter = between.slice(delimiterIndex + 1);
-  return beforeDelimiter.trim() === "" && afterDelimiter.trim() === "";
 }

@@ -1,7 +1,9 @@
 import type { SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { trailingStatementDelimiterPosition, type StatementDelimiterDocument } from "@/lib/sql/statementDelimiter";
 
-export function currentStatementFrameRangeTo(nextChar: string, range: SqlTextRange): number {
-  return nextChar === ";" ? range.to + 1 : range.to;
+export function currentStatementFrameRangeTo(doc: StatementDelimiterDocument, range: SqlTextRange): number {
+  const delimiterPos = trailingStatementDelimiterPosition(doc, range.to);
+  return delimiterPos === null ? range.to : delimiterPos + 1;
 }
 
 export function shouldRebuildCurrentStatementFrame(update: { docChanged: boolean; selectionSet: boolean; configurationChanged: boolean }): boolean {

@@ -93,6 +93,24 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeAtCursor(cache, semicolonGapCursor)?.sql).toBe("SELECT 1");
   });
 
+  it("keeps a standalone next-line semicolon attached to the current statement", () => {
+    const sql = "SELECT *\nFROM users\n;\n\nSELECT * FROM audit;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const delimiterCursor = sql.indexOf(";");
+
+    expect(executableStatementRangeAtCursor(cache, delimiterCursor)?.sql).toBe("SELECT *\nFROM users");
+    expect(executableStatementRangeAtCursor(cache, delimiterCursor + 1)?.sql).toBe("SELECT *\nFROM users");
+  });
+
+  it("does not attach a semicolon after a blank line to the previous statement", () => {
+    const sql = "SELECT 1\n\n;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf(";"))).toBeNull();
+  });
+
   it("returns null for blank and pure comment cursor lines", () => {
     const doc = Text.of(["SELECT 1;", "-- comment", "/* block comment */", "", "SELECT 2;"]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");

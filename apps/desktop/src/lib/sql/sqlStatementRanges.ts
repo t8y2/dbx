@@ -1,4 +1,5 @@
 import type { SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
+import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
@@ -576,8 +577,8 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     const next = statements[index + 1];
     // A caret after a statement's semicolon still belongs to that statement
     // until the next statement's text begins.
-    if (pos > statement.to && (!next || pos < next.from) && isCursorInSameLineDelimiterGap(sql, statement.to, pos)) {
-      return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(statement, sql);
+    if (pos > statement.to && (!next || pos < next.from) && isCursorInTrailingDelimiterGap(sql, statement.to, pos)) {
+      return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(softRanges[softRanges.length - 1] ?? statement, sql);
     }
 
     // Cursor in indentation or inter-statement whitespace immediately before
@@ -585,9 +586,9 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     // execution range remains tight around the SQL text itself.
     if (pos >= statement.hitFrom && pos < statement.from && (sql.slice(pos, statement.from).trim() === "" || (isElasticsearchCompatibleDatabaseType(databaseType) && isElasticsearchRequestPreamble(sql.slice(statement.hitFrom, statement.from))))) {
       const previous = statements[index - 1];
-      if (previous && isCursorInSameLineDelimiterGap(sql, previous.to, pos)) {
+      if (previous && isCursorInTrailingDelimiterGap(sql, previous.to, pos)) {
         const previousSoftRanges = splitStatementRangeAtSoftStarts(sql, previous, databaseType, parameterOptions);
-        return rangeForCursorInSoftRanges(sql, previousSoftRanges, pos) ?? rangeFor(previous, sql);
+        return rangeForCursorInSoftRanges(sql, previousSoftRanges, pos) ?? rangeFor(previousSoftRanges[previousSoftRanges.length - 1] ?? previous, sql);
       }
       return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(statement, sql);
     }
@@ -614,7 +615,7 @@ export function mongoCommandRangeAtCursor(sql: string, cursorPos: number): SqlTe
     if (pos >= command.from && pos <= command.to) return range;
 
     const next = commands[index + 1];
-    if (pos > command.to && (!next || pos < next.from) && isCursorInSameLineDelimiterGap(sql, command.to, pos)) return range;
+    if (pos > command.to && (!next || pos < next.from) && isCursorInTrailingDelimiterGap(sql, command.to, pos)) return range;
 
     if (pos < command.from && sql.slice(pos, command.from).trim() === "" && isCursorOnStatementLine(sql, pos, command)) return range;
   }
@@ -622,13 +623,8 @@ export function mongoCommandRangeAtCursor(sql: string, cursorPos: number): SqlTe
   return null;
 }
 
-function isCursorInSameLineDelimiterGap(sql: string, previousStatementEnd: number, cursorPos: number): boolean {
-  if (cursorPos <= previousStatementEnd) return false;
-  const between = sql.slice(previousStatementEnd, cursorPos);
-  const delimiterIndex = between.lastIndexOf(";");
-  if (delimiterIndex === -1) return false;
-  const afterDelimiter = between.slice(delimiterIndex + 1);
-  return !afterDelimiter.includes("\n") && between.slice(0, delimiterIndex).trim() === "" && afterDelimiter.trim() === "";
+function isCursorInTrailingDelimiterGap(sql: string, previousStatementEnd: number, cursorPos: number): boolean {
+  return cursorBelongsToTrailingStatementDelimiter(sql, previousStatementEnd, cursorPos);
 }
 
 function rangeForCursorInSoftRanges(sql: string, ranges: RawStatement[], pos: number): SqlTextRange | null {
@@ -2043,16 +2039,17 @@ export function buildExecutionCandidates(sql: string, cursorPos: number, databas
 
   const sameContent = normalizeSql(cursorStatement.sql) === normalizeSql(full.sql);
   if (sameContent) {
-    return [candidateFromRange(full, "all", databaseType)];
+    return [candidateFromRange(full, "all", databaseType, ["cursor", "all"])];
   }
 
   return [candidateFromRange(cursorStatement, "cursor", databaseType), candidateFromRange(full, "all", databaseType)];
 }
 
-function candidateFromRange(range: SqlTextRange, kind: SqlExecutionCandidate["kind"], databaseType?: DatabaseType): SqlExecutionCandidate {
+function candidateFromRange(range: SqlTextRange, kind: SqlExecutionCandidate["kind"], databaseType?: DatabaseType, supportedKinds: SqlExecutionCandidate["supportedKinds"] = [kind]): SqlExecutionCandidate {
   const isRedis = databaseType === "redis";
   return {
     kind,
+    supportedKinds,
     label: kind === "cursor" ? (isRedis ? "currentCommand" : "currentStatement") : isRedis ? "allCommands" : "allStatements",
     sql: range.sql,
     from: range.from,

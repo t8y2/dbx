@@ -11,7 +11,7 @@ import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
-import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
+import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { currentStatementFrameRangeTo, shouldRebuildCurrentStatementFrame, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
@@ -644,12 +644,12 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
   const doc = currentView.state.doc.toString();
   const parameterOptions = sqlStatementParameterOptions();
   const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType, parameterOptions);
-  if (candidates.length === 0) return false;
+  if (candidates.length === 0) return true;
   // The execution shortcut keeps executing the configured target (cursor/all) directly:
   // it stays keyboard-driven and never pops the picker, which is reserved for click entry points.
   if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType, parameterOptions)) {
-    const preferredKind = settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all";
-    const candidate = candidates.find((item) => item.kind === preferredKind) ?? candidates[0];
+    const candidate = executionCandidateForMode(candidates, settingsStore.editorSettings.executeMode);
+    if (!candidate) return true;
     emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, candidate), options.openInNewResultTab);
     return true;
   }
@@ -4011,8 +4011,7 @@ onMounted(async () => {
   );
 
   function currentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
-    const nextChar = range.to < view.state.doc.length ? view.state.doc.sliceString(range.to, range.to + 1) : "";
-    return currentStatementFrameRangeTo(nextChar, range);
+    return currentStatementFrameRangeTo(view.state.doc, range);
   }
 
   const activeLineHighlighter = ViewPlugin.fromClass(

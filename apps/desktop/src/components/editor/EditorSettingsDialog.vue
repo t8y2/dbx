@@ -3226,8 +3226,7 @@ function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof impo
 }
 
 function previewCurrentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
-  const nextChar = range.to < view.state.doc.length ? view.state.doc.sliceString(range.to, range.to + 1) : "";
-  return currentStatementFrameRangeTo(nextChar, range);
+  return currentStatementFrameRangeTo(view.state.doc, range);
 }
 
 watch(

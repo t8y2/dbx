@@ -3390,7 +3390,7 @@ test("MongoDB query result export pages find commands through the document API",
   const originalFetch = globalThis.fetch;
   const findBodies: any[] = [];
   const progress: Array<{ rowsExported: number; totalRows: number | null }> = [];
-  const command = 'db.permissions.find({"role":"admin"},{"name":1,"active":1}).sort({"createdTime":-1}).skip(3).limit(205)';
+  const command = 'db.permissions.find({"role":"admin"},{"name":1,"active":1}).collation({locale:"en",strength:1}).sort({"createdTime":-1}).skip(3).limit(205)';
   const documents = Array.from({ length: 205 }, (_, index) => (index === 100 ? { _id: index + 4, active: true } : { _id: index + 4, name: `user-${index + 4}` }));
   const copyDocuments = documents.map((document) => ({ ...document, _id: { $numberInt: String(document._id) } }));
 
@@ -3439,7 +3439,7 @@ test("MongoDB query result export pages find commands through the document API",
         { skip: 203, limit: 5 },
       ],
     );
-    assert.ok(findBodies.every((body) => body.collection === "permissions" && body.filter === '{"role":"admin"}' && body.projection === '{"name":1,"active":1}' && body.sort === '{"createdTime":-1}'));
+    assert.ok(findBodies.every((body) => body.collection === "permissions" && body.filter === '{"role":"admin"}' && body.projection === '{"name":1,"active":1}' && body.sort === '{"createdTime":-1}' && JSON.stringify(JSON.parse(body.collation)) === JSON.stringify({ locale: "en", strength: 1 })));
     assert.equal(new Set(findBodies.map((body) => body.executionId)).size, 1);
     assert.ok(findBodies[0]?.executionId);
     assert.deepEqual(exported?.columns, ["_id", "name", "active"]);
@@ -3911,18 +3911,20 @@ test("mongo find execution uses editor page size and supports server pagination"
 
   try {
     const tabId = store.createTab("mongo-page-1", "dbx_test", "Query", "query", "");
-    await store.executeTabSql(tabId, "db.issue_4566.find({})");
+    const sql = 'db.issue_4566.find({name:"xxx"}).collation({locale:"en",strength:1})';
+    await store.executeTabSql(tabId, sql);
     const tab = store.tabs.find((item) => item.id === tabId);
 
     assert.equal(findBodies[0]?.collection, "issue_4566");
     assert.equal(findBodies[0]?.skip, 0);
     assert.equal(findBodies[0]?.limit, 100);
+    assert.deepEqual(JSON.parse(findBodies[0]?.collation), { locale: "en", strength: 1 });
     assert.equal(tab?.result?.rows.length, 100);
     assert.equal(tab?.resultPageLimit, 100);
     assert.equal(tab?.resultPageOffset, 0);
     assert.equal(tab?.resultTotalRowCount, 824);
 
-    await store.executeTabSql(tabId, "db.issue_4566.find({})", {
+    await store.executeTabSql(tabId, sql, {
       pagination: { offset: 100, limit: 100 },
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
@@ -3931,6 +3933,7 @@ test("mongo find execution uses editor page size and supports server pagination"
     assert.equal(findBodies[1]?.collection, "issue_4566");
     assert.equal(findBodies[1]?.skip, 100);
     assert.equal(findBodies[1]?.limit, 100);
+    assert.deepEqual(JSON.parse(findBodies[1]?.collation), { locale: "en", strength: 1 });
     assert.equal(tab?.result?.rows[0]?.[0], 101);
     assert.equal(tab?.resultPageOffset, 100);
     assert.equal(tab?.resultTotalRowCount, 824);

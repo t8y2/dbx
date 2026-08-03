@@ -97,6 +97,7 @@ pub struct MongoFindRequest {
     pub filter: Option<String>,
     pub projection: Option<String>,
     pub sort: Option<String>,
+    pub collation: Option<String>,
     pub execution_id: Option<String>,
 }
 
@@ -401,6 +402,7 @@ pub async fn find_documents(
             req.filter.as_deref(),
             req.projection.as_deref(),
             req.sort.as_deref(),
+            req.collation.as_deref(),
         ),
     )
     .await?;

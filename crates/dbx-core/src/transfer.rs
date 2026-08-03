@@ -3716,6 +3716,7 @@ async fn find_mongo_documents_for_rows(
         None,
         None,
         Some(r#"{"_id":1}"#),
+        None,
     )
     .await
 }

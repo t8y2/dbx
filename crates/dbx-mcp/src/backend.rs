@@ -440,7 +440,7 @@ impl DbxBackend for LocalBackend {
                 .await
                 .map(|version| scalar_query_result("version", Value::String(version))),
             MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
-            MongoCommand::Find { collection, filter, projection, sort, skip, limit } => {
+            MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
                 let result = mongo_ops::mongo_find_documents_core(
                     &self.state,
                     connection_id,
@@ -451,6 +451,7 @@ impl DbxBackend for LocalBackend {
                     Some(filter),
                     projection.as_deref(),
                     sort.as_deref(),
+                    collation.as_deref(),
                 )
                 .await?;
                 Ok(mongo_documents_query_result(result.documents))
@@ -973,7 +974,7 @@ impl DbxBackend for WebBackend {
                 Ok(scalar_query_result("version", Value::String(version)))
             }
             MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
-            MongoCommand::Find { collection, filter, projection, sort, skip, limit } => {
+            MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
                 let result = self
                     .request(
                         reqwest::Method::POST,
@@ -987,6 +988,7 @@ impl DbxBackend for WebBackend {
                             "filter": filter,
                             "projection": projection,
                             "sort": sort,
+                            "collation": collation,
                         })),
                     )
                     .await?

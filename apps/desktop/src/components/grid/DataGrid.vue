@@ -185,7 +185,8 @@ import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/useDataGridExport";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
-import { claimDataGridPaste, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
+import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
+import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, extractorUnavailableForDatabase, type DataGridCopyExtractorId } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
@@ -2539,8 +2540,17 @@ const canFetchNextInfiniteScrollSegment = computed(() =>
 );
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql || !!props.countTotalRows));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
-/** Full-grid busy state: query loading or on-demand COUNT (e.g. jump to last page). */
-const gridSurfaceBusy = computed(() => props.loading === true || totalRowCountBusy.value);
+/** Full-grid busy state: refresh dispatch, query loading, or on-demand COUNT (e.g. jump to last page). */
+const gridSurfaceBusy = computed(() => isRefreshingData.value || props.loading === true || totalRowCountBusy.value);
+const dataGridNativeSelectionBlockOwner = {};
+watch(
+  gridSurfaceBusy,
+  (busy, prevBusy) => {
+    if (busy) beginDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
+    else if (prevBusy) finishDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
+  },
+  { immediate: true },
+);
 const canCalculateTotalRowCount = computed(() => !!props.countTotalRows || (!!props.connectionId && (!!props.tableMeta || !!props.countSql)));
 const showExactTotalCountAction = computed(() => canCalculateTotalRowCount.value && (totalRowCountIsExact.value === false || typeof displayedTotalRowCount.value !== "number"));
 watch(
@@ -3236,6 +3246,7 @@ async function onToolbarRefresh() {
   }
   preserveTransposeOnNextResult.value = showTranspose.value;
   isRefreshingData.value = true;
+  beginDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value, "refresh");
 }
 
@@ -5277,6 +5288,8 @@ watch(
 
 function pauseCanvasGridWork() {
   dataGridIsActive = false;
+  stopLoadingElapsedTimer();
+  if (gridSurfaceBusy.value) finishDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.pause();
   gridScrollbarsRuntime.pause();
   disconnectCellEditResizeObserver();
@@ -5289,6 +5302,8 @@ function pauseCanvasGridWork() {
 
 function resumeCanvasGridWork() {
   dataGridIsActive = true;
+  startLoadingElapsedTimer();
+  if (gridSurfaceBusy.value) beginDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.resume();
   gridScrollbarsRuntime.resume();
   nextTick(() => {
@@ -6435,8 +6450,8 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (clipboardShortcut(event, "a")) {
-    if (!hasData.value) return;
-    event.preventDefault();
+    const intent = claimDataGridSelectAll(event, gridSurfaceBusy.value, hasData.value);
+    if (intent !== "select") return;
     selectAllCells();
     return;
   }
@@ -7801,11 +7816,21 @@ function stopLoadingElapsedTimer() {
   }
 }
 
-function startLoadingElapsedTimer() {
+function startLoadingElapsedTimer(reset = false) {
   stopLoadingElapsedTimer();
-  if (!dataGridIsActive || !gridSurfaceBusy.value) return;
-  _loadingStart = Date.now();
-  loadingElapsed.value = 0;
+  if (!dataGridIsActive || !gridSurfaceBusy.value) {
+    if (!gridSurfaceBusy.value) {
+      _loadingStart = 0;
+      loadingElapsed.value = 0;
+    }
+    return;
+  }
+  if (reset || !_loadingStart) {
+    _loadingStart = Date.now();
+    loadingElapsed.value = 0;
+  } else {
+    loadingElapsed.value = Date.now() - _loadingStart;
+  }
   const updateOnNextFrame = () => {
     if (!dataGridIsActive || !gridSurfaceBusy.value) return;
     loadingElapsed.value = Date.now() - _loadingStart;
@@ -7824,7 +7849,7 @@ watch(gridSurfaceBusy, (isLoading) => {
     });
   }
   if (isLoading) {
-    startLoadingElapsedTimer();
+    startLoadingElapsedTimer(true);
   } else if (isDebugLoggingEnabled()) {
     nextTick(() => {
       requestAnimationFrame(() => {
@@ -7839,11 +7864,9 @@ watch(gridSurfaceBusy, (isLoading) => {
 });
 
 onActivated(() => {
-  startLoadingElapsedTimer();
   autoRefresh.start();
 });
 onDeactivated(() => {
-  stopLoadingElapsedTimer();
   autoRefresh.stop();
 });
 

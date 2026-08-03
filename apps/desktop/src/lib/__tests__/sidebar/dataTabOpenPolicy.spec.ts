@@ -66,6 +66,13 @@ describe("dataTabOpenPolicy", () => {
     expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseScope: "same-table" })).toBeUndefined();
   });
 
+  it("does not reuse a same-name table from another schema", () => {
+    const archiveUsers = dataTab("archive-users", "users", "archive");
+    archiveUsers.tableMeta = { schema: "archive", tableName: "users", columns: [], primaryKeys: [] };
+
+    expect(findExistingDataTabCandidate([archiveUsers], usersTarget, { openMode: "default", reuseScope: "same-table" })).toBeUndefined();
+  });
+
   it("allows metadata to update a tab that still points to the requested table", () => {
     const tab = dataTab("users", "users");
     tab.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };

@@ -354,7 +354,10 @@ fn linux_nvidia_driver() -> LinuxNvidiaDriver {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&'static str, &'static str)] {
+fn linux_webkit_rendering_workarounds(
+    driver: LinuxNvidiaDriver,
+    has_render_device: bool,
+) -> &'static [(&'static str, &'static str)] {
     match driver {
         LinuxNvidiaDriver::Proprietary => {
             // NVIDIA's proprietary driver needs both DMABuf and explicit-sync
@@ -364,6 +367,14 @@ fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&
         LinuxNvidiaDriver::Nouveau => {
             // WebKitGTK's DMABuf renderer can produce a fully black WebView on
             // Nouveau while the DOM remains interactive.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        }
+        LinuxNvidiaDriver::None if !has_render_device => {
+            // No DRM render node means Mesa can only render through llvmpipe.
+            // WebKitGTK's DMABuf compositing then drives llvmpipe's gallivm
+            // LLVM JIT, which can fail to materialize the compositing shaders
+            // (blank/white window on GPU-less VMs and servers), so disable the
+            // DMABuf renderer there as well.
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         }
         LinuxNvidiaDriver::None => {
@@ -430,7 +441,8 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver()) {
+    let has_render_device = !linux_drm_render_devices().is_empty();
+    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver(), has_render_device) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -1054,14 +1066,20 @@ mod tests {
     #[test]
     fn applies_driver_specific_linux_webkit_rendering_workarounds() {
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
-        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None), &[]);
+        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, true), &[]);
+        // Without any DRM render node (GPU-less VM / server) Mesa falls back to
+        // llvmpipe, whose DMABuf compositing path can crash the WebKit process.
+        assert_eq!(
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, false),
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        );
     }
 
     #[test]

@@ -7,6 +7,10 @@ const template = readFileSync(resolve(process.cwd(), "src-tauri/windows/nsis/ins
 const win7Config = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
 const win7RuntimeScript = readFileSync(resolve(process.cwd(), ".github/scripts/prepare-webview2-win7-runtime.ps1"), "utf8");
 const win7PeAuditScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-win7-pe-compat.ps1"), "utf8");
+const appCargoToml = readFileSync(resolve(process.cwd(), "src-tauri/Cargo.toml"), "utf8");
+const appBuildScript = readFileSync(resolve(process.cwd(), "src-tauri/build.rs"), "utf8");
+const ciWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/ci.yml"), "utf8");
+const releaseWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/release.yml"), "utf8");
 
 describe("Windows offline installer template", () => {
   it.each([
@@ -94,5 +98,13 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(win7PeAuditScript).toContain('"CoIncrementMTAUsage"');
     expect(win7PeAuditScript).toContain('"GetSystemTimePreciseAsFileTime"');
     expect(win7PeAuditScript).toContain("dumpbin.exe");
+  });
+
+  it("builds the Windows 7 executable with the production custom protocol", () => {
+    expect(appCargoToml).toContain('custom-protocol = ["tauri/custom-protocol"]');
+    expect(appBuildScript).toContain("CARGO_FEATURE_CUSTOM_PROTOCOL");
+    expect(appBuildScript).toContain("CARGO_CFG_TARGET_VENDOR");
+    expect(ciWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
+    expect(releaseWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
   });
 });

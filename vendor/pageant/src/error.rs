@@ -34,6 +34,6 @@ pub enum Error {
 impl Error {
     #[cfg(windows)]
     pub(crate) fn from_win32() -> Self {
-        Self::WindowsError(windows::core::Error::from_thread())
+        Self::WindowsError(windows::core::Error::from_win32())
     }
 }

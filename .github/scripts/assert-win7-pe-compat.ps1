@@ -41,6 +41,7 @@ if ($LASTEXITCODE -ne 0) {
 $forbiddenImports = [ordered]@{
   "combase.dll" = "COMBASE is only available starting with Windows 8; use OLE32 imports."
   "api-ms-win-core-winrt-" = "WinRT API sets are unavailable on Windows 7."
+  "CoIncrementMTAUsage" = "CoIncrementMTAUsage is unavailable on Windows 7."
   "GetSystemTimePreciseAsFileTime" = "GetSystemTimePreciseAsFileTime is unavailable on Windows 7."
   "GetDpiForWindow" = "GetDpiForWindow is unavailable on Windows 7."
   "GetSystemMetricsForDpi" = "GetSystemMetricsForDpi is unavailable on Windows 7."
@@ -56,6 +57,8 @@ foreach ($entry in $forbiddenImports.GetEnumerator()) {
 
 if ($violations.Count -gt 0) {
   $summary = $violations -join "`n"
+  Write-Host "Full PE import table for diagnosis:"
+  Write-Host $imports
   throw "Windows 7 incompatible PE imports detected in ${BinaryPath}:`n$summary"
 }
 

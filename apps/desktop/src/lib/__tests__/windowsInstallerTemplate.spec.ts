@@ -91,6 +91,7 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
   it("rejects executable imports that cannot load on Windows 7", () => {
     expect(win7PeAuditScript).toContain('"combase.dll"');
     expect(win7PeAuditScript).toContain('"api-ms-win-core-winrt-"');
+    expect(win7PeAuditScript).toContain('"CoIncrementMTAUsage"');
     expect(win7PeAuditScript).toContain('"GetSystemTimePreciseAsFileTime"');
     expect(win7PeAuditScript).toContain("dumpbin.exe");
   });

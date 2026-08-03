@@ -14,7 +14,7 @@ use windows::Win32::Security::Authentication::Identity::{GetUserNameExA, NameUse
 use windows::Win32::Security::Cryptography::{
     CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_CROSS_PROCESS, CryptProtectMemory,
 };
-use windows_strings::PSTR;
+use windows::core::PSTR;
 
 use crate::Error;
 

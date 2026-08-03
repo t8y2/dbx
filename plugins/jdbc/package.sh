@@ -2,7 +2,7 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-VERSION="$(grep -m1 '^version\s*=' "$ROOT/build.gradle" | sed -E "s/.*=\s*'([^']+)'.*/\1/")"
+VERSION="$(sed -nE "s/^version[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" "$ROOT/build.gradle" | head -n 1)"
 PACKAGE_DIR="$ROOT/dist/dbx-jdbc-plugin-$VERSION"
 ZIP_PATH="$ROOT/dist/dbx-jdbc-plugin-$VERSION.zip"
 LATEST_ZIP_PATH="$ROOT/dist/dbx-jdbc-plugin-latest.zip"

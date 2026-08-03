@@ -21,7 +21,11 @@ def mavenCoreVersion = '4.0.0-rc-5'
 
 dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
-    implementation 'org.slf4j:slf4j-api:1.7.36'
+    implementation('org.slf4j:slf4j-api') {
+        version {
+            strictly '1.7.36'
+        }
+    }
     implementation 'org.apache.commons:commons-lang3:3.18.0'
 
     implementation "org.apache.maven.resolver:maven-resolver-api:${mavenResolverVersion}"
@@ -48,6 +52,7 @@ tasks.named('test') {
 
 tasks.named('shadowJar') {
     archiveBaseName = 'dbx-jdbc-plugin'
+    archiveVersion = ''
     archiveClassifier = 'all'
     mergeServiceFiles()
     manifest {

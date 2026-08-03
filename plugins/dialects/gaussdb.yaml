@@ -105,14 +105,6 @@ types:
     category: "DATETIME"
   - name: "YEAR"
     category: "INTEGER"
-  - name: "ENUM"
-    category: "ENUM"
-    has_length: true
-    semantic_fidelity_base: 0.8
-  - name: "SET"
-    category: "SET"
-    has_length: true
-    semantic_fidelity_base: 0.7
   - name: "GEOMETRY"
     category: "SPATIAL"
 

@@ -332,8 +332,8 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
-          cache: maven
+          java-version: "21"
+          cache: gradle
 
       - name: JDBC plugin version guard
         env:

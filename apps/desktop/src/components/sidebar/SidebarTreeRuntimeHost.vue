@@ -4828,6 +4828,11 @@ function handleRowKeydown(node: TreeNode, event: KeyboardEvent) {
   onKeydown(event);
 }
 
+function openPrimaryVisibleFilter(node: TreeNode) {
+  activateRuntimeNode(node);
+  openVisibleDatabasesDialog();
+}
+
 function openDataInNewTab(node: TreeNode) {
   activateRuntimeNode(node);
   openDataInNewTabImmediately(node);
@@ -4848,6 +4853,7 @@ defineExpose({
   handleRowClick,
   handleRowDoubleClick,
   handleRowKeydown,
+  openPrimaryVisibleFilter,
   openDataInNewTab,
   requestPaste,
   toggleNode,

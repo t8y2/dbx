@@ -2382,6 +2382,7 @@ export default withEnglishFallback({
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",
+    sidebarControlLabel: 'Configurar bancos de dados visíveis para "{connection}"{count}',
     description: 'Escolha quais bancos de dados são exibidos em "{connection}".',
     searchPlaceholder: "Pesquisar bancos de dados...",
     selectedCount: "{selected}/{total} selecionados",
@@ -2396,6 +2397,7 @@ export default withEnglishFallback({
   },
   visibleSchemas: {
     title: "Filtro de Schema",
+    sidebarControlLabel: 'Configurar schemas visíveis para "{connection}"{count}',
     description: 'Escolha quais schemas são exibidos em "{connection}".',
     searchPlaceholder: "Pesquisar schemas...",
     selectedCount: "{selected}/{total} selecionados",

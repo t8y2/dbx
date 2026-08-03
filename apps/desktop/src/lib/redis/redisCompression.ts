@@ -1,3 +1,5 @@
+import { Inflate as PakoInflate, Z_OK } from "pako";
+
 export const REDIS_DECOMPRESS_MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 
 export type RedisDecompressAlgorithm = "gzip" | "zlib" | "deflate";
@@ -15,8 +17,20 @@ export type RedisDecompressResult =
     }
   | {
       ok: false;
-      reason: "corrupt" | "limit" | "unsupported";
+      reason: "corrupt" | "limit";
     };
+
+export type RedisDecompressOptions = {
+  maxOutputBytes?: number;
+  /**
+   * Force a specific compression format instead of auto-detecting.
+   * Auto-detection recognizes only gzip (magic bytes) and zlib (RFC 1950 header
+   * + ADLER32 checksum). Raw deflate (`"deflate"`, RFC 1951) has no framing or
+   * checksum, so arbitrary binary data can be misread as valid output — pass
+   * this only when the value is known to be raw DEFLATE.
+   */
+  algorithm?: RedisDecompressAlgorithm;
+};
 
 class DecompressionLimitError extends Error {
   readonly limitBytes: number;
@@ -27,43 +41,50 @@ class DecompressionLimitError extends Error {
   }
 }
 
-function isCompressionStreamSupported(): boolean {
-  return typeof DecompressionStream === "function";
-}
-
-function createSizeCapTransform(maxOutputBytes: number): TransformStream<Uint8Array, Uint8Array> {
-  let total = 0;
-  return new TransformStream({
-    transform(chunk, controller) {
-      total += chunk.byteLength;
-      if (total > maxOutputBytes) {
-        controller.error(new DecompressionLimitError(maxOutputBytes));
-        return;
-      }
-      controller.enqueue(chunk);
-    },
-  });
-}
+// pako windowBits per format: gzip = 31 (RFC 1952), zlib = 15 (RFC 1950),
+// raw deflate = -15 (RFC 1951).
+const WINDOW_BITS: Record<RedisDecompressAlgorithm, number> = {
+  gzip: 31,
+  zlib: 15,
+  deflate: -15,
+};
 
 /**
- * Streaming decompression with an output cap. The cap is the primary zip-bomb
- * defense: the transform errors the stream the moment accumulated output
- * exceeds `maxOutputBytes`, so no partial result survives. Consuming the
- * readable via `Response.arrayBuffer()` attaches the error path the standard
- * way, so corrupt input surfaces as a rejected promise (not an unhandled
- * stream error).
+ * Bounded inflate via pako's streaming `Inflate`. Output arrives chunk by chunk
+ * through `onData`; we count it and throw the moment cumulative output exceeds
+ * `maxOutputBytes`. Because pako emits chunks incrementally (its zlib strm uses
+ * a fixed-size output buffer), a zip bomb aborts after the first chunks past
+ * the cap — the full output is never materialized, so peak memory stays
+ * ~cap + chunk + input instead of unbounded. This is an allocation-time limit,
+ * unlike counting bytes only after a decompressor has already buffered the
+ * whole result internally.
  */
-async function decompressBytes(bytes: Uint8Array, format: "gzip" | "deflate" | "deflate-raw", maxOutputBytes: number): Promise<Uint8Array> {
-  const stream = new DecompressionStream(format);
-  const writer = stream.writable.getWriter();
-  const output = new Response(stream.readable.pipeThrough(createSizeCapTransform(maxOutputBytes))).arrayBuffer();
-  try {
-    await writer.write(bytes as BufferSource);
-    await writer.close();
-    return new Uint8Array(await output);
-  } finally {
-    writer.releaseLock();
+function inflateBounded(bytes: Uint8Array, algorithm: RedisDecompressAlgorithm, maxOutputBytes: number): Uint8Array {
+  const inflater = new PakoInflate({ windowBits: WINDOW_BITS[algorithm] });
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  inflater.onData = (chunk) => {
+    total += chunk.byteLength;
+    if (total > maxOutputBytes) throw new DecompressionLimitError(maxOutputBytes);
+    chunks.push(chunk);
+  };
+  inflater.push(bytes, true);
+  if (inflater.err !== Z_OK) {
+    throw new Error(inflater.msg || `decompression failed (status ${inflater.err})`);
   }
+  return concatBytes(chunks);
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.byteLength;
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
 }
 
 function decodeText(bytes: Uint8Array): string {
@@ -73,45 +94,41 @@ function decodeText(bytes: Uint8Array): string {
 /**
  * Decompress Redis value bytes with the standard web formats.
  *
- * Detection order:
+ * Detection order (when no `algorithm` is forced):
  * 1. gzip — reliable magic (`1f 8b`); a failure here means corrupt data.
- * 2. zlib — `DecompressionStream("deflate")` validates the RFC 1950 header and
- *    ADLER32 trailer, so a success is checksum-verified.
- * 3. raw deflate — RFC 1951, no header/checksum; attempted last because it can
- *    accept almost any deflate-shaped bitstream.
+ * 2. zlib — RFC 1950 header + ADLER32 trailer validate on success, so a
+ *    successful zlib decode is checksum-verified.
+ * Raw deflate (RFC 1951) is NEVER auto-detected: it has no framing or checksum,
+ * so arbitrary binary can be accepted and shown, searched, or copied as
+ * "decompressed" content. Callers that know a value is raw DEFLATE must pass
+ * `{ algorithm: "deflate" }` explicitly.
  *
  * The `ok` result carries the algorithm that actually succeeded so the UI can
  * label it (e.g. "Decompressed (zlib)").
  */
-export async function decompressRedisValue(bytes: Uint8Array, options: { maxOutputBytes?: number } = {}): Promise<RedisDecompressResult> {
+export async function decompressRedisValue(bytes: Uint8Array, options: RedisDecompressOptions = {}): Promise<RedisDecompressResult> {
   const maxOutputBytes = options.maxOutputBytes ?? REDIS_DECOMPRESS_MAX_OUTPUT_BYTES;
   if (bytes.length === 0) return { ok: false, reason: "corrupt" };
+
+  if (options.algorithm) {
+    return decompressOne(bytes, options.algorithm, maxOutputBytes);
+  }
 
   if (isGzipMagic(bytes)) {
     return decompressOne(bytes, "gzip", maxOutputBytes);
   }
 
-  // zlib first: checksum-verified and the common Redis COMPRESS format.
-  const zlibResult = await decompressOne(bytes, "deflate", maxOutputBytes);
-  if (zlibResult.ok) return zlibResult;
-  if (zlibResult.reason === "limit") return zlibResult;
-
-  return decompressOne(bytes, "deflate-raw", maxOutputBytes);
+  return decompressOne(bytes, "zlib", maxOutputBytes);
 }
 
-async function decompressOne(bytes: Uint8Array, format: "gzip" | "deflate" | "deflate-raw", maxOutputBytes: number): Promise<RedisDecompressResult> {
-  if (!isCompressionStreamSupported()) return { ok: false, reason: "unsupported" };
+async function decompressOne(bytes: Uint8Array, algorithm: RedisDecompressAlgorithm, maxOutputBytes: number): Promise<RedisDecompressResult> {
+  // Yield so the UI can paint the loading state before the synchronous inflate.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   try {
-    const output = await decompressBytes(bytes, format, maxOutputBytes);
-    return { ok: true, text: decodeText(output), algorithm: algorithmForFormat(format) };
+    const output = inflateBounded(bytes, algorithm, maxOutputBytes);
+    return { ok: true, text: decodeText(output), algorithm };
   } catch (error) {
     if (error instanceof DecompressionLimitError) return { ok: false, reason: "limit" };
     return { ok: false, reason: "corrupt" };
   }
-}
-
-function algorithmForFormat(format: "gzip" | "deflate" | "deflate-raw"): RedisDecompressAlgorithm {
-  if (format === "gzip") return "gzip";
-  if (format === "deflate") return "zlib";
-  return "deflate";
 }

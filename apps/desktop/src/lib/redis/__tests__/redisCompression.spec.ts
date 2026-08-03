@@ -1,81 +1,23 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { gunzipSync, inflateRawSync, inflateSync } from "zlib";
+import { describe, expect, it } from "vitest";
+import { deflateRawSync, deflateSync, gzipSync } from "zlib";
 import { decompressRedisValue, isGzipMagic, REDIS_DECOMPRESS_MAX_OUTPUT_BYTES } from "../redisCompression";
 
-// NOTE: Node 22's real DecompressionStream adapter crashes the process on
-// corrupt input (unhandled internal zlib 'error' event) even when the reader
-// error is caught, so it cannot be exercised in vitest. Production runs in a
-// browser engine (Tauri WebView2 / WKWebView) where the Compression Streams
-// spec contract holds — reader errors are plain TypeError rejections. These
-// tests install a spec-faithful mock of DecompressionStream (ReadableStream +
-// WritableStream backed by node:zlib) to exercise the logic under test: gzip
-// detection, zlib→raw fallback order, the output cap, and error mapping.
-// The mock is defined after the production import so it is the only
-// `DecompressionStream` global the code under test sees.
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const chunk of chunks) total += chunk.byteLength;
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return merged;
-}
-
-class MockDecompressionStream {
-  readonly readable: ReadableStream<Uint8Array>;
-  readonly writable: WritableStream<Uint8Array>;
-
-  constructor(format: string) {
-    const chunks: Uint8Array[] = [];
-    let readableController!: ReadableStreamDefaultController<Uint8Array>;
-    this.readable = new ReadableStream<Uint8Array>({
-      start(controller) {
-        readableController = controller;
-      },
-    });
-    this.writable = new WritableStream<Uint8Array>({
-      write(chunk) {
-        chunks.push(chunk);
-      },
-      close() {
-        try {
-          const input = concatBytes(chunks);
-          let output: Uint8Array;
-          if (format === "gzip") output = new Uint8Array(gunzipSync(input));
-          else if (format === "deflate") output = new Uint8Array(inflateSync(input));
-          else if (format === "deflate-raw") output = new Uint8Array(inflateRawSync(input));
-          else throw new Error(`Unsupported format: ${format}`);
-          readableController.enqueue(output);
-          readableController.close();
-        } catch (cause) {
-          readableController.error(new TypeError("Decompression failed", { cause }));
-        }
-      },
-    });
-  }
-}
-
-beforeEach(() => {
-  (globalThis as unknown as { DecompressionStream: unknown }).DecompressionStream = MockDecompressionStream;
-});
+// Decompression runs against the real pako implementation (pure JS), so these
+// tests exercise the actual production path in Node the same way it runs in the
+// Tauri WebView2 / WKWebView renderer — no DecompressionStream mock, no
+// environment-specific behavior to paper over. node:zlib is used only to build
+// fixtures (it is byte-compatible with pako for gzip/zlib/raw DEFLATE).
 
 function gzipOf(text: string): Uint8Array {
-  const zlib = require("zlib") as typeof import("zlib");
-  return new Uint8Array(zlib.gzipSync(text));
+  return new Uint8Array(gzipSync(text));
 }
 
 function zlibOf(text: string): Uint8Array {
-  const zlib = require("zlib") as typeof import("zlib");
-  return new Uint8Array(zlib.deflateSync(text));
+  return new Uint8Array(deflateSync(text));
 }
 
-function deflateRawOf(text: string): Uint8Array {
-  const zlib = require("zlib") as typeof import("zlib");
-  return new Uint8Array(zlib.deflateRawSync(text));
+function deflateRawOf(data: Uint8Array | string): Uint8Array {
+  return new Uint8Array(deflateRawSync(data));
 }
 
 describe("isGzipMagic", () => {
@@ -101,13 +43,73 @@ describe("decompressRedisValue", () => {
     expect(result).toEqual({ ok: true, text: "hello world", algorithm: "zlib" });
   });
 
-  it("decompresses raw deflate after zlib fails", async () => {
-    const result = await decompressRedisValue(deflateRawOf("raw deflate payload"));
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.text).toBe("raw deflate payload");
-      expect(result.algorithm).toBe("deflate");
-    }
+  it("does not auto-detect raw deflate from a valid raw-deflate stream", async () => {
+    // A valid raw DEFLATE stream has no framing and no checksum, so arbitrary
+    // binary can look like it. Auto-detection must not accept it — regression
+    // for the old behavior that fell back to raw deflate after zlib failed and
+    // displayed the "decompressed" garbage as real content.
+    const rawDeflate = deflateRawOf("raw deflate payload");
+    const result = await decompressRedisValue(rawDeflate);
+    expect(result).toEqual({ ok: false, reason: "corrupt" });
+  });
+
+  it("rejects arbitrary binary that happens to be a valid raw-deflate stream", async () => {
+    // This is the exact false-positive the reviewer flagged: a value that was
+    // never meant to be compressed data (a binary payload — a PNG header plus
+    // non-UTF-8 bytes) gets raw-deflated, producing a structurally valid
+    // bitstream. Under the old code it was accepted and shown as decompressed
+    // garbage; auto-detection must now reject it.
+    const binaryPayload = new Uint8Array([
+      0x89,
+      0x50,
+      0x4e,
+      0x47,
+      0x0d,
+      0x0a,
+      0x1a,
+      0x0a, // PNG signature
+      0x00,
+      0x00,
+      0x00,
+      0x0d,
+      0x49,
+      0x48,
+      0x44,
+      0x52,
+      0xff,
+      0x00,
+      0xff,
+      0x00,
+      0x01,
+      0x02,
+      0x03,
+      0x7f,
+      0x80,
+      0xc0,
+      0xe0,
+      0xfe,
+    ]);
+    const rawDeflate = deflateRawOf(binaryPayload);
+    const result = await decompressRedisValue(rawDeflate);
+    expect(result.ok).toBe(false);
+  });
+
+  it("decompresses raw deflate only when the algorithm is explicitly requested", async () => {
+    const rawDeflate = deflateRawOf("explicit raw deflate payload");
+    expect(await decompressRedisValue(rawDeflate)).toEqual({ ok: false, reason: "corrupt" });
+    const result = await decompressRedisValue(rawDeflate, { algorithm: "deflate" });
+    expect(result).toEqual({ ok: true, text: "explicit raw deflate payload", algorithm: "deflate" });
+  });
+
+  it("forces a single algorithm when requested, bypassing magic detection", async () => {
+    const gz = gzipOf("gzip data");
+    const zl = zlibOf("zlib data");
+    // A gzip value forced as zlib must fail, and vice versa — no cross-format
+    // guessing when the caller commits to an algorithm.
+    expect(await decompressRedisValue(gz, { algorithm: "zlib" })).toEqual({ ok: false, reason: "corrupt" });
+    expect(await decompressRedisValue(zl, { algorithm: "gzip" })).toEqual({ ok: false, reason: "corrupt" });
+    expect(await decompressRedisValue(gz, { algorithm: "gzip" })).toEqual({ ok: true, text: "gzip data", algorithm: "gzip" });
+    expect(await decompressRedisValue(zl, { algorithm: "zlib" })).toEqual({ ok: true, text: "zlib data", algorithm: "zlib" });
   });
 
   it("reports corrupt data without throwing", async () => {
@@ -125,12 +127,29 @@ describe("decompressRedisValue", () => {
     expect(result).toEqual({ ok: false, reason: "corrupt" });
   });
 
-  it("rejects output beyond the configured cap and keeps no partial content", async () => {
-    // 8 MiB of zeros compresses to a few KB; decompressing it must trip the 1 KiB cap.
-    const payload = new Uint8Array(8 * 1024 * 1024);
-    const gz = new Uint8Array((require("zlib") as typeof import("zlib")).gzipSync(payload));
-    const result = await decompressRedisValue(gz, { maxOutputBytes: 1024 });
-    expect(result).toEqual({ ok: false, reason: "limit" });
+  it("enforces the output cap during decompression for high-ratio input", async () => {
+    // 64 MiB of zeros compresses to ~64 KiB (~1000:1). The bounded inflate
+    // streams output in chunks and aborts as soon as cumulative output exceeds
+    // the cap — the 64 MiB is never materialized. Runs against real pako, so it
+    // reflects actual platform behavior rather than a mock that buffers the
+    // whole result first.
+    const payload = new Uint8Array(64 * 1024 * 1024);
+    const cases: Array<[Uint8Array, Parameters<typeof decompressRedisValue>[1]]> = [
+      [new Uint8Array(gzipSync(payload)), undefined],
+      [new Uint8Array(deflateSync(payload)), undefined],
+      [deflateRawOf(payload), { algorithm: "deflate" }],
+    ];
+    for (const [compressed, options] of cases) {
+      const result = await decompressRedisValue(compressed, { ...options, maxOutputBytes: 1024 });
+      expect(result).toEqual({ ok: false, reason: "limit" });
+    }
+  });
+
+  it("allows output up to exactly the cap", async () => {
+    const payload = new Uint8Array(1024);
+    const result = await decompressRedisValue(new Uint8Array(gzipSync(payload)), { maxOutputBytes: 1024 });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.algorithm).toBe("gzip");
   });
 
   it("respects the shared default cap constant", () => {
@@ -140,11 +159,5 @@ describe("decompressRedisValue", () => {
   it("honors a custom cap below the default", async () => {
     const result = await decompressRedisValue(gzipOf("small payload"), { maxOutputBytes: 8 });
     expect(result).toEqual({ ok: false, reason: "limit" });
-  });
-
-  it("reports unsupported when DecompressionStream is absent", async () => {
-    (globalThis as unknown as { DecompressionStream: unknown }).DecompressionStream = undefined;
-    const result = await decompressRedisValue(gzipOf("hello"));
-    expect(result).toEqual({ ok: false, reason: "unsupported" });
   });
 });

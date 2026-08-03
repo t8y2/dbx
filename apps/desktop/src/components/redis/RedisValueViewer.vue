@@ -167,21 +167,49 @@ const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<JsonHighlighter>();
 
-// Decompressed view state. Decompression is async (DecompressionStream), so the
-// result intentionally lives outside the synchronous format pipeline built by
-// formatRedisMemberDetail; the request id guards against stale results when the
-// user switches values or formats mid-flight.
-type RedisDecompressedState = { status: "idle" } | { status: "loading" } | { status: "success"; text: string; algorithm: RedisDecompressAlgorithm } | { status: "error"; reason: "corrupt" | "limit" | "unsupported" };
+// Decompressed view state. Decompression yields to the event loop so the
+// loading state paints before the synchronous bounded inflate runs; the result
+// intentionally lives outside the synchronous format pipeline built by
+// formatRedisMemberDetail, and the request id guards against stale results when
+// the user switches values or formats mid-flight.
+type RedisDecompressedState = { status: "idle" } | { status: "loading" } | { status: "success"; text: string; algorithm: RedisDecompressAlgorithm } | { status: "error"; reason: "corrupt" | "limit" };
 const decompressedState = ref<RedisDecompressedState>({ status: "idle" });
 let decompressRequestId = 0;
 
-async function runDecompress(bytes: Uint8Array) {
+async function runDecompress(bytes: Uint8Array, algorithm?: RedisDecompressAlgorithm) {
   const requestId = ++decompressRequestId;
   decompressedState.value = { status: "loading" };
-  const result = await decompressRedisValue(bytes);
+  const result = await decompressRedisValue(bytes, algorithm ? { algorithm } : {});
   if (requestId !== decompressRequestId) return;
   if (result.ok) decompressedState.value = { status: "success", text: result.text, algorithm: result.algorithm };
   else decompressedState.value = { status: "error", reason: result.reason };
+}
+
+/** Bytes of whichever decompressed view is active (string value or member), or null when there is nothing to decode. */
+function currentDecompressTargetBytes(): Uint8Array | null {
+  if (stringValueView.value === "decompressed") {
+    const blob = stringBlob.value;
+    return blob ? decodeRedisBlob(blob) : null;
+  }
+  if (memberValueView.value === "decompressed") {
+    const raw = selectedMemberRaw.value;
+    if (raw == null) return null;
+    // Plain-string members (not blobs) still attempt decompression so the user
+    // gets the non-blocking "not compressed" notice instead of silence.
+    return isRedisBlob(raw) ? decodeRedisBlob(raw) : new TextEncoder().encode(typeof raw === "string" ? raw : formatRedisMemberDetail(raw).rawText);
+  }
+  return null;
+}
+
+function refreshDecompressedView(algorithm?: RedisDecompressAlgorithm) {
+  const bytes = currentDecompressTargetBytes();
+  if (bytes) void runDecompress(bytes, algorithm);
+  else decompressedState.value = { status: "idle" };
+}
+
+/** Last-resort explicit decode for values that are raw RFC 1951 DEFLATE (never auto-detected). */
+function retryDecompressAsDeflate() {
+  refreshDecompressedView("deflate");
 }
 
 const decompressedJsonDetail = computed(() => {
@@ -193,7 +221,6 @@ const decompressedFailureMessage = computed(() => {
   const state = decompressedState.value;
   if (state.status !== "error") return "";
   if (state.reason === "limit") return t("redis.decompressedLimitExceeded");
-  if (state.reason === "unsupported") return t("redis.decompressedUnsupported");
   return t("redis.decompressedFailed");
 });
 
@@ -376,25 +403,14 @@ const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemb
 
 // The Decompressed view depends on the value/format refs above, so these
 // watchers and computeds live here rather than next to the state declarations.
-watch([stringValueView, stringBlob], ([view, blob]) => {
+watch([stringValueView, stringBlob], ([view]) => {
   if (view !== "decompressed") return;
-  if (!blob) {
-    decompressedState.value = { status: "idle" };
-    return;
-  }
-  void runDecompress(decodeRedisBlob(blob));
+  refreshDecompressedView();
 });
 
-watch([memberValueView, selectedMemberRaw], ([view, raw]) => {
+watch([memberValueView, selectedMemberRaw], ([view]) => {
   if (view !== "decompressed") return;
-  if (raw == null) {
-    decompressedState.value = { status: "idle" };
-    return;
-  }
-  // Plain-string members (not blobs) still attempt decompression so the user
-  // gets the non-blocking "not compressed" notice instead of silence.
-  const bytes = isRedisBlob(raw) ? decodeRedisBlob(raw) : new TextEncoder().encode(typeof raw === "string" ? raw : formatRedisMemberDetail(raw).rawText);
-  void runDecompress(bytes);
+  refreshDecompressedView();
 });
 
 const stringGzipBadge = computed(() => (stringBlob.value ? isGzipMagic(decodeRedisBlob(stringBlob.value)) : false));
@@ -2271,8 +2287,19 @@ defineExpose({ focusSearch });
           </div>
           <template v-else>
             <pre class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass('decompressed')">{{ decompressedRawFallbackText }}</pre>
-            <div v-if="decompressedFailureMessage" class="shrink-0 border-t px-4 py-2 text-xs text-muted-foreground">
-              {{ decompressedFailureMessage }}
+            <div v-if="decompressedFailureMessage" class="flex shrink-0 flex-wrap items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+              <span>{{ decompressedFailureMessage }}</span>
+              <Button
+                v-if="decompressedState.status === 'error' && decompressedState.reason !== 'limit'"
+                variant="outline"
+                size="sm"
+                class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+                :title="t('redis.decompressedRetryAsDeflate')"
+                :aria-label="t('redis.decompressedRetryAsDeflate')"
+                @click="retryDecompressAsDeflate"
+              >
+                {{ t("redis.decompressedRetryAsDeflate") }}
+              </Button>
             </div>
           </template>
         </div>
@@ -2898,8 +2925,19 @@ defineExpose({ focusSearch });
             </div>
             <template v-else>
               <pre class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass('decompressed')">{{ decompressedRawFallbackText }}</pre>
-              <div v-if="decompressedFailureMessage" class="shrink-0 border-t px-5 py-2 text-xs text-muted-foreground">
-                {{ decompressedFailureMessage }}
+              <div v-if="decompressedFailureMessage" class="flex shrink-0 flex-wrap items-center gap-2 border-t px-5 py-2 text-xs text-muted-foreground">
+                <span>{{ decompressedFailureMessage }}</span>
+                <Button
+                  v-if="decompressedState.status === 'error' && decompressedState.reason !== 'limit'"
+                  variant="outline"
+                  size="sm"
+                  class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+                  :title="t('redis.decompressedRetryAsDeflate')"
+                  :aria-label="t('redis.decompressedRetryAsDeflate')"
+                  @click="retryDecompressAsDeflate"
+                >
+                  {{ t("redis.decompressedRetryAsDeflate") }}
+                </Button>
               </div>
             </template>
           </div>

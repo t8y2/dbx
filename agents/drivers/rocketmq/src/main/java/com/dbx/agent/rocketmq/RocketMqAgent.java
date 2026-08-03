@@ -61,6 +61,9 @@ public final class RocketMqAgent {
     private static final int DEFAULT_LIST_LIMIT = 200;
     private static final int CONSUMER_GROUP_ENRICH_CONCURRENCY = 8;
     private static final long CONSUMER_GROUP_ENRICH_BUDGET_MS = 8_000;
+    /** Nameserver route enrichment for listTopics fallback when bulk broker config is unavailable. */
+    private static final int TOPIC_LIST_ROUTE_CONCURRENCY = 8;
+    private static final long TOPIC_LIST_ROUTE_BUDGET_MS = 8_000;
     private static final String AUTO_CREATE_TOPIC_KEY = "TBW102";
     /** RocketMQ 5.x topic attribute key for message type (NORMAL/DELAY/FIFO/TRANSACTION). */
     private static final String TOPIC_MESSAGE_TYPE_ATTRIBUTE = "message.type";
@@ -463,37 +466,80 @@ public final class RocketMqAgent {
         // Skip fetchTopicList when broker configs already provide the catalog.
         Set<String> topicNames;
         if (brokerTopics.isEmpty()) {
-            TopicList topicList = fetchTopicList(admin, conn);
+            // Reuse resolved cluster — do not call examineBrokerClusterInfo again via clusterName(conn, admin).
+            TopicList topicList = fetchTopicList(admin, cluster);
             topicNames = new TreeSet<>(topicList.getTopicList());
         } else {
             topicNames = brokerTopics.keySet();
         }
 
+        List<Map<String, Object>> topics = buildTopicCatalogRows(
+            topicNames,
+            brokerTopics,
+            topicAttributes,
+            brokerSystemTopics,
+            brokerNames,
+            cluster,
+            keyword,
+            admin::examineTopicRouteInfo,
+            TOPIC_LIST_ROUTE_CONCURRENCY,
+            TOPIC_LIST_ROUTE_BUDGET_MS
+        );
+        topics.sort(Comparator.comparing(m -> String.valueOf(m.get("name"))));
+
+        int total = topics.size();
+        List<Map<String, Object>> page = paginate(topics, offset, limit);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("topics", page);
+        result.put("total", total);
+        result.put("offset", offset);
+        result.put("limit", limit);
+        return result;
+    }
+
+    @FunctionalInterface
+    interface TopicRouteLookup {
+        TopicRouteData load(String topic) throws Exception;
+    }
+
+    /**
+     * Build topic catalog rows from names + optional bulk broker configs.
+     * When bulk configs are empty, partition counts are filled via a single budgeted route RPC
+     * per topic; per-topic examineTopicConfig / resolveTopicMessageType is never used (that path
+     * hits the same broker that already failed getAllTopicConfig and can stall for minutes).
+     */
+    static List<Map<String, Object>> buildTopicCatalogRows(
+        Set<String> topicNames,
+        Map<String, TopicConfig> brokerTopics,
+        Map<String, Map<String, String>> topicAttributes,
+        Set<String> brokerSystemTopics,
+        Set<String> brokerNames,
+        String cluster,
+        String keyword,
+        TopicRouteLookup routeLookup,
+        int routeConcurrency,
+        long routeBudgetMs
+    ) {
+        String keywordLower = keyword == null ? "" : keyword.toLowerCase(Locale.ROOT);
+        boolean hasBrokerCatalog = brokerTopics != null && !brokerTopics.isEmpty();
         List<Map<String, Object>> topics = new ArrayList<>();
+        List<Map<String, Object>> needsRoute = new ArrayList<>();
         for (String topic : topicNames) {
-            if (!keyword.isBlank() && !topic.toLowerCase(Locale.ROOT).contains(keyword)) {
+            if (!keywordLower.isBlank() && !topic.toLowerCase(Locale.ROOT).contains(keywordLower)) {
                 continue;
             }
-            TopicConfig brokerConfig = brokerTopics.get(topic);
-            int partitions = brokerConfig == null ? 1 : Math.max(brokerConfig.getReadQueueNums(), 1);
-            if (brokerConfig == null) {
-                try {
-                    TopicRouteData route = admin.examineTopicRouteInfo(topic);
-                    if (route.getQueueDatas() != null && !route.getQueueDatas().isEmpty()) {
-                        partitions = Math.max(route.getQueueDatas().get(0).getReadQueueNums(), 1);
-                    }
-                } catch (Exception ignored) {
-                    // Stale nameserver-only topics are skipped below when broker configs are available.
-                    if (!brokerTopics.isEmpty()) {
-                        continue;
-                    }
-                }
+            TopicConfig brokerConfig = hasBrokerCatalog ? brokerTopics.get(topic) : null;
+            // Nameserver-only stale topics are skipped when broker catalog is the source of truth.
+            if (hasBrokerCatalog && brokerConfig == null) {
+                continue;
             }
-            Map<String, String> attributes = topicAttributes.get(topic);
-            if (isUserTopic(topic) && readTopicMessageTypeAttribute(attributes) == null) {
-                String resolved = brokerConfig == null
-                    ? resolveTopicMessageType(admin, conn, topic, clusterInfo)
-                    : readTopicMessageType(brokerConfig);
+            int partitions = brokerConfig == null ? 1 : Math.max(brokerConfig.getReadQueueNums(), 1);
+            Map<String, String> attributes = topicAttributes == null ? null : topicAttributes.get(topic);
+            // Type from bulk config attributes only — never examineTopicConfig per topic on fallback.
+            if (brokerConfig != null
+                && isUserTopic(topic)
+                && readTopicMessageTypeAttribute(attributes) == null) {
+                String resolved = readTopicMessageType(brokerConfig);
                 if (resolved != null && !resolved.isBlank()) {
                     attributes = attributes == null ? new HashMap<>() : new HashMap<>(attributes);
                     attributes.put("+" + TOPIC_MESSAGE_TYPE_ATTRIBUTE, resolved);
@@ -511,17 +557,71 @@ public final class RocketMqAgent {
             row.put("internal", internal);
             row.put("messageType", messageType);
             topics.add(row);
+            if (brokerConfig == null) {
+                needsRoute.add(row);
+            }
         }
-        topics.sort(Comparator.comparing(m -> String.valueOf(m.get("name"))));
+        if (!needsRoute.isEmpty() && routeLookup != null) {
+            enrichTopicPartitions(needsRoute, routeLookup, routeConcurrency, routeBudgetMs);
+        }
+        return topics;
+    }
 
-        int total = topics.size();
-        List<Map<String, Object>> page = paginate(topics, offset, limit);
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("topics", page);
-        result.put("total", total);
-        result.put("offset", offset);
-        result.put("limit", limit);
-        return result;
+    static int partitionsFromRoute(TopicRouteData route) {
+        if (route == null || route.getQueueDatas() == null || route.getQueueDatas().isEmpty()) {
+            return 1;
+        }
+        return Math.max(route.getQueueDatas().get(0).getReadQueueNums(), 1);
+    }
+
+    /**
+     * Fill {@code partitions} via nameserver route lookups with bounded concurrency and a global
+     * time budget. Unfinished/failed topics keep the default partitions=1.
+     */
+    static void enrichTopicPartitions(
+        List<Map<String, Object>> rows,
+        TopicRouteLookup lookup,
+        int concurrency,
+        long budgetMs) {
+        if (rows.isEmpty() || lookup == null) {
+            return;
+        }
+        int workers = Math.max(1, Math.min(concurrency, rows.size()));
+        ExecutorService executor = Executors.newFixedThreadPool(workers, runnable -> {
+            Thread thread = new Thread(runnable, "dbx-rocketmq-topic-route");
+            thread.setDaemon(true);
+            return thread;
+        });
+        List<Callable<Integer>> tasks = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            String topic = String.valueOf(row.get("name"));
+            tasks.add(() -> {
+                try {
+                    return partitionsFromRoute(lookup.load(topic));
+                } catch (Exception ignored) {
+                    return 1;
+                }
+            });
+        }
+        List<Future<Integer>> results = Collections.emptyList();
+        try {
+            results = executor.invokeAll(tasks, Math.max(1, budgetMs), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            executor.shutdownNow();
+        }
+        for (int index = 0; index < rows.size(); index++) {
+            Map<String, Object> row = rows.get(index);
+            if (index < results.size() && !results.get(index).isCancelled()) {
+                try {
+                    row.put("partitions", results.get(index).get());
+                } catch (Exception ignored) {
+                    // Keep default partitions=1 when enrichment fails.
+                }
+            }
+            row.putIfAbsent("partitions", 1);
+        }
     }
 
     private static Object createTopic(JsonObject params) throws Exception {
@@ -1842,9 +1942,8 @@ public final class RocketMqAgent {
         return addr;
     }
 
-    private static TopicList fetchTopicList(DefaultMQAdminExt admin, JsonObject conn) throws Exception {
-        String cluster = clusterName(conn, admin);
-        if (!cluster.isBlank()) {
+    private static TopicList fetchTopicList(DefaultMQAdminExt admin, String cluster) throws Exception {
+        if (cluster != null && !cluster.isBlank()) {
             return admin.fetchTopicsByCLuster(cluster);
         }
         return admin.fetchAllTopicList();

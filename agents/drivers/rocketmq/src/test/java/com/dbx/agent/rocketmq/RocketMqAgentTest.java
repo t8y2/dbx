@@ -15,16 +15,21 @@ import org.apache.rocketmq.remoting.protocol.admin.TopicOffset;
 import org.apache.rocketmq.remoting.protocol.body.ProducerInfo;
 import org.apache.rocketmq.remoting.protocol.body.ProducerTableInfo;
 import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
+import org.apache.rocketmq.remoting.protocol.route.QueueData;
+import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 import org.apache.rocketmq.common.message.MessageQueue;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -313,6 +318,145 @@ class RocketMqAgentTest {
             assertEquals(0, row.get("memberCount"));
             assertEquals(List.of(), row.get("topics"));
         }
+    }
+
+    @Test
+    void enrichTopicPartitionsRunsIndependentLookupsConcurrently() throws Exception {
+        List<Map<String, Object>> rows = IntStream.range(0, 4)
+            .mapToObj(index -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("name", "topic-" + index);
+                row.put("partitions", 1);
+                return row;
+            })
+            .toList();
+        CountDownLatch started = new CountDownLatch(rows.size());
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+
+        CompletableFuture<Void> enrichment = CompletableFuture.runAsync(() ->
+            RocketMqAgent.enrichTopicPartitions(rows, topic -> {
+                int current = active.incrementAndGet();
+                maxActive.accumulateAndGet(current, Math::max);
+                started.countDown();
+                try {
+                    release.await(1, TimeUnit.SECONDS);
+                    return routeWithReadQueues(8);
+                } finally {
+                    active.decrementAndGet();
+                }
+            }, 4, 1_000)
+        );
+
+        assertTrue(started.await(1, TimeUnit.SECONDS));
+        release.countDown();
+        enrichment.get(2, TimeUnit.SECONDS);
+
+        assertTrue(maxActive.get() > 1);
+        for (Map<String, Object> row : rows) {
+            assertEquals(8, row.get("partitions"));
+        }
+    }
+
+    @Test
+    void enrichTopicPartitionsReturnsDefaultsWhenBudgetExpires() {
+        List<Map<String, Object>> rows = IntStream.range(0, 4)
+            .mapToObj(index -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("name", "slow-topic-" + index);
+                row.put("partitions", 1);
+                return row;
+            })
+            .toList();
+        CountDownLatch blocked = new CountDownLatch(1);
+        long startedAt = System.nanoTime();
+
+        RocketMqAgent.enrichTopicPartitions(rows, topic -> {
+            blocked.await();
+            return routeWithReadQueues(16);
+        }, 2, 50);
+
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        assertTrue(elapsedMs < 1_000, "topic route enrichment exceeded its response budget: " + elapsedMs + "ms");
+        for (Map<String, Object> row : rows) {
+            assertEquals(1, row.get("partitions"));
+        }
+    }
+
+    @Test
+    void buildTopicCatalogRowsFallbackIssuesAtMostOneRouteRpcPerTopic() {
+        Set<String> topicNames = new TreeSet<>(List.of("Alpha", "Beta", "Gamma"));
+        Map<String, AtomicInteger> routeCalls = new ConcurrentHashMap<>();
+        AtomicInteger totalRouteCalls = new AtomicInteger();
+
+        List<Map<String, Object>> rows = RocketMqAgent.buildTopicCatalogRows(
+            topicNames,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            Set.of(),
+            Set.of(),
+            "DefaultCluster",
+            "",
+            topic -> {
+                totalRouteCalls.incrementAndGet();
+                routeCalls.computeIfAbsent(topic, ignored -> new AtomicInteger()).incrementAndGet();
+                return routeWithReadQueues(4);
+            },
+            8,
+            2_000
+        );
+
+        assertEquals(3, rows.size());
+        assertEquals(3, totalRouteCalls.get(), "fallback must not repeat examineTopicRouteInfo per topic");
+        for (String topic : topicNames) {
+            assertEquals(1, routeCalls.get(topic).get());
+        }
+        for (Map<String, Object> row : rows) {
+            assertEquals(4, row.get("partitions"));
+            // Bulk config unavailable — classify without per-topic examineTopicConfig.
+            assertEquals("UNSPECIFIED", row.get("messageType"));
+        }
+    }
+
+    @Test
+    void buildTopicCatalogRowsUsesBrokerConfigWithoutRouteLookup() {
+        TopicConfig config = new TopicConfig("Orders");
+        config.setReadQueueNums(12);
+        config.setAttributes(Map.of("message.type", "NORMAL"));
+        Map<String, TopicConfig> brokerTopics = Map.of("Orders", config);
+        AtomicInteger routeCalls = new AtomicInteger();
+
+        List<Map<String, Object>> rows = RocketMqAgent.buildTopicCatalogRows(
+            Set.of("Orders"),
+            brokerTopics,
+            Map.of("Orders", Map.of("message.type", "NORMAL")),
+            Set.of(),
+            Set.of(),
+            "DefaultCluster",
+            "",
+            topic -> {
+                routeCalls.incrementAndGet();
+                return routeWithReadQueues(99);
+            },
+            8,
+            2_000
+        );
+
+        assertEquals(1, rows.size());
+        assertEquals(0, routeCalls.get(), "broker catalog path must not call examineTopicRouteInfo");
+        assertEquals(12, rows.get(0).get("partitions"));
+        assertEquals("NORMAL", rows.get(0).get("messageType"));
+    }
+
+    private static TopicRouteData routeWithReadQueues(int readQueueNums) {
+        QueueData queueData = new QueueData();
+        queueData.setBrokerName("broker-a");
+        queueData.setReadQueueNums(readQueueNums);
+        queueData.setWriteQueueNums(readQueueNums);
+        TopicRouteData route = new TopicRouteData();
+        route.setQueueDatas(List.of(queueData));
+        return route;
     }
 
     @Test

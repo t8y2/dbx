@@ -137,6 +137,20 @@ const topicsGridTemplate = computed(() => {
   return cols.join(" ");
 });
 
+/** Min content width from grid track mins + gaps + padding; enables shared horizontal scroll. */
+const topicsTableMinWidthPx = computed(() => {
+  let min = 180 + 120; // name + type
+  if (showNamespaceColumn.value) min += 100;
+  if (!isRocketMqCluster.value) min += 140;
+  min += isRocketMqCluster.value ? 560 : 200;
+  let colCount = 3;
+  if (showNamespaceColumn.value) colCount += 1;
+  if (!isRocketMqCluster.value) colCount += 1;
+  min += (colCount - 1) * 8; // column-gap
+  min += 24; // horizontal padding
+  return min;
+});
+
 const userTopicCount = computed(() => {
   if (isRocketMqCluster.value) {
     return topics.value.filter((topic) => isRocketMqBusinessMessageType(resolveRocketMqMessageType(topic))).length;
@@ -501,65 +515,68 @@ watch(newPartitions, () => {
       </div>
 
       <div v-else class="topics-table">
-        <div class="topics-table-header" :style="{ gridTemplateColumns: topicsGridTemplate }">
-          <div class="topics-col">{{ t("mqTopics.name") }}</div>
-          <div v-if="showNamespaceColumn" class="topics-col">{{ t("mqAdmin.namespace") }}</div>
-          <div class="topics-col">{{ t("mqTopics.type") }}</div>
-          <div v-if="!isRocketMqCluster" class="topics-col">{{ t("mqTopics.partitions") }}</div>
-          <div class="topics-col">{{ t("mqTopics.actions") }}</div>
-        </div>
-        <RecycleScroller class="topics-scroller" :items="virtualTopicRows" :item-size="TOPIC_ROW_HEIGHT" :buffer="200" key-field="id">
-          <template #default="{ item: row }">
-            <div class="topics-row" :class="{ selected: topicRowSelected(row.topic) }" :style="{ gridTemplateColumns: topicsGridTemplate, height: `${TOPIC_ROW_HEIGHT}px` }" @click="selectTopic(row.topic)">
-              <div class="topics-col topic-name">
-                <div class="topic-name-cell">
-                  <span class="topic-name-text" :title="row.topic.shortName">{{ row.topic.shortName }}</span>
-                  <span v-if="!row.topic.persistent" class="badge badge-warning">{{ t("mqTopics.nonPersistent") }}</span>
+        <!-- Shared horizontal scroller keeps header/body columns aligned when the grid min-width exceeds the panel. -->
+        <div class="topics-table-hscroll" :style="{ '--topics-table-min-width': `${topicsTableMinWidthPx}px` }">
+          <div class="topics-table-header" :style="{ gridTemplateColumns: topicsGridTemplate }">
+            <div class="topics-col">{{ t("mqTopics.name") }}</div>
+            <div v-if="showNamespaceColumn" class="topics-col">{{ t("mqAdmin.namespace") }}</div>
+            <div class="topics-col">{{ t("mqTopics.type") }}</div>
+            <div v-if="!isRocketMqCluster" class="topics-col">{{ t("mqTopics.partitions") }}</div>
+            <div class="topics-col">{{ t("mqTopics.actions") }}</div>
+          </div>
+          <RecycleScroller class="topics-scroller" :items="virtualTopicRows" :item-size="TOPIC_ROW_HEIGHT" :buffer="200" key-field="id">
+            <template #default="{ item: row }">
+              <div class="topics-row" :class="{ selected: topicRowSelected(row.topic) }" :style="{ gridTemplateColumns: topicsGridTemplate, height: `${TOPIC_ROW_HEIGHT}px` }" @click="selectTopic(row.topic)">
+                <div class="topics-col topic-name">
+                  <div class="topic-name-cell">
+                    <span class="topic-name-text" :title="row.topic.shortName">{{ row.topic.shortName }}</span>
+                    <span v-if="!row.topic.persistent" class="badge badge-warning">{{ t("mqTopics.nonPersistent") }}</span>
+                  </div>
+                </div>
+                <div v-if="showNamespaceColumn" class="topics-col">{{ row.topic.namespace || "-" }}</div>
+                <div class="topics-col">
+                  <span class="badge" :class="topicTypeBadgeClass(row.topic)">
+                    {{ topicTypeLabel(row.topic) }}
+                  </span>
+                </div>
+                <div v-if="!isRocketMqCluster" class="topics-col">
+                  <span v-if="row.topic.partitioned">{{ row.topic.partitions ? t("mqTopics.partitionCount", { count: row.topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
+                  <span v-else class="text-muted">-</span>
+                </div>
+                <div class="topics-col actions" @click.stop>
+                  <template v-if="isRocketMqCluster">
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('status', row.topic)">{{ t("mqTopics.actionStatus") }}</button>
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('route', row.topic)">{{ t("mqTopics.actionRoute") }}</button>
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('consumers', row.topic)">{{ t("mqTopics.actionConsumers") }}</button>
+                    <button v-if="isDlqTopic(row.topic)" type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
+                    <template v-else>
+                      <button type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
+                      <button type="button" class="btn-sm" :disabled="readOnly" @click="navigateToMessages(row.topic)">{{ t("mqRocketmq.actionSendMessage") }}</button>
+                    </template>
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('config', row.topic)">{{ t("mqTopics.actionConfig") }}</button>
+                    <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('reset', row.topic)">{{ t("mqTopics.actionReset") }}</button>
+                    <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('skip', row.topic)">{{ t("mqTopics.actionSkip") }}</button>
+                    <button type="button" class="btn-sm btn-danger" :disabled="readOnly || isTopicProtected(row.topic)" @click="handleDelete(row.topic)">{{ t("mqTopics.delete") }}</button>
+                  </template>
+                  <template v-else>
+                    <button v-if="row.topic.partitioned && supportsPartitionedTopics !== false && !isTopicProtected(row.topic)" type="button" @click="openPartitionsDialog(row.topic)" :disabled="readOnly || !row.topic.partitions" class="btn-sm">
+                      {{ t("mqTopics.adjustPartitions") }}
+                    </button>
+                    <button
+                      type="button"
+                      @click="handleDelete(row.topic)"
+                      :disabled="readOnly || isTopicProtected(row.topic) || (showNamespaceColumn && !row.topic.namespace)"
+                      :title="showNamespaceColumn && !row.topic.namespace ? t('mqAdmin.selectNamespaceToWrite') : undefined"
+                      class="btn-sm btn-danger"
+                    >
+                      {{ t("mqTopics.delete") }}
+                    </button>
+                  </template>
                 </div>
               </div>
-              <div v-if="showNamespaceColumn" class="topics-col">{{ row.topic.namespace || "-" }}</div>
-              <div class="topics-col">
-                <span class="badge" :class="topicTypeBadgeClass(row.topic)">
-                  {{ topicTypeLabel(row.topic) }}
-                </span>
-              </div>
-              <div v-if="!isRocketMqCluster" class="topics-col">
-                <span v-if="row.topic.partitioned">{{ row.topic.partitions ? t("mqTopics.partitionCount", { count: row.topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
-                <span v-else class="text-muted">-</span>
-              </div>
-              <div class="topics-col actions" @click.stop>
-                <template v-if="isRocketMqCluster">
-                  <button type="button" class="btn-sm" @click="openRocketMqDialog('status', row.topic)">{{ t("mqTopics.actionStatus") }}</button>
-                  <button type="button" class="btn-sm" @click="openRocketMqDialog('route', row.topic)">{{ t("mqTopics.actionRoute") }}</button>
-                  <button type="button" class="btn-sm" @click="openRocketMqDialog('consumers', row.topic)">{{ t("mqTopics.actionConsumers") }}</button>
-                  <button v-if="isDlqTopic(row.topic)" type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
-                  <template v-else>
-                    <button type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
-                    <button type="button" class="btn-sm" :disabled="readOnly" @click="navigateToMessages(row.topic)">{{ t("mqRocketmq.actionSendMessage") }}</button>
-                  </template>
-                  <button type="button" class="btn-sm" @click="openRocketMqDialog('config', row.topic)">{{ t("mqTopics.actionConfig") }}</button>
-                  <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('reset', row.topic)">{{ t("mqTopics.actionReset") }}</button>
-                  <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('skip', row.topic)">{{ t("mqTopics.actionSkip") }}</button>
-                  <button type="button" class="btn-sm btn-danger" :disabled="readOnly || isTopicProtected(row.topic)" @click="handleDelete(row.topic)">{{ t("mqTopics.delete") }}</button>
-                </template>
-                <template v-else>
-                  <button v-if="row.topic.partitioned && supportsPartitionedTopics !== false && !isTopicProtected(row.topic)" type="button" @click="openPartitionsDialog(row.topic)" :disabled="readOnly || !row.topic.partitions" class="btn-sm">
-                    {{ t("mqTopics.adjustPartitions") }}
-                  </button>
-                  <button
-                    type="button"
-                    @click="handleDelete(row.topic)"
-                    :disabled="readOnly || isTopicProtected(row.topic) || (showNamespaceColumn && !row.topic.namespace)"
-                    :title="showNamespaceColumn && !row.topic.namespace ? t('mqAdmin.selectNamespaceToWrite') : undefined"
-                    class="btn-sm btn-danger"
-                  >
-                    {{ t("mqTopics.delete") }}
-                  </button>
-                </template>
-              </div>
-            </div>
-          </template>
-        </RecycleScroller>
+            </template>
+          </RecycleScroller>
+        </div>
       </div>
 
       <!-- Create Dialog -->
@@ -851,12 +868,23 @@ watch(newPartitions, () => {
   background: var(--topics-surface);
 }
 
+.topics-table-hscroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .topics-table-header,
 .topics-row {
   display: grid;
   align-items: center;
   column-gap: 8px;
   padding: 0 12px;
+  min-width: var(--topics-table-min-width, 100%);
 }
 
 .topics-table-header {
@@ -883,6 +911,7 @@ watch(newPartitions, () => {
   flex: 1;
   min-height: 0;
   height: 100%;
+  min-width: var(--topics-table-min-width, 100%);
   /* RecycleScroller owns overflow-y; reserve gutter for classic scrollbars (Windows). */
   scrollbar-gutter: stable;
 }

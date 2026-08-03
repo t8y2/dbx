@@ -98,6 +98,10 @@ async fn run_temporary_connection_test(
     };
 
     app.remove_connection_pools(&temp_id).await;
+    // Pool drain intentionally keeps durable MQ adapters for reconnect reuse; temporary
+    // probes must still release any registry entry if a cached path was used.
+    #[cfg(feature = "mq-admin")]
+    app.mq_registry.drop_connection(&temp_id).await;
     app.reset_connection_transport_for_config(&temp_id, &config).await;
     app.configs.write().await.remove(&temp_id);
 
@@ -513,6 +517,30 @@ mod tests {
         assert_eq!(detailed.0.database_info, None);
         assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
         assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn mq_connection_test_does_not_retain_temporary_adapter() {
+        let (state, dir) = test_web_state().await;
+        let admin_url = spawn_pulsar_clusters_server().await;
+        let config = mq_config("pulsar-probe", &admin_url);
+
+        let result = test_connection(State(state.clone()), Json(ConnectRequest { config, client_attempt: None }))
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(result.0, "Connection successful");
+
+        assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
+        assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
+        let cached = state.app.mq_registry.cached_connection_ids().await;
+        assert!(
+            cached.iter().all(|id| !id.starts_with("__test_")),
+            "temporary MQ connection tests must not retain registry adapters: {cached:?}"
+        );
+        assert!(!state.app.mq_registry.has_cached_connection("pulsar-probe").await);
 
         let _ = std::fs::remove_dir_all(dir);
     }

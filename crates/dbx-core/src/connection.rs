@@ -2169,23 +2169,37 @@ impl AppState {
                 // connection_id is recognized as valid.
                 let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = crate::mq::service::resolve_mq_agent_launch_spec(&mqc, self);
-                let build = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
-                    Ok(build) => build,
-                    Err(err) => {
+                // Temporary "__test_*" probes must not retain agents in the registry.
+                // reconnect fast-path caching only applies to durable connection ids;
+                // drain_connection_pools no longer drops MQ adapters (reconnect reuse).
+                if connection_id.starts_with("__test_") {
+                    let adapter = self.mq_registry.build_transient_config(mqc, agent_launch).await?;
+                    adapter.test_connection().await?;
+                    if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                        return Err(err);
+                    }
+                    // adapter drops here and kills agent-backed processes (RocketMQ/Kafka/RabbitMQ).
+                    PoolKind::MessageQueue
+                } else {
+                    let build = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
+                        Ok(build) => build,
+                        Err(err) => {
+                            self.mq_registry.drop_connection(connection_id).await;
+                            return Err(err);
+                        }
+                    };
+                    if let Err(err) = crate::mq::validate_mq_adapter_after_build(&build).await {
                         self.mq_registry.drop_connection(connection_id).await;
                         return Err(err);
                     }
-                };
-                if let Err(err) = crate::mq::validate_mq_adapter_after_build(&build).await {
-                    self.mq_registry.drop_connection(connection_id).await;
-                    return Err(err);
+                    if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+                        self.mq_registry.drop_connection(connection_id).await;
+                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                        return Err(err);
+                    }
+                    PoolKind::MessageQueue
                 }
-                if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-                    self.mq_registry.drop_connection(connection_id).await;
-                    self.reset_connection_transport_for_config(connection_id, &db_config).await;
-                    return Err(err);
-                }
-                PoolKind::MessageQueue
             }
             #[cfg(not(feature = "mq-admin"))]
             DatabaseType::MessageQueue => {

@@ -122,6 +122,16 @@ impl MqAdminRegistry {
         self.build_locks.write().await.remove(connection_id);
     }
 
+    /// Whether an adapter is currently cached for this connection id.
+    pub async fn has_cached_connection(&self, connection_id: &str) -> bool {
+        self.instances.read().await.contains_key(connection_id)
+    }
+
+    /// Connection ids currently holding a cached MQ adapter (for cleanup assertions).
+    pub async fn cached_connection_ids(&self) -> Vec<String> {
+        self.instances.read().await.keys().cloned().collect()
+    }
+
     /// Build a fresh adapter without caching it — used for connection tests
     /// where we don't want to retain state.
     pub async fn build_transient(&self, cfg: &ConnectionConfig) -> Result<Arc<dyn MessageQueueAdmin>, String> {

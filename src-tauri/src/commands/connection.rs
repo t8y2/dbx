@@ -1063,19 +1063,12 @@ async fn test_connection_with_info_inner(
             }
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
+                // Probe with a transient adapter so Test Connection never retains/replaces
+                // a live cached MQ agent for this connection id (same pattern as Nacos).
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
-                let build = match state.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
-                    Ok(build) => build,
-                    Err(err) => {
-                        state.mq_registry.drop_connection(connection_id).await;
-                        return Err(err);
-                    }
-                };
-                if let Err(err) = build.adapter.test_connection().await {
-                    state.mq_registry.drop_connection(connection_id).await;
-                    return Err(err);
-                }
+                let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
+                adapter.test_connection().await?;
                 Ok("Connection successful".to_string())
             }
             #[cfg(not(feature = "mq-admin"))]

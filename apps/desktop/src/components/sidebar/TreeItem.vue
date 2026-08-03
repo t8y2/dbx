@@ -70,6 +70,7 @@ import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
+import SidebarVisibleFilterControl from "./SidebarVisibleFilterControl.vue";
 
 const { t } = useI18n();
 
@@ -1196,6 +1197,7 @@ function onKeydown(event: KeyboardEvent) {
             >{{ trailingComment }}</span
           >
         </div>
+        <SidebarVisibleFilterControl v-if="node.type === 'connection'" :node="node" />
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>

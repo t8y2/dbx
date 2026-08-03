@@ -701,6 +701,10 @@ export default withEnglishFallback({
     damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
     damengJvmOptionsHint: "每行一個 -Dkey 或 -Dkey=value；值包含空格時也不要使用 shell 引號。",
     damengJvmOptionsInvalid: "第 {line} 行必須是未使用 shell 引號的 -Dkey 或 -Dkey=value 系統屬性。",
+    zookeeperClusterInputHint: "ZooKeeper 叢集可在上方 URL 中填寫全部節點（例如 zookeeper://zk-1:2181,zk-2:2181/app），也可在下方 Connect String 中填寫。",
+    zookeeperAuthMethod: "認證方式",
+    zookeeperAuthDigest: "Digest（預設）",
+    zookeeperAuthSaslDigest: "SASL DIGEST-MD5",
   },
   editor: {
     duckdbDraining: "上一筆 DuckDB 查詢仍在停止，請稍後重試。",

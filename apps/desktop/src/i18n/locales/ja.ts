@@ -722,6 +722,10 @@ export default withEnglishFallback({
     httpTunnelInvalidOrder: "{hop}: HTTP トンネルは最初のトンネル/プロキシレイヤーに配置する必要があります",
     httpTunnelInvalidUrl: "{hop}: トンネルスクリプト URL は必須です",
     httpTunnelInvalidTimeout: "{hop}: HTTP トンネルのタイムアウト時間は 1 から 300 秒の間で設定してください",
+    zookeeperClusterInputHint: "ZooKeeperクラスタは、上部のURLにすべてのノードを記入（例：zookeeper://zk-1:2181,zk-2:2181/app）、または下部のConnect Stringに記入できます。",
+    zookeeperAuthMethod: "認証方式",
+    zookeeperAuthDigest: "Digest（デフォルト）",
+    zookeeperAuthSaslDigest: "SASL DIGEST-MD5",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

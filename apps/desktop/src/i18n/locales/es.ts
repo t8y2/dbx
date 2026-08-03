@@ -703,6 +703,10 @@ export default withEnglishFallback({
     damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
     damengJvmOptionsHint: "Una propiedad -Dkey o -Dkey=value por línea. Los valores con espacios no necesitan comillas del shell.",
     damengJvmOptionsInvalid: "La línea {line} debe ser una propiedad -Dkey o -Dkey=value sin comillas del shell.",
+    zookeeperClusterInputHint: "El clúster ZooKeeper puede completarse con todos los nodos en la URL superior (por ejemplo, zookeeper://zk-1:2181,zk-2:2181/app), o en el Connect String a continuación.",
+    zookeeperAuthMethod: "Método de autenticación",
+    zookeeperAuthDigest: "Digest (predeterminado)",
+    zookeeperAuthSaslDigest: "SASL DIGEST-MD5",
   },
   editor: {
     duckdbDraining: "La consulta anterior de DuckDB aún se está deteniendo. Vuelva a intentarlo en breve.",

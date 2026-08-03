@@ -11,6 +11,14 @@ function installLocalStorage() {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe("connectionStore sidebar table storage", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -24,13 +32,9 @@ describe("connectionStore sidebar table storage", () => {
       { name: "EXISTING_TABLE", table_type: "BASE TABLE", comment: null },
       { name: "NEW_TABLE", table_type: "BASE TABLE", comment: null },
     ]);
-    const listObjectStatistics = vi
-      .fn()
-      .mockResolvedValueOnce([{ name: "EXISTING_TABLE", schema: "APP", total_bytes: 8192 }])
-      .mockResolvedValueOnce([
-        { name: "EXISTING_TABLE", schema: "APP", total_bytes: 8192 },
-        { name: "NEW_TABLE", schema: "APP", total_bytes: 16384 },
-      ]);
+    const initialStatistics = deferred<Array<{ name: string; schema: string; total_bytes: number }>>();
+    const refreshedStatistics = deferred<Array<{ name: string; schema: string; total_bytes: number }>>();
+    const listObjectStatistics = vi.fn().mockReturnValueOnce(initialStatistics.promise).mockReturnValueOnce(refreshedStatistics.promise);
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
@@ -84,13 +88,23 @@ describe("connectionStore sidebar table storage", () => {
     store.connectedIds.add(connection.id);
     store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [schemaNode] }];
 
-    await store.loadSidebarTableStorage({ connectionId: connection.id, database: connection.database, schema: "APP" });
-    expect(existingTable.sizeBytes).toBe(8192);
+    const initialLoad = store.loadSidebarTableStorage({ connectionId: connection.id, database: connection.database, schema: "APP" });
+    expect(listObjectStatistics).toHaveBeenCalledTimes(1);
 
     await store.refreshObjectListTreeNode(connection.id, connection.database, "APP");
-
-    const newTable = schemaNode.children?.find((node) => node.label === "NEW_TABLE");
     expect(listObjectStatistics).toHaveBeenCalledTimes(2);
+
+    const currentExistingTable = schemaNode.children?.find((node) => node.label === "EXISTING_TABLE");
+    const newTable = schemaNode.children?.find((node) => node.label === "NEW_TABLE");
+    refreshedStatistics.resolve([
+      { name: "EXISTING_TABLE", schema: "APP", total_bytes: 8192 },
+      { name: "NEW_TABLE", schema: "APP", total_bytes: 16384 },
+    ]);
+    await vi.waitFor(() => expect(newTable?.sizeBytes).toBe(16384));
+
+    initialStatistics.resolve([{ name: "EXISTING_TABLE", schema: "APP", total_bytes: 4096 }]);
+    await initialLoad;
+    expect(currentExistingTable?.sizeBytes).toBe(8192);
     expect(newTable?.sizeBytes).toBe(16384);
   });
 });

@@ -5268,7 +5268,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else {
       await refreshDatabaseTreeNode(connectionId, database, catalog);
     }
-    await loadSidebarTableStorage({ connectionId, database, schema: schema || "" }, { force: true });
+    void loadSidebarTableStorage({ connectionId, database, schema: schema || "" }, { force: true });
   }
 
   function isSchemaAwareDatabase(connectionId: string): boolean {

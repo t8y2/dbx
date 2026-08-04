@@ -1,3 +1,5 @@
+import { normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
+
 /**
  * Minimal shape of a translate function, satisfied by both `useI18n().t` inside
  * components and `i18n.global.t` in stores and composables. Using the full
@@ -39,6 +41,7 @@ const patterns: [RegExp, string][] = [
   [/^Custom Java runtime path is empty\. Please choose a Java executable\.$/, "connection.customJavaPathEmpty"],
   [/^Agent requires Java 21, but DBX started it with an older Java runtime\. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager\./, "connection.agentJavaTooOld"],
   [/^JDBC plugin is not installed\. Install the optional JDBC plugin to use this connection\.$/, "connection.jdbcPluginNotInstalled"],
+  [/GBASEDBTSERVER[\s\S]*DBSERVERNAME[\s\S]*DBSERVERALIASES/, "connection.gbaseServerMismatch"],
   [/^ai\.configNameExists:(.+)$/, "ai.configNameExists"],
 
   // Tunnel / proxy test messages
@@ -64,7 +67,6 @@ const patterns: [RegExp, string][] = [
   [/^Unsupported SOCKS bound address type: (\d+)$/, "settings.tunnelsSocksUnsupportedAddrType"],
 
   // Query result export limits (crates/dbx-core/src/query_result_export.rs)
-  [/^XLSX supports at most ([\d,]+) data rows\. Use CSV export for the full result\.$/, "exportProgress.xlsxRowLimit"],
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
   [/^Streaming export needs a result-set session, but this driver returned no session_id\.$/, "exportProgress.agentSessionMissing"],
 
@@ -105,7 +107,6 @@ const paramNames: Record<string, string | string[]> = {
   "settings.tunnelsSocksUnsupportedAuth": "method",
   "settings.tunnelsSocksConnectRejected": "code",
   "settings.tunnelsSocksUnsupportedAddrType": "type",
-  "exportProgress.xlsxRowLimit": "limit",
   "driverStore.jreDirRemoveFailedWindows": ["path", "error"],
   "driverStore.jreDirRemoveFailed": ["path", "error"],
   "driverStore.jreInUseByDrivers": ["jre", "drivers"],
@@ -115,12 +116,22 @@ const paramNames: Record<string, string | string[]> = {
 };
 
 function backendErrorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
-  return String(error);
+  if (typeof error === "string") return sanitizeBackendErrorMessage(error);
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return sanitizeBackendErrorMessage(error.message);
+  return sanitizeBackendErrorMessage(String(error));
+}
+
+function translateStructuredBackendError(t: BackendErrorTranslate, error: BackendError): string {
+  const translated = t(error.messageKey, error.messageParams);
+  const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
+  const detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : undefined;
+  return detail && detail !== summary ? `${summary}\n\n${detail}` : summary;
 }
 
 export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
+  const structured = normalizeBackendError(error);
+  if (structured) return translateStructuredBackendError(t, structured);
+
   const message = backendErrorMessage(error);
   const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
   if (tagged) {

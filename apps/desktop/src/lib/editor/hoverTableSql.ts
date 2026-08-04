@@ -107,6 +107,16 @@ export function sanitizeHoverDdl(ddl: string): string {
 }
 
 /**
+ * The persisted display DDL is the canonical object definition. Native
+ * PostgreSQL appends owner and grant statements after the structural DDL;
+ * quick-look hover keeps the structure and omits that access-control tail.
+ */
+export function ddlForHoverPreview(ddl: string): string {
+  const accessTail = /\n\s*ALTER\s+TABLE\s+[^\n;]+\s+OWNER\s+TO\s+[^\n;]+;/i.exec(ddl);
+  return accessTail ? ddl.slice(0, accessTail.index).trimEnd() : ddl;
+}
+
+/**
  * Display fields of a single column line, prior to vertical alignment.
  */
 interface ColumnFieldParts {

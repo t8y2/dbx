@@ -1,4 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
 
 type ConnectionPresentationConfig = Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "host" | "port" | "database">;
 type ConnectionNamePresentationConfig = ConnectionPresentationConfig & Pick<ConnectionConfig, "name">;
@@ -77,6 +78,37 @@ export function connectionRedactedNameLabel(connection?: ConnectionNamePresentat
   }
 
   return hostNames.has(name) ? connectionRedactedEndpointLabel(connection) : name;
+}
+
+export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "ssl">>): string {
+  switch (connection.db_type) {
+    case "postgres":
+    case "kwdb":
+    case "yashandb":
+    case "redshift":
+    case "questdb":
+      return "postgresql";
+    case "gaussdb":
+      return connection.driver_profile?.toLowerCase() === GAUSSDB_M_JDBC_DRIVER_PROFILE ? "jdbc:gaussdb" : "postgresql";
+    case "sqlserver":
+      return "mssql";
+    case "elasticsearch":
+    case "easysearch":
+    case "qdrant":
+    case "milvus":
+    case "weaviate":
+    case "chromadb":
+    case "rqlite":
+    case "turso":
+    case "mq":
+      return connection.ssl ? "https" : "http";
+    case "cloudflare-d1":
+      return "https";
+    case "dameng":
+      return "dm";
+    default:
+      return connection.db_type;
+  }
 }
 
 export function connectionUrlPlaceholder(dbType: DatabaseType): string {

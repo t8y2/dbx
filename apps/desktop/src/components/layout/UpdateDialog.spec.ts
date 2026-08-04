@@ -172,6 +172,19 @@ describe("UpdateDialog active task guard", () => {
   });
 });
 
+describe("UpdateDialog download progress", () => {
+  it("keeps the downloading button at a fixed width as progress changes", async () => {
+    const { state } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 9 });
+
+    expect(buttonWithText("Downloading 9%")?.classList.contains("w-52")).toBe(true);
+
+    state.downloadProgress = 100;
+    await flushDialog();
+
+    expect(buttonWithText("Downloading 100%")?.classList.contains("w-52")).toBe(true);
+  });
+});
+
 describe("UpdateDialog close protection", () => {
   it("cancels the background download when the close button is clicked", async () => {
     const { state, cancelDownload } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 });

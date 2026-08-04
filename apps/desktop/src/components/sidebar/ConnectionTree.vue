@@ -10,7 +10,8 @@ import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeTy
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
 import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
-import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
+import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
@@ -1264,6 +1265,14 @@ function openSidebarDdl(node: TreeNode) {
   sidebarDdlOpen.value = true;
 }
 
+function openSidebarDdlForSelection(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
+  if (!node || !sidebarNodeSupportsDdlView(node)) return false;
+  openSidebarDdl(node);
+  return true;
+}
+
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
   if (!node.connectionId || !node.database || !objectSourceKindForTreeNode(node.type)) return;
   const target = createSidebarActionTarget(node);
@@ -1530,6 +1539,13 @@ function onWindowKeydown(event: KeyboardEvent) {
       }
       return;
     }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isViewTableDdlShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (openSidebarDdlForSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
   }
 
   if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target) || isEditableSidebarTypeSearchTarget(document.activeElement)) return;
@@ -1597,6 +1613,7 @@ function copySelectedSidebarNames(): boolean {
             database: node.database!,
             schema: connectionObjectTreeNodeSchema(store.getConfig(node.connectionId!), node.database!, node.schema),
             tableName: node.label,
+            tableComment: node.comment,
           })),
         }
       : null;
@@ -1788,7 +1805,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <TreeItem
               :node="item.node"
               :depth="item.depth"
-              :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameGroupId === item.node.id"
               :highlighted="highlightedNodeId === item.node.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
@@ -1799,7 +1816,14 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           </template>
         </RecycleScroller>
         <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
-          <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
+          <TreeItem
+            :node="stickyNode.node"
+            :depth="stickyNode.depth"
+            :reorder-disabled="true"
+            :reference-drag-disabled="true"
+            :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+            @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+          />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -1828,7 +1852,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
               :key="item.id"
               :node="item.node"
               :depth="item.depth"
-              :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameGroupId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"

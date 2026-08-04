@@ -3,6 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { Check, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
@@ -89,7 +90,7 @@ import * as api from "@/lib/backend/api";
 import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
-import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
+import { isDataGridToolbarCompact, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -188,6 +189,9 @@ onMounted(() => {
     setTimeout(preload, 300);
   }
   window.addEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+  window.addEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.visualViewport?.addEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.addEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
 });
 
 watch(
@@ -208,6 +212,7 @@ const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
+const standaloneResultToolbarViewportWidth = ref(0);
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
 const dataGridViewOptionsOpen = ref(false);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
@@ -336,7 +341,7 @@ const hasNumericData = computed(() => {
 
 const activeQueryError = computed(() => {
   const result = props.activeTab.result;
-  if (!result?.columns.includes("Error")) return "";
+  if (!result || !isQueryExecutionErrorResult(result)) return "";
   return String(result.rows[0]?.[0] ?? "");
 });
 const hasQueryOutput = computed(
@@ -417,18 +422,21 @@ const hasTabularResult = computed(() => {
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
 const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
-const standaloneResultToolbarCompact = computed(() => standaloneResultToolbarWidth.value > 0 && standaloneResultToolbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
+const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
+
+function updateStandaloneResultToolbarDimensions() {
+  standaloneResultToolbarWidth.value = standaloneResultToolbarRef.value?.clientWidth ?? 0;
+  standaloneResultToolbarViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
+}
 
 function observeStandaloneResultToolbar() {
   standaloneResultToolbarResizeObserver?.disconnect();
   standaloneResultToolbarResizeObserver = undefined;
   const toolbar = standaloneResultToolbarRef.value;
-  standaloneResultToolbarWidth.value = toolbar?.clientWidth ?? 0;
+  updateStandaloneResultToolbarDimensions();
   if (toolbar && typeof ResizeObserver !== "undefined") {
-    standaloneResultToolbarResizeObserver = new ResizeObserver(() => {
-      standaloneResultToolbarWidth.value = toolbar.clientWidth;
-    });
+    standaloneResultToolbarResizeObserver = new ResizeObserver(updateStandaloneResultToolbarDimensions);
     standaloneResultToolbarResizeObserver.observe(toolbar);
   }
 }
@@ -560,6 +568,9 @@ onUnmounted(() => {
   stopQueryRunningElapsedTimer();
   standaloneResultToolbarResizeObserver?.disconnect();
   window.removeEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+  window.removeEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.visualViewport?.removeEventListener("resize", updateStandaloneResultToolbarDimensions);
+  window.removeEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
 });
 
 watch(
@@ -1470,7 +1481,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                     @export-archive="exportResultArchive"
                   />
                 </template>
-                <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
+                <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
                   <QueryErrorActions :error-message="String(errorMessage)" :connection-id="activeTab.connectionId" @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')" @fix-with-ai="(message) => emit('fixWithAi', message)" />
                 </template>
               </DataGrid>
@@ -1767,7 +1778,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
         >
-          <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
+          <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
             <QueryErrorActions :error-message="String(errorMessage)" :connection-id="activeTab.connectionId" @change-query-timeout="activeTab.connectionId && emit('openConnectionSettings', activeTab.connectionId, 'advanced')" @fix-with-ai="(message) => emit('fixWithAi', message)" />
           </template>
         </DataGrid>
@@ -1832,7 +1843,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <!-- Document mode: MongoDB collections and Elasticsearch indices -->
     <template v-else-if="activeTab.mode === 'mongo'">
       <div class="flex-1 min-h-0">
-        <DocumentBrowser ref="documentBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" />
+        <DocumentBrowser ref="documentBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" :table-meta="activeTab.tableMeta" />
       </div>
     </template>
 

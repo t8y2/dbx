@@ -10,6 +10,19 @@ describe("sqlInListPaste", () => {
     });
   });
 
+  it("uses the configured SQL keyword case", () => {
+    expect(buildSqlInConditionFromPasteSource("A\nB", "lower")).toEqual({
+      ok: true,
+      sql: "in ('A', 'B')",
+      valueCount: 2,
+    });
+    expect(buildSqlInConditionFromPasteSource("A\nB", "upper")).toEqual({
+      ok: true,
+      sql: "IN ('A', 'B')",
+      valueCount: 2,
+    });
+  });
+
   it("splits comma, tab, and newline separated clipboard content", () => {
     expect(buildSqlInConditionFromPasteSource("A\tB\nC,D")).toEqual({
       ok: true,

@@ -16,6 +16,7 @@ import {
   Copy,
   Database,
   FileCode,
+  FileDown,
   FlaskConical,
   GitBranch,
   HelpCircle,
@@ -54,8 +55,9 @@ import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.v
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
-import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
+import { buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
 import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
@@ -74,9 +76,10 @@ import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConver
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
-import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
+import { fetchNamespaceOptionsForConnection, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
 import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
@@ -86,6 +89,8 @@ import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/
 import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
+import { saveTextFile } from "@/lib/export/saveTextFile";
+import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -121,12 +126,16 @@ type AiMessageMention =
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Connection that produced this assistant response; ephemeral export metadata. */
+  sourceConnectionName?: string;
   mentions?: AiMessageMention[];
   reasoning?: string;
   isThinking?: boolean;
   agentSteps?: AiAgentStepItem[];
   /** Hidden system-generated context summary; not rendered in chat UI but included in LLM history. */
   kind?: "contextSummary";
+  /** Per-message token stats from the last agent run; ephemeral, not persisted. */
+  tokens?: { input: number; output: number };
 }
 
 const props = defineProps<{
@@ -229,7 +238,6 @@ const userPausedAutoScroll = ref(false);
 const showScrollToBottom = ref(false);
 const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
-const agentTokens = ref<{ input: number; output: number } | null>(null);
 const promptHistory = ref<string[]>([]);
 const historyIndex = ref(-1);
 const draftBeforeHistory = ref("");
@@ -339,7 +347,9 @@ const activeFullConfig = computed(() => {
 });
 
 function getModelsForConfig(configId: string) {
-  return modelCatalogs.get(configId)?.models ?? [];
+  const config = settings.aiConfigs.find((item) => item.id === configId);
+  if (!config) return [];
+  return aiModelOptions(config, modelCatalogs.get(configId)?.models ?? []);
 }
 
 function configMatchesModelQuery(config: AiConfigItem, query: string): boolean {
@@ -414,12 +424,21 @@ function startManualModel(configId: string) {
   nextTick(() => document.querySelector<HTMLInputElement>("[data-manual-model-input]")?.focus());
 }
 
-function applyManualModel(configId: string) {
+async function applyManualModel(configId: string) {
   const modelId = manualModelId.value.trim();
   if (!modelId) return;
-  handleModelSelect(configId, modelId);
-  manualModelConfigId.value = "";
-  manualModelId.value = "";
+  const config = settings.aiConfigs.find((item) => item.id === configId);
+  if (!config) return;
+  try {
+    if (config.model.trim() !== modelId) {
+      await settings.updateAiConfigItem(configId, { models: addConfiguredAiModel(config.models, modelId) });
+    }
+    handleModelSelect(configId, modelId);
+    manualModelConfigId.value = "";
+    manualModelId.value = "";
+  } catch (error) {
+    toast(translateBackendError(t, error));
+  }
 }
 
 const activeEffortEntry = computed(() => {
@@ -644,8 +663,7 @@ watch(
 function selectAction(action: AiAction) {
   activeAction.value = action;
   if (action === "fix" && props.tab?.result) {
-    const cols = props.tab.result.columns;
-    if (cols.includes("Error")) {
+    if (isQueryExecutionErrorResult(props.tab.result)) {
       const errVal = props.tab.result.rows[0]?.[0];
       if (errVal != null) prompt.value = String(errVal);
     }
@@ -724,6 +742,7 @@ let confirmedWriteSqlText: string | undefined = undefined;
  *  to prevent a database change between confirmation and execution. */
 let confirmedConnectionId: string | undefined = undefined;
 let confirmedDatabase: string | undefined = undefined;
+let confirmedSchema: string | undefined = undefined;
 
 /** Clear all pending write-confirmation state. Call on every early-return
  *  and failure path so a stale grant cannot leak into a subsequent send(). */
@@ -732,9 +751,13 @@ function clearPendingWriteGrant() {
   confirmedWriteSqlText = undefined;
   confirmedConnectionId = undefined;
   confirmedDatabase = undefined;
+  confirmedSchema = undefined;
 }
 
-const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
+const productionContext = computed(() => {
+  const target = props.connection && props.tab ? resolveAiDatabaseTarget(props.tab, props.connection) : undefined;
+  return productionContextForDatabase(props.connection, target?.database);
+});
 
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
@@ -756,7 +779,11 @@ function sendProposalReply(positive: boolean) {
     if (confirmedWriteSqlText) {
       allowWriteSqlForNextRun = true;
       confirmedConnectionId = props.connection?.id;
-      confirmedDatabase = props.tab?.database || "";
+      if (props.tab && props.connection) {
+        const target = resolveAiDatabaseTarget(props.tab, props.connection);
+        confirmedDatabase = target.database;
+        confirmedSchema = target.schema;
+      }
     }
     // When no SQL code block is found in the proposal, treat the
     // confirmation as rejected — we cannot bind the agent to a
@@ -798,11 +825,17 @@ function selectModeActionItem(action: AiAction) {
   modeActionOpen.value = false;
 }
 
-const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
+const { databaseOptions, loadDatabaseOptions } = useDatabaseOptions();
+
+// Dameng presents schemas as its top-level namespace, unlike the other
+// connection types that rely on the shared database-options loader.
+const aiDatabaseOptions = ref<Record<string, string[]>>({});
 
 const dbOptions = computed(() => {
-  if (!props.connection) return [];
-  return allDbOptions.value[props.connection.id] || [];
+  const connection = props.connection;
+  if (!connection) return [];
+  if (connection.db_type === "dameng") return aiDatabaseOptions.value[connection.id] || [];
+  return databaseOptions.value[connection.id] || [];
 });
 
 const dbSelectOptions = computed(() => {
@@ -818,20 +851,29 @@ const dbSelectOptions = computed(() => {
   }));
 });
 
-const selectedDatabaseSelectValue = computed(() => (props.connection ? encodeSelectableDatabaseValue(props.connection.db_type, props.tab?.database || "") : ""));
+const selectedNamespace = computed(() => (props.connection && props.tab ? resolveAiNamespaceSelection(props.tab, props.connection).value : ""));
+
+const selectedDatabaseSelectValue = computed(() => (props.connection ? encodeSelectableDatabaseValue(props.connection.db_type, selectedNamespace.value) : ""));
 
 const selectedDatabaseLabel = computed(() => {
   if (!props.connection) return t("editor.selectDatabase");
   if (!props.tab) return t("editor.selectDatabase");
-  return formatDatabaseLabel(props.connection, props.tab.database || "", {
+  return formatDatabaseLabel(props.connection, selectedNamespace.value, {
     defaultDatabase: t("editor.defaultDatabase"),
     noDatabase: t("editor.noDatabase"),
   });
 });
 
-async function loadDatabases() {
-  if (!props.connection) return;
-  await loadDatabaseOptions(props.connection.id);
+async function loadDatabases(connection = props.connection): Promise<string[]> {
+  if (!connection) return [];
+  if (connection.db_type !== "dameng") {
+    await loadDatabaseOptions(connection.id);
+    return databaseOptions.value[connection.id] || [];
+  }
+  await connectionStore.ensureConnected(connection.id);
+  const options = await fetchNamespaceOptionsForConnection(connection.id, connection);
+  aiDatabaseOptions.value[connection.id] = options;
+  return options;
 }
 
 async function changeConnection(connectionId: string) {
@@ -839,16 +881,16 @@ async function changeConnection(connectionId: string) {
   if (!conn) return;
   connectionStore.activeConnectionId = connectionId;
   const tab = props.tab;
+  const tabId = tab ? tab.id : queryStore.createTab(connectionId, resolveDefaultDatabase(conn, []));
   if (tab) {
     queryStore.updateConnection(tab.id, connectionId, resolveDefaultDatabase(conn, []));
-  } else {
-    queryStore.createTab(connectionId, resolveDefaultDatabase(conn, []));
   }
   try {
-    await loadDatabaseOptions(connectionId);
-    const database = resolveDefaultDatabase(conn, allDbOptions.value[connectionId] || []);
-    if (tab) {
-      queryStore.updateDatabase(tab.id, database);
+    const options = await loadDatabases(conn);
+    if (conn.db_type === "dameng") {
+      queryStore.updateSchema(tabId, resolveDefaultAiSchema(conn, options));
+    } else {
+      queryStore.updateDatabase(tabId, resolveDefaultDatabase(conn, options));
     }
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
@@ -856,11 +898,16 @@ async function changeConnection(connectionId: string) {
   }
 }
 
-function changeDatabase(value: string) {
+function changeNamespace(value: string) {
   const tab = props.tab;
   const connection = props.connection;
   if (!tab || !connection) return;
-  queryStore.updateDatabase(tab.id, decodeSelectableDatabaseValue(connection.db_type, value));
+  const namespace = decodeSelectableDatabaseValue(connection.db_type, value);
+  if (resolveAiNamespaceSelection(tab, connection).kind === "schema") {
+    queryStore.updateSchema(tab.id, namespace || undefined);
+  } else {
+    queryStore.updateDatabase(tab.id, namespace);
+  }
 }
 
 function flushAssistantDeltas() {
@@ -1711,7 +1758,9 @@ async function send() {
         if (msg.role === "assistant" && msg.content) {
           confirmedWriteSqlText = extractSingleSqlCodeBlock(msg.content);
           confirmedConnectionId = connection.id;
-          confirmedDatabase = tab.database || "";
+          const target = resolveAiDatabaseTarget(tab, connection);
+          confirmedDatabase = target.database;
+          confirmedSchema = target.schema;
           break;
         }
         if (msg.role === "user") break;
@@ -1721,11 +1770,12 @@ async function send() {
       }
     }
   }
-  // Verify the connection/database haven't changed since the user confirmed
-  // the write operation. If the user switched connections or databases between
+  // Verify the connection/database/schema haven't changed since the user confirmed
+  // the write operation. If the user switched connections or namespaces between
   // confirmation and execution, the grant is void.
   if (allowWriteSqlForNextRun && confirmedWriteSqlText) {
-    if (confirmedConnectionId !== connection.id || confirmedDatabase !== (tab.database || "")) {
+    const target = resolveAiDatabaseTarget(tab, connection);
+    if (confirmedConnectionId !== connection.id || confirmedDatabase !== target.database || confirmedSchema !== target.schema) {
       allowWriteSqlForNextRun = false;
       confirmedWriteSqlText = undefined;
     }
@@ -1737,16 +1787,17 @@ async function send() {
   // state, so the values survive to be passed through to the backend.
   const confirmedTargetConnId = allowWriteSql ? confirmedConnectionId : undefined;
   const confirmedTargetDb = allowWriteSql ? confirmedDatabase : undefined;
+  const confirmedTargetSchema = allowWriteSql ? confirmedSchema : undefined;
   allowWriteSqlForNextRun = false;
   confirmedWriteSqlText = undefined;
   confirmedConnectionId = undefined;
   confirmedDatabase = undefined;
-  messages.value.push({ role: "assistant", content: "" });
+  confirmedSchema = undefined;
+  messages.value.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
   currentSessionId.value = sessionId;
   const agentEvents: AgentEvent[] = [];
-  agentTokens.value = null;
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
     const context = await buildAiContext(tab, connection, {
@@ -1765,6 +1816,7 @@ async function send() {
         confirmedWriteSql,
         confirmedConnectionId: confirmedTargetConnId,
         confirmedDatabase: confirmedTargetDb,
+        confirmedSchema: confirmedTargetSchema,
       },
       history,
       (event: AgentEvent) => {
@@ -1777,7 +1829,8 @@ async function send() {
         }
         if (event.type === "agent_end") {
           if (event.input_tokens || event.output_tokens) {
-            agentTokens.value = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
+            const msg = messages.value[assistantIdx];
+            if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
           }
         }
         if (event.type === "context_compacted") {
@@ -1899,6 +1952,24 @@ async function copyCode(code: string, key: string) {
   }
 }
 
+async function exportMessageAsMarkdown(msg: ChatMessage) {
+  if (!msg.content) return;
+
+  try {
+    const result = buildAiAnalysisExport({
+      connectionName: msg.sourceConnectionName ?? props.connection?.name,
+      content: msg.content,
+      analysisLabel: t("ai.analysis"),
+      dateLabel: new Date().toLocaleString(),
+    });
+    if (!result) return;
+    await saveTextFile(result.markdown, result.defaultFileName, "Markdown", "md");
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(t("grid.exportFailed", { message }), 5000);
+  }
+}
+
 function clearMessages() {
   messages.value = [];
   conversationId.value = "";
@@ -1940,11 +2011,11 @@ function selectConversation(conv: AiConversation) {
   messages.value = conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
+    sourceConnectionName: m.role === "assistant" ? conv.connectionName : undefined,
     mentions: Array.isArray(m.mentions) ? (m.mentions as AiMessageMention[]) : undefined,
     reasoning: m.reasoning,
     kind: m.kind,
   }));
-  agentTokens.value = null;
   pendingCompaction.value = null;
   showConversationList.value = false;
   scrollToBottom({ force: true });
@@ -2222,8 +2293,9 @@ async function openExternalUrl(url: string) {
               </div>
             </div>
 
-            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
-              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
+            <!-- Keep the metadata row as wide as the reply card so its export action stays right-aligned. -->
+            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex w-full max-w-[95%] min-w-0 flex-col">
+              <div class="w-full rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
                 <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
                   <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
                     <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />
@@ -2310,15 +2382,19 @@ async function openExternalUrl(url: string) {
                   </Button>
                 </div>
               </div>
+              <div v-if="msg.content && !isGenerating" class="mt-1 flex items-center justify-between">
+                <span v-if="msg.tokens" class="text-[10px] text-muted-foreground">&#8593;{{ msg.tokens.input.toLocaleString() }} &#8595;{{ msg.tokens.output.toLocaleString() }} tokens</span>
+                <span v-else />
+                <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.exportMarkdown')" @click="exportMessageAsMarkdown(msg)">
+                  <FileDown class="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
           </template>
 
           <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
             <span>{{ t("ai.thinking") }}</span>
-          </div>
-          <div v-if="agentTokens && !isGenerating" class="flex items-center gap-1 text-[10px] text-muted-foreground px-2 pb-1">
-            <span>&#8593;{{ agentTokens.input.toLocaleString() }} &#8595;{{ agentTokens.output.toLocaleString() }} tokens</span>
           </div>
         </div>
       </ScrollArea>
@@ -2369,7 +2445,7 @@ async function openExternalUrl(url: string) {
                   :model-value="selectedDatabaseSelectValue"
                   @update:model-value="
                     (v) => {
-                      if (typeof v === 'string') changeDatabase(v);
+                      if (typeof v === 'string') changeNamespace(v);
                     }
                   "
                   @update:open="

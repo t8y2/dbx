@@ -101,7 +101,7 @@ describe("Redis expiry mode wiring", () => {
     const currentTtl = findFunction(viewerSource, "currentEditableTtl").getText();
 
     expect(start).toContain("redisExpiryModeForTtl(ttl)");
-    expect(currentTtl).toContain("computeTtlForExpiryEdit(autoRefreshEnabled.value, countdownTtl.value, data.value.ttl)");
+    expect(currentTtl).toContain("computeTtlForExpiryEdit(countdownTtl.value, data.value.ttl)");
     expect(viewerSource).toContain("unixSecondsToCalendarDateTime(Math.ceil(Date.now() / 1_000) + ttl)");
     expect(save).toContain("validateRedisExpiry");
     expect(save).toContain("applyRedisExpiryPolicy");

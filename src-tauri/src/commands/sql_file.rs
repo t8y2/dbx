@@ -206,7 +206,8 @@ mod execution_tests {
 
     #[tokio::test]
     async fn stops_on_first_failure_by_default() {
-        let summary = run_fake_script(vec!["ok 1".into(), "fail 2".into(), "ok 3".into()], false, None).await;
+        let summary: SqlFileSummary =
+            run_fake_script(vec!["ok 1".into(), "fail 2".into(), "ok 3".into()], false, None).await;
 
         assert_eq!(summary.success_count, 1);
         assert_eq!(summary.failure_count, 1);

@@ -56,6 +56,13 @@ struct CachedMqAdmin {
     adapter: Arc<dyn MessageQueueAdmin>,
 }
 
+/// Result of resolving an MQ admin adapter for a connection attempt.
+pub struct MqBuildResult {
+    pub adapter: Arc<dyn MessageQueueAdmin>,
+    /// True when an existing cached adapter was reused (reconnect fast path).
+    pub was_cached: bool,
+}
+
 impl MqAdminRegistry {
     pub fn new() -> Self {
         Self { instances: RwLock::new(HashMap::new()), build_locks: RwLock::new(HashMap::new()) }
@@ -63,7 +70,7 @@ impl MqAdminRegistry {
 
     /// Return the cached adapter for this connection, building it from the
     /// connection's `external_config` if not already present.
-    pub async fn get_or_build(&self, cfg: &ConnectionConfig) -> Result<Arc<dyn MessageQueueAdmin>, String> {
+    pub async fn get_or_build(&self, cfg: &ConnectionConfig) -> Result<MqBuildResult, String> {
         let mqc = MqAdminConfig::from_connection(cfg)?;
         self.get_or_build_config(&cfg.id, mqc, None).await
     }
@@ -73,13 +80,13 @@ impl MqAdminRegistry {
         connection_id: &str,
         mqc: MqAdminConfig,
         agent_launch: Option<AgentLaunchSpec>,
-    ) -> Result<Arc<dyn MessageQueueAdmin>, String> {
+    ) -> Result<MqBuildResult, String> {
         let fingerprint = adapter_fingerprint(&mqc, agent_launch.as_ref());
 
         // Fast path: return the cached adapter.
         if let Some(entry) = self.instances.read().await.get(connection_id) {
             if entry.fingerprint == fingerprint {
-                return Ok(entry.adapter.clone());
+                return Ok(MqBuildResult { adapter: entry.adapter.clone(), was_cached: true });
             }
         }
 
@@ -94,22 +101,35 @@ impl MqAdminRegistry {
         // Another task may have built it while we were waiting for the lock.
         if let Some(entry) = self.instances.read().await.get(connection_id) {
             if entry.fingerprint == fingerprint {
-                return Ok(entry.adapter.clone());
+                return Ok(MqBuildResult { adapter: entry.adapter.clone(), was_cached: true });
             }
         }
+
+        // Config changed — drop the stale adapter so its agent process is released.
+        self.instances.write().await.remove(connection_id);
 
         let adapter = build_adapter(mqc, agent_launch).await?;
         self.instances
             .write()
             .await
             .insert(connection_id.to_string(), CachedMqAdmin { fingerprint, adapter: adapter.clone() });
-        Ok(adapter)
+        Ok(MqBuildResult { adapter, was_cached: false })
     }
 
     /// Drop the cached adapter for a connection (called on disconnect).
     pub async fn drop_connection(&self, connection_id: &str) {
         self.instances.write().await.remove(connection_id);
         self.build_locks.write().await.remove(connection_id);
+    }
+
+    /// Whether an adapter is currently cached for this connection id.
+    pub async fn has_cached_connection(&self, connection_id: &str) -> bool {
+        self.instances.read().await.contains_key(connection_id)
+    }
+
+    /// Connection ids currently holding a cached MQ adapter (for cleanup assertions).
+    pub async fn cached_connection_ids(&self) -> Vec<String> {
+        self.instances.read().await.keys().cloned().collect()
     }
 
     /// Build a fresh adapter without caching it — used for connection tests
@@ -126,6 +146,15 @@ impl MqAdminRegistry {
     ) -> Result<Arc<dyn MessageQueueAdmin>, String> {
         build_adapter(mqc, agent_launch).await
     }
+}
+
+/// Validate connectivity after resolving an MQ adapter. Skips an immediate probe when
+/// the adapter was just built and its connect path already verified the cluster.
+pub async fn validate_mq_adapter_after_build(build: &MqBuildResult) -> Result<(), String> {
+    if build.was_cached || !build.adapter.build_includes_connect_test() {
+        build.adapter.test_connection().await?;
+    }
+    Ok(())
 }
 
 fn adapter_fingerprint(mqc: &MqAdminConfig, agent_launch: Option<&AgentLaunchSpec>) -> u64 {

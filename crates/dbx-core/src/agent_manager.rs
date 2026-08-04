@@ -276,6 +276,41 @@ mod tests {
     }
 
     #[test]
+    fn resolves_relative_native_agent_launch_with_absolute_paths() {
+        let base_dir =
+            PathBuf::from("target").join(format!("dbx-agent-manager-relative-native-{}", uuid::Uuid::new_v4()));
+        let manager = AgentManager::new_with_base_dir(base_dir.clone());
+        let native = manager.driver_native_path("oracle");
+        touch(&native);
+        let expected_program = native.canonicalize().unwrap();
+        let expected_working_dir = manager.driver_dir("oracle").canonicalize().unwrap();
+
+        let launch = manager
+            .resolve_agent_launch_spec(&AgentState::default(), "oracle", DEFAULT_JRE_KEY)
+            .expect("relative native launch should resolve");
+
+        assert!(launch.program.is_absolute());
+        assert_eq!(launch.program, expected_program);
+        assert_eq!(launch.args, Vec::<String>::new());
+        assert_eq!(launch.working_dir.as_deref(), Some(expected_working_dir.as_path()));
+
+        fs::remove_dir_all(base_dir).unwrap();
+    }
+
+    #[test]
+    fn relative_native_agent_launch_keeps_missing_driver_error() {
+        let base_dir =
+            PathBuf::from("target").join(format!("dbx-agent-manager-relative-missing-{}", uuid::Uuid::new_v4()));
+        let manager = AgentManager::new_with_base_dir(base_dir);
+
+        let error = manager
+            .resolve_agent_launch_spec(&AgentState::default(), "oracle", DEFAULT_JRE_KEY)
+            .expect_err("missing native agent should fail");
+
+        assert_eq!(error, "oracle driver is not installed. Please install it from the Driver Manager.");
+    }
+
+    #[test]
     fn resolves_manifest_agent_launch_with_driver_dir_templates() {
         let manager = test_manager("manifest-agent");
         let driver_dir = manager.driver_dir("dameng-go");
@@ -344,6 +379,8 @@ pub struct DriverInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactInfo {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ArtifactFormat>,
@@ -689,6 +726,17 @@ impl AgentManager {
 
         let native_path = self.driver_native_path(driver_key);
         if native_path.exists() {
+            let (native_path, driver_dir) = if native_path.is_relative() || driver_dir.is_relative() {
+                let native_path = native_path
+                    .canonicalize()
+                    .map_err(|e| format!("Failed to resolve {driver_key} native agent executable path: {e}"))?;
+                let driver_dir = driver_dir
+                    .canonicalize()
+                    .map_err(|e| format!("Failed to resolve {driver_key} native agent working directory: {e}"))?;
+                (native_path, driver_dir)
+            } else {
+                (native_path, driver_dir)
+            };
             return Ok(AgentLaunchSpec::new(native_path).with_working_dir(driver_dir));
         }
 
@@ -894,7 +942,7 @@ impl AgentManager {
         agent_session_id: String,
         connect_params: serde_json::Value,
         connect_timeout: std::time::Duration,
-    ) -> Result<AgentDriverClient, String> {
+    ) -> Result<AgentDriverClient, crate::agent_runtime::SharedConnectionOpenError> {
         crate::agent_runtime::spawn_shared_connection_client(
             self,
             db_type,

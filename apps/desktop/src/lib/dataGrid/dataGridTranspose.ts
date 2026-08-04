@@ -11,6 +11,8 @@ export interface BuildTransposeRowsOptions<T> {
   columns: string[];
   records: T[][];
   typeByColumn?: Map<string, string>;
+  types?: readonly (string | undefined)[];
+  comments?: readonly (string | undefined)[];
   displayValue: (value: T, column: string, columnIndex: number, recordIndex: number) => string;
 }
 
@@ -29,6 +31,7 @@ export interface DataGridTransposeRow<T> {
   id: string;
   column: string;
   type: string;
+  comment?: string;
   values: Array<DataGridTransposeCell<T>>;
 }
 
@@ -36,6 +39,7 @@ export interface DataGridVisibleTransposeRow<T> {
   id: string;
   column: string;
   type: string;
+  comment?: string;
   values: Array<DataGridVisibleTransposeCell<T>>;
 }
 
@@ -50,6 +54,7 @@ export interface TransposeRecordWindowOptions {
   viewportWidth: number;
   pinnedWidth: number;
   recordWidth: number;
+  recordOffsets?: readonly number[];
   overscan?: number;
 }
 
@@ -159,6 +164,8 @@ export interface TransposeScrollLeftOptions {
   viewportWidth: number;
   pinnedWidth: number;
   recordWidth: number;
+  recordOffsets?: readonly number[];
+  currentScrollLeft?: number;
 }
 
 export interface TransposeRecordIndexesForModeOptions {
@@ -182,8 +189,17 @@ export function nextTransposeState(showTranspose: boolean, transposeRowIndex: nu
   return { showTranspose: true, transposeRowIndex: requestedRowIndex };
 }
 
-export function restoreDataGridAfterTranspose(options: { scroller: Pick<HTMLElement, "scrollLeft" | "scrollWidth" | "clientWidth"> | null; scrollLeftBeforeTranspose: number; attachCanvasResizeObserver: () => void; refreshGridScrollerMetrics: () => void }) {
+export function restoreDataGridAfterTranspose(options: {
+  scroller: Pick<HTMLElement, "scrollTop" | "scrollLeft" | "scrollHeight" | "scrollWidth" | "clientHeight" | "clientWidth"> | null;
+  scrollLeftBeforeTranspose: number;
+  scrollTopBeforeTranspose?: number;
+  attachCanvasResizeObserver: () => void;
+  refreshGridScrollerMetrics: () => void;
+}) {
   if (!options.scroller) return;
+  if (options.scrollTopBeforeTranspose !== undefined) {
+    options.scroller.scrollTop = Math.max(0, Math.min(Math.max(0, options.scroller.scrollHeight - options.scroller.clientHeight), options.scrollTopBeforeTranspose));
+  }
   options.scroller.scrollLeft = restoredDataGridScrollLeft(options.scrollLeftBeforeTranspose, options.scroller.scrollWidth, options.scroller.clientWidth);
   options.attachCanvasResizeObserver();
   options.refreshGridScrollerMetrics();
@@ -225,7 +241,8 @@ export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Ar
     return {
       id: `${columnIndex}:${column}`,
       column,
-      type: options.typeByColumn?.get(column) || "",
+      type: options.types?.[columnIndex] || options.typeByColumn?.get(column) || "",
+      ...(options.comments ? { comment: options.comments[columnIndex] || "" } : {}),
       values: options.records.map((record, recordIndex) => {
         const value = record[columnIndex] as T;
         return {
@@ -243,7 +260,8 @@ export function buildVisibleTransposeRows<T>(options: BuildVisibleTransposeRowsO
     return {
       id: `${columnIndex}:${column}`,
       column,
-      type: options.typeByColumn?.get(column) || "",
+      type: options.types?.[columnIndex] || options.typeByColumn?.get(column) || "",
+      ...(options.comments ? { comment: options.comments[columnIndex] || "" } : {}),
       values: options.recordIndexes.flatMap((recordIndex) => {
         const record = options.records[recordIndex];
         if (!record) return [];
@@ -269,8 +287,25 @@ export function visibleTransposeRecordWindow(options: TransposeRecordWindowOptio
   }
 
   const overscan = options.overscan ?? 2;
-  const recordScrollLeft = Math.max(0, options.scrollLeft - options.pinnedWidth);
+  const recordScrollLeft = Math.max(0, options.scrollLeft);
   const recordViewportWidth = Math.max(0, options.viewportWidth - options.pinnedWidth);
+  if (options.recordOffsets?.length === options.totalRecords + 1) {
+    const offsets = options.recordOffsets;
+    const firstVisible = Math.max(
+      0,
+      offsets.findIndex((_offset, index) => index < options.totalRecords && offsets[index + 1] > recordScrollLeft),
+    );
+    const firstAfterViewport = offsets.findIndex((offset, index) => index > firstVisible && offset >= recordScrollLeft + recordViewportWidth);
+    const start = Math.max(0, firstVisible - overscan);
+    const end = Math.min(options.totalRecords, (firstAfterViewport < 0 ? options.totalRecords : firstAfterViewport) + overscan);
+    const totalWidth = offsets[options.totalRecords];
+    return {
+      start,
+      end,
+      beforeWidth: offsets[start],
+      afterWidth: Math.max(0, totalWidth - offsets[end]),
+    };
+  }
   const start = Math.max(0, Math.floor(recordScrollLeft / options.recordWidth) - overscan);
   const end = Math.min(options.totalRecords, Math.ceil((recordScrollLeft + recordViewportWidth) / options.recordWidth) + overscan + 1);
 
@@ -290,18 +325,7 @@ export function transposeRecordIndexesForMode(options: TransposeRecordIndexesFor
 }
 
 export function transposeAnchorRowIndex(options: TransposeAnchorOptions): number {
-  const requestedRowId = options.rowIds[options.requestedRowIndex];
-  if (requestedRowId !== undefined && options.selectedRowIds.size > 1 && options.selectedRowIds.has(requestedRowId)) {
-    const firstSelectedIndex = options.rowIds.findIndex((rowId) => options.selectedRowIds.has(rowId));
-    if (firstSelectedIndex >= 0) return firstSelectedIndex;
-  }
-
-  const range = options.selectedRange;
-  if (range && range.startRow !== range.endRow && options.requestedRowIndex >= range.startRow && options.requestedRowIndex <= range.endRow) {
-    return range.startRow;
-  }
-
-  return options.requestedRowIndex;
+  return Math.max(0, Math.min(options.rowIds.length - 1, options.requestedRowIndex));
 }
 
 export function transposeFieldWidth(columns: string[], options: TransposeFieldWidthOptions = {}): number {
@@ -317,8 +341,15 @@ export function transposeFieldWidth(columns: string[], options: TransposeFieldWi
 
 export function transposeScrollLeftForRecord(options: TransposeScrollLeftOptions): number {
   if (options.recordWidth <= 0 || options.totalRecords <= 0) return 0;
-  const desired = Math.max(0, options.recordIndex) * options.recordWidth;
-  const totalWidth = options.pinnedWidth + options.totalRecords * options.recordWidth;
+  const recordIndex = Math.max(0, Math.min(options.totalRecords - 1, options.recordIndex));
+  const offsets = options.recordOffsets?.length === options.totalRecords + 1 ? options.recordOffsets : undefined;
+  const recordStart = offsets ? offsets[recordIndex] : recordIndex * options.recordWidth;
+  const recordEnd = offsets ? offsets[recordIndex + 1] : recordStart + options.recordWidth;
+  const recordsWidth = offsets ? offsets[options.totalRecords] : options.totalRecords * options.recordWidth;
+  const recordViewportWidth = Math.max(0, options.viewportWidth - options.pinnedWidth);
+  const currentScrollLeft = Math.max(0, options.currentScrollLeft ?? recordStart);
+  const desired = recordStart < currentScrollLeft ? recordStart : recordEnd > currentScrollLeft + recordViewportWidth ? recordEnd - recordViewportWidth : currentScrollLeft;
+  const totalWidth = options.pinnedWidth + recordsWidth;
   const maxScrollLeft = Math.max(0, totalWidth - options.viewportWidth);
-  return Math.min(desired, maxScrollLeft);
+  return Math.max(0, Math.min(desired, maxScrollLeft));
 }

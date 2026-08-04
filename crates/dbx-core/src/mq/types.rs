@@ -496,13 +496,45 @@ pub struct PeekedMessage {
     pub payload_text: Option<String>,
 }
 
-/// Optional hints for reading messages. Pulsar ignores these today; Kafka uses
-/// them to optionally narrow a non-committing peek to one partition / offset.
-/// When omitted, Kafka peeks across all partitions from each partition's earliest
-/// readable offset (still capped by `count`).
+/// A message browse response. `incomplete` is set when the adapter could only
+/// return a partial snapshot before its configured deadline or scan limit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeekMessagesResult {
+    #[serde(default)]
+    pub messages: Vec<PeekedMessage>,
+    #[serde(default)]
+    pub incomplete: bool,
+}
+
+impl PeekMessagesResult {
+    pub fn complete(messages: Vec<PeekedMessage>) -> Self {
+        Self { messages, incomplete: false }
+    }
+}
+
+/// Kafka's explicit starting position for a non-committing message peek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeekStartPosition {
+    Latest,
+    Earliest,
+    Offset,
+}
+
+/// Optional hints for reading messages. Non-Kafka adapters ignore
+/// `start_position` and retain their existing partition/offset handling.
+/// For Kafka, an omitted position keeps legacy behavior: it starts at the
+/// earliest available message unless an older caller supplies `offset`.
+/// `start_position: Offset` requires a non-negative offset. When no partition
+/// is supplied, Kafka reads forward from that offset in every topic partition.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {
+    /// Kafka's explicit read starting point. This remains optional so callers
+    /// that predate it retain their original earliest/offset behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_position: Option<PeekStartPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1190,5 +1222,32 @@ mod tests {
         assert!(!caps.supports_policies);
         assert!(!caps.supports_cluster_monitoring);
         assert!(caps.supports_tenants);
+    }
+
+    #[test]
+    fn peek_options_omit_optional_fields_and_serialize_start_position() {
+        let legacy: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"partition":2}"#).expect("legacy peek options");
+        assert_eq!(legacy.start_position, None);
+        assert_eq!(legacy.partition, Some(2));
+        assert_eq!(legacy.offset, None);
+
+        let latest: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"startPosition":"latest"}"#).expect("latest peek options");
+        assert_eq!(latest.start_position, Some(super::PeekStartPosition::Latest));
+        let json = serde_json::to_value(latest).expect("serialize latest peek options");
+        assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("latest"));
+    }
+
+    #[test]
+    fn peek_result_serializes_completion_status_and_accepts_legacy_responses() {
+        let complete = super::PeekMessagesResult::complete(Vec::new());
+        let json = serde_json::to_value(&complete).expect("serialize complete peek result");
+        assert_eq!(json, serde_json::json!({ "messages": [], "incomplete": false }));
+
+        let legacy: super::PeekMessagesResult =
+            serde_json::from_value(serde_json::json!({ "messages": [] })).expect("deserialize legacy peek result");
+        assert!(!legacy.incomplete);
+        assert!(legacy.messages.is_empty());
     }
 }

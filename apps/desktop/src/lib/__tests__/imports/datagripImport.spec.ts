@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { SidebarLayout, SidebarOrderEntry } from "@/types/database";
-import { parseDataGripConnections, parseDataGripImport, type DataGripImportPayload } from "@/lib/imports/datagripImport";
+import { matchDataGripImportFiles, parseDataGripConnections, parseDataGripImport, type DataGripImportPayload } from "@/lib/imports/datagripImport";
 
 function payload(dataSources: string, dataSourcesLocal?: string, dbForestConfig?: string): DataGripImportPayload {
   return { format: "datagrip-import", dataSources, dataSourcesLocal, dbForestConfig };
@@ -63,6 +63,59 @@ describe("DataGrip connection import", () => {
       database: "test",
       username: "SYSTEM",
     });
+  });
+
+  it("imports Kingbase data sources configured by URL without a driver-ref", () => {
+    // DataGrip has no built-in Kingbase driver, so every Kingbase connection is
+    // a custom driver. Real exports use <configured-by-url>true</configured-by-url>
+    // with NO <driver-ref> element — the driver identity lives only in
+    // <jdbc-driver> + <jdbc-url>. Such connections must still import.
+    const connections = parseDataGripConnections(
+      payload(`
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="Kingbase Dev" uuid="kingbase-url">
+              <configured-by-url>true</configured-by-url>
+              <jdbc-driver>com.kingbase8.Driver</jdbc-driver>
+              <jdbc-url>jdbc:kingbase8://192.0.2.1:54321/app</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+      `),
+    );
+
+    expect(connections).toHaveLength(1);
+    expect(connections[0]).toMatchObject({
+      name: "Kingbase Dev",
+      db_type: "kingbase",
+      driver_profile: "kingbase",
+      driver_label: "KingbaseES",
+      host: "192.0.2.1",
+      port: 54321,
+      database: "app",
+      username: "SYSTEM",
+    });
+  });
+
+  it("drops unknown custom drivers configured by URL", () => {
+    // No <driver-ref> + an unrecognised driver class/subprotocol must NOT leak
+    // in as a generic JDBC connection. It stays dropped. This guards the
+    // mergeFragments "" sentinel contract (see parseDataGripImport guard).
+    const connections = parseDataGripConnections(
+      payload(`
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="Mystery DB" uuid="mystery-1">
+              <configured-by-url>true</configured-by-url>
+              <jdbc-driver>com.example.mystery.Driver</jdbc-driver>
+              <jdbc-url>jdbc:mystery://10.0.0.1:9999/db</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+      `),
+    );
+
+    expect(connections).toHaveLength(0);
   });
 
   it("preserves DataGrip connection groups as sidebar groups", () => {
@@ -136,6 +189,34 @@ describe("DataGrip connection import", () => {
     expect(layoutLabels(result.layout!, names)).toEqual([{ group: "Legacy Group", children: ["Legacy"] }]);
   });
 
+  it("preserves the modern DataGrip group attribute", () => {
+    // Real DataGrip exports use a `group` attribute on <data-source> (not the
+    // legacy `group-name`). Connections sharing a group land under one folder.
+    const result = parseDataGripImport(
+      payload(`
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="Prod" uuid="mysql-prod" group="production">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://prod.example.com:3306/app</jdbc-url>
+            </data-source>
+            <data-source name="Dev" uuid="mysql-dev" group="development">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://dev.example.com:3306/app</jdbc-url>
+            </data-source>
+            <data-source name="Lonely" uuid="mysql-solo">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://localhost:3306/app</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+      `),
+    );
+
+    const names = new Map(result.connections.map((connection) => [connection.id, connection.name]));
+    expect(layoutLabels(result.layout!, names)).toEqual([{ group: "production", children: ["Prod"] }, { group: "development", children: ["Dev"] }, "Lonely"]);
+  });
+
   it("keeps the connection-only API and empty layout behavior", () => {
     const importPayload = payload(`
       <project>
@@ -150,5 +231,47 @@ describe("DataGrip connection import", () => {
 
     expect(parseDataGripConnections(importPayload)).toHaveLength(1);
     expect(parseDataGripImport(importPayload).layout).toBeUndefined();
+  });
+});
+
+describe("matchDataGripImportFiles", () => {
+  it("picks the three DataGrip config files by name regardless of order", () => {
+    const paths = ["C:/proj/.idea/db-forest-config.xml", "C:/proj/.idea/dataSources.local.xml", "C:/proj/.idea/dataSources.xml"];
+    expect(matchDataGripImportFiles(paths)).toEqual({
+      dataSources: "C:/proj/.idea/dataSources.xml",
+      local: "C:/proj/.idea/dataSources.local.xml",
+      forest: "C:/proj/.idea/db-forest-config.xml",
+    });
+  });
+
+  it("allows missing optional local and forest files", () => {
+    expect(matchDataGripImportFiles(["C:/proj/.idea/dataSources.xml"])).toEqual({
+      dataSources: "C:/proj/.idea/dataSources.xml",
+      local: undefined,
+      forest: undefined,
+    });
+  });
+
+  it("throws a coded error when dataSources.xml is not among the selected files", () => {
+    let caught: unknown;
+    try {
+      matchDataGripImportFiles(["C:/proj/other.xml", "C:/proj/dataSources.local.xml"]);
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as Error).message).toMatch(/dataSources\.xml/i);
+    expect((caught as Error & { code?: string }).code).toBe("DATAGRIP_IMPORT_MISSING_DATASOURCES");
+  });
+
+  it("matches file names case-insensitively", () => {
+    const result = matchDataGripImportFiles(["C:/proj/.idea/DataSources.XML", "C:/proj/.idea/datasources.local.xml"]);
+    expect(result.dataSources).toBe("C:/proj/.idea/DataSources.XML");
+    expect(result.local).toBe("C:/proj/.idea/datasources.local.xml");
+  });
+
+  it("handles Windows backslash paths", () => {
+    const result = matchDataGripImportFiles(["C:\\proj\\.idea\\dataSources.xml", "C:\\proj\\.idea\\dataSources.local.xml"]);
+    expect(result.dataSources).toBe("C:\\proj\\.idea\\dataSources.xml");
+    expect(result.local).toBe("C:\\proj\\.idea\\dataSources.local.xml");
   });
 });

@@ -16,5 +16,13 @@ describe("cross-database table paste", () => {
   it("retains the local duplicate-table paste path", () => {
     expect(runtimeSource).toContain("if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();");
     expect(runtimeSource).toContain("pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());");
+    expect(runtimeSource).toContain('normalizeNewTargetName: mode === "structure-and-data"');
+  });
+
+  it("carries table comments through the local sidebar paste path", () => {
+    expect(runtimeSource).toMatch(/tableName: node\.label,\s*tableComment: node\.comment/);
+    expect(runtimeSource).toMatch(/targetName: `\$\{entry\.tableName\}_copy`,[\s\S]*?tableComment: entry\.tableComment/);
+    expect(runtimeSource).toMatch(/targetName,\s*tableComment: entry\.tableComment/);
+    expect(runtimeSource).toContain("executeAsScript: duplicateTableStructureRequiresScript(structureSql)");
   });
 });

@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	go_ora "github.com/sijms/go-ora/v2"
+	"github.com/sijms/go-ora/v2/configurations"
 )
 
 func TestHandshakeResponse(t *testing.T) {
@@ -272,6 +275,112 @@ func TestNormalizeValueKeepsOracleZonedDateTimeOffsets(t *testing.T) {
 	}
 }
 
+func TestExecuteOracleSelectRetriesXMLTypeDecodeFailures(t *testing.T) {
+	originalSQL := `SELECT * FROM (SELECT * FROM "DBX"."TEST_LOBS") WHERE ROWNUM <= 100`
+	rewrittenSQL := `SELECT * FROM (SELECT "ID", XMLSERIALIZE(CONTENT "XML_CONTENT" AS CLOB) AS "XML_CONTENT" FROM "DBX"."TEST_LOBS") WHERE ROWNUM <= 100`
+	calls := []string{}
+
+	result, err := executeOracleSelectWithXMLTypeRetry(
+		originalSQL,
+		func(sqlText string) (queryResult, error) {
+			calls = append(calls, sqlText)
+			if sqlText == originalSQL {
+				return queryResult{}, errors.New("abnormal data representation for date")
+			}
+			return queryResult{Columns: []string{"ID", "XML_CONTENT"}, Rows: [][]any{{"1", "<root/>"}}}, nil
+		},
+		func(sqlText string) (string, error) {
+			if sqlText != originalSQL {
+				t.Fatalf("rewrite input = %q, want original SQL", sqlText)
+			}
+			return rewrittenSQL, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{originalSQL, rewrittenSQL}) {
+		t.Fatalf("execute calls = %#v, want original and rewritten SQL", calls)
+	}
+	if len(result.Rows) != 1 || result.Rows[0][1] != "<root/>" {
+		t.Fatalf("unexpected retry result: %#v", result)
+	}
+}
+
+func TestExecuteOracleSelectDoesNotRewriteSuccessfulQueries(t *testing.T) {
+	calls := 0
+	rewriteCalled := false
+	want := queryResult{Columns: []string{"ID"}, Rows: [][]any{{"1"}}}
+
+	result, err := executeOracleSelectWithXMLTypeRetry(
+		`SELECT ID FROM TEST_TABLE`,
+		func(string) (queryResult, error) {
+			calls++
+			return want, nil
+		},
+		func(sqlText string) (string, error) {
+			rewriteCalled = true
+			return sqlText, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("result = %#v, want %#v", result, want)
+	}
+	if calls != 1 || rewriteCalled {
+		t.Fatalf("successful query should not rewrite: calls=%d rewriteCalled=%t", calls, rewriteCalled)
+	}
+}
+
+func TestExecuteOracleSelectDoesNotRetryOrdinaryErrors(t *testing.T) {
+	calls := 0
+	rewriteCalled := false
+	originalErr := errors.New("ORA-00942: table or view does not exist")
+
+	_, err := executeOracleSelectWithXMLTypeRetry(
+		`SELECT * FROM MISSING_TABLE`,
+		func(string) (queryResult, error) {
+			calls++
+			return queryResult{}, originalErr
+		},
+		func(sqlText string) (string, error) {
+			rewriteCalled = true
+			return sqlText, nil
+		},
+	)
+	if !errors.Is(err, originalErr) {
+		t.Fatalf("error = %v, want original error", err)
+	}
+	if calls != 1 || rewriteCalled {
+		t.Fatalf("ordinary error should not retry: calls=%d rewriteCalled=%t", calls, rewriteCalled)
+	}
+}
+
+func TestExecuteOracleSelectKeepsDecodeErrorWhenNoXMLTypeRewriteApplies(t *testing.T) {
+	calls := 0
+	originalErr := errors.New("TTC error: received code 36 during response reading")
+	sqlText := `SELECT * FROM TEST_DATES`
+
+	_, err := executeOracleSelectWithXMLTypeRetry(
+		sqlText,
+		func(string) (queryResult, error) {
+			calls++
+			return queryResult{}, originalErr
+		},
+		func(input string) (string, error) {
+			return input, nil
+		},
+	)
+	if !errors.Is(err, originalErr) {
+		t.Fatalf("error = %v, want original error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("unchanged SQL should not retry, got %d executions", calls)
+	}
+}
+
 func TestNormalizeDDLObjectType(t *testing.T) {
 	tests := map[string]string{
 		"":                  "",
@@ -285,6 +394,146 @@ func TestNormalizeDDLObjectType(t *testing.T) {
 		if got := normalizeDDLObjectType(input); got != want {
 			t.Fatalf("normalizeDDLObjectType(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestGetTableDDLPreservesQuotedObjectName(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const table = "ZGJ_FlowSealTemplate"
+	const ddl = `CREATE TABLE "ZTZS_ERP2"."ZGJ_FlowSealTemplate" ("FlowId" NUMBER)`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", table, schema},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ddl {
+		t.Fatalf("getTableDDL() = %q, want %q", got, ddl)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableDDLUppercaseObjectDoesNotAddFallbackQuery(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const table = "ORDERS"
+	const ddl = `CREATE TABLE "ZTZS_ERP2"."ORDERS" ("ID" NUMBER)`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", table, schema},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ddl {
+		t.Fatalf("getTableDDL() = %q, want %q", got, ddl)
+	}
+	if scripted.next != 2 {
+		t.Fatalf("uppercase object should use two queries, got %d", scripted.next)
+	}
+}
+
+func TestGetTableDDLFallsBackToUppercaseAfterExactMiss(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const ddl = `CREATE TABLE "ZTZS_ERP2"."ORDERS" ("ID" NUMBER)`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, "orders"},
+			rows:          nil,
+		},
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, "ORDERS"},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", "ORDERS", schema},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, "orders", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ddl {
+		t.Fatalf("getTableDDL() = %q, want %q", got, ddl)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableDDLFallbackPreservesQuotedColumnNames(t *testing.T) {
+	const schema = "ZTZS_ERP2"
+	const table = "ZGJ_FlowSealTemplate"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_OBJECTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"TABLE"}},
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL",
+			args:          []driver.Value{"TABLE", table, schema},
+			err:           errors.New("ORA-31603: object not found"),
+		},
+		{
+			queryContains: "FROM ALL_TAB_COLUMNS",
+			args:          []driver.Value{schema, table},
+			columns: []string{
+				"COLUMN_NAME", "DATA_TYPE", "NULLABLE", "DATA_DEFAULT", "IS_PRIMARY_KEY",
+				"COMMENTS", "DATA_PRECISION", "DATA_SCALE", "CHAR_LENGTH",
+			},
+			rows: [][]driver.Value{{"FlowId", "VARCHAR2", "N", nil, int64(1), nil, nil, nil, int64(50)}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `CREATE TABLE "ZTZS_ERP2"."ZGJ_FlowSealTemplate" (
+  "FlowId" VARCHAR2(50) NOT NULL,
+  PRIMARY KEY ("FlowId")
+)`
+	if got != want {
+		t.Fatalf("getTableDDL() = %q, want %q", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
 	}
 }
 
@@ -647,6 +896,199 @@ func TestBuildDSNAddsSysDbaOption(t *testing.T) {
 	}
 }
 
+func TestParseOracleMajorVersion(t *testing.T) {
+	tests := []struct {
+		version string
+		major   int
+		ok      bool
+	}{
+		{version: "10.2.0.4.0", major: 10, ok: true},
+		{version: "11.2.0.4.0 Production", major: 11, ok: true},
+		{version: "Oracle Database 10g Enterprise Edition Release 10.2.0.4.0 - 64bit Production", major: 10, ok: true},
+		{version: "19.0.0.0.0", major: 19, ok: true},
+		{version: "", ok: false},
+		{version: "Oracle Database 10g", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			major, ok := parseOracleMajorVersion(tt.version)
+			if major != tt.major || ok != tt.ok {
+				t.Fatalf("parseOracleMajorVersion(%q) = (%d, %t), want (%d, %t)", tt.version, major, ok, tt.major, tt.ok)
+			}
+		})
+	}
+}
+
+func TestParseOracleAuthVersionNumber(t *testing.T) {
+	tests := []struct {
+		value string
+		major int
+		ok    bool
+	}{
+		{value: "169870336", major: 10, ok: true},
+		{value: "186647040", major: 11, ok: true},
+		{value: "301989888", major: 18, ok: true},
+		{value: "", ok: false},
+		{value: "not-a-version", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			major, ok := parseOracleAuthVersionNumber(tt.value)
+			if major != tt.major || ok != tt.ok {
+				t.Fatalf("parseOracleAuthVersionNumber(%q) = (%d, %t), want (%d, %t)", tt.value, major, ok, tt.major, tt.ok)
+			}
+		})
+	}
+}
+
+func TestOracleServerMajorVersionUsesDriverSessionProperties(t *testing.T) {
+	major, ok := oracleServerMajorVersionFromDriverConn(&go_ora.Connection{
+		SessionProperties: map[string]string{"AUTH_VERSION_NO": "186647040"},
+	})
+	if !ok || major != 11 {
+		t.Fatalf("oracleServerMajorVersionFromDriverConn() = (%d, %t), want (11, true)", major, ok)
+	}
+	if _, ok := oracleServerMajorVersionFromDriverConn(struct{}{}); ok {
+		t.Fatal("non-Oracle connections should not expose a server version")
+	}
+}
+
+func TestOracleServerMajorVersionUsesProductComponentVersion(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "PRODUCT_COMPONENT_VERSION",
+			args:          []driver.Value{},
+			rows:          [][]driver.Value{{"10.2.0.4.0"}},
+		},
+	})
+
+	major, ok := oracleServerMajorVersion(db, time.Second)
+	if !ok || major != 10 {
+		t.Fatalf("oracleServerMajorVersion() = (%d, %t), want (10, true)", major, ok)
+	}
+	if scripted.next != 1 {
+		t.Fatalf("expected one version query, got %d", scripted.next)
+	}
+}
+
+func TestOracleServerMajorVersionFallsBackToVersionBanner(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "PRODUCT_COMPONENT_VERSION",
+			args:          []driver.Value{},
+			err:           errors.New("view unavailable"),
+		},
+		{
+			queryContains: "V$VERSION",
+			args:          []driver.Value{},
+			rows: [][]driver.Value{{
+				"Oracle Database 11g Enterprise Edition Release 11.2.0.4.0 - 64bit Production",
+			}},
+		},
+	})
+
+	major, ok := oracleServerMajorVersion(db, time.Second)
+	if !ok || major != 11 {
+		t.Fatalf("oracleServerMajorVersion() = (%d, %t), want (11, true)", major, ok)
+	}
+	if scripted.next != 2 {
+		t.Fatalf("expected both version queries, got %d", scripted.next)
+	}
+}
+
+func TestWithOracleLOBFetchPostUsesURLParamsForGeneratedDSN(t *testing.T) {
+	params := withOracleLOBFetchPost(connectParams{
+		Host:      "db.example.com",
+		Port:      1521,
+		Database:  "ORCL",
+		Username:  "scott",
+		Password:  "tiger",
+		URLParams: "CHARSET=ZHS16GBK",
+	})
+
+	values, err := url.ParseQuery(params.URLParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values.Get("LOB FETCH") != "POST" || values.Get("CHARSET") != "ZHS16GBK" {
+		t.Fatalf("legacy LOB mode should preserve URL parameters, got: %s", params.URLParams)
+	}
+	config, err := configurations.ParseConfig(buildDSN(params))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Lob != configurations.STREAM {
+		t.Fatalf("generated DSN should enable streamed LOB reads, got: %s", buildDSN(params))
+	}
+}
+
+func TestWithOracleLOBFetchPostUpdatesRawOracleURL(t *testing.T) {
+	params := withOracleLOBFetchPost(connectParams{
+		ConnectionString: "oracle://scott:tiger@db.example.com:1521/ORCL?CHARSET=ZHS16GBK",
+	})
+	parsed, err := url.Parse(params.ConnectionString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("LOB FETCH") != "POST" || parsed.Query().Get("CHARSET") != "ZHS16GBK" {
+		t.Fatalf("raw Oracle URL should preserve query parameters, got: %s", params.ConnectionString)
+	}
+	config, err := configurations.ParseConfig(params.ConnectionString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Lob != configurations.STREAM {
+		t.Fatalf("raw Oracle URL should enable streamed LOB reads, got: %s", params.ConnectionString)
+	}
+}
+
+func TestHasOracleLOBFetchOptionHonorsExplicitModes(t *testing.T) {
+	tests := []connectParams{
+		{URLParams: "lob+fetch=inline"},
+		{URLParams: "LOB%20FETCH=POST"},
+		{ConnectionString: "oracle://scott:tiger@db.example.com:1521/ORCL?lob+fetch=stream"},
+	}
+	for _, params := range tests {
+		if !hasOracleLOBFetchOption(params) {
+			t.Fatalf("explicit LOB fetch mode should be detected: %+v", params)
+		}
+	}
+	if hasOracleLOBFetchOption(connectParams{URLParams: "CHARSET=ZHS16GBK"}) {
+		t.Fatal("unrelated URL parameters should not be treated as an explicit LOB fetch mode")
+	}
+}
+
+func TestShouldUseLegacyOracleLOBFetchOnlyForLegacyServers(t *testing.T) {
+	params := connectParams{URLParams: "CHARSET=ZHS16GBK"}
+	if !shouldUseLegacyOracleLOBFetch(params, 10, true) {
+		t.Fatal("Oracle 10g should use streamed LOB reads")
+	}
+	if shouldUseLegacyOracleLOBFetch(params, 11, true) || shouldUseLegacyOracleLOBFetch(params, 19, true) {
+		t.Fatal("Oracle 11g and newer should retain the driver's default LOB mode")
+	}
+	if shouldUseLegacyOracleLOBFetch(params, 0, false) {
+		t.Fatal("unknown Oracle versions should retain the driver's default LOB mode")
+	}
+	if shouldUseLegacyOracleLOBFetch(connectParams{URLParams: "LOB+FETCH=INLINE"}, 10, true) {
+		t.Fatal("an explicit user LOB mode should not be overridden")
+	}
+}
+
+func TestOracleMethodMayReadLOB(t *testing.T) {
+	for _, method := range []string{"get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction"} {
+		if !oracleMethodMayReadLOB(method) {
+			t.Fatalf("%s should enable deferred legacy LOB reads", method)
+		}
+	}
+	for _, method := range []string{"list_schemas", "list_tables", "list_objects", "get_columns", "list_indexes", "list_triggers"} {
+		if oracleMethodMayReadLOB(method) {
+			t.Fatalf("%s should not reconnect while loading metadata", method)
+		}
+	}
+}
+
 func TestOracleGB18030ConverterRoundTrip(t *testing.T) {
 	converter := oracleGB18030Converter{}
 	input := "DBX \u4e2d\u6587 \U00020000"
@@ -663,6 +1105,30 @@ func TestOracleGB18030ConverterRoundTrip(t *testing.T) {
 	}
 	if clone := converter.Clone(); clone.GetLangID() != oracleCharsetZHS32GB18030 {
 		t.Fatalf("GB18030 converter clone lang id = %d, want %d", clone.GetLangID(), oracleCharsetZHS32GB18030)
+	}
+}
+
+func TestOpenDBUsesIndependentOracleDrivers(t *testing.T) {
+	params := connectParams{
+		Host:     "127.0.0.1",
+		Port:     1521,
+		Database: "ORCL",
+		Username: "dbx",
+		Password: "secret",
+	}
+	first, err := openDB(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := openDB(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	if first.Driver() == second.Driver() {
+		t.Fatal("Oracle connections must not share the driver's cached charset converters")
 	}
 }
 
@@ -1308,6 +1774,7 @@ func contains(values []string, target string) bool {
 type oracleViewSourceQueryStep struct {
 	queryContains string
 	args          []driver.Value
+	columns       []string
 	rows          [][]driver.Value
 	err           error
 }
@@ -1360,7 +1827,11 @@ func (c *oracleViewSourceConn) QueryContext(
 	if step.err != nil {
 		return nil, step.err
 	}
-	return &oracleViewSourceRows{columns: []string{"SOURCE"}, values: step.rows}, nil
+	columns := step.columns
+	if len(columns) == 0 {
+		columns = []string{"SOURCE"}
+	}
+	return &oracleViewSourceRows{columns: columns, values: step.rows}, nil
 }
 
 type oracleViewSourceRows struct {

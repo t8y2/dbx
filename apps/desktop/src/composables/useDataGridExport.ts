@@ -2,9 +2,10 @@ import { computed, type ComputedRef, type Ref, createApp } from "vue";
 import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
-import type { DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import type { DataGridExtractRequest, DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -76,6 +77,7 @@ export interface UseDataGridExportOptions {
   copyInsertTargetLabel?: ComputedRef<string | undefined>;
   mongoUpdateTarget?: ComputedRef<MongoCopyUpdateTarget | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
+  identifierQuote?: ComputedRef<string | undefined>;
   connectionId: ComputedRef<string | undefined>;
   database: ComputedRef<string | undefined>;
   context: ComputedRef<"results" | "table-data" | undefined>;
@@ -467,6 +469,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return targetedRows().filter((item) => !item.isDraft);
   }
 
+  function updateEligibleRows(): RowItem[] {
+    return targetedRows().filter((item) => !item.isNew && !item.isDraft && !item.isDeleted);
+  }
+
   function insertableCopyColumnCount(excludePrimaryKeys: boolean, copyColumns = effectiveColumns(sourceColumns.value, columns.value), extractorOptions?: DataGridExtractorOptions): number {
     const primaryKeySet = new Set((tableMeta.value?.primaryKeys ?? []).map(normalizeColumnName));
     return copyColumns.filter((column): column is string => !!column && !isCopyInsertOmittedColumn(databaseType.value, column, tableMeta.value, extractorOptions) && (!excludePrimaryKeys || !primaryKeySet.has(normalizeColumnName(column)))).length;
@@ -487,14 +493,28 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return buildCopyInsertStatement(rowLimit === undefined ? data : { ...data, rows: data.rows.slice(0, rowLimit) }, extractorOptions.sql.excludePrimaryKeysFromInsert, extractorOptions.sql.insertMode);
   }
 
-  async function buildMongoExtractorUpdate(_extractorOptions: DataGridExtractorOptions, rowLimit?: number): Promise<string | undefined> {
+  function mongoUpdateColumnIndexes(request: DataGridExtractRequest): number[] {
+    const selectedColumns = new Set(
+      request.selectedColumnIndexes
+        .map((index) => request.columns[index]?.sourceName ?? request.columns[index]?.displayName)
+        .filter((column): column is string => !!column)
+        .map(normalizeColumnName),
+    );
+    return effectiveColumns(sourceColumns.value, columns.value)
+      .map((column, index) => (column && selectedColumns.has(normalizeColumnName(column)) ? index : -1))
+      .filter((index) => index >= 0);
+  }
+
+  async function buildMongoExtractorUpdate(request: DataGridExtractRequest, rowLimit?: number): Promise<string | undefined> {
     const target = options.mongoUpdateTarget?.value;
     const documents = options.mongoDocuments?.value;
     if (!target || !documents) return undefined;
-    const rows = insertEligibleRows();
+    const rows = updateEligibleRows();
     if (rows.length === 0) return undefined;
     const limitedRows = rowLimit === undefined ? rows : rows.slice(0, rowLimit);
-    const copyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
+    const allCopyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
+    const selectedColumnIndexes = mongoUpdateColumnIndexes(request);
+    const copyColumns = selectedColumnIndexes.map((index) => allCopyColumns[index]);
     await yieldToMainThread();
     const statements: string[] = [];
     for (const item of limitedRows) {
@@ -503,12 +523,35 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       if (!originalDocument || typeof originalDocument !== "object" || Array.isArray(originalDocument)) continue;
       const source = originalDocument as Record<string, unknown>;
       if (!Object.prototype.hasOwnProperty.call(source, target.idColumn)) continue;
-      const update = buildMongoCopyUpdateDocument(item.data as MongoInputValue[], copyColumns, item.isDirtyCol, originalDocument, target.idColumn);
+      const update = buildMongoCopyUpdateDocument(
+        selectedColumnIndexes.map((index) => item.data[index]) as MongoInputValue[],
+        copyColumns,
+        selectedColumnIndexes.map((index) => item.isDirtyCol[index] ?? false),
+        originalDocument,
+        target.idColumn,
+      );
       if (!update) continue;
       const statement = `db.getCollection(${JSON.stringify(target.collection)}).updateOne({${JSON.stringify(target.idColumn)}:${formatMongoShellLiteral(source[target.idColumn])}},${formatMongoShellLiteral(update)});`;
       statements.push(formatMongoCopyStatement(statement) ?? statement);
     }
     return statements.length > 0 ? statements.join("\n") : undefined;
+  }
+
+  function canBuildMongoExtractorUpdate(request: DataGridExtractRequest): boolean {
+    const target = options.mongoUpdateTarget?.value;
+    const documents = options.mongoDocuments?.value;
+    const rows = updateEligibleRows();
+    if (!target || !documents || rows.length === 0) return false;
+
+    const normalizedIdColumn = normalizeColumnName(target.idColumn);
+    const copyColumns = mongoUpdateColumnIndexes(request).map((index) => effectiveColumns(sourceColumns.value, columns.value)[index] ?? "");
+    if (!copyColumns.some((column) => column && normalizeColumnName(column) !== normalizedIdColumn)) return false;
+
+    return rows.every((item) => {
+      if (item.sourceIndex === undefined) return false;
+      const document = documents[item.sourceIndex];
+      return !!document && typeof document === "object" && !Array.isArray(document) && Object.prototype.hasOwnProperty.call(document, target.idColumn);
+    });
   }
 
   const { copyWithExtractor, previewWithExtractor, canCopyWithExtractor } = useDataGridExtractor({
@@ -535,6 +578,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     },
     buildMongoInsert: buildMongoExtractorInsert,
     buildMongoUpdate: buildMongoExtractorUpdate,
+    canBuildMongoUpdate: canBuildMongoExtractorUpdate,
     contextCell,
     contextSelectionIsSynthetic,
   });
@@ -1002,6 +1046,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           connectionId: connectionId.value,
           database: database.value,
           schema: meta.schema,
+          identifierQuote: options.identifierQuote?.value,
           tableName: meta.tableName,
           filePath: outputPath,
           format,
@@ -1046,6 +1091,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
+    if (databaseType.value === "mongodb") return false;
     // The full result is already in memory — don't re-execute the query on the
     // backend just to stream the same rows back to a file.
     if (hasCompleteLocalResult?.value) return false;
@@ -1119,6 +1165,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportQueryResultSqlViaBackend(rowIds?: number[]): Promise<boolean> {
     // Guard: only for query-result context without complete local result, desktop only
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) return false;
+    if (databaseType.value === "mongodb") return false;
     if (hasCompleteLocalResult?.value) return false;
     if (!isTauriRuntime()) return false; // Web → local export fallback
 
@@ -1285,50 +1332,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   };
 }
 
-async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string) {
-  if (isTauriRuntime()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: defaultFileName,
-      filters: [{ name: filterName, extensions: [filterExt] }],
-    });
-    if (path) await writeTextFile(path, content);
-    return;
-  }
-
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = defaultFileName;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean } = {}): string {
   const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
   const suffix = options.allResults ? "results" : options.page ? "page" : "";
   return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
-}
-
-function sanitizeExportBaseName(value: string): string {
-  return replaceControlCharacters(
-    value
-      .trim()
-      .replace(/\.[sS][qQ][lL]$/, "")
-      .replace(/[<>:"/\\|?*]/g, "_"),
-    "_",
-  )
-    .replace(/\s+/g, " ")
-    .replace(/[._\s-]+$/g, "")
-    .slice(0, 120);
-}
-
-function replaceControlCharacters(value: string, replacement: string): string {
-  return Array.from(value)
-    .map((char) => (char.charCodeAt(0) < 32 ? replacement : char))
-    .join("");
 }
 
 function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: RowItem[]; mongoDocuments?: unknown[]; excludePrimaryKeys?: boolean; insertMode?: DataGridCopyInsertMode }): string | undefined {
@@ -1361,16 +1368,6 @@ function formatMongoCopyStatement(statement: string | undefined): string | undef
 
 function yieldToMainThread(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function compactLocalTimestamp(date = new Date()): string {
-  const yy = String(date.getFullYear() % 100).padStart(2, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  const second = String(date.getSeconds()).padStart(2, "0");
-  return `${yy}${month}${day}${hour}${minute}${second}`;
 }
 
 function effectiveColumns(sourceColumns: Array<string | undefined> | undefined, columns: string[]): Array<string | undefined> {

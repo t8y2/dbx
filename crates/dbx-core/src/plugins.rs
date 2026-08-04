@@ -337,7 +337,7 @@ impl PluginDriverSession {
         process.child.id()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn start_for_test(
         plugin: InstalledPlugin,
         driver_id: String,
@@ -513,10 +513,9 @@ fn resolve_plugin_executable(plugin_dir: &Path, executable: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        read_decoded_plugin_response, read_plugin_line, InstalledPlugin, PluginDriverManifest, PluginDriverSession,
-        PluginManifest, PluginRuntimeEnv,
-    };
+    use super::{read_decoded_plugin_response, read_plugin_line, InstalledPlugin, PluginManifest};
+    #[cfg(unix)]
+    use super::{PluginDriverManifest, PluginDriverSession, PluginRuntimeEnv};
     use std::path::PathBuf;
     use tokio::io::BufReader;
 

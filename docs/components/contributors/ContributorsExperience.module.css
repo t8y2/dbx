@@ -192,6 +192,7 @@
 .directoryGrid strong { display: block; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .directoryGrid small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .directoryGrid svg { color: #718396; }
+.directoryToggle { display: none; width: 100%; min-height: 46px; margin-top: 12px; border: 1px solid rgba(155, 176, 205, 0.2); border-radius: 10px; background: rgba(17, 21, 29, 0.88); color: var(--ink); font-size: 13px; font-weight: 740; cursor: pointer; }
 .empty { padding: 60px; border: 1px dashed rgba(155, 176, 205, 0.2); border-radius: 12px; color: var(--muted); text-align: center; }
 
 .modalBackdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(31, 27, 66, 0.74); backdrop-filter: blur(16px); }
@@ -237,6 +238,8 @@
   .directorySection { padding-right: 18px; padding-left: 18px; }
   .directoryHeader { align-items: stretch; flex-direction: column; }
   .directoryGrid { grid-template-columns: 1fr; }
+  .directoryGrid[data-expanded="false"] > :nth-child(n + 25) { display: none; }
+  .directoryToggle { display: block; }
   .certificatePreview { min-height: 390px; padding: 30px; }
   .certificatePreview > p { max-width: 68%; }
   .previewSeal { right: 34px; width: 74px; height: 74px; font-size: 22px; }

@@ -3,6 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeParser } from "@/lib/sql/executableStatementRangeCache";
 
 describe("executableStatementRangeCacheForDoc", () => {
+  it("tracks MongoDB commands for current-statement framing", () => {
+    const sql = 'db.users.find({})\n\ndb.getCollection("audit.logs").countDocuments({})';
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mongodb");
+
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf("users"))?.sql).toBe("db.users.find({})");
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf("audit.logs"))?.sql).toBe('db.getCollection("audit.logs").countDocuments({})');
+    expect(executableStatementRangeAtCursor(cache, doc.line(2).from)).toBeNull();
+  });
+
   it("reuses parsed executable statement ranges for the same document and database type", () => {
     const doc = Text.of(["SELECT 1;", "SELECT 2;"]);
     const parse = vi.fn<ExecutableStatementRangeParser>(() => [
@@ -81,6 +91,24 @@ describe("executableStatementRangeCacheForDoc", () => {
 
     expect(executableStatementRangeAtCursor(cache, indentationCursor)?.sql).toBe("SELECT 2");
     expect(executableStatementRangeAtCursor(cache, semicolonGapCursor)?.sql).toBe("SELECT 1");
+  });
+
+  it("keeps a standalone next-line semicolon attached to the current statement", () => {
+    const sql = "SELECT *\nFROM users\n;\n\nSELECT * FROM audit;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const delimiterCursor = sql.indexOf(";");
+
+    expect(executableStatementRangeAtCursor(cache, delimiterCursor)?.sql).toBe("SELECT *\nFROM users");
+    expect(executableStatementRangeAtCursor(cache, delimiterCursor + 1)?.sql).toBe("SELECT *\nFROM users");
+  });
+
+  it("does not attach a semicolon after a blank line to the previous statement", () => {
+    const sql = "SELECT 1\n\n;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf(";"))).toBeNull();
   });
 
   it("returns null for blank and pure comment cursor lines", () => {

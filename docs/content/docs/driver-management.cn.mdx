@@ -9,11 +9,11 @@ DBX 使用混合驱动架构：内置 Rust 驱动、独立原生 Agent，以及 
 
 | 驱动类型     | 工作方式                    | 适用场景                                                                                                                                    |
 | ------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| 原生（内置） | Rust 驱动编译进 DBX         | MySQL、PostgreSQL、SQLite、SQL Server、Redis、MongoDB、DuckDB、ClickHouse 等                                                               |
-| 原生 Agent   | DBX 管理的 Go/Rust 独立进程 | Oracle、KingBase、虚谷 XuguDB，以及存在成熟原生驱动的数据库                                                                                |
+| 原生（内置） | Rust 驱动编译进 DBX         | MySQL、PostgreSQL、SQLite、SQL Server、Redis、MongoDB、ClickHouse 等                                                                       |
+| 原生 Agent / 外部驱动 | DBX 管理的 Go/Rust 独立进程或 sidecar | Oracle、KingBase、虚谷 XuguDB、DuckDB，以及 RabbitMQ 等需要独立运行时的连接 |
 | JDBC Agent   | DBX 管理的 Java 子进程      | 需要 JDBC 的数据库：GaussDB、openGauss、DM、HighGo、Vastbase、UXDB、Trino、Hive、DB2、Informix、Neo4j、TDengine、YashanDB、GoldenDB、Kylin、SunDB 等 |
 
-<Callout type="info">内置驱动可直接使用；原生 Agent 只需对应平台的可执行文件，JDBC Agent 还需要 JRE。首次创建连接时 DBX 会自动安装匹配的组件。</Callout>
+<Callout type="info">内置驱动可直接使用；原生 Agent/sidecar 需要对应平台文件，JDBC Agent 还需要 JRE。连接对话框会提示缺少的组件，但安装是否自动完成取决于网络、平台、驱动许可和当前设置。</Callout>
 
 ## 驱动商店
 
@@ -66,6 +66,12 @@ DBX 会定期检查驱动更新：
 - 有新版本时，驱动商店标签页上会显示更新角标
 - 点击**升级全部驱动**一次性更新所有已安装的驱动
 - 单个驱动可从商店中对应条目升级
+
+## 运行时监控
+
+驱动管理会汇总正在运行的外部驱动和 Agent，包括协议模式、活动 Session、PID、内存、CPU、运行时长和最后错误。支持控制的运行时可以在这里停止或重启；共享运行时可能服务多个连接，操作前应检查活动 Session。
+
+RabbitMQ 等消息队列 Agent 还可能同时使用业务协议和管理 API。自定义 AMQP/管理端口、SSH 隧道和 TLS 目标必须分别配置，不能从一个端口推断另一个端口。
 
 ## 离线驱动导入
 

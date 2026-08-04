@@ -62,6 +62,7 @@ type metadataListConstraints struct {
 type columnInfo struct {
 	Name                   string  `json:"name"`
 	DataType               string  `json:"data_type"`
+	FullDataType           string  `json:"-"`
 	IsNullable             bool    `json:"is_nullable"`
 	ColumnDefault          *string `json:"column_default"`
 	IsPrimaryKey           bool    `json:"is_primary_key"`
@@ -538,13 +539,54 @@ func isUndefinedColumn(err error, columnName string) bool {
 }
 
 func (s *server) informationSchemaColumns(schema, table string, primary map[string]bool) ([]columnInfo, error) {
-	query := `SELECT c.column_name, c.data_type, c.is_nullable, c.column_default,
+	// Cache the optional information_schema capabilities for this connection so
+	// subsequent table metadata requests do not repeat known failing probes.
+	includeColumnType := !s.infoColumnTypeUnsupported
+	includeUdtName := !s.infoUdtNameUnsupported
+	for {
+		result, err := s.queryInformationSchemaColumns(schema, table, primary, includeColumnType, includeUdtName)
+		if err == nil {
+			return result, nil
+		}
+		switch {
+		case includeColumnType && isUndefinedColumn(err, "column_type"):
+			includeColumnType = false
+			s.infoColumnTypeUnsupported = true
+		case includeUdtName && isUndefinedColumn(err, "udt_name"):
+			includeUdtName = false
+			s.infoUdtNameUnsupported = true
+		default:
+			return nil, err
+		}
+	}
+}
+
+func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeColumnType, includeUdtName bool) ([]columnInfo, error) {
+	var fullDataTypeExpression string
+	switch {
+	case includeColumnType && includeUdtName:
+		fullDataTypeExpression = `CASE
+	WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED')
+		AND UPPER(COALESCE(NULLIF(TRIM(c.column_type), ''), 'USER-DEFINED')) IN ('USER-DEFINED', 'USER_DEFINED')
+	THEN c.udt_name
+	ELSE c.column_type
+	END`
+	case includeColumnType:
+		fullDataTypeExpression = "c.column_type"
+	case includeUdtName:
+		fullDataTypeExpression = `CASE
+		WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED') THEN c.udt_name
+		END AS column_type`
+	default:
+		fullDataTypeExpression = "NULL AS column_type"
+	}
+	query := fmt.Sprintf(`SELECT c.column_name, c.data_type, %s, c.is_nullable, c.column_default,
 	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length
 	FROM information_schema.columns c
 	LEFT JOIN sys_catalog.sys_namespace n ON n.nspname = c.table_schema
 	LEFT JOIN sys_catalog.sys_class rel ON rel.relnamespace = n.oid AND rel.relname = c.table_name
 	LEFT JOIN sys_catalog.sys_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
-	WHERE c.table_schema = ` + quoteLiteral(schema) + ` AND c.table_name = ` + quoteLiteral(table) + ` ORDER BY c.ordinal_position`
+	WHERE c.table_schema = %s AND c.table_name = %s ORDER BY c.ordinal_position`, fullDataTypeExpression, quoteLiteral(schema), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -553,15 +595,15 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 	result := []columnInfo{}
 	for rows.Next() {
 		var name, dataType, nullable string
-		var defaultValue, comment sql.NullString
+		var fullDataType, defaultValue, comment sql.NullString
 		var precision, scale, length sql.NullInt64
-		if err := rows.Scan(&name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length); err != nil {
+		if err := rows.Scan(&name, &dataType, &fullDataType, &nullable, &defaultValue, &comment, &precision, &scale, &length); err != nil {
 			return nil, err
 		}
 		if parsed := boundedVarcharLength(dataType); parsed != nil && !length.Valid {
 			length = sql.NullInt64{Int64: int64(*parsed), Valid: true}
 		}
-		result = append(result, columnInfo{Name: name, DataType: dataType, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		result = append(result, columnInfo{Name: name, DataType: dataType, FullDataType: fullDataType.String, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
 	}
 	return result, rows.Err()
 }
@@ -875,7 +917,7 @@ func ensureStatementTerminator(statement string) string {
 }
 
 func columnDDLDefinition(column columnInfo) string {
-	definition := quoteIdentifier(column.Name) + " " + column.DataType
+	definition := quoteIdentifier(column.Name) + " " + columnDDLDataType(column)
 	if column.Extra != nil && *column.Extra != "" {
 		// Identity clauses belong immediately after the data type in both
 		// PostgreSQL-compatible and SQL Server-compatible Kingbase modes.
@@ -888,6 +930,31 @@ func columnDDLDefinition(column columnInfo) string {
 		definition += " DEFAULT " + *column.ColumnDefault
 	}
 	return definition
+}
+
+func columnDDLDataType(column columnInfo) string {
+	if fullDataType := strings.TrimSpace(column.FullDataType); fullDataType != "" {
+		return fullDataType
+	}
+	dataType := strings.TrimSpace(column.DataType)
+	if strings.Contains(dataType, "(") {
+		return dataType
+	}
+	normalized := strings.Join(strings.Fields(strings.ToLower(dataType)), " ")
+	switch normalized {
+	case "varchar", "character varying", "char", "character":
+		if column.CharacterMaximumLength != nil && *column.CharacterMaximumLength > 0 {
+			return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
+		}
+	case "numeric", "decimal":
+		if column.NumericPrecision != nil && *column.NumericPrecision > 0 {
+			if column.NumericScale != nil {
+				return fmt.Sprintf("%s(%d,%d)", dataType, *column.NumericPrecision, *column.NumericScale)
+			}
+			return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
+		}
+	}
+	return dataType
 }
 
 func kingbaseIdentityClause(code string) *string {

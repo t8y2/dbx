@@ -1,70 +1,153 @@
 ---
 title: 什么是 DBX？
-description: DBX 是一个开源数据库工作台，覆盖连接管理、SQL 编辑、数据浏览、结构工具、AI 助手和自托管访问。
+description: DBX 是一个开源、轻量的数据库与数据基础设施工作台，覆盖 70+ 种连接、桌面与自托管访问、AI、CLI 和 MCP。
 ---
 
-DBX 是一个开源数据库工作台。它把日常数据库工作里的高频动作放在同一个界面里：连接数据库、写 SQL、查看和编辑数据、浏览结构、对比 Schema、导入导出数据，以及在需要时让 AI 辅助分析。
+DBX 是一个开源、轻量的数据库与数据基础设施工作台。它把连接管理、对象浏览、SQL 编辑、数据修改、结构工具、专项控制台和自动化入口放在同一个工作区中，支持 70+ 种数据库及数据系统。
 
-它同时提供桌面应用和 Docker 版本。桌面应用适合本机开发和日常连接管理；Docker 版本适合在服务器上自托管，通过浏览器访问同一套能力。
+DBX 不会强行把所有系统都抽象成 SQL 数据库：关系型数据库使用查询编辑器、数据表格和 Schema 工具；Redis、MongoDB、向量数据库、消息队列、etcd、ZooKeeper、Nacos 等系统则使用更符合其数据模型的专项界面。
 
-![DBX 截图](/screenshot-dark.png)
+<Callout type="info">如果你已经决定开始使用，可以直接阅读 [快速开始](/cn/docs/getting-started)。如果你正在确认某个引擎或功能是否支持，请查看 [数据库支持与功能矩阵](/cn/docs/databases)。</Callout>
 
-## 适合的场景
+![DBX 深色界面截图](/screenshot-dark.png)
+
+## DBX 解决什么问题
 
 <Cards>
-  <Card title="日常查询与排查" href="/cn/docs/query-editor">
-    使用 SQL 编辑器编写、格式化和执行查询，并通过查询历史快速找回之前的排查过程。
+  <Card title="连接与区分多个环境" href="/cn/docs/getting-started">
+    集中管理本地、测试、预发和生产连接，并使用分组、颜色、置顶、搜索、只读和生产保护减少选错目标。
   </Card>
-  <Card title="查看与修改数据" href="/cn/docs/data-grid">
-    在数据表格中筛选、排序、编辑、预览 SQL，再决定是否写入数据库。
+  <Card title="查询、排查与分析" href="/cn/docs/query-editor">
+    使用元数据补全、格式化、选中执行、查询历史、多结果和执行计划完成日常 SQL 工作。
   </Card>
-  <Card title="理解数据库结构" href="/cn/docs/schema-browser">
-    通过侧边栏浏览数据库、Schema、表、字段、索引、外键和触发器，适合接手陌生库时快速定位对象。
+  <Card title="浏览与修改数据" href="/cn/docs/data-grid">
+    在虚拟滚动表格中筛选、排序和编辑数据，并在写入前检查生成的 SQL。
   </Card>
-  <Card title="跨环境同步" href="/cn/docs/schema-diff">
-    对比开发、测试、生产等环境之间的结构差异，生成可审查的同步 SQL。
+  <Card title="理解与变更结构" href="/cn/docs/schema-browser">
+    浏览数据库对象，编辑表结构，对比 Schema，查看 ER 图和字段血缘，并生成可审查的 DDL。
+  </Card>
+  <Card title="迁移与交换数据" href="/cn/docs/data-transfer">
+    导入表格文件、跨连接传输数据、执行 SQL 文件，并按数据库能力导出结构和数据。
+  </Card>
+  <Card title="让工具和 AI 使用连接" href="/cn/docs/mcp">
+    通过 CLI、MCP 或自托管后端，把已经配置的连接安全地接入终端、脚本和 AI 编程助手。
   </Card>
 </Cards>
 
-## 主要能力
+## 支持的不只是 SQL 数据库
 
-| 能力         | 说明                                                                                            |
-| ------------ | ----------------------------------------------------------------------------------------------- |
-| 多数据库连接 | 支持 MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle 等数据库 |
-| SQL 编辑器   | 基于 CodeMirror 6，支持语法高亮、元数据补全、格式化、选中执行和查询历史                         |
-| 数据表格     | 虚拟滚动、行内编辑、WHERE/ORDER BY 控制、SQL 预览和多格式导出                                   |
-| 结构工具     | 结构浏览、表结构编辑、Schema 对比、ER 图、字段血缘、数据库导出和 SQL 文件执行                   |
-| 数据流转     | 表数据导入、数据传输、SQL 文件执行，以及支持进度和取消的 SQL 导出                               |
-| 专项浏览器   | Redis 键值浏览和 MongoDB 文档浏览                                                               |
-| AI 与自动化  | 根据连接元数据生成 SQL、解释查询、优化语句、辅助修复错误，并通过 MCP 暴露连接给编程助手         |
-| 自托管访问   | Docker 版本可部署在服务器上，通过浏览器访问 DBX                                                 |
+DBX 的连接选择器按实际工作方式组织数据库和数据系统。不同类别会进入不同的工作区，而不是只显示一个通用查询框。
 
-## 设计取向
+| 类别 | 代表系统 | DBX 中的主要体验 |
+| --- | --- | --- |
+| 关系型与兼容协议 | MySQL、PostgreSQL、SQLite、Oracle、SQL Server、达梦、openGauss、GaussDB | SQL 编辑器、数据表格、对象树、表结构、Schema 工具 |
+| 分析型与数据仓库 | ClickHouse、Doris、StarRocks、Databricks、Snowflake、Trino、BigQuery | 查询、结果分析、元数据浏览，以及驱动支持的结构和导出能力 |
+| 文档、键值与搜索 | MongoDB、Redis、Elasticsearch、Easysearch、HBase、Cassandra | 文档、键、索引或表族等专项浏览器 |
+| 图、向量与 AI 数据 | Neo4j、Qdrant、Milvus、Weaviate、ChromaDB | 图数据库连接，以及向量集合浏览、检索和写入入口 |
+| 时序系统 | QuestDB、TDengine、IoTDB、InfluxDB | 时序查询与系统对应的连接、对象和数据视图 |
+| 消息队列 | Pulsar、Kafka、RocketMQ、RabbitMQ | Topic、订阅/消费者、消息、监控、权限或策略等能力 |
+| 注册与配置中心 | etcd、ZooKeeper、Nacos | Key/ZNode 浏览、集群状态、访问控制、配置与服务管理 |
+| 驱动扩展 | JDBCX、自定义 MySQL/PostgreSQL、可选 JDBC 插件 | 使用兼容协议或厂商 JDBC 驱动扩展连接范围 |
 
-DBX 优先覆盖数据库客户端里的核心工作流，而不是把所有数据库管理场景都塞进一个复杂入口。它更关注这些细节：
+具体数据库能使用哪些高级能力，取决于驱动、协议和数据库本身。以 [数据库支持](/cn/docs/databases) 中的功能矩阵为准；专项系统的入口与边界见 [专项工作台](/cn/docs/specialized-workspaces)。
 
-- **少切换上下文**：结构浏览、SQL 编辑、数据表格和结果查看尽量在同一工作区内完成。
-- **操作可审查**：涉及数据或结构变更时，尽量先展示将要执行的 SQL。
-- **多环境可区分**：连接颜色、置顶、搜索和上下文菜单帮助区分开发、测试和生产环境。
-- **轻量部署**：桌面版适合个人日常工作，Docker 版适合团队或服务器环境。
+## 一套工作流，多个使用入口
 
-## 数据与安全
+| 入口 | 适合场景 | 能力与边界 |
+| --- | --- | --- |
+| 桌面版 | 个人日常开发、本地数据库文件、完整工作台 | 提供本地文件、SQL 文件树/SQL 库、桌面 Deep Link 等操作系统集成 |
+| Docker / Web | 服务器自托管、远程浏览器访问 | 共享大部分数据库工作流；文件路径指向服务器，部分本地文件和桌面集成功能不可用 |
+| CLI | 终端、脚本、CI、Codex 工作流 | 列出连接和 Schema、描述表、执行查询、生成紧凑上下文，并可唤起桌面端打开表 |
+| MCP Server | Claude Code、Cursor、Windsurf 等 AI 客户端 | 列出连接、读取结构、执行受策略约束的查询或命令，并可连接本地数据目录或 DBX Web |
 
-- 连接配置保存在本机应用数据目录的 SQLite 数据库中，密码、SSH 密码、SSH 密钥密码等敏感字段会从普通连接配置中拆出，单独存放在 `connection_secrets` 表。
-- 配置导出支持 AES-GCM 加密，适合在多台设备之间迁移连接。
-- SSH 隧道可以连接私有网络或防火墙后的数据库。
-- AI Ask 模式不会执行生成的 SQL。Agent 和 MCP 流程会使用保守执行策略，并默认阻止危险 SQL。
+桌面版和 Web 版复用同一套 Rust 核心能力，但它们不是所有系统集成上的完全等价替代。选择部署方式时，应同时考虑数据库所在网络、文件位于本机还是服务器，以及是否需要桌面 Deep Link 或本地 SQL 文件管理。
+
+## 从连接到自动化
+
+<Steps>
+  <Step>
+    ### 建立连接边界
+
+    选择数据库类型，填写认证信息，并按需要配置 TLS、SSH、SOCKS5、HTTP 代理或 HTTP 隧道。为高风险连接启用只读或生产环境保护。
+
+  </Step>
+  <Step>
+    ### 先理解对象和上下文
+
+    从侧边栏查看数据库、Schema、表、字段、索引、外键和数据库专属对象。陌生数据库可以先使用搜索、对象源码、ER 图或字段血缘建立上下文。
+
+  </Step>
+  <Step>
+    ### 查询、检查并修改
+
+    在查询编辑器中执行 SQL，或在数据表格、文档/键值浏览器和专项控制台中完成对应操作。DBX 会在可行时展示 SQL 或请求内容，便于执行前审查。
+
+  </Step>
+  <Step>
+    ### 比较、迁移和复用
+
+    使用 Schema 对比、表导入、数据传输、数据库导出、SQL 文件执行、查询历史和 SQL 库，把一次性操作变成可检查、可复用的流程。
+
+  </Step>
+  <Step>
+    ### 接入 AI 与自动化
+
+    在应用内使用 AI Ask/Agent，或通过 CLI 和 MCP 把连接、Schema 上下文和查询能力提供给终端脚本与 AI 编程助手。
+
+  </Step>
+</Steps>
+
+## 核心能力地图
+
+| 任务 | 代码中对应的产品能力 | 详细文档 |
+| --- | --- | --- |
+| 创建连接 | 连接分类、URL 解析、TLS、隧道/代理、只读、生产保护、驱动选择 | [快速开始](/cn/docs/getting-started)、[隧道/代理](/cn/docs/ssh-tunnel) |
+| 编写和执行查询 | CodeMirror 6、元数据补全、格式化、执行目标、多结果、取消、历史 | [查询编辑器](/cn/docs/query-editor) |
+| 查看和编辑结果 | 虚拟滚动、数据库侧过滤/排序、行内编辑、SQL 预览、多格式导出 | [数据表格](/cn/docs/data-grid) |
+| 理解数据库结构 | 对象树、对象搜索、源码查看、表结构、Schema 对比、ER 图、字段血缘 | [结构浏览](/cn/docs/schema-browser)、[Schema 对比](/cn/docs/schema-diff) |
+| 导入、传输和导出 | CSV/TSV/JSON/Excel 导入、跨连接传输、SQL 文件执行、数据库导出 | [表数据导入](/cn/docs/table-import)、[数据传输](/cn/docs/data-transfer) |
+| 管理非关系型系统 | Redis、MongoDB、搜索、向量、HBase、消息队列、注册与配置中心工作台 | [专项工作台](/cn/docs/specialized-workspaces) |
+| AI 与外部工具 | Ask/Agent、CLI、MCP、Web/Docker 后端 API | [AI 助手](/cn/docs/ai-assistant)、[CLI](/cn/docs/cli)、[MCP](/cn/docs/mcp) |
+| 迁移个人配置 | 连接导入、加密配置导出、WebDAV/Gist/Gitee 同步、SQL 库同步 | [配置导出/导入](/cn/docs/config-export)、[云同步与备份](/cn/docs/cloud-sync) |
+
+## 安全模型
+
+DBX 使用多层限制，而不是只依赖一个“危险操作确认”开关：
+
+- **数据库账号权限**始终是最终边界，建议生产环境使用最小权限账号。
+- **只读连接**会在核心查询执行路径阻止可识别的写入，并隐藏或禁用多个修改入口。
+- **生产环境保护**可以作用于整个连接或指定数据库；检测到写入时，每次都要求新的明确确认。
+- **可审查的变更**会在数据编辑、表结构、Schema 对比等流程中尽量先展示 SQL。
+- **AI Ask 模式**只生成回答，不执行 SQL；Agent 在生产环境中不会获得自动写入授权，而是把 SQL 放回编辑器供人工检查。
+- **MCP 策略**统一管理连接 allowlist 和“只读 / 数据读写 / 完全访问”三档权限，且不能绕过连接只读、生产保护和数据库账号权限。
+- **敏感配置**与普通连接 JSON 分开存储；配置导出可使用 AES-GCM 加密。
+
+完整配置和各入口的行为见 [生产环境与写入安全](/cn/docs/production-safety)。
+
+## 需要了解的边界
+
+<Callout type="warn">
+  DBX 是数据库工作台，不是托管数据库服务，也不能替代数据库账号权限、审计、备份和变更审批。数据库导出适合轻量备份或迁移，但大型生产库仍应使用数据库原生备份工具。AI 输出、自动生成的 SQL 和跨引擎数据迁移都需要人工审查。
+</Callout>
+
+- 高级功能不会对所有数据库强行开放；不可靠的兼容路径会被隐藏或降级。
+- Docker/Web 中的本地路径属于服务器文件系统，不是浏览器所在电脑。
+- JDBC/Agent 数据库需要相应驱动或运行时，功能范围可能少于原生驱动。
+- [Web API](/cn/docs/web-api) 主要服务 DBX Web 和内部集成，不是稳定的公共契约；脚本和 AI 集成优先使用 CLI 或 MCP。
 
 ## 下一步
 
 <Cards>
   <Card title="安装并创建连接" href="/cn/docs/getting-started">
-    从桌面应用或 Docker 版本开始，创建第一个数据库连接。
+    选择桌面版或 Docker，创建第一个连接并完成网络与安全配置。
   </Card>
-  <Card title="查看支持的数据库" href="/cn/docs/databases">
-    了解不同数据库引擎、兼容协议和 ODBC 场景的支持情况。
+  <Card title="检查数据库支持" href="/cn/docs/databases">
+    查看连接类型、默认端口、驱动方式和高级功能矩阵。
   </Card>
-  <Card title="配置 AI 助手" href="/cn/docs/ai-assistant">
-    设置 API Key 后，在 SQL 编辑器中使用自然语言生成和解释查询。
+  <Card title="配置生产安全" href="/cn/docs/production-safety">
+    设置只读连接、生产保护、AI 与 MCP 权限边界。
+  </Card>
+  <Card title="选择自动化入口" href="/cn/docs/cli">
+    根据终端脚本、Codex 或 AI 客户端场景选择 CLI 或 MCP。
   </Card>
 </Cards>

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{is_schema_aware, qualified_table_name, quote_table_identifier};
+use crate::sql_dialect::{is_schema_aware, profile_for, qualified_table_name, quote_table_identifier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -162,6 +162,8 @@ pub struct DuplicateTableStructureSqlOptions {
     pub schema: Option<String>,
     pub source_name: String,
     pub target_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_comments: Vec<DuplicateTableColumnComment>,
 }
@@ -188,17 +190,23 @@ pub struct CopyTableDataSqlOptions {
     pub postgres_overriding_system_value: bool,
     #[serde(default)]
     pub sqlserver_identity_insert: bool,
+    #[serde(default)]
+    pub normalize_new_target_name: bool,
 }
 
-const MYSQL_COMPATIBLE_PROFILES: &[&str] =
-    &["mysql", "mariadb", "tidb", "oceanbase", "doris", "starrocks", "custom_mysql"];
+const MYSQL_COMPATIBLE_PROFILES: &[&str] = &["mysql", "mariadb", "tidb", "oceanbase", "custom_mysql"];
+const CREATE_DATABASE_CHARSET_UNSUPPORTED_PROFILES: &[&str] = &["doris", "selectdb", "starrocks"];
 
 pub fn supports_create_database_charset(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
     let normalized_profile = driver_profile.map(str::to_ascii_lowercase);
-    matches!(
-        database_type,
-        Some(DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb)
-    ) || normalized_profile.as_deref().is_some_and(|profile| MYSQL_COMPATIBLE_PROFILES.contains(&profile))
+    if normalized_profile
+        .as_deref()
+        .is_some_and(|profile| CREATE_DATABASE_CHARSET_UNSUPPORTED_PROFILES.contains(&profile))
+    {
+        return false;
+    }
+    matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb))
+        || normalized_profile.as_deref().is_some_and(|profile| MYSQL_COMPATIBLE_PROFILES.contains(&profile))
 }
 
 pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> Result<String, String> {
@@ -581,7 +589,10 @@ pub fn build_create_schema_sql(options: SchemaNameSqlOptions) -> Result<String, 
 
 pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
     let schema = quote_table_identifier(options.database_type, &options.name);
-    if matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb)) {
+    if matches!(
+        options.database_type,
+        Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::Dameng)
+    ) {
         format!("DROP SCHEMA {schema} CASCADE;")
     } else {
         format!("DROP SCHEMA {schema};")
@@ -590,7 +601,8 @@ pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
 
 pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOptions) -> String {
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
-    let target = qualified_name(options.database_type, options.schema.as_deref(), &options.target_name);
+    let target =
+        qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
     let structure_sql = if options.database_type == Some(DatabaseType::Mysql) {
         format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
@@ -605,20 +617,26 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
     };
 
-    if options.database_type != Some(DatabaseType::Dameng) {
-        return structure_sql;
+    let mut comment_sql = Vec::new();
+    if let Some(database_type) =
+        options.database_type.filter(|database_type| supports_duplicate_table_comment(*database_type))
+    {
+        if let Some(comment) = options.table_comment.as_deref().filter(|comment| !comment.trim().is_empty()) {
+            comment_sql.push(format!(
+                "COMMENT ON TABLE {target} IS {}",
+                quote_duplicate_table_comment(database_type, comment)
+            ));
+        }
     }
-    let comment_sql = options
-        .column_comments
-        .iter()
-        .filter_map(|column| {
+    if options.database_type == Some(DatabaseType::Dameng) {
+        comment_sql.extend(options.column_comments.iter().filter_map(|column| {
             if column.comment.trim().is_empty() {
                 return None;
             }
             let column_name = quote_table_identifier(options.database_type, &column.name);
             Some(format!("COMMENT ON COLUMN {target}.{column_name} IS {}", quote_sql_string(&column.comment)))
-        })
-        .collect::<Vec<_>>();
+        }));
+    }
     if comment_sql.is_empty() {
         return structure_sql;
     }
@@ -627,7 +645,11 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
 
 pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
-    let target = qualified_name(options.database_type, options.schema.as_deref(), &options.target_name);
+    let target = if options.normalize_new_target_name {
+        qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name)
+    } else {
+        qualified_name(options.database_type, options.schema.as_deref(), &options.target_name)
+    };
     let Some(columns) = options.columns.filter(|columns| !columns.is_empty()) else {
         return format!("INSERT INTO {target} SELECT * FROM {source};");
     };
@@ -661,7 +683,10 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
         return false;
     }
-    if database_type == DatabaseType::Sqlite {
+    if matches!(
+        database_type,
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+    ) {
         return object_type == DatabaseObjectType::Table;
     }
     if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
@@ -702,7 +727,10 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
         ));
     }
 
-    if database_type == Some(DatabaseType::Sqlite) {
+    if matches!(
+        database_type,
+        Some(DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+    ) {
         return Ok(format!(
             "ALTER TABLE {} RENAME TO {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),
@@ -758,6 +786,17 @@ fn is_postgres_like_structure_copy(database_type: DatabaseType) -> bool {
     )
 }
 
+fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
+    matches!(
+        database_type,
+        DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
+            | DatabaseType::OpenGauss
+    )
+}
+
 fn uses_false_predicate_duplicate_structure(database_type: DatabaseType) -> bool {
     matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::Iris)
 }
@@ -786,6 +825,18 @@ fn qualified_name(database_type: Option<DatabaseType>, schema: Option<&str>, nam
         )
     } else {
         quote_rename_identifier(database_type, name)
+    }
+}
+
+fn qualified_duplicate_target_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
+    if database_type != Some(DatabaseType::Dameng) {
+        return qualified_name(database_type, schema, name);
+    }
+    let target = profile_for(DatabaseType::Dameng).quote_ident(name);
+    if schema.is_some_and(|schema| !schema.is_empty()) {
+        format!("{}.{}", quote_rename_identifier(database_type, schema.unwrap()), target)
+    } else {
+        target
     }
 }
 
@@ -821,6 +872,36 @@ fn clean_sql_option(value: Option<&str>) -> String {
 
 fn quote_sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn quote_duplicate_table_comment(database_type: DatabaseType, value: &str) -> String {
+    if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
+        return quote_sql_string(value);
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\'' => escaped.push_str("\\'"),
+            character if character.is_ascii_control() => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                let byte = character as u8;
+                escaped.push_str("\\x");
+                escaped.push(HEX[(byte >> 4) as usize] as char);
+                escaped.push(HEX[(byte & 0x0F) as usize] as char);
+            }
+            character => escaped.push(character),
+        }
+    }
+
+    let prefix = if database_type == DatabaseType::Redshift { "" } else { "E" };
+    format!("{prefix}'{escaped}'")
 }
 
 fn comment_literal(value: Option<&str>) -> String {
@@ -873,6 +954,31 @@ mod tests {
             .unwrap(),
             "CREATE DATABASE `app_db` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
         );
+    }
+
+    #[test]
+    fn omits_create_database_charset_for_doris_family() {
+        for (database_type, driver_profile) in [
+            (DatabaseType::Doris, None),
+            (DatabaseType::StarRocks, None),
+            (DatabaseType::Mysql, Some("doris")),
+            (DatabaseType::Mysql, Some("selectdb")),
+            (DatabaseType::Mysql, Some("starrocks")),
+        ] {
+            assert_eq!(
+                build_create_database_sql(CreateDatabaseSqlOptions {
+                    database_type: Some(database_type),
+                    driver_profile: driver_profile.map(str::to_string),
+                    target: None,
+                    parent: None,
+                    name: "analytics".to_string(),
+                    charset: Some("utf8mb4".to_string()),
+                    collation: Some("utf8mb4_unicode_ci".to_string()),
+                })
+                .unwrap(),
+                "CREATE DATABASE `analytics`;"
+            );
+        }
     }
 
     #[test]
@@ -1091,8 +1197,10 @@ mod tests {
     #[test]
     fn recognizes_mysql_compatible_create_database_profiles() {
         assert!(supports_create_database_charset(Some(DatabaseType::Mysql), Some("oceanbase")));
-        assert!(supports_create_database_charset(Some(DatabaseType::Mysql), Some("doris")));
         assert!(supports_create_database_charset(Some(DatabaseType::Goldendb), Some("goldendb")));
+        assert!(!supports_create_database_charset(Some(DatabaseType::Mysql), Some("doris")));
+        assert!(!supports_create_database_charset(Some(DatabaseType::Doris), None));
+        assert!(!supports_create_database_charset(Some(DatabaseType::StarRocks), None));
         assert!(!supports_create_database_charset(Some(DatabaseType::Postgres), None));
     }
 
@@ -1341,6 +1449,13 @@ mod tests {
             }),
             "DROP SCHEMA \"analytics\" CASCADE;"
         );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA \"analytics\" CASCADE;"
+        );
     }
 
     #[test]
@@ -1444,6 +1559,7 @@ mod tests {
                 schema: None,
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                table_comment: None,
                 column_comments: vec![],
             }),
             "CREATE TABLE `users_copy` LIKE `users`;"
@@ -1454,9 +1570,21 @@ mod tests {
                 schema: Some("public".to_string()),
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                table_comment: None,
                 column_comments: vec![],
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                schema: Some("public".to_string()),
+                source_name: "customer_orders".to_string(),
+                target_name: "customer_orders_copy".to_string(),
+                table_comment: Some("  Customer's orders; archive  ".to_string()),
+                column_comments: vec![],
+            }),
+            "CREATE TABLE \"public\".\"customer_orders_copy\" (LIKE \"public\".\"customer_orders\" INCLUDING ALL);\nCOMMENT ON TABLE \"public\".\"customer_orders_copy\" IS '  Customer''s orders; archive  ';"
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
@@ -1464,6 +1592,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                table_comment: None,
                 column_comments: vec![],
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
@@ -1474,6 +1603,7 @@ mod tests {
                 schema: Some("dbo".to_string()),
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                table_comment: None,
                 column_comments: vec![],
             }),
             "SELECT TOP 0 * INTO [dbo].[users_copy] FROM [dbo].[users];"
@@ -1484,6 +1614,7 @@ mod tests {
                 schema: Some("HR".to_string()),
                 source_name: "USERS".to_string(),
                 target_name: "USERS_COPY".to_string(),
+                table_comment: None,
                 column_comments: vec![],
             }),
             "CREATE TABLE \"HR\".\"USERS_COPY\" AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
@@ -1492,7 +1623,8 @@ mod tests {
             database_type: Some(DatabaseType::Dameng),
             schema: Some("APP".to_string()),
             source_name: "USERS".to_string(),
-            target_name: "USERS_COPY".to_string(),
+            target_name: "users_copy".to_string(),
+            table_comment: None,
             column_comments: vec![
                 DuplicateTableColumnComment {
                     name: "DISPLAY\"NAME".to_string(),
@@ -1504,23 +1636,63 @@ mod tests {
         });
         assert_eq!(
             dameng_sql,
-            "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  ';"
+            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  ';"
         );
         assert_eq!(
             crate::sql::split_sql_statements_for_database(&dameng_sql, DatabaseType::Dameng),
             vec![
-                "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
-                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'"
-                    .to_string(),
-                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  '".to_string(),
+                "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
+                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'".to_string(),
+                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  '".to_string(),
             ]
         );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                schema: Some("APP".to_string()),
+                source_name: "USERS".to_string(),
+                target_name: "UsersCopy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+            }),
+            "CREATE TABLE \"APP\".\"UsersCopy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0"
+        );
+        for database_type in [
+            DatabaseType::Postgres,
+            DatabaseType::Redshift,
+            DatabaseType::Gaussdb,
+            DatabaseType::Kwdb,
+            DatabaseType::OpenGauss,
+        ] {
+            let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(database_type),
+                schema: Some("public".to_string()),
+                source_name: "source".to_string(),
+                target_name: "copy".to_string(),
+                table_comment: Some("owner\\'s; archive".to_string()),
+                column_comments: vec![],
+            });
+            let expected_literal = if database_type == DatabaseType::Redshift {
+                "'owner\\\\\\'s; archive'"
+            } else {
+                "E'owner\\\\\\'s; archive'"
+            };
+            assert!(sql.ends_with(&format!("COMMENT ON TABLE \"public\".\"copy\" IS {expected_literal};")));
+            assert_eq!(
+                crate::sql::split_sql_statements_for_database(&sql, database_type),
+                vec![
+                    "CREATE TABLE \"public\".\"copy\" (LIKE \"public\".\"source\" INCLUDING ALL)".to_string(),
+                    format!("COMMENT ON TABLE \"public\".\"copy\" IS {expected_literal}"),
+                ]
+            );
+        }
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
                 database_type: Some(DatabaseType::Iris),
                 schema: Some("SQLUSER".to_string()),
                 source_name: "tb_a".to_string(),
                 target_name: "tb_a_copy".to_string(),
+                table_comment: None,
                 column_comments: vec![],
             }),
             "CREATE TABLE \"SQLUSER\".\"tb_a_copy\" AS SELECT * FROM \"SQLUSER\".\"tb_a\" WHERE 1=0"
@@ -1531,6 +1703,7 @@ mod tests {
                 schema: None,
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                table_comment: Some("ignored by QuestDB".to_string()),
                 column_comments: vec![],
             }),
             "CREATE TABLE `users_copy` (LIKE `users`);"
@@ -1548,6 +1721,7 @@ mod tests {
                 columns: None,
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
             }),
             "INSERT INTO \"users_copy\" SELECT * FROM \"users\";"
         );
@@ -1560,6 +1734,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
             }),
             "INSERT INTO `users_copy` (`id`, `name`) SELECT `id`, `name` FROM `users`;"
         );
@@ -1572,6 +1747,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: true,
                 sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
             }),
             "INSERT INTO \"public\".\"users_copy\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE SELECT \"id\", \"name\" FROM \"public\".\"users\";"
         );
@@ -1584,8 +1760,35 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: true,
+                normalize_new_target_name: false,
             }),
             "SET IDENTITY_INSERT [dbo].[users_copy] ON;\nINSERT INTO [dbo].[users_copy] ([id], [name]) SELECT [id], [name] FROM [dbo].[users];\nSET IDENTITY_INSERT [dbo].[users_copy] OFF;"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                schema: Some("APP".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: None,
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                normalize_new_target_name: true,
+            }),
+            "INSERT INTO \"APP\".USERS_COPY SELECT * FROM \"APP\".\"users\";"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                schema: Some("APP".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: None,
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
+            }),
+            "INSERT INTO \"APP\".\"users_copy\" SELECT * FROM \"APP\".\"users\";"
         );
     }
 
@@ -1613,6 +1816,32 @@ mod tests {
             .unwrap(),
             "RENAME TABLE `active_users` TO `enabled_users`;"
         );
+    }
+
+    #[test]
+    fn builds_sqlite_protocol_table_rename_sql() {
+        for database_type in
+            [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1]
+        {
+            let expected = if database_type == DatabaseType::Sqlite {
+                "ALTER TABLE \"main\".\"users\" RENAME TO \"app users\";"
+            } else {
+                "ALTER TABLE \"users\" RENAME TO \"app users\";"
+            };
+            assert!(supports_object_rename(Some(database_type), DatabaseObjectType::Table));
+            assert!(!supports_object_rename(Some(database_type), DatabaseObjectType::View));
+            assert_eq!(
+                build_rename_object_sql(RenameObjectSqlOptions {
+                    database_type: Some(database_type),
+                    object_type: DatabaseObjectType::Table,
+                    schema: Some("main".to_string()),
+                    old_name: "users".to_string(),
+                    new_name: "app users".to_string(),
+                })
+                .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -104,6 +104,18 @@ const supportsTransaction = computed(() => supportsTransactionFeature(props.acti
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 const saveTooltip = computed(() => (props.activeTab.objectSource ? t("objects.saveSource") : t("toolbar.saveSql")));
+// DM calls it autotrace, Postgres EXPLAIN ANALYZE, SQL Server the actual execution
+// plan (SET STATISTICS XML); all three execute the statement.
+const supportsExplainAnalyze = computed(() => {
+  const dbType = props.activeConnection?.db_type;
+  return dbType === "dameng" || dbType === "postgres" || dbType === "sqlserver";
+});
+const explainAnalyzeTooltip = computed(() => {
+  const dbType = props.activeConnection?.db_type;
+  if (dbType === "postgres") return t("toolbar.explainAnalyze");
+  if (dbType === "sqlserver") return t("toolbar.actualPlan");
+  return t("toolbar.autotrace");
+});
 const canSaveSql = computed(() => !!props.activeTab.externalSqlPath || !!props.activeTab.sql.trim());
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
@@ -242,18 +254,24 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExplaining ? t("toolbar.stopExplain") : t("toolbar.explainPlan") }}</TooltipContent>
       </Tooltip>
-      <!-- Autotrace toggle (only for DM) -->
-      <Button
-        v-if="activeConnection?.db_type === 'dameng'"
-        variant="ghost"
-        size="icon"
-        class="h-6 w-6"
-        :class="props.explainMode === 'autotrace' ? 'text-green-600 bg-green-100 dark:text-green-300 dark:bg-green-900/30' : 'text-muted-foreground/50'"
-        :disabled="activeTab.isExecuting"
-        @click="emit('update:explainMode', props.explainMode === 'autotrace' ? 'explain' : 'autotrace')"
-      >
-        <span class="font-bold" style="font-size: 9px">A</span>
-      </Button>
+      <!-- Autotrace (DM) / EXPLAIN ANALYZE (Postgres) / actual plan (SQL Server) toggle -->
+      <Tooltip v-if="supportsExplainAnalyze">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6"
+            :class="props.explainMode === 'autotrace' ? 'text-green-600 bg-green-100 dark:text-green-300 dark:bg-green-900/30' : 'text-muted-foreground/50'"
+            :disabled="activeTab.isExecuting"
+            :aria-label="explainAnalyzeTooltip"
+            :aria-pressed="props.explainMode === 'autotrace'"
+            @click="emit('update:explainMode', props.explainMode === 'autotrace' ? 'explain' : 'autotrace')"
+          >
+            <span class="font-bold" style="font-size: 9px">A</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
+      </Tooltip>
       <!-- Transaction toggle -->
       <Tooltip v-if="supportsTransaction">
         <TooltipTrigger as-child>

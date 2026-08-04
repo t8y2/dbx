@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { LandingFooter } from "@/components/landing/LandingFooter";
 import { LandingNav } from "@/components/landing/LandingNav";
+import { SponsorContactForm } from "@/components/landing/SponsorContactForm";
 import { buildMetadata } from "@/lib/metadata";
 
 const i18n = {
@@ -12,10 +13,10 @@ const i18n = {
     qiniuSponsorAction: "Visit Qiniu Cloud",
     rainyunSponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
     rainyunSponsorAction: "Visit RainYun",
-    becomeTitle: "Support DBX",
-    becomeDesc: "Financial sponsorship, infrastructure, developer tools, services, and other forms of support are all welcome from individuals and organizations.",
-    becomeContact: "QQ: 86554840",
-    becomeAction: "Contact us",
+    easysearchSponsorDesc: "Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.",
+    easysearchSponsorAction: "Visit Easysearch",
+    becomeTitle: "Sponsorship inquiries",
+    becomeDesc: "If you would like to support DBX with funding, infrastructure, developer tools, or services, tell us about the idea and how to reach you.",
   },
   cn: {
     title: "赞助商与合作伙伴",
@@ -24,10 +25,10 @@ const i18n = {
     qiniuSponsorAction: "访问七牛云",
     rainyunSponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
     rainyunSponsorAction: "访问雨云",
-    becomeTitle: "支持 DBX",
-    becomeDesc: "无论是个人还是团队，资金赞助、基础设施、开发工具、服务资源或其他形式的支持都十分欢迎。",
-    becomeContact: "QQ：86554840",
-    becomeAction: "联系赞助合作",
+    easysearchSponsorDesc: "Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。",
+    easysearchSponsorAction: "访问 Easysearch",
+    becomeTitle: "赞助合作",
+    becomeDesc: "如果你愿意通过资金、基础设施、开发工具或服务资源支持 DBX，请留下联系方式和合作说明。",
   },
 };
 
@@ -65,6 +66,14 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       description: t.qiniuSponsorDesc,
       action: t.qiniuSponsorAction,
     },
+    {
+      name: "Easysearch",
+      href: "https://easysearch.cn",
+      logo: "/sponsors/easysearch.png",
+      logoClass: "w-full max-w-[136px] object-contain",
+      description: t.easysearchSponsorDesc,
+      action: t.easysearchSponsorAction,
+    },
   ];
 
   return (
@@ -95,14 +104,13 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
           ))}
         </div>
 
-        <div className="mt-10 rounded-xl border border-landing-line bg-landing-panel px-6 py-5">
-          <h2 className="text-xl font-[720]">{t.becomeTitle}</h2>
-          <p className="mt-2 text-sm leading-[1.7] text-landing-muted">{t.becomeDesc}</p>
-          <div className="mt-5 flex flex-wrap items-center gap-4">
-            <span className="text-sm font-[650] text-landing-muted">{t.becomeContact}</span>
-            <Link href="https://github.com/t8y2/dbx/discussions" target="_blank" className="landing-final-link inline-flex min-h-[42px] items-center justify-center rounded-[7px] px-4 text-sm font-[650]">
-            {t.becomeAction}
-            </Link>
+        <div className="mt-10 overflow-hidden rounded-xl border border-landing-line bg-landing-panel">
+          <div className="border-b border-landing-line px-6 py-5">
+            <h2 className="text-xl font-[720]">{t.becomeTitle}</h2>
+            <p className="mt-2 max-w-[680px] text-sm leading-[1.7] text-landing-muted">{t.becomeDesc}</p>
+          </div>
+          <div className="p-6">
+            <SponsorContactForm lang={locale} />
           </div>
         </div>
       </section>

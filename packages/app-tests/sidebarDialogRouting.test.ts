@@ -33,6 +33,7 @@ test("remaining form dialogs render once at tree level and keep confirm/cancel b
   assert.equal(occurrences(connectionTree, "<SidebarTreeItemDialogs"), 1);
   assert.doesNotMatch(treeItem, /<Dialog(?:\s|>)/);
   assert.doesNotMatch(treeItem, /<InstallExtensionDialog/);
+  assert.match(dialogHost, /<p class="min-w-0 break-words text-sm text-muted-foreground \[overflow-wrap:anywhere\]">\s*\{\{ connectionDeleteConfirmMessage\(\) \}\}/);
   assert.match(dialogHost, /v-model:open="showCreateDatabaseDialog"/);
   assert.match(dialogHost, /@click="showCreateDatabaseDialog = false"/);
   assert.match(dialogHost, /@click="confirmCreateDatabase"/);

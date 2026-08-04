@@ -57,6 +57,7 @@ pub async fn document_find_documents(
     filter: Option<String>,
     projection: Option<String>,
     sort: Option<String>,
+    collation: Option<String>,
     execution_id: Option<String>,
 ) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
@@ -73,6 +74,7 @@ pub async fn document_find_documents(
             filter.as_deref(),
             projection.as_deref(),
             sort.as_deref(),
+            collation.as_deref(),
         ),
     )
     .await
@@ -147,15 +149,17 @@ pub async fn document_delete_document(
     collection: String,
     id: String,
     routing: Option<String>,
+    document_type: Option<String>,
 ) -> Result<u64, String> {
     ensure_connection_writable(&state, &connection_id, "Delete").await?;
-    dbx_core::document_ops::delete_document_core(
+    dbx_core::document_ops::delete_document_core_with_type(
         &state,
         &connection_id,
         &database,
         &collection,
         &id,
         routing.as_deref(),
+        document_type.as_deref(),
     )
     .await
 }

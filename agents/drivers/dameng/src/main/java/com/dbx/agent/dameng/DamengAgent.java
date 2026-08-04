@@ -28,6 +28,11 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLNonTransientConnectionException;
+import java.sql.SQLRecoverableException;
+import java.sql.SQLSyntaxErrorException;
+import java.sql.SQLTransientConnectionException;
 import java.sql.SQLXML;
 import java.sql.Statement;
 import java.sql.Types;
@@ -100,6 +105,77 @@ public final class DamengAgent extends AbstractJdbcAgent {
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         connectedUsername = params.getUsername();
+    }
+
+    @Override
+    protected void afterPhysicalConnect(ConnectParams params, Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;");
+        } catch (SQLException error) {
+            if (!isIgnorableDbmsOutputError(error)) {
+                throw error;
+            }
+        }
+    }
+
+    private static boolean isIgnorableDbmsOutputError(SQLException error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof SQLException sqlError) {
+                for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                    if (isConnectionError(candidate)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof SQLException sqlError) {
+                for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                    if (candidate instanceof SQLFeatureNotSupportedException || candidate instanceof SQLSyntaxErrorException) {
+                        return true;
+                    }
+                    String sqlState = candidate.getSQLState();
+                    if ("0A000".equalsIgnoreCase(sqlState)
+                        || "42000".equalsIgnoreCase(sqlState)
+                        || "42501".equalsIgnoreCase(sqlState)) {
+                        return true;
+                    }
+                    String message = candidate.getMessage();
+                    if (message != null && isDbmsOutputUnavailableMessage(message.toLowerCase(Locale.ROOT))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isConnectionError(SQLException error) {
+        String sqlState = error.getSQLState();
+        return error instanceof SQLNonTransientConnectionException
+            || error instanceof SQLRecoverableException
+            || error instanceof SQLTransientConnectionException
+            || (sqlState != null && sqlState.toUpperCase(Locale.ROOT).startsWith("08"));
+    }
+
+    private static boolean isDbmsOutputUnavailableMessage(String message) {
+        if (!message.contains("dbms_output")) {
+            return false;
+        }
+        return message.contains("权限")
+            || message.contains("privilege")
+            || message.contains("permission")
+            || message.contains("access denied")
+            || message.contains("not authorized")
+            || message.contains("不支持")
+            || message.contains("unsupported")
+            || message.contains("not supported")
+            || message.contains("不存在")
+            || message.contains("not exist")
+            || message.contains("not found")
+            || message.contains("未找到")
+            || message.contains("undefined")
+            || message.contains("未定义");
     }
 
     /**
@@ -297,7 +373,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 boolean metadataObject = normalized.contains("all_objects")
                     || normalized.contains("sysobjects")
                     || normalized.contains("all_dependencies")
-                    || normalized.contains("all_tab_comments");
+                    || normalized.contains("all_tab_comments")
+                    || normalized.contains("dbms_metadata")
+                    || normalized.contains("get_ddl");
                 boolean permissionDenied = normalized.contains("权限")
                     || normalized.contains("privilege")
                     || normalized.contains("permission denied")
@@ -406,7 +484,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private static boolean includesSupportedObjectTypes(MetadataListConstraints constraints) {
         return constraints.includesTableLikeTypes()
             || constraints.objectTypeAllowed("PROCEDURE")
-            || constraints.objectTypeAllowed("FUNCTION");
+            || constraints.objectTypeAllowed("FUNCTION")
+            || constraints.objectTypeAllowed("SEQUENCE")
+            || constraints.objectTypeAllowed("PACKAGE")
+            || constraints.objectTypeAllowed("PACKAGE_BODY");
     }
 
     private static void appendDamengObjectTypePredicate(
@@ -448,6 +529,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (constraints.objectTypeAllowed("FUNCTION")) {
             result.add("FUNCTION");
         }
+        if (constraints.objectTypeAllowed("SEQUENCE")) {
+            result.add("SEQUENCE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE")) {
+            result.add("PACKAGE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
+            result.add("PACKAGE BODY");
+        }
         return result;
     }
 
@@ -472,6 +562,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (constraints.objectTypeAllowed("FUNCTION")) {
             result.add("FUNCTION");
+        }
+        if (constraints.objectTypeAllowed("SEQUENCE")) {
+            result.add("SEQUENCE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE")) {
+            result.add("PACKAGE");
+        }
+        if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
+            result.add("PACKAGE BODY");
         }
         return result;
     }
@@ -576,33 +675,66 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (!includesSupportedObjectTypes(constraints)) {
             return List.of();
         }
+        RuntimeException permissionError;
         try {
             return executeConstrainedObjects(schema, buildConstrainedObjectsQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
-            if (needsMaterializedViewClassification(constraints)) {
-                try {
-                    return executeConstrainedObjects(
-                        schema,
-                        buildAccessibleConstrainedObjectsQuery(schema, constraints),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to owner-local and raw catalog fallbacks.
-                }
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
             }
-            if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
-                try {
-                    return executeConstrainedObjects(
-                        schema,
-                        buildConstrainedObjectsQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
-                        constraints
-                    );
-                } catch (RuntimeException ignored) {
-                    // Fall through to the raw catalog path below.
-                }
-            }
-            return executeRawConstrainedObjects(schema, constraints);
+            permissionError = e;
         }
+        if (needsMaterializedViewClassification(constraints)) {
+            try {
+                return executeConstrainedObjects(
+                    schema,
+                    buildAccessibleConstrainedObjectsQuery(schema, constraints),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
+            try {
+                return executeConstrainedObjects(
+                    schema,
+                    buildConstrainedObjectsQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
+                    constraints
+                );
+            } catch (RuntimeException e) {
+                if (!isDamengMetadataPermissionError(e)) {
+                    throw e;
+                }
+                permissionError.addSuppressed(e);
+            }
+        }
+        try {
+            return executeRawConstrainedObjects(schema, constraints);
+        } catch (RuntimeException e) {
+            if (!isDamengMetadataPermissionError(e)) {
+                throw e;
+            }
+            permissionError.addSuppressed(e);
+        }
+        try {
+            return executeJdbcMetadataObjects(schema, constraints);
+        } catch (RuntimeException e) {
+            e.addSuppressed(permissionError);
+            throw e;
+        }
+    }
+
+    private List<ObjectInfo> executeJdbcMetadataObjects(String schema, MetadataListConstraints constraints) {
+        if (!constraints.includesTableLikeTypes()) {
+            return List.of();
+        }
+        return executeJdbcMetadataTables(schema, constraints).stream()
+            .map(table -> new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()))
+            .toList();
     }
 
     private List<ObjectInfo> executeConstrainedObjects(
@@ -730,6 +862,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
             case "MATERIALIZED_VIEW", "MATERIALIZED VIEW" -> "MATERIALIZED_VIEW";
             case "PROCEDURE" -> "PROCEDURE";
             case "FUNCTION" -> "FUNCTION";
+            case "SEQUENCE" -> "SEQUENCE";
+            case "PACKAGE" -> "PKG_SPEC";
+            case "PACKAGE_BODY", "PACKAGE BODY" -> "PKG_BODY";
             // DM DBMS_METADATA accepts TRIGGER directly and returns executable CREATE OR REPLACE DDL.
             case "TRIGGER" -> "TRIGGER";
             default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
@@ -738,25 +873,37 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public String getTableDdl(String schema, String table) {
-        return unchecked(() -> {
-            String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
-            String ddl = null;
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                stmt.setString(1, "TABLE");
-                stmt.setString(2, table);
-                stmt.setString(3, schema);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    if (rs.next()) {
-                        ddl = coalesce(readTextColumn(rs, 1));
+        try {
+            return unchecked(() -> {
+                String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+                String ddl = null;
+                try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+                    stmt.setString(1, "TABLE");
+                    stmt.setString(2, table);
+                    stmt.setString(3, schema);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            ddl = coalesce(readTextColumn(rs, 1));
+                        }
                     }
                 }
+                if (ddl != null) {
+                    ddl = appendTableAndColumnComments(ddl, schema, table);
+                    return appendIndependentIndexDdl(ddl, schema, table);
+                }
+                throw new IllegalArgumentException("Table not found: " + schema + "." + table);
+            });
+        } catch (RuntimeException error) {
+            if (!isDamengMetadataPermissionError(error)) {
+                throw error;
             }
-            if (ddl != null) {
-                ddl = appendTableAndColumnComments(ddl, schema, table);
-                return appendIndependentIndexDdl(ddl, schema, table);
+            try {
+                return super.getTableDdl(schema, table);
+            } catch (RuntimeException fallbackError) {
+                fallbackError.addSuppressed(error);
+                throw fallbackError;
             }
-            throw new IllegalArgumentException("Table not found: " + schema + "." + table);
-        });
+        }
     }
 
     @Override
@@ -969,11 +1116,36 @@ public final class DamengAgent extends AbstractJdbcAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            () -> "",
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::resultValue
+            this::resultValue,
+            DamengAgent::statementPrintMessages
         );
+    }
+
+    static List<String> statementPrintMessages(Statement statement) {
+        try {
+            Object target = statement;
+            Method method;
+            try {
+                method = statement.getClass().getMethod("getPrintMsg");
+            } catch (NoSuchMethodException ignored) {
+                // Pooled connections expose a Hikari proxy rather than DmdbStatement directly.
+                Class<?> damengStatementClass = Class.forName("dm.jdbc.driver.DmdbStatement");
+                target = statement.unwrap(damengStatementClass);
+                method = damengStatementClass.getMethod("getPrintMsg");
+            }
+            Object value = method.invoke(target);
+            if (!(value instanceof String)) {
+                return List.of();
+            }
+            String message = (String) value;
+            return message.isEmpty() ? List.of() : message.lines().toList();
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 
     private QueryResult executeExplainQuery(String sql, String schema, ExecuteQueryOptions options) {
@@ -1068,7 +1240,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::resultValue
+            this::resultValue,
+            DamengAgent::statementPrintMessages
         );
     }
 

@@ -27,8 +27,8 @@ export function LandingFooter({ lang }: { lang: "en" | "cn" }) {
       <div className="max-w-[1180px] mx-auto px-7 py-7 max-[760px]:px-[18px]">
         <div className="flex items-center justify-between gap-4 max-[760px]:flex-col max-[760px]:gap-3 max-[760px]:text-center">
           {/* Logo */}
-          <Link href={`/${lang}`} className="flex items-center gap-2.5 text-[var(--color-landing-ink)] text-lg font-[820] shrink-0">
-            <img src="/logo.png" alt="DBX" width={22} height={22} />
+          <Link href={`/${lang}`} className="flex min-h-11 items-center gap-2.5 text-[var(--color-landing-ink)] text-lg font-[820] shrink-0">
+            <img src="/logo.png" alt="" aria-hidden="true" width={22} height={22} />
             <span>DBX</span>
           </Link>
 
@@ -37,13 +37,13 @@ export function LandingFooter({ lang }: { lang: "en" | "cn" }) {
 
           {/* Repo icons */}
           <div className="flex items-center gap-3 shrink-0">
-            <a href="https://github.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" className="text-[var(--color-landing-muted)] hover:text-[var(--color-landing-ink)] transition-colors" aria-label="GitHub">
+            <a href="https://github.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" className="inline-flex size-11 items-center justify-center text-[var(--color-landing-muted)] hover:text-[var(--color-landing-ink)] transition-colors" aria-label="GitHub">
               <GithubIcon />
             </a>
-            <a href="https://cnb.cool/dbxio.com/dbx" target="_blank" rel="noopener noreferrer" className="opacity-40 hover:opacity-100 transition-opacity" aria-label="CNB">
+            <a href="https://cnb.cool/dbxio.com/dbx" target="_blank" rel="noopener noreferrer" className="inline-flex size-11 items-center justify-center opacity-40 hover:opacity-100 transition-opacity" aria-label="CNB">
               <img src="/icons/cnb.svg" alt="CNB" width={18} height={18} />
             </a>
-            <a href="https://atomgit.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" className="opacity-40 hover:opacity-100 transition-opacity" aria-label="AtomGit">
+            <a href="https://atomgit.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" className="inline-flex size-11 items-center justify-center opacity-40 hover:opacity-100 transition-opacity" aria-label="AtomGit">
               <img src="/icons/atomgit.png" alt="AtomGit" width={18} height={18} />
             </a>
           </div>

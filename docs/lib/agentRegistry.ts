@@ -26,6 +26,8 @@ interface AgentRegistryArtifact {
 
 interface AgentRegistryDriver {
   version?: string;
+  min_app_version?: string;
+  jre?: string;
   jar?: AgentRegistryArtifact;
   native?: Record<string, AgentRegistryArtifact>;
 }
@@ -89,7 +91,9 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX = "https://github.com/t8y2/dbx/releases/dow
 const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const MIN_APP_VERSION = "0.6.0";
 const driverVersionMap = driverVersions as Record<string, string>;
-const nativeDriverKeys = new Set(["duckdb", "oracle", "kingbase", "xugu"]);
+const nativeDriverKeys = ["duckdb", "oracle", "kingbase", "xugu", "rabbitmq"] as const;
+const nativeDriverKeySet = new Set<string>(nativeDriverKeys);
+const nativeDriverKeyPattern = nativeDriverKeys.join("|");
 
 const platformLabels: Record<string, string> = {
   "macos-aarch64": "macOS (Apple Silicon)",
@@ -127,6 +131,7 @@ const driverLabels: Record<string, string> = {
   neo4j: "Neo4j",
   "oceanbase-oracle": "OceanBase Oracle Mode",
   oracle: "Oracle",
+  rabbitmq: "RabbitMQ",
   saphana: "SAP HANA",
   snowflake: "Snowflake",
   sundb: "SunDB",
@@ -142,7 +147,7 @@ const driverLabels: Record<string, string> = {
 };
 
 const currentDriverKeys = Object.keys(driverVersionMap).sort((a, b) => labelForDriver(a).localeCompare(labelForDriver(b)));
-const currentJavaDriverKeys = currentDriverKeys.filter((key) => !nativeDriverKeys.has(key));
+const currentJavaDriverKeys = currentDriverKeys.filter((key) => !nativeDriverKeySet.has(key));
 
 const jreVersions: Record<string, string> = {
   "21": "21",
@@ -224,7 +229,14 @@ function assetMap(assets: GitHubReleaseAsset[]): Map<string, GitHubReleaseAsset>
 }
 
 export function buildAgentDownloadCatalogFromRegistry(registry: AgentRegistry): AgentDownloadCatalog {
-  return buildAgentDownloadCatalog(registryReleaseAssets(registry));
+  const assets = registryReleaseAssets(registry);
+  return {
+    jdbcPlugin: buildJdbcPluginDownloadEntry(),
+    bundles: buildOfflineBundleEntries(assets),
+    drivers: buildDriverEntriesFromRegistry(registry),
+    jres: buildJreEntries(assets),
+    nativeAgents: buildNativeAgentEntries(assets),
+  };
 }
 
 export function buildAgentDownloadCatalog(assets: GitHubReleaseAsset[]): AgentDownloadCatalog {
@@ -287,14 +299,33 @@ export function buildDriverEntries(assets: GitHubReleaseAsset[]): DriverDisplayE
     .filter((entry): entry is DriverDisplayEntry => entry !== null);
 }
 
+function buildDriverEntriesFromRegistry(registry: AgentRegistry): DriverDisplayEntry[] {
+  return Object.entries(registry.drivers ?? {})
+    .map(([key, driver]) => {
+      const jar = driver.jar;
+      if (nativeDriverKeySet.has(key) || !jar?.url || jar.size <= 0) return null;
+
+      return {
+        key,
+        label: labelForDriver(key),
+        version: driver.version ?? driverVersionMap[key] ?? "",
+        minAppVersion: driver.min_app_version ?? MIN_APP_VERSION,
+        jar: { url: jar.url, size: jar.size },
+        jre: driver.jre ?? "21",
+      };
+    })
+    .filter((entry): entry is DriverDisplayEntry => entry !== null)
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 export function buildNativeAgentEntries(assets: GitHubReleaseAsset[]): NativeAgentDisplayEntry[] {
   const entries = new Map<string, NativeAgentDisplayEntry & { packaged: boolean }>();
   const platforms = "macos-aarch64|macos-x64|linux-aarch64|linux-x64|windows-aarch64|windows-x64";
 
   for (const asset of assets) {
-    const packageMatch = new RegExp(`^dbx-agent-(duckdb|oracle|kingbase|xugu)-(.+)-(${platforms})\\.(?:tar\\.zst|zip)$`).exec(asset.name);
-    const versionedMatch = new RegExp(`^dbx-agent-(duckdb|oracle|kingbase|xugu)-(.+)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
-    const legacyMatch = new RegExp(`^dbx-agent-(duckdb|oracle|kingbase|xugu)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
+    const packageMatch = new RegExp(`^dbx-agent-(${nativeDriverKeyPattern})-(.+)-(${platforms})\\.(?:tar\\.zst|zip)$`).exec(asset.name);
+    const versionedMatch = new RegExp(`^dbx-agent-(${nativeDriverKeyPattern})-(.+)-(${platforms})(?:\\.exe)?$`).exec(asset.name);
+    const legacyMatch = new RegExp(`^dbx-agent-(${nativeDriverKeyPattern})-(${platforms})(?:\\.exe)?$`).exec(asset.name);
     const match = packageMatch ?? versionedMatch ?? legacyMatch;
     if (!match) continue;
 
@@ -302,7 +333,7 @@ export function buildNativeAgentEntries(assets: GitHubReleaseAsset[]): NativeAge
     const key = match[1];
     const version = legacyMatch ? (driverVersionMap[key] ?? "") : match[2];
     const platformKey = legacyMatch ? match[2] : match[3];
-    if (!nativeDriverKeys.has(key)) continue;
+    if (!nativeDriverKeySet.has(key)) continue;
     const entryKey = `${key}:${platformKey}`;
     const existing = entries.get(entryKey);
     if (existing?.packaged && !packaged) continue;

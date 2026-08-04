@@ -24,6 +24,7 @@ export interface MongoFindCommand {
   skip: number;
   limit: number;
   sort?: string;
+  collation?: string;
 }
 
 export interface MongoFindPaginationPlan {
@@ -162,6 +163,14 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
     sort = parsedSort;
   }
 
+  const collationArg = readChainedCallArgument(chain, "collation");
+  let collation: string | undefined;
+  if (collationArg !== undefined) {
+    const parsedCollation = normalizeJsonArgument(collationArg);
+    if (!parsedCollation) return null;
+    collation = parsedCollation;
+  }
+
   const skip = readChainedIntegerArgument(chain, "skip", 0);
   const limit = readChainedIntegerArgument(chain, "limit", DEFAULT_LIMIT);
   if (skip === null || limit === null) return null;
@@ -173,6 +182,7 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
     skip,
     limit,
     sort,
+    ...(collation ? { collation } : {}),
   };
 }
 
@@ -756,7 +766,15 @@ export function mongoCreateIndexToQueryResult(name: string, executionTimeMs: num
   };
 }
 
-export function mongoDroppedIndexesToQueryResult(names: string[], executionTimeMs: number): QueryResult {
+export function mongoDroppedIndexesToQueryResult(names: string[], executionTimeMs: number, failures: Array<{ name: string; message: string }> = []): QueryResult {
+  if (failures.length > 0) {
+    return {
+      columns: ["name", "status", "message"],
+      rows: [...names.map((name) => [name, "dropped", null] as [string, string, null]), ...failures.map((failure) => [failure.name, "failed", failure.message])],
+      affected_rows: names.length,
+      execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+    };
+  }
   return {
     columns: ["name"],
     rows: names.map((name) => [name]),

@@ -405,7 +405,7 @@ export function useDataGridColumnLayout(options: {
   renderedColumnWidths: MaybeRefOrGetter<readonly number[]>;
   scrollLeft: MaybeRefOrGetter<number>;
   viewportWidth: MaybeRefOrGetter<number>;
-  rowNumberWidth: number;
+  rowNumberWidth: MaybeRefOrGetter<number>;
   bufferPx?: number;
   headerRef?: MaybeRefOrGetter<HTMLElement | null | undefined>;
   orderedColumnIndexes?: MaybeRefOrGetter<readonly number[]>;
@@ -427,7 +427,7 @@ export function useDataGridColumnLayout(options: {
       columnCount: toValue(options.visibleColumnIndexes).length,
       scrollLeft: toValue(options.scrollLeft),
       viewportWidth: toValue(options.viewportWidth),
-      rowNumberWidth: options.rowNumberWidth,
+      rowNumberWidth: toValue(options.rowNumberWidth),
       bufferPx: options.bufferPx ?? 900,
     }),
   );
@@ -478,7 +478,7 @@ export function useDataGridColumnLayout(options: {
   }
 
   function columnContentOffsetLeft(visibleColIdx: number): number {
-    return options.rowNumberWidth + (renderedColumnOffsets.value[visibleColIdx] ?? 0);
+    return toValue(options.rowNumberWidth) + (renderedColumnOffsets.value[visibleColIdx] ?? 0);
   }
 
   const columnHeaderDragState = ref<ColumnHeaderDragState | null>(null);

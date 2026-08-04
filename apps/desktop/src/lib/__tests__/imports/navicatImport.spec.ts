@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseNavicatConnections } from "@/lib/imports/navicatImport";
 
 class TestElement {
@@ -74,6 +74,10 @@ async function encryptNavicatPassword(value: string) {
 if (!globalThis.DOMParser) {
   globalThis.DOMParser = TestDOMParser as typeof DOMParser;
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("parseNavicatConnections", () => {
   it("imports SQLite DatabaseFile as the host without treating it as a schema", async () => {
@@ -153,6 +157,17 @@ describe("parseNavicatConnections", () => {
         auth_method: "password",
       }),
     ]);
+  });
+
+  it("decrypts Navicat passwords without SubtleCrypto in insecure HTTP contexts", async () => {
+    const databasePassword = await encryptNavicatPassword("database-secret");
+    vi.stubGlobal("crypto", {});
+
+    const [connection] = await parseNavicatConnections(`<Connections>
+  <Connection ConnType="ORACLE" ConnectionName="oracle-http" Host="db.internal" UserName="app" Password="${databasePassword}" />
+</Connections>`);
+
+    expect(connection?.password).toBe("database-secret");
   });
 
   it("imports key-authenticated SSH field variants with the default port", async () => {

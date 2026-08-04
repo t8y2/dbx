@@ -43,7 +43,9 @@ const showExpireDialog = ref(false);
 const selectedSub = ref<SubscriptionInfo>();
 const peekedMessages = ref<PeekedMessage[]>([]);
 const peekLoading = ref(false);
+const peekIncomplete = ref(false);
 const peekCount = ref(5);
+let peekRequestVersion = 0;
 const deleteTarget = ref<SubscriptionInfo>();
 const showDeleteDialog = ref(false);
 const deleting = ref(false);
@@ -212,6 +214,7 @@ function openPeekDialog(sub: SubscriptionInfo) {
   selectedSub.value = sub;
   peekCount.value = 5;
   peekedMessages.value = [];
+  peekIncomplete.value = false;
   showPeekDialog.value = true;
   void handlePeekMessages();
 }
@@ -344,18 +347,37 @@ async function confirmClearBacklog() {
 
 async function handlePeekMessages() {
   const topicRef = getPulsarTopicRef();
-  if (!selectedSub.value || !topicRef) return;
+  const sub = selectedSub.value;
+  if (!sub || !topicRef) return;
+  const requestVersion = ++peekRequestVersion;
   const count = Math.max(1, Math.min(100, Number(peekCount.value) || 1));
   peekCount.value = count;
   peekLoading.value = true;
+  peekIncomplete.value = false;
   error.value = undefined;
   try {
-    peekedMessages.value = await mqPeekMessages(props.connectionId, topicRef, selectedSub.value.name, count);
+    const result = await mqPeekMessages(props.connectionId, topicRef, sub.name, count);
+    if (requestVersion === peekRequestVersion) {
+      if (Array.isArray(result)) {
+        peekedMessages.value = result;
+        peekIncomplete.value = false;
+      } else {
+        peekedMessages.value = result.messages;
+        peekIncomplete.value = result.incomplete;
+      }
+    }
   } catch (e: unknown) {
-    error.value = formatError(e);
+    if (requestVersion === peekRequestVersion) error.value = formatError(e);
   } finally {
-    peekLoading.value = false;
+    if (requestVersion === peekRequestVersion) peekLoading.value = false;
   }
+}
+
+function invalidatePeekRequest() {
+  peekRequestVersion += 1;
+  peekLoading.value = false;
+  peekedMessages.value = [];
+  peekIncomplete.value = false;
 }
 
 async function handleExpireMessages() {
@@ -379,6 +401,7 @@ watch(
   () => [props.topic, props.tenant, props.namespace, props.mqSystemKind],
   () => {
     selectedSub.value = undefined;
+    invalidatePeekRequest();
     loadSubscriptions();
   },
   { immediate: true },
@@ -604,6 +627,9 @@ watch(
             <button @click="handlePeekMessages" :disabled="peekLoading" class="btn-sm">
               {{ peekLoading ? t("mqSubscriptions.loading") : t("mqSubscriptions.refresh") }}
             </button>
+          </div>
+          <div v-if="peekIncomplete" class="form-warning" role="status" data-testid="peek-incomplete">
+            {{ t("mqMessages.peekIncomplete") }}
           </div>
           <div v-if="error" class="form-error">{{ error }}</div>
           <div v-else-if="peekLoading && !peekedMessages.length" class="panel-loading">{{ t("mqSubscriptions.loading") }}</div>
@@ -1047,6 +1073,16 @@ button:disabled {
   background: var(--color-error-bg);
   color: var(--color-error);
   border-radius: var(--dbx-radius-fixed-4);
+  font-size: 13px;
+}
+
+.form-warning {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-warning-border, #d99a22);
+  border-radius: var(--dbx-radius-fixed-4);
+  background: var(--color-warning-background, #fff6df);
+  color: var(--color-warning-text, #7a4a00);
   font-size: 13px;
 }
 

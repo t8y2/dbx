@@ -1,0 +1,139 @@
+---
+title: Specialized Workspaces
+description: Manage Redis, MongoDB, search and vector databases, HBase, message queues, etcd, ZooKeeper, and Nacos in DBX.
+---
+
+In addition to the SQL editor and data grid, DBX opens specialized workspaces for specific connection types. These interfaces use each system's native object model and management APIs, including Redis keys, MongoDB documents, vector collections, message queue topics, etcd keys, ZooKeeper ZNodes, and Nacos configurations.
+
+<Callout type="info">Specialized capabilities are enabled dynamically based on database type, server version, driver, and account privileges. If an entry point is missing, check [Database Support](/en/docs/databases), the connection test result, and server permissions.</Callout>
+
+## Workspace Overview
+
+| Category | Connection types | Main entry points |
+| --- | --- | --- |
+| Key/value and document | Redis, MongoDB | Key or document browsing, filtering, editing, commands, and aggregation workflows |
+| Search and document indexes | Elasticsearch, Easysearch, Manticore Search | Index/document browsing and engine-specific requests |
+| Vector databases | Qdrant, Milvus, Weaviate, ChromaDB | Collection browsing, vector search, upsert, delete, and request preview |
+| Wide-column and column family | HBase | Namespaces, table structure, column families, and row data |
+| Message queues | Pulsar, Kafka, RocketMQ, RabbitMQ | Topics, subscriptions or consumers, messages, monitoring, permissions, policies, and admin APIs |
+| Registry and configuration | etcd, ZooKeeper, Nacos | Keys/ZNodes, cluster status, access control, configuration, services, and instances |
+| Runtime status | MySQL, PostgreSQL, Redis, etcd, Nacos, and others | Dashboards, processes or sessions, metrics, and database-specific administration views |
+
+## Redis and MongoDB
+
+Redis and MongoDB have dedicated guides:
+
+<Cards>
+  <Card title="Redis Browser" href="/en/docs/redis">
+    Browse and search keys, edit multiple data types, run commands, and inspect statistics and Slowlog.
+  </Card>
+  <Card title="MongoDB Browser" href="/en/docs/mongodb">
+    Browse collections and documents, filter, paginate, edit, manage indexes, and work with GridFS data.
+  </Card>
+</Cards>
+
+When a connection is read-only, DBX disables or rejects mutations in Redis, MongoDB, and GridFS. Dangerous Redis commands also pass through a separate command-safety classifier.
+
+## Search and Document Indexes
+
+Elasticsearch, Easysearch, and Manticore Search use index- and document-oriented browsing. DBX displays indexes or collections from driver metadata and provides entry points for browsing, querying, and inspecting documents.
+
+Keep these boundaries in mind:
+
+- Elasticsearch and Easysearch usually connect to HTTP/HTTPS endpoints rather than traditional database TCP ports
+- TLS, proxying, and authentication depend on the connection type and server configuration
+- Document queries and mutations vary by driver, server version, and account privileges
+- SQL workflows such as schema diff or SQL file execution only appear when the engine reliably supports them
+
+## Vector Databases
+
+Qdrant, Milvus, Weaviate, and ChromaDB open a vector collection workspace. Depending on the engine, it can:
+
+- Browse collections and records
+- Display dimensions or schema details
+- Run Top K similarity search with an input vector
+- Preview or edit the raw request
+- Upsert vectors, payloads/metadata, or documents
+- Delete records by ID or request condition
+
+The products use different APIs, collection models, and search parameters. DBX generates an engine-specific request template, but dimensions, field names, distance metrics, and index settings must match the target database.
+
+<Callout type="warn">Vector upserts and deletes are write operations. Production connections should combine database privileges, DBX read-only/production protection, and human request review.</Callout>
+
+## HBase
+
+The HBase workspace is organized around namespaces, tables, column families, and row keys. Depending on Agent and server capabilities, it can browse table structure and rows and expose create, alter, truncate, or delete operations on writable connections.
+
+Scan ranges and filters directly affect server load. For large tables, constrain row-key ranges, page size, and returned columns instead of treating a full scan like a normal relational data grid.
+
+## Message Queues
+
+Pulsar, Kafka, RocketMQ, and RabbitMQ share the message queue console framework, but each system only shows panels supported by its own capabilities. Common areas include:
+
+- Topics plus namespaces, tenants, or virtual hosts
+- Subscriptions, consumer groups, producers, and clients
+- Message queries, sending, and traces
+- Broker or cluster monitoring
+- Permissions, policies, quotas, and related administration
+- Raw API requests exposed by the driver
+
+Pulsar emphasizes tenants, namespaces, and subscriptions; Kafka uses topics, consumer groups, and brokers; RocketMQ adds message and trace workflows; RabbitMQ uses virtual hosts, exchanges/queues, connections, policies, and permissions.
+
+<Callout type="info">Message queue panels are capability-driven. Server versions, management APIs, account privileges, or a missing management port can make individual tabs unavailable.</Callout>
+
+## etcd, ZooKeeper, and Nacos
+
+### etcd
+
+etcd provides a key browser, cluster dashboard, and access-control workspace. Available features include prefix browsing, value editing, lease information, member and health status, metrics, and user/role management.
+
+### ZooKeeper
+
+ZooKeeper displays hierarchical data as a ZNode tree. You can browse paths and inspect node content, then create, update, or delete nodes when permissions and connection state allow it.
+
+### Nacos
+
+The Nacos workspace covers configuration and services and can also manage namespaces. Depending on the connection and console API, it includes:
+
+- Configuration creation, editing, deletion, and full-text search
+- Configuration history, version diff, and rollback
+- Batch import/export and cross-namespace copy
+- Services, instances, weights, and health data
+- Dashboard and Raw API access
+
+Configuration history can require an additional console URL and credentials. If the connection works but history is unavailable, check the console settings in the connection form.
+
+## Dashboards and Administration Views
+
+Some connections expose runtime status pages from the object tree or a tab, including:
+
+- MySQL and PostgreSQL dashboards or process/session views
+- Redis instance information, statistics, and Slowlog
+- etcd members, database size, and Raft/lease-related metrics
+- Nacos namespace, configuration, service, and instance statistics
+- Message queue broker, topic, client, and consumption state
+
+These pages are for inspection and troubleshooting, not long-term monitoring. Use Prometheus, Grafana, or a vendor monitoring platform when you need alerts, historical trends, and capacity planning.
+
+## Safety and Compatibility Boundaries
+
+- Specialized workspaces respect connection read-only state; MCP-exposed specialized commands also follow the global MCP policy.
+- Production protection still applies to writes recognized by DBX, while database privileges remain the final boundary.
+- Drivers expose only capabilities they can implement reliably, so tabs can differ even within one category.
+- Management APIs and data protocols can use different ports, such as RabbitMQ Management API or the Nacos console API.
+- File paths and network reachability in Docker/Web belong to the server environment, not the browser computer.
+
+<Cards>
+  <Card title="Review the database matrix" href="/en/docs/databases">
+    Check connection types, default ports, driver architecture, and advanced feature coverage.
+  </Card>
+  <Card title="Configure drivers" href="/en/docs/driver-management">
+    Install or update Agent/JDBC drivers and handle runtime dependencies.
+  </Card>
+  <Card title="Set write protection" href="/en/docs/production-safety">
+    Configure read-only connections, production protection, and MCP permissions.
+  </Card>
+  <Card title="Troubleshoot connectivity" href="/en/docs/ssh-tunnel">
+    Configure TLS, SSH, SOCKS5, HTTP proxies, or HTTP tunnels.
+  </Card>
+</Cards>

@@ -85,6 +85,17 @@ impl KafkaAdmin {
         client.call(method, params).await
     }
 
+    /// The Kafka agent bounds message browsing with its configured request timeout.
+    /// Do not preempt that with the driver's generic 30-second RPC timeout.
+    async fn call_with_agent_timeout<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String> {
+        let mut client = self.client.lock().await;
+        client.call_with_timeout(method, params, None).await
+    }
+
     /// Send a JSON-RPC call that returns `{ok: true}` on success.
     async fn call_ok(&self, method: &str, params: serde_json::Value) -> Result<(), String> {
         let _: serde_json::Value = self.call(method, params).await?;
@@ -317,51 +328,11 @@ impl MessageQueueAdmin for KafkaAdmin {
         _sub: &str,
         count: u32,
         options: PeekMessagesOptions,
-    ) -> Result<Vec<PeekedMessage>, String> {
-        let conn_params = build_connection_params(&self.config);
-        let mut params = serde_json::json!({
-            "topic": topic.topic,
-            "count": count,
-            "connection": conn_params,
-        });
-        // Omit partition/offset so the agent defaults to all partitions + earliest.
-        // Do not coerce missing values to 0 — that forced PARTITION 0 OFFSET 0 UX.
-        if let Some(partition) = options.partition {
-            params["partition"] = serde_json::json!(partition);
-        }
-        if let Some(offset) = options.offset {
-            params["offset"] = serde_json::json!(offset);
-        }
-        let result: serde_json::Value = self.call("mq_peek_messages", params).await?;
+    ) -> Result<PeekMessagesResult, String> {
+        let params = peek_messages_params(&self.config, topic, count, options);
+        let result: serde_json::Value = self.call_with_agent_timeout("mq_peek_messages", params).await?;
 
-        let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(messages
-            .into_iter()
-            .enumerate()
-            .map(|(idx, m)| {
-                let mut properties = HashMap::new();
-                if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
-                    properties.insert("partition".to_string(), partition.to_string());
-                }
-                PeekedMessage {
-                    position: (idx + 1) as u32,
-                    message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                    key: m.get("key").and_then(|v| v.as_str()).map(String::from),
-                    publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                    event_time: None,
-                    properties,
-                    headers: m
-                        .get("headers")
-                        .and_then(|v| v.as_object())
-                        .map(|obj| {
-                            obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
-                        })
-                        .unwrap_or_default(),
-                    payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
-                }
-            })
-            .collect())
+        Ok(peek_messages_result_from_agent(&result))
     }
 
     async fn expire_messages(&self, _topic: &TopicRef, _sub: &str, _expire_seconds: i64) -> Result<(), String> {
@@ -687,6 +658,70 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     })
 }
 
+fn peek_messages_params(
+    cfg: &MqAdminConfig,
+    topic: &TopicRef,
+    count: u32,
+    options: PeekMessagesOptions,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "topic": topic.topic,
+        "count": count,
+        "connection": build_connection_params(cfg),
+    });
+    // Keep absent fields absent so older earliest and offset requests retain
+    // their established agent semantics, including offset 0.
+    if let Some(start_position) = options.start_position {
+        params["startPosition"] = serde_json::json!(start_position);
+    }
+    if let Some(partition) = options.partition {
+        params["partition"] = serde_json::json!(partition);
+    }
+    if let Some(offset) = options.offset {
+        params["offset"] = serde_json::json!(offset);
+    }
+    params
+}
+
+fn peek_messages_result_from_agent(result: &serde_json::Value) -> PeekMessagesResult {
+    let (messages, incomplete) = if let Some(messages) = result.as_array() {
+        (messages.clone(), false)
+    } else {
+        (
+            result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+            result.get("incomplete").and_then(|v| v.as_bool()).unwrap_or(false),
+        )
+    };
+    let messages = messages
+        .into_iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            let mut properties = HashMap::new();
+            if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
+                properties.insert("partition".to_string(), partition.to_string());
+            }
+            PeekedMessage {
+                position: (idx + 1) as u32,
+                message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                key: m.get("key").and_then(|v| v.as_str()).map(String::from),
+                publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                event_time: None,
+                properties,
+                headers: m
+                    .get("headers")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
+                    })
+                    .unwrap_or_default(),
+                payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+            }
+        })
+        .collect();
+    PeekMessagesResult { messages, incomplete }
+}
+
 fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<serde_json::Value, String> {
     match pos {
         ResetPosition::Earliest => Ok(serde_json::json!({
@@ -769,6 +804,95 @@ mod tests {
             management_connect_override: None,
             extra,
         }
+    }
+
+    fn topic_ref() -> TopicRef {
+        TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        }
+    }
+
+    #[test]
+    fn peek_message_params_forward_explicit_start_position_and_offset_filters() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(
+            &cfg,
+            &topic_ref(),
+            20,
+            PeekMessagesOptions {
+                start_position: Some(PeekStartPosition::Offset),
+                partition: Some(2),
+                offset: Some(17),
+            },
+        );
+
+        assert_eq!(params.get("topic").and_then(|value| value.as_str()), Some("events"));
+        assert_eq!(params.get("count").and_then(|value| value.as_u64()), Some(20));
+        assert_eq!(params.get("startPosition").and_then(|value| value.as_str()), Some("offset"));
+        assert_eq!(params.get("partition").and_then(|value| value.as_i64()), Some(2));
+        assert_eq!(params.get("offset").and_then(|value| value.as_i64()), Some(17));
+    }
+
+    #[test]
+    fn peek_message_params_omit_legacy_optional_fields() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(&cfg, &topic_ref(), 20, PeekMessagesOptions::default());
+
+        assert!(params.get("startPosition").is_none());
+        assert!(params.get("partition").is_none());
+        assert!(params.get("offset").is_none());
+    }
+
+    #[test]
+    fn peek_result_preserves_the_agent_incomplete_status() {
+        let result = peek_messages_result_from_agent(&serde_json::json!({
+            "messages": [{
+                "partition": 2,
+                "offset": 17,
+                "payloadBase64": "aGVsbG8=",
+            }],
+            "incomplete": true,
+        }));
+
+        assert!(result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("2"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("17"));
+    }
+
+    #[test]
+    fn peek_result_accepts_legacy_agent_array_responses() {
+        let result = peek_messages_result_from_agent(&serde_json::json!([{
+            "partition": 1,
+            "offset": 9,
+            "payloadBase64": "bGVnYWN5",
+        }]));
+
+        assert!(!result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("1"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("9"));
+        assert_eq!(result.messages[0].payload_base64, "bGVnYWN5");
+    }
+
+    #[test]
+    fn peek_message_params_preserve_legacy_offset_requests() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(
+            &cfg,
+            &topic_ref(),
+            20,
+            PeekMessagesOptions { start_position: None, partition: None, offset: Some(17) },
+        );
+
+        assert!(params.get("startPosition").is_none());
+        assert_eq!(params.get("offset").and_then(|value| value.as_i64()), Some(17));
     }
 
     #[test]

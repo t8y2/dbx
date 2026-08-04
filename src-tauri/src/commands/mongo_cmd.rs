@@ -110,6 +110,7 @@ pub async fn mongo_find_documents(
     filter: Option<String>,
     projection: Option<String>,
     sort: Option<String>,
+    collation: Option<String>,
     execution_id: Option<String>,
     mcp_request: Option<bool>,
 ) -> Result<MongoDocumentResult, String> {
@@ -126,6 +127,7 @@ pub async fn mongo_find_documents(
         filter,
         projection,
         sort,
+        collation,
         execution_id,
     )
     .await
@@ -467,8 +469,16 @@ pub async fn mongo_delete_document(
     id: String,
     routing: Option<String>,
 ) -> Result<u64, String> {
-    crate::commands::document_cmd::document_delete_document(state, connection_id, database, collection, id, routing)
-        .await
+    crate::commands::document_cmd::document_delete_document(
+        state,
+        connection_id,
+        database,
+        collection,
+        id,
+        routing,
+        None,
+    )
+    .await
 }
 
 #[tauri::command]

@@ -25,7 +25,7 @@ describe("sidebar filter guards", () => {
     expect(source).toContain("sidebarTableSearchEnabled && !isTreeSearchFiltering.value");
     expect(source).toContain("!useVirtualTree.value || isTreeSearchFiltering.value");
     expect(source.match(/if \(isRootListPartial\.value\)/g)).toHaveLength(2);
-    expect(source.match(/:drag-disabled="isRootListPartial \|\| isConnectionListAlphabeticallySorted"/g)).toHaveLength(2);
+    expect(source.match(/:reorder-disabled="isRootListPartial \|\| isConnectionListAlphabeticallySorted"/g)).toHaveLength(2);
     expect(source).not.toContain("isFiltering");
   });
 });

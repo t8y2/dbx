@@ -1,19 +1,29 @@
 // @vitest-environment happy-dom
 
-import { computed, nextTick, ref } from "vue";
+import { computed, isRef, nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
-import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH } from "@/lib/dataGrid/dataGridColumnWidth";
+import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { clearDataGridColumnWidthStates, createDataGridColumnMeasurementSignature, createDataGridColumnStructureSignature, DATA_GRID_COLUMN_WIDTH_STATE_LIMIT, dataGridColumnWidthStateCount, loadDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
-import { DATA_GRID_ROW_NUM_WIDTH, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
+import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 
-function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[]; columnTypes?: string[]; cacheKey?: string; density?: "compact" | "standard" | "comfortable"; compactColumnHeaderActions?: boolean; headerTextWidth?: number }) {
+function createResizeState(options: {
+  columns: string[];
+  rows: Array<Array<string | number | boolean | null>> | ReturnType<typeof ref<Array<Array<string | number | boolean | null>>>>;
+  columnIndexes?: number[];
+  columnTypes?: string[];
+  cacheKey?: string;
+  density?: "compact" | "standard" | "comfortable";
+  compactColumnHeaderActions?: boolean;
+  headerTextWidth?: number;
+}) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
   const headerTextWidth = ref(options.headerTextWidth);
   const headerMeasurementKey = ref(0);
   const density = ref(options.density ?? "standard");
+  const rows = isRef(options.rows) ? options.rows : ref(options.rows);
   const state = useDataGridColumnResize({
     columns: computed(() => options.columns),
-    sourceRows: computed(() => options.rows),
+    sourceRows: computed(() => rows.value),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
     density,
     compactColumnHeaderActions: computed(() => compact.value),
@@ -24,6 +34,7 @@ function createResizeState(options: { columns: string[]; rows: Array<Array<strin
   });
   return {
     ...state,
+    rows,
     setCompact(v: boolean) {
       compact.value = v;
     },
@@ -65,13 +76,13 @@ describe("useDataGridColumnResize", () => {
     });
 
     state.initColumnWidths();
-    // standard valueTextLimit=40, 120 chars → truncated to 40: 40×8+24=344
-    // header "description"=11×8+85=173 < 344 → 344
-    expect(state.columnWidths.value[0]).toBe(344);
+    // standard valueTextLimit=40, 120 chars → truncated to 40: 40×8+24+12=356
+    // header "description"=11×8+59=147 < 356 → 356
+    expect(state.columnWidths.value[0]).toBe(356);
 
     state.autoFitColumn(0);
 
-    expect(state.columnWidths.value[0]).toBeGreaterThan(344);
+    expect(state.columnWidths.value[0]).toBeGreaterThan(356);
     expect(state.columnWidths.value[0]).toBeLessThanOrEqual(DATA_GRID_COL_AUTO_FIT_MAX_WIDTH);
   });
 
@@ -122,6 +133,15 @@ describe("useDataGridColumnResize", () => {
     first.onResizeStart(1, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
     document.dispatchEvent(new MouseEvent("mouseup", { clientX: 160 }));
     expect(first.columnWidths.value[1]).toBe(originalWidth + 60);
+    const persisted = loadDataGridColumnWidthState(
+      {
+        cacheKey: "result-a",
+        structureSignature: createDataGridColumnStructureSignature(["id", "name"]),
+        measurementSignature: createDataGridColumnMeasurementSignature("standard", true, 0),
+      },
+      [0, 1],
+    );
+    expect(persisted?.userSizedColumnIndexes).toEqual(new Set([1]));
 
     const remounted = createResizeState({
       columns: ["id", "name"],
@@ -177,15 +197,15 @@ describe("useDataGridColumnResize", () => {
     const structureSignature = createDataGridColumnStructureSignature(["id"]);
     const measurementSignature = createDataGridColumnMeasurementSignature("standard", true, 14);
     for (let index = 0; index < DATA_GRID_COLUMN_WIDTH_STATE_LIMIT; index++) {
-      saveDataGridColumnWidthState({ cacheKey: `result-${index}`, structureSignature, measurementSignature }, [0], [100 + index]);
+      saveDataGridColumnWidthState({ cacheKey: `result-${index}`, structureSignature, measurementSignature }, [0], [100 + index], new Set());
     }
-    expect(loadDataGridColumnWidthState({ cacheKey: "result-0", structureSignature, measurementSignature }, [0])).toEqual([100]);
-    saveDataGridColumnWidthState({ cacheKey: `result-${DATA_GRID_COLUMN_WIDTH_STATE_LIMIT}`, structureSignature, measurementSignature }, [0], [100 + DATA_GRID_COLUMN_WIDTH_STATE_LIMIT]);
+    expect(loadDataGridColumnWidthState({ cacheKey: "result-0", structureSignature, measurementSignature }, [0])?.widths).toEqual([100]);
+    saveDataGridColumnWidthState({ cacheKey: `result-${DATA_GRID_COLUMN_WIDTH_STATE_LIMIT}`, structureSignature, measurementSignature }, [0], [100 + DATA_GRID_COLUMN_WIDTH_STATE_LIMIT], new Set());
 
     expect(dataGridColumnWidthStateCount()).toBe(DATA_GRID_COLUMN_WIDTH_STATE_LIMIT);
     expect(loadDataGridColumnWidthState({ cacheKey: "result-1", structureSignature, measurementSignature }, [0])).toBeUndefined();
-    expect(loadDataGridColumnWidthState({ cacheKey: "result-0", structureSignature, measurementSignature }, [0])).toEqual([100]);
-    expect(loadDataGridColumnWidthState({ cacheKey: `result-${DATA_GRID_COLUMN_WIDTH_STATE_LIMIT}`, structureSignature, measurementSignature }, [0])).toEqual([100 + DATA_GRID_COLUMN_WIDTH_STATE_LIMIT]);
+    expect(loadDataGridColumnWidthState({ cacheKey: "result-0", structureSignature, measurementSignature }, [0])?.widths).toEqual([100]);
+    expect(loadDataGridColumnWidthState({ cacheKey: `result-${DATA_GRID_COLUMN_WIDTH_STATE_LIMIT}`, structureSignature, measurementSignature }, [0])?.widths).toEqual([100 + DATA_GRID_COLUMN_WIDTH_STATE_LIMIT]);
   });
 
   it("recalculates column widths when compactColumnHeaderActions changes", async () => {
@@ -274,9 +294,130 @@ describe("useDataGridColumnResize", () => {
 
     state.initColumnWidths();
     // P95 of 50 samples ignores the single 200-char outlier;
-    // "short" = 5 chars → 5×8+24=64, header "data"=4×8+59=91 → max=91
+    // "short" = 5 chars → 5×8+24+12=76, header "data"=4×8+59=91 → max=91
     expect(state.columnWidths.value[0]).toBeLessThan(600);
     expect(state.columnWidths.value[0]).toBe(91);
+  });
+
+  it("sizes short numeric columns from large sample values", () => {
+    const state = createResizeState({
+      columns: ["id"],
+      rows: Array.from({ length: 20 }, (_, index) => [1_217_001 + index]),
+      density: "standard",
+      compactColumnHeaderActions: true,
+    });
+
+    state.initColumnWidths();
+
+    // "1217001" → 7×8+24+12=92, wider than header-only "id" (~75)
+    expect(state.columnWidths.value[0]).toBeGreaterThanOrEqual(92);
+  });
+
+  it("grows cached narrow columns when later pages introduce larger values", async () => {
+    const rows = ref<Array<Array<string | number | boolean | null>>>([[1], [2], [3]]);
+    const state = createResizeState({
+      columns: ["id"],
+      rows,
+      density: "standard",
+      compactColumnHeaderActions: true,
+      cacheKey: "result-grow",
+    });
+
+    state.initColumnWidths();
+    const narrowWidth = state.columnWidths.value[0];
+
+    rows.value = Array.from({ length: 20 }, (_, index) => [1_217_001 + index]);
+    await nextTick();
+
+    expect(state.columnWidths.value[0]).toBeGreaterThan(narrowWidth);
+    expect(state.columnWidths.value[0]).toBeGreaterThanOrEqual(92);
+
+    const remounted = createResizeState({
+      columns: ["id"],
+      rows: Array.from({ length: 20 }, () => ["x".repeat(40)]),
+      density: "standard",
+      compactColumnHeaderActions: true,
+      cacheKey: "result-grow",
+    });
+    remounted.initColumnWidths();
+    expect(remounted.columnWidths.value[0]).toBe(356);
+  });
+
+  it("grows when the width percentile changes without changing the maximum value length", async () => {
+    const rows = ref<Array<Array<string | number | boolean | null>>>([...Array.from({ length: 49 }, () => ["x"]), ["x".repeat(40)]]);
+    const state = createResizeState({
+      columns: ["id"],
+      rows,
+      density: "standard",
+      compactColumnHeaderActions: true,
+    });
+
+    state.initColumnWidths();
+    expect(state.columnWidths.value[0]).toBe(75);
+
+    rows.value = [["x"], ...Array.from({ length: 49 }, () => ["x".repeat(40)])];
+    await nextTick();
+
+    expect(state.columnWidths.value[0]).toBe(356);
+  });
+
+  it("preserves a manually narrowed width across page changes and remounts", async () => {
+    const rows = ref<Array<Array<string | number | boolean | null>>>(Array.from({ length: 20 }, (_, index) => [1_217_001 + index]));
+    const state = createResizeState({
+      columns: ["id"],
+      rows,
+      density: "standard",
+      compactColumnHeaderActions: true,
+      cacheKey: "manual-narrow",
+    });
+
+    state.initColumnWidths();
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 0 }));
+    expect(state.columnWidths.value[0]).toBe(DATA_GRID_COL_MIN_WIDTH);
+
+    rows.value = Array.from({ length: 20 }, () => ["x".repeat(40)]);
+    await nextTick();
+    expect(state.columnWidths.value[0]).toBe(DATA_GRID_COL_MIN_WIDTH);
+
+    const remounted = createResizeState({
+      columns: ["id"],
+      rows,
+      density: "standard",
+      compactColumnHeaderActions: true,
+      cacheKey: "manual-narrow",
+    });
+    remounted.initColumnWidths();
+    expect(remounted.columnWidths.value[0]).toBe(DATA_GRID_COL_MIN_WIDTH);
+  });
+
+  it("preserves an explicit auto-fit width across page changes and remounts", async () => {
+    const rows = ref<Array<Array<string | number | boolean | null>>>([[1], [2], [3]]);
+    const state = createResizeState({
+      columns: ["id"],
+      rows,
+      density: "standard",
+      compactColumnHeaderActions: true,
+      cacheKey: "manual-auto-fit",
+    });
+
+    state.initColumnWidths();
+    state.autoFitColumn(0);
+    const fittedWidth = state.columnWidths.value[0];
+
+    rows.value = Array.from({ length: 20 }, () => ["x".repeat(40)]);
+    await nextTick();
+    expect(state.columnWidths.value[0]).toBe(fittedWidth);
+
+    const remounted = createResizeState({
+      columns: ["id"],
+      rows,
+      density: "standard",
+      compactColumnHeaderActions: true,
+      cacheKey: "manual-auto-fit",
+    });
+    remounted.initColumnWidths();
+    expect(remounted.columnWidths.value[0]).toBe(fittedWidth);
   });
 
   it("comfortable mode is never narrower than standard for the same column", () => {
@@ -299,5 +440,28 @@ describe("useDataGridColumnResize", () => {
     comf.initColumnWidths();
 
     expect(comf.columnWidths.value[0]).toBeGreaterThanOrEqual(std.columnWidths.value[0]);
+  });
+});
+
+describe("sampleDataGridColumnValues", () => {
+  it("includes both the head and tail of a long row window", () => {
+    const rows = Array.from({ length: 100 }, (_, index) => [index + 1, `row-${index + 1}`]);
+    expect(sampleDataGridColumnValues(rows, 0, 10)).toEqual([1, 2, 3, 4, 5, 96, 97, 98, 99, 100]);
+  });
+});
+
+describe("dataGridRowNumberColumnWidth", () => {
+  it("keeps the default width for small page indexes", () => {
+    expect(dataGridRowNumberColumnWidth(999)).toBe(DATA_GRID_ROW_NUM_WIDTH);
+    expect(dataGridRowNumberColumnWidth(9999)).toBe(DATA_GRID_ROW_NUM_WIDTH);
+  });
+
+  it("widens the gutter for multi-million row numbers", () => {
+    expect(dataGridRowNumberColumnWidth(4_215_101)).toBeGreaterThan(DATA_GRID_ROW_NUM_WIDTH);
+    expect(dataGridRowNumberColumnWidth(4_215_101)).toBe(dataGridRowNumberColumnWidth(9_999_999));
+  });
+
+  it("prefers measured text width when provided", () => {
+    expect(dataGridRowNumberColumnWidth(99, 12, () => 40)).toBe(56);
   });
 });

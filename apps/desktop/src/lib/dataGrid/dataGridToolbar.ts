@@ -1,4 +1,17 @@
-export const DATA_GRID_COMPACT_TOPBAR_WIDTH = 1050;
+const DATA_GRID_COMPACT_TOPBAR_MIN_WIDTH = 900;
+const DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH = 1050;
+const DATA_GRID_COMPACT_TOPBAR_VIEWPORT_RATIO = 0.75;
+export const DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH = DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH;
+
+export function dataGridToolbarCompactBreakpoint(viewportWidth: number, minimumWidth = DATA_GRID_COMPACT_TOPBAR_MIN_WIDTH): number {
+  const normalizedViewportWidth = Number.isFinite(viewportWidth) ? Math.max(0, viewportWidth) : DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH;
+  const normalizedMinimumWidth = Math.min(DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH, Math.max(DATA_GRID_COMPACT_TOPBAR_MIN_WIDTH, minimumWidth));
+  return Math.min(DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH, Math.max(normalizedMinimumWidth, normalizedViewportWidth * DATA_GRID_COMPACT_TOPBAR_VIEWPORT_RATIO));
+}
+
+export function isDataGridToolbarCompact(toolbarWidth: number, viewportWidth: number, minimumWidth?: number): boolean {
+  return toolbarWidth > 0 && toolbarWidth < dataGridToolbarCompactBreakpoint(viewportWidth, minimumWidth);
+}
 
 export type DataGridReloadIntent = "refresh";
 
@@ -12,6 +25,14 @@ export interface DataGridToolbarActionCapability {
   onTrigger: () => void | Promise<void>;
 }
 
+export function dataGridDeleteRowToolbarState(options: { editable: boolean; canDeleteRows: boolean; canDeleteExistingRows: boolean; deletableTargetCount: number; isSaving: boolean }): { visible: boolean; disabled: boolean } {
+  const deletionAvailable = options.editable && options.canDeleteRows;
+  return {
+    visible: deletionAvailable && (options.canDeleteExistingRows || options.deletableTargetCount > 0),
+    disabled: options.isSaving || options.deletableTargetCount === 0,
+  };
+}
+
 export interface DataGridToolbarSaveCapability extends DataGridToolbarActionCapability {
   pendingCount: number;
   shortcutLabel?: string;
@@ -22,6 +43,8 @@ export interface DataGridToolbarMenuItem {
   label: string;
   disabled?: boolean;
   separatorBefore?: boolean;
+  /** Marks a menu item as the active choice in a mutually-exclusive group (rendered as a check). */
+  selected?: boolean;
 }
 
 export interface DataGridToolbarExportCapability {
@@ -40,6 +63,16 @@ export interface DataGridToolbarCopyCapability {
   currentValue: string;
   items: readonly DataGridToolbarMenuItem[];
   onCopy: () => void | Promise<void>;
+  onSelect: (value: string) => void | Promise<void>;
+}
+
+export interface DataGridToolbarAddRowCapability {
+  label: string;
+  tooltip?: string;
+  visible?: boolean;
+  disabled?: boolean;
+  items: readonly DataGridToolbarMenuItem[];
+  onTrigger: () => void | Promise<void>;
   onSelect: (value: string) => void | Promise<void>;
 }
 
@@ -106,6 +139,14 @@ export async function triggerDataGridToolbarCopy(capability: DataGridToolbarCopy
 
 export async function selectDataGridToolbarCopyItem(capability: DataGridToolbarCopyCapability | undefined, value: string): Promise<boolean> {
   if (!capability || !isDataGridToolbarCapabilityVisible(capability)) return false;
+  const item = capability.items.find((candidate) => candidate.value === value);
+  if (!item || item.disabled) return false;
+  await capability.onSelect(value);
+  return true;
+}
+
+export async function selectDataGridToolbarAddRowItem(capability: DataGridToolbarAddRowCapability | undefined, value: string): Promise<boolean> {
+  if (!capability || !isDataGridToolbarCapabilityVisible(capability) || capability.disabled) return false;
   const item = capability.items.find((candidate) => candidate.value === value);
   if (!item || item.disabled) return false;
   await capability.onSelect(value);

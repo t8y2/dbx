@@ -42,6 +42,22 @@ test("activates an existing data table tab with a usable result", () => {
   );
 });
 
+test("activates a successful data table tab with a real Error column", () => {
+  assert.equal(
+    canActivateExistingDataTableTab(
+      dataTab({
+        result: {
+          columns: ["Error"],
+          rows: [["valid value"]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      }),
+    ),
+    true,
+  );
+});
+
 test("reloads restored data table tabs without a result", () => {
   assert.equal(canActivateExistingDataTableTab(dataTab()), false);
 });
@@ -55,6 +71,7 @@ test("reloads existing data table tabs showing an error result", () => {
           rows: [["MySQL connection failed: Input/output error: No route to host (os error 65)"]],
           affected_rows: 0,
           execution_time_ms: 0,
+          execution_error: true,
         },
       }),
     ),
@@ -85,6 +102,25 @@ test("double activation opens a missing table without a first-click snapshot", (
   assert.equal(dataTableDoubleClickAction(undefined, "double"), "open");
 });
 
+test("double activation opens a new table when data tab reuse is disabled", () => {
+  assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "double", false), "open");
+  assert.equal(
+    dataTableDoubleClickAction(
+      dataTab({
+        result: {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      }),
+      "double",
+      false,
+    ),
+    "open",
+  );
+});
+
 test("double activation reuses loading and successful tabs without refreshing", () => {
   assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "double"), "activate");
   assert.equal(
@@ -113,6 +149,7 @@ test("double activation preserves restored and error recovery behavior", () => {
           rows: [["connection failed"]],
           affected_rows: 0,
           execution_time_ms: 0,
+          execution_error: true,
         },
       }),
       "double",

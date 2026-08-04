@@ -94,25 +94,50 @@ class TDengineAgentMetadataTest {
     }
 
     @Test
-    void showMetadataCachesFullResultsForLocalPaging() {
+    void showMetadataStopsReadingAtTheRequestedPageBoundary() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        List<String> rowReads = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows, rowReads));
+
+        List<TableInfo> firstPage = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints(null, 3, null, List.of("TABLE"))
+        );
+        List<TableInfo> secondPage = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints(null, 2, 3, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(List.of("meters", "weather", "device_a"), firstPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(List.of("device_b", "standalone"), secondPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals("meters", firstPage.get(2).getParent_name());
+        Assertions.assertEquals("meters", secondPage.get(0).getParent_name());
+        Assertions.assertTrue(maxRows.isEmpty());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES",
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+        Assertions.assertEquals(4, rowReads.stream().filter("STABLE"::equals).count());
+        Assertions.assertEquals(4, rowReads.stream().filter("TABLE"::equals).count());
+    }
+
+    @Test
+    void showMetadataCachesOnlyUnboundedResults() {
         List<String> statements = new ArrayList<>();
         List<Integer> maxRows = new ArrayList<>();
         TDengineAgent agent = new TDengineAgent();
         TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
 
-        List<TableInfo> firstPage = agent.listTables(
-            "dbx_alpha",
-            new MetadataListConstraints(null, 2, null, List.of("TABLE"))
-        );
-        List<TableInfo> secondPage = agent.listTables(
-            "dbx_alpha",
-            new MetadataListConstraints(null, 2, 2, List.of("TABLE"))
-        );
+        agent.listTables("dbx_alpha");
+        agent.listTables("dbx_alpha");
 
-        Assertions.assertEquals(List.of("meters", "device_a"), firstPage.stream().map(TableInfo::getName).toList());
-        Assertions.assertEquals(List.of("device_b", "standalone"), secondPage.stream().map(TableInfo::getName).toList());
-        Assertions.assertEquals("meters", secondPage.get(0).getParent_name());
-        Assertions.assertTrue(maxRows.isEmpty());
         Assertions.assertEquals(
             List.of(
                 "SHOW `dbx_alpha`.STABLES",
@@ -250,10 +275,18 @@ class TDengineAgentMetadataTest {
     }
 
     private static Connection showMetadataConnection(List<String> statements, List<Integer> maxRows) {
+        return showMetadataConnection(statements, maxRows, null);
+    }
+
+    private static Connection showMetadataConnection(
+        List<String> statements,
+        List<Integer> maxRows,
+        List<String> rowReads
+    ) {
         return proxy(Connection.class, (proxy, method, args) -> {
             String name = method.getName();
             if ("createStatement".equals(name)) {
-                return showMetadataStatement(statements, maxRows);
+                return showMetadataStatement(statements, maxRows, rowReads);
             }
             if ("isClosed".equals(name)) return false;
             if ("close".equals(name)) return null;
@@ -261,7 +294,11 @@ class TDengineAgentMetadataTest {
         });
     }
 
-    private static java.sql.Statement showMetadataStatement(List<String> statements, List<Integer> maxRows) {
+    private static java.sql.Statement showMetadataStatement(
+        List<String> statements,
+        List<Integer> maxRows,
+        List<String> rowReads
+    ) {
         int[] activeMaxRows = {0};
         return proxy(java.sql.Statement.class, (proxy, method, args) -> {
             String name = method.getName();
@@ -274,7 +311,12 @@ class TDengineAgentMetadataTest {
                 String sql = (String) args[0];
                 statements.add(sql);
                 if (sql.endsWith("STABLES")) {
-                    return showTableResultSet(List.of(new String[] {"meters"}, new String[] {"weather"}), activeMaxRows[0]);
+                    return showTableResultSet(
+                        List.of(new String[] {"meters"}, new String[] {"weather"}),
+                        activeMaxRows[0],
+                        "STABLE",
+                        rowReads
+                    );
                 }
                 if (sql.endsWith("TABLES")) {
                     return showTableResultSet(
@@ -283,7 +325,9 @@ class TDengineAgentMetadataTest {
                             new String[] {"device_b", "", "", "meters"},
                             new String[] {"standalone", "", "", ""}
                         ),
-                        activeMaxRows[0]
+                        activeMaxRows[0],
+                        "TABLE",
+                        rowReads
                     );
                 }
             }
@@ -292,14 +336,23 @@ class TDengineAgentMetadataTest {
         });
     }
 
-    private static ResultSet showTableResultSet(List<String[]> rows, int maxRows) {
+    private static ResultSet showTableResultSet(
+        List<String[]> rows,
+        int maxRows,
+        String tableType,
+        List<String> rowReads
+    ) {
         List<String[]> limitedRows = maxRows > 0 ? rows.subList(0, Math.min(rows.size(), maxRows)) : rows;
         int[] index = {-1};
         return proxy(ResultSet.class, (proxy, method, args) -> {
             String name = method.getName();
             if ("next".equals(name)) {
                 index[0] += 1;
-                return index[0] < limitedRows.size();
+                boolean hasNext = index[0] < limitedRows.size();
+                if (hasNext && rowReads != null) {
+                    rowReads.add(tableType);
+                }
+                return hasNext;
             }
             if ("getString".equals(name)) {
                 int column = (Integer) args[0];
@@ -463,6 +516,15 @@ class TDengineAgentMetadataTest {
         );
 
         Assertions.assertEquals("jdbc:TAOS-RS://127.0.0.1:6041/db?timezone=UTC#anchor", sanitized);
+    }
+
+    @Test
+    void enablesRestInformationSchemaPagingForTdengine338AndNewer() {
+        Assertions.assertFalse(TDengineAgent.supportsRestInformationSchemaPagingVersion(null));
+        Assertions.assertFalse(TDengineAgent.supportsRestInformationSchemaPagingVersion("3.3.7.9"));
+        Assertions.assertTrue(TDengineAgent.supportsRestInformationSchemaPagingVersion("3.3.8.0"));
+        Assertions.assertTrue(TDengineAgent.supportsRestInformationSchemaPagingVersion("3.3.8.1"));
+        Assertions.assertTrue(TDengineAgent.supportsRestInformationSchemaPagingVersion("4.0.0.0"));
     }
 
     private static ResultSet describeResultSet(String[][] rows) {

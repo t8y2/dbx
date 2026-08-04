@@ -171,6 +171,56 @@ function databaseFromPath(pathname: string): string | undefined {
   return decodeUrlPart(value.split("/")[0]);
 }
 
+function parseZooKeeperUrl(source: string): ParsedConnectionUrl | null {
+  const match = source.match(/^zookeeper:\/\/([^/?#]+)(\/[^?#]*)?(\?[^#]*)?$/i);
+  if (!match) return null;
+
+  const profile = SCHEME_PROFILES.zookeeper;
+  const authority = match[1];
+  const userInfoEnd = authority.lastIndexOf("@");
+  const userInfo = userInfoEnd >= 0 ? authority.slice(0, userInfoEnd) : "";
+  const endpointList = userInfoEnd >= 0 ? authority.slice(userInfoEnd + 1) : authority;
+  const [rawUsername, ...rawPasswordParts] = userInfo.split(":");
+  const username = userInfo ? decodeUrlPart(rawUsername) : "";
+  const password = userInfo ? decodeUrlPart(rawPasswordParts.join(":")) : "";
+  const endpoints = endpointList.split(",").map((endpoint) => endpoint.trim());
+  if (endpoints.some((endpoint) => !endpoint)) throw new Error("Invalid connection URL");
+
+  const normalizedEndpoints = endpoints.map((endpoint) => {
+    let endpointUrl: URL;
+    try {
+      endpointUrl = new URL(`zookeeper://${endpoint}`);
+    } catch {
+      throw new Error("Invalid connection URL");
+    }
+    if (endpointUrl.username || endpointUrl.password || (endpointUrl.pathname && endpointUrl.pathname !== "/") || endpointUrl.search || endpointUrl.hash) {
+      throw new Error("Invalid connection URL");
+    }
+    const rawHost = endpointUrl.hostname.replace(/^\[(.*)]$/, "$1");
+    const host = rawHost.includes(":") ? `[${rawHost}]` : rawHost;
+    const port = endpointUrl.port ? Number(endpointUrl.port) : profile.defaultPort;
+    return { host: rawHost, port, connectString: `${host}:${port}` };
+  });
+  const chroot = match[2] && match[2] !== "/" ? match[2] : "";
+  const urlParams = (match[3] || "").replace(/^\?/, "");
+  const name = queryParamValue(urlParams, "name")?.trim();
+
+  return {
+    ...(name ? { name } : {}),
+    dbType: profile.type,
+    driverProfile: profile.profile,
+    driverLabel: profile.label,
+    host: normalizedEndpoints[0].host,
+    port: normalizedEndpoints[0].port,
+    username,
+    password,
+    database: undefined,
+    urlParams: stripConnectionNameParam(urlParams),
+    ssl: false,
+    connectionString: `${normalizedEndpoints.map((endpoint) => endpoint.connectString).join(",")}${chroot}`,
+  };
+}
+
 function queryParamValue(params: string, key: string): string | undefined {
   for (const part of params.split(/[&;]/)) {
     if (!part) continue;
@@ -523,6 +573,9 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
 
   const mongoResult = parseMongoUrl(source);
   if (mongoResult) return mongoResult;
+
+  const zooKeeperResult = parseZooKeeperUrl(source);
+  if (zooKeeperResult) return zooKeeperResult;
 
   let parsed: URL;
   try {

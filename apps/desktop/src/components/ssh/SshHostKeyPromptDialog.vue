@@ -42,6 +42,7 @@ const secretCode = ref("");
 const resolving = ref(false);
 const unlisteners: Array<() => void> = [];
 let webEventSource: EventSource | null = null;
+let pendingTimer: ReturnType<typeof setInterval> | null = null;
 let mounted = true;
 
 function enqueuePrompt(request: SshPromptRequest) {
@@ -125,12 +126,43 @@ async function setupTauriPromptBridge() {
   }
 }
 
+// Fallback delivery alongside the SSE stream. On first connect the dialog's
+// EventSource may not be open yet when the backend fires a host-key prompt, so
+// the SSE `Prompt` event is lost and (without this) the connection hangs until
+// its timeout. Polling the pending endpoint recovers any lost prompt so the
+// dialog still appears. `enqueuePrompt` dedupes by id, so repeated polls are
+// harmless.
+async function fetchPendingPrompts() {
+  try {
+    const res = await fetch(apiUrl("/api/ssh/prompts/pending"), { credentials: "include" });
+    if (!res.ok) return;
+    const pending = (await res.json()) as SshPromptRequest[];
+    pending.forEach((req) => enqueuePrompt(req));
+  } catch {
+    // Transient failure — the next poll retries.
+  }
+}
+
 function setupWebPromptBridge() {
   webEventSource = new EventSource(apiUrl("/api/ssh/prompts"));
   webEventSource.onmessage = (event) => handleWebEvent(event.data);
-  webEventSource.onerror = () => {
-    // EventSource automatically retries. Do not close it while the app is mounted.
+  webEventSource.onopen = () => {
+    // The SSE stream is live; its replay already carries any prompt that fired
+    // before the stream opened, so stop polling to avoid needless requests.
+    if (pendingTimer) {
+      clearInterval(pendingTimer);
+      pendingTimer = null;
+    }
   };
+  webEventSource.onerror = () => {
+    // EventSource reconnects automatically. While disconnected, fall back to
+    // polling so a prompt fired during the outage is not lost.
+    if (!pendingTimer) pendingTimer = setInterval(fetchPendingPrompts, 2000);
+  };
+  // First-connect fallback: the stream may not be open yet when the backend
+  // fires a host-key prompt, so poll until it is.
+  void fetchPendingPrompts();
+  if (!pendingTimer) pendingTimer = setInterval(fetchPendingPrompts, 2000);
 }
 
 onMounted(() => {
@@ -143,6 +175,10 @@ onBeforeUnmount(() => {
   unlisteners.forEach((u) => u());
   webEventSource?.close();
   webEventSource = null;
+  if (pendingTimer) {
+    clearInterval(pendingTimer);
+    pendingTimer = null;
+  }
   if (isTauriRuntime()) void import("@tauri-apps/api/core").then(({ invoke }) => invoke("ssh_prompt_not_ready")).catch(() => undefined);
 });
 

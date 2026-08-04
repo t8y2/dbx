@@ -4,7 +4,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, FileArchive } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -25,13 +25,15 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { createShikiJsonHighlighter, type JsonHighlighter } from "@/lib/common/shikiJsonHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
-import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
+import { computeDisplayTtl, computeTtlCountdownTick, computeTtlCountdownValue, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
+  decodeRedisBlob,
   formatRedisMemberDetail,
   getRedisMemberSelectionKey,
   isRedisBlob,
+  parseRedisJsonDetail,
   preferredRedisValueFormat,
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
   redisBlobText,
@@ -47,6 +49,7 @@ import {
   type RedisCollectionItem,
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
+import { decompressRedisValue, isGzipMagic, type RedisDecompressAlgorithm } from "@/lib/redis/redisCompression";
 import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import { formatJsonSource } from "@/lib/common/safeJsonFormat";
@@ -164,16 +167,81 @@ const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<JsonHighlighter>();
 
-// Auto-refresh keeps the displayed TTL moving locally and periodically asks
-// Redis for the authoritative value. The two timers stay separate so a short
-// polling interval never causes a full key-value reload.
+// Decompressed view state. Decompression yields to the event loop so the
+// loading state paints before the synchronous bounded inflate runs; the result
+// intentionally lives outside the synchronous format pipeline built by
+// formatRedisMemberDetail, and the request id guards against stale results when
+// the user switches values or formats mid-flight.
+type RedisDecompressedState = { status: "idle" } | { status: "loading" } | { status: "success"; text: string; algorithm: RedisDecompressAlgorithm } | { status: "error"; reason: "corrupt" | "limit" };
+const decompressedState = ref<RedisDecompressedState>({ status: "idle" });
+let decompressRequestId = 0;
+
+async function runDecompress(bytes: Uint8Array, algorithm?: RedisDecompressAlgorithm) {
+  const requestId = ++decompressRequestId;
+  decompressedState.value = { status: "loading" };
+  const result = await decompressRedisValue(bytes, algorithm ? { algorithm } : {});
+  if (requestId !== decompressRequestId) return;
+  if (result.ok) decompressedState.value = { status: "success", text: result.text, algorithm: result.algorithm };
+  else decompressedState.value = { status: "error", reason: result.reason };
+}
+
+/** Bytes of whichever decompressed view is active (string value or member), or null when there is nothing to decode. */
+function currentDecompressTargetBytes(): Uint8Array | null {
+  if (stringValueView.value === "decompressed") {
+    const blob = stringBlob.value;
+    return blob ? decodeRedisBlob(blob) : null;
+  }
+  if (memberValueView.value === "decompressed") {
+    const raw = selectedMemberRaw.value;
+    if (raw == null) return null;
+    // Plain-string members (not blobs) still attempt decompression so the user
+    // gets the non-blocking "not compressed" notice instead of silence.
+    return isRedisBlob(raw) ? decodeRedisBlob(raw) : new TextEncoder().encode(typeof raw === "string" ? raw : formatRedisMemberDetail(raw).rawText);
+  }
+  return null;
+}
+
+function refreshDecompressedView(algorithm?: RedisDecompressAlgorithm) {
+  const bytes = currentDecompressTargetBytes();
+  if (bytes) void runDecompress(bytes, algorithm);
+  else decompressedState.value = { status: "idle" };
+}
+
+/** Last-resort explicit decode for values that are raw RFC 1951 DEFLATE (never auto-detected). */
+function retryDecompressAsDeflate() {
+  refreshDecompressedView("deflate");
+}
+
+const decompressedJsonDetail = computed(() => {
+  const state = decompressedState.value;
+  return state.status === "success" ? parseRedisJsonDetail(state.text) : null;
+});
+
+const decompressedFailureMessage = computed(() => {
+  const state = decompressedState.value;
+  if (state.status !== "error") return "";
+  if (state.reason === "limit") return t("redis.decompressedLimitExceeded");
+  return t("redis.decompressedFailed");
+});
+
+/** Format label shows the algorithm that actually succeeded, e.g. "Decompressed (zlib)". */
+const decompressedLabel = computed(() => {
+  const state = decompressedState.value;
+  const base = t("redis.decompressedView");
+  return state.status === "success" ? `${base} (${state.algorithm})` : base;
+});
+
+// Auto-refresh keeps the displayed TTL moving locally and periodically reloads
+// the complete key detail. The full reload updates changed values as well as
+// the authoritative TTL without rebuilding the parent key tree.
 const autoRefreshEnabled = ref(readRedisAutoRefreshEnabled());
 const autoRefreshIntervalSeconds = ref(readRedisAutoRefreshInterval());
 const countdownTtl = ref(0);
-const refreshingTtl = ref(false);
+const refreshingValue = ref(false);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
-let ttlRefreshRequestId = 0;
+let autoRefreshRequestId = 0;
+let countdownTtlObservedAtMs = Date.now();
 let redisValueViewerIsActive = true;
 
 function canRunAutoRefresh(): boolean {
@@ -200,46 +268,54 @@ function startAutoRefresh() {
   stopAutoRefresh();
   if (!autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
 
-  countdownTtl.value = data.value.ttl;
-  countdownTimer = setInterval(() => {
-    const action = computeAutoRefreshTick(autoRefreshEnabled.value, countdownTtl.value);
-    if (action.type === "decrement") {
-      countdownTtl.value--;
-    }
-  }, 1000);
-
-  autoRefreshTimer = setInterval(() => void refreshTtl(), autoRefreshIntervalSeconds.value * 1000);
+  autoRefreshTimer = setInterval(() => void refreshAutoValue(), autoRefreshIntervalSeconds.value * 1000);
 }
 
-async function refreshTtl() {
-  if (refreshingTtl.value || loading.value || editingTtl.value || savingTtl.value || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
+function startCountdown() {
+  stopCountdown();
+  if (!data.value || !canRunAutoRefresh()) return;
 
-  const requestId = ++ttlRefreshRequestId;
-  refreshingTtl.value = true;
-  try {
-    const ttl = await api.redisGetTtl(props.connectionId, props.db, props.keyRaw);
-    // A draft may be created while the request is in flight. Never apply even
-    // a missing-key response after the user has started editing.
-    if (requestId !== ttlRefreshRequestId || hasUnsavedRedisDraft.value || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
-
-    if (ttl === -2) {
-      data.value = null;
-      collectionItems.value = [];
-      scanCursor.value = undefined;
-      resetStreamEntries();
-      resetStreamMonitoring();
-      stopAutoRefresh();
-      emit("deleted", props.keyRaw);
-      return;
+  updateCountdownTtl();
+  countdownTimer = setInterval(() => {
+    const action = computeTtlCountdownTick(countdownTtl.value);
+    if (action.type === "decrement") {
+      updateCountdownTtl();
     }
+  }, 1000);
+}
 
-    const refreshedValue = { ...data.value, ttl };
-    data.value = refreshedValue;
-    countdownTtl.value = ttl;
+function syncCountdownTtl(serverTtl: number) {
+  countdownTtl.value = serverTtl;
+  countdownTtlObservedAtMs = Date.now();
+}
+
+function updateCountdownTtl() {
+  if (!data.value) return;
+  countdownTtl.value = computeTtlCountdownValue(data.value.ttl, countdownTtlObservedAtMs, Date.now());
+}
+
+function startRefreshTimers() {
+  startCountdown();
+  startAutoRefresh();
+}
+
+async function refreshAutoValue() {
+  if (refreshingValue.value || loading.value || editingTtl.value || savingTtl.value || hasUnsavedRedisDraft.value || shouldPauseAutoValueRefresh() || !autoRefreshEnabled.value || !data.value || !canRunAutoRefresh()) return;
+
+  const requestId = ++autoRefreshRequestId;
+  refreshingValue.value = true;
+  try {
+    const applied = await load({
+      background: true,
+      preserveDraft: true,
+      notifyParent: false,
+      shouldApply: () => requestId === autoRefreshRequestId && !hasUnsavedRedisDraft.value && !shouldPauseAutoValueRefresh() && autoRefreshEnabled.value && canRunAutoRefresh(),
+    });
+    if (requestId !== autoRefreshRequestId || !applied || !data.value) return;
   } catch {
     // A failed background read must not retry in a tight loop. Manual refresh
     // remains available and starts a fresh polling lifecycle on success.
-    if (requestId === ttlRefreshRequestId) {
+    if (requestId === autoRefreshRequestId) {
       stopAutoRefresh();
       // The user did not turn the preference off, so do not persist this
       // transient failure. The visible state must still match the stopped
@@ -247,29 +323,37 @@ async function refreshTtl() {
       autoRefreshEnabled.value = false;
     }
   } finally {
-    if (requestId === ttlRefreshRequestId) refreshingTtl.value = false;
+    if (requestId === autoRefreshRequestId) refreshingValue.value = false;
   }
 }
 
 function stopAutoRefresh() {
-  ttlRefreshRequestId++;
-  refreshingTtl.value = false;
+  autoRefreshRequestId++;
+  refreshingValue.value = false;
   if (autoRefreshTimer !== null) {
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
   }
+}
+
+function stopCountdown() {
   if (countdownTimer !== null) {
     clearInterval(countdownTimer);
     countdownTimer = null;
   }
 }
 
+function stopRefreshTimers() {
+  stopAutoRefresh();
+  stopCountdown();
+}
+
 function handleDocumentVisibilityChange() {
   if (document.visibilityState === "hidden") {
-    stopAutoRefresh();
+    stopRefreshTimers();
     return;
   }
-  startAutoRefresh();
+  startRefreshTimers();
 }
 
 const hashSortBy = ref<"field" | "value" | null>(null);
@@ -316,6 +400,42 @@ const stringBlob = computed<RedisBlob | null>(() => {
 });
 const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: true }) : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
+
+// The Decompressed view depends on the value/format refs above, so these
+// watchers and computeds live here rather than next to the state declarations.
+watch([stringValueView, stringBlob], ([view]) => {
+  if (view !== "decompressed") return;
+  refreshDecompressedView();
+});
+
+watch([memberValueView, selectedMemberRaw], ([view]) => {
+  if (view !== "decompressed") return;
+  refreshDecompressedView();
+});
+
+const stringGzipBadge = computed(() => (stringBlob.value ? isGzipMagic(decodeRedisBlob(stringBlob.value)) : false));
+const memberGzipBadge = computed(() => (isRedisBlob(selectedMemberRaw.value) ? isGzipMagic(decodeRedisBlob(selectedMemberRaw.value)) : false));
+
+/** Raw fallback shown while Decompressed fails: keep the original content visible, never an error string in its place. */
+const decompressedRawFallbackText = computed(() => {
+  if (stringValueView.value === "decompressed" && stringValueDetail.value) {
+    return detailTextForFormat(stringValueDetail.value, stringValueDetail.value.defaultFormat);
+  }
+  if (memberValueView.value === "decompressed" && selectedMemberDetail.value) {
+    return detailTextForFormat(selectedMemberDetail.value, selectedMemberDetail.value.defaultFormat);
+  }
+  return "";
+});
+
+/** Copy targets the decompressed text while the Decompressed view is showing it. */
+const memberCopyText = computed(() => {
+  if (memberValueView.value === "decompressed") {
+    const state = decompressedState.value;
+    if (state.status === "success") return state.text;
+  }
+  return detailTextForFormat(selectedMemberDetail.value, memberValueView.value);
+});
+
 const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
@@ -445,10 +565,18 @@ const valueSearchSupported = computed(() => showMemberDetail.value || isStringLi
 const contentSearchText = computed(() => {
   if (showMemberDetail.value) {
     if (isEditingMember.value || isEditingHashJson.value) return memberEditValue.value;
+    if (memberValueView.value === "decompressed") {
+      const state = decompressedState.value;
+      return state.status === "success" ? state.text : "";
+    }
     return detailTextForFormat(selectedMemberDetail.value, memberValueView.value);
   }
   if (redisKind.value === "json") return editValue.value;
   if (!isStringLikeKind.value || !stringValueDetail.value) return "";
+  if (stringValueView.value === "decompressed") {
+    const state = decompressedState.value;
+    return state.status === "success" ? state.text : "";
+  }
   if (stringValueView.value === "json" && stringValueDetail.value.json) return editValue.value;
   if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value) return editValue.value;
   return detailTextForFormat(stringValueDetail.value, stringValueView.value);
@@ -475,6 +603,12 @@ let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
 let zsetResizeStartX = 0;
 let zsetResizeStartWidth = 0;
+
+function shouldPauseAutoValueRefresh(): boolean {
+  const loadedPageSize = data.value ? redisValueCollectionItems(data.value).length : 0;
+  const hasExpandedCollectionPage = collectionItems.value.length > loadedPageSize;
+  return showMemberDetail.value || valueSearchOpen.value || Boolean(hashSearchQuery.value.trim()) || Boolean(activeHashSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
+}
 
 type PendingDelete = { kind: "key" } | { kind: "hash"; field: string } | { kind: "list"; index: number } | { kind: "set"; member: string } | { kind: "zset"; member: string };
 const pendingDelete = ref<PendingDelete | null>(null);
@@ -923,7 +1057,8 @@ function setStringValueFormat(format: RedisValueFormat) {
       // Keep a dirty JSON draft marked as json so save still compact-writes after a tab switch.
       if (!(stringDraftFormat.value === "json" && isStringDraftDirty("json"))) stringDraftFormat.value = "utf8";
     }
-    rememberRedisValueFormat(format);
+    // Decompressed is a per-value view, never a persisted preference.
+    if (format !== "decompressed") rememberRedisValueFormat(format);
   }
 }
 
@@ -945,7 +1080,8 @@ function setMemberValueFormat(format: RedisValueFormat) {
         memberDraftFormat.value = "utf8";
       }
     }
-    rememberRedisValueFormat(format);
+    // Decompressed is a per-value view, never a persisted preference.
+    if (format !== "decompressed") rememberRedisValueFormat(format);
   }
 }
 
@@ -965,13 +1101,15 @@ function redisFormatLabel(format: RedisValueFormat, rawLabel?: string): string {
       return t("grid.hexViewerHex");
     case "base64":
       return "Base64";
+    case "decompressed":
+      return decompressedLabel.value;
     default:
       return rawLabel || t("redis.rawContent");
   }
 }
 
 function isTextRedisFormat(format: RedisValueFormat): boolean {
-  return format === "utf8" || format === "ascii" || format === "binary" || format === "json";
+  return format === "utf8" || format === "ascii" || format === "binary" || format === "json" || format === "decompressed";
 }
 
 function highlightRedisJson(json: string): string {
@@ -1023,23 +1161,29 @@ const deleteDetails = computed(() => {
   return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
 });
 
-async function load(options: { selectDefaultMember?: boolean; preserveDraft?: boolean } = {}): Promise<boolean> {
+async function load(options: { background?: boolean; notifyParent?: boolean; preserveDraft?: boolean; selectDefaultMember?: boolean; shouldApply?: () => boolean } = {}): Promise<boolean> {
+  const background = options.background ?? false;
+  const notifyParent = options.notifyParent ?? true;
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   const requestId = ++loadRequestId;
-  loading.value = true;
+  if (!background) loading.value = true;
   try {
     const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
-    if (requestId !== loadRequestId) return false;
+    if (requestId !== loadRequestId || (options.shouldApply && !options.shouldApply())) return false;
 
     // Redis reports a key that expired between refreshes as a `none` value.
     // Tell the browser to remove it instead of rendering a stale detail shell.
     if (loadedValue.redis_type === "none") {
+      // A background read can finish after the user starts editing. Preserve
+      // the draft and defer even a missing-key update until the user decides
+      // whether to save or discard it.
+      if (background && options.preserveDraft && hasUnsavedRedisDraft.value) return false;
       data.value = null;
       collectionItems.value = [];
       scanCursor.value = undefined;
       resetStreamEntries();
       resetStreamMonitoring();
-      stopAutoRefresh();
+      stopRefreshTimers();
       emit("deleted", props.keyRaw);
       return true;
     }
@@ -1049,7 +1193,8 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
       if (currentValue) {
         const preservedValue = { ...currentValue, ttl: loadedValue.ttl };
         data.value = preservedValue;
-        emit("loaded", preservedValue);
+        syncCountdownTtl(loadedValue.ttl);
+        if (notifyParent) emit("loaded", preservedValue);
       }
       return false;
     }
@@ -1062,7 +1207,8 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
     searchLoading.value = false;
     resetValueSearch();
     data.value = loadedValue;
-    emit("loaded", loadedValue);
+    syncCountdownTtl(loadedValue.ttl);
+    if (notifyParent) emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
     collectionItems.value = redisValueCollectionItems(loadedValue);
     replaceStreamEntries(loadedValue);
@@ -1100,10 +1246,8 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
     throw error;
   } finally {
     if (requestId === loadRequestId) {
-      loading.value = false;
-      if (autoRefreshEnabled.value && data.value) {
-        startAutoRefresh();
-      }
+      if (!background) loading.value = false;
+      if (!background && data.value) startRefreshTimers();
     }
   }
 }
@@ -1187,6 +1331,14 @@ function requestDeleteKey() {
 
 async function copyValue() {
   if (!data.value) return;
+  // Copy the decompressed text while the Decompressed view is showing it.
+  if (stringValueView.value === "decompressed") {
+    const state = decompressedState.value;
+    if (state.status === "success") {
+      await copyText(state.text);
+      return;
+    }
+  }
   const value = data.value.data.kind === "stream" ? { ...data.value, data: { ...data.value.data, entries: streamEntries.value } } : data.value;
   const text = redisValueCopyText(value, collectionItems.value);
   try {
@@ -1613,7 +1765,7 @@ function requestZsetRemove(member: string | null) {
 // TTL
 function currentEditableTtl(): number {
   if (!data.value) return -1;
-  return computeTtlForExpiryEdit(autoRefreshEnabled.value, countdownTtl.value, data.value.ttl);
+  return computeTtlForExpiryEdit(countdownTtl.value, data.value.ttl);
 }
 
 function expiryValidationMessage(reason: "ttl" | "date" | "past"): string {
@@ -1956,17 +2108,17 @@ onMounted(() => {
 });
 onActivated(() => {
   redisValueViewerIsActive = true;
-  startAutoRefresh();
+  startRefreshTimers();
 });
 onDeactivated(() => {
   redisValueViewerIsActive = false;
-  stopAutoRefresh();
+  stopRefreshTimers();
 });
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleValueViewerPointerDown, true);
   document.removeEventListener("visibilitychange", handleDocumentVisibilityChange);
   redisValueViewerIsActive = false;
-  stopAutoRefresh();
+  stopRefreshTimers();
   stopResizeHashColumns();
   stopResizeZsetColumns();
   if (hashSearchTimer) clearTimeout(hashSearchTimer);
@@ -2001,39 +2153,40 @@ defineExpose({ focusSearch });
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <DropdownMenu>
-            <DropdownMenuTrigger as-child>
-              <Button
-                data-redis-value-refresh
-                variant="ghost"
-                size="icon"
-                class="h-7 w-7 shrink-0 animate-none"
-                :class="autoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : ''"
-                :title="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('grid.refresh')"
-                :aria-label="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('grid.refresh')"
-                :aria-pressed="autoRefreshEnabled"
-                ><RefreshCw class="h-3.5 w-3.5 animate-none"
-              /></Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" class="w-40">
-              <DropdownMenuItem class="gap-2" :disabled="hasUnsavedRedisDraft" @select="refreshValueAndStreamGroups">
-                <RefreshCw class="h-3.5 w-3.5" />
-                {{ t("grid.refresh") }}
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>{{ t("redis.autoRefresh") }}</DropdownMenuLabel>
-              <DropdownMenuItem class="gap-2" @select="disableAutoRefresh">
-                <Check v-if="!autoRefreshEnabled" class="h-3.5 w-3.5" />
-                <span v-else class="h-3.5 w-3.5" />
-                {{ t("serverDashboard.off") }}
-              </DropdownMenuItem>
-              <DropdownMenuItem v-for="interval in REDIS_AUTO_REFRESH_INTERVAL_OPTIONS" :key="interval" class="gap-2" @select="selectAutoRefreshInterval(interval)">
-                <Check v-if="autoRefreshEnabled && autoRefreshIntervalSeconds === interval" class="h-3.5 w-3.5" />
-                <span v-else class="h-3.5 w-3.5" />
-                {{ interval }}s
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <div class="flex h-7 shrink-0 overflow-hidden rounded-md border">
+            <Button data-redis-value-refresh variant="ghost" size="icon" class="h-7 w-7 rounded-none animate-none" :disabled="loading || refreshingValue || hasUnsavedRedisDraft" :title="t('grid.refresh')" :aria-label="t('grid.refresh')" @click="refreshValueAndStreamGroups">
+              <RefreshCw class="h-3.5 w-3.5 animate-none" />
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger as-child>
+                <Button
+                  data-redis-auto-refresh-menu
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-5 rounded-none border-l px-0"
+                  :class="autoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : ''"
+                  :title="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
+                  :aria-label="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
+                >
+                  <ChevronDown class="h-3 w-3" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="w-40">
+                <DropdownMenuLabel>{{ t("redis.autoRefresh") }}</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem class="gap-2" @select="disableAutoRefresh">
+                  <Check v-if="!autoRefreshEnabled" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ t("serverDashboard.off") }}
+                </DropdownMenuItem>
+                <DropdownMenuItem v-for="interval in REDIS_AUTO_REFRESH_INTERVAL_OPTIONS" :key="interval" class="gap-2" @select="selectAutoRefreshInterval(interval)">
+                  <Check v-if="autoRefreshEnabled && autoRefreshIntervalSeconds === interval" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ interval }}s
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
@@ -2044,7 +2197,7 @@ defineExpose({ focusSearch });
           <Badge v-if="metadataSizeLabel" variant="outline" class="text-xs text-muted-foreground"> {{ t("redis.columnSize") }}: {{ metadataSizeLabel }} </Badge>
           <template v-if="!editingTtl">
             <Badge v-if="data.ttl > 0" as="button" type="button" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50" :disabled="savingTtl" :aria-label="t('redis.expiry')" @click="startEditTtl">
-              TTL: {{ formatTtl(computeDisplayTtl(autoRefreshEnabled, countdownTtl, data.ttl), t) }}
+              TTL: {{ formatTtl(computeDisplayTtl(countdownTtl, data.ttl), t) }}
             </Badge>
             <Badge v-else-if="data.ttl === -1" as="button" type="button" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50" :disabled="savingTtl" :aria-label="t('redis.expiry')" @click="startEditTtl">
               {{ t("redis.noExpiry") }}
@@ -2085,6 +2238,10 @@ defineExpose({ focusSearch });
               {{ redisFormatLabel(format, stringValueDetail.rawLabel) }}
             </Button>
           </div>
+          <Button v-if="stringGzipBadge" variant="outline" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" @click="setStringValueFormat('decompressed')">
+            <FileArchive class="h-3.5 w-3.5 mr-1" />
+            Gzip
+          </Button>
           <span class="flex-1" />
           <label v-if="isTextRedisFormat(stringValueView)" class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
@@ -2117,6 +2274,35 @@ defineExpose({ focusSearch });
         </div>
         <pre v-else-if="stringValueView === 'base64' && canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
         <pre v-else-if="stringValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all">{{ stringValueDetail.base64Text }}</pre>
+        <div v-else-if="stringValueView === 'decompressed'" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+          <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
+            <Loader2 class="h-4 w-4 animate-spin" />
+            {{ t("redis.decompressedLoading") }}
+          </div>
+          <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
+            <div v-if="decompressedJsonDetail" class="p-4">
+              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            </div>
+            <pre v-else class="w-full min-w-0 max-w-full p-4 text-sm leading-6" :class="detailTextClass('decompressed')">{{ decompressedState.text }}</pre>
+          </div>
+          <template v-else>
+            <pre class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass('decompressed')">{{ decompressedRawFallbackText }}</pre>
+            <div v-if="decompressedFailureMessage" class="flex shrink-0 flex-wrap items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+              <span>{{ decompressedFailureMessage }}</span>
+              <Button
+                v-if="decompressedState.status === 'error' && decompressedState.reason !== 'limit'"
+                variant="outline"
+                size="sm"
+                class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+                :title="t('redis.decompressedRetryAsDeflate')"
+                :aria-label="t('redis.decompressedRetryAsDeflate')"
+                @click="retryDecompressAsDeflate"
+              >
+                {{ t("redis.decompressedRetryAsDeflate") }}
+              </Button>
+            </div>
+          </template>
+        </div>
         <textarea
           v-else-if="stringValueView === 'utf8' && canEditCurrentStringFormat"
           ref="stringTextareaRef"
@@ -2676,6 +2862,10 @@ defineExpose({ focusSearch });
           <DialogTitle class="flex items-center gap-2">
             <span class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ redisFormatLabel(memberValueView, selectedMemberDetail.rawLabel) }}</Badge>
+            <Badge v-if="memberGzipBadge" variant="outline" class="shrink-0 cursor-pointer text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" @click="setMemberValueFormat('decompressed')">
+              <FileArchive class="h-3 w-3 mr-1" />
+              Gzip
+            </Badge>
           </DialogTitle>
         </DialogHeader>
         <template v-if="isEditingMember">
@@ -2722,6 +2912,35 @@ defineExpose({ focusSearch });
           </div>
           <pre v-else-if="memberValueView === 'base64' && canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
           <pre v-else-if="memberValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all">{{ selectedMemberDetail.base64Text }}</pre>
+          <div v-else-if="memberValueView === 'decompressed'" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+            <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("redis.decompressedLoading") }}
+            </div>
+            <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
+              <div v-if="decompressedJsonDetail" class="p-5">
+                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+              </div>
+              <pre v-else class="w-full min-w-0 max-w-full p-5 text-[13px] leading-6" :class="detailTextClass('decompressed')">{{ decompressedState.text }}</pre>
+            </div>
+            <template v-else>
+              <pre class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass('decompressed')">{{ decompressedRawFallbackText }}</pre>
+              <div v-if="decompressedFailureMessage" class="flex shrink-0 flex-wrap items-center gap-2 border-t px-5 py-2 text-xs text-muted-foreground">
+                <span>{{ decompressedFailureMessage }}</span>
+                <Button
+                  v-if="decompressedState.status === 'error' && decompressedState.reason !== 'limit'"
+                  variant="outline"
+                  size="sm"
+                  class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+                  :title="t('redis.decompressedRetryAsDeflate')"
+                  :aria-label="t('redis.decompressedRetryAsDeflate')"
+                  @click="retryDecompressAsDeflate"
+                >
+                  {{ t("redis.decompressedRetryAsDeflate") }}
+                </Button>
+              </div>
+            </template>
+          </div>
           <pre v-else-if="canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)" v-html="contentSearchHighlightedHtml" />
           <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)">{{ detailTextForFormat(selectedMemberDetail, memberValueView) }}</pre>
         </template>
@@ -2750,7 +2969,7 @@ defineExpose({ focusSearch });
             <Pencil class="h-4 w-4" />
             {{ t("redis.editMember") }}
           </Button>
-          <Button variant="outline" @click="copyText(redisClipboardSafeText(detailTextForFormat(selectedMemberDetail, memberValueView)))">
+          <Button variant="outline" @click="copyText(redisClipboardSafeText(memberCopyText))">
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>

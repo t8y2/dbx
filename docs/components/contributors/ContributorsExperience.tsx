@@ -21,6 +21,8 @@ const copy = {
     stars: "GitHub stars",
     directory: "Contributor directory",
     search: "Search GitHub login",
+    showAll: "Show all contributors",
+    showLess: "Show fewer contributors",
     noResults: "No matching contributor.",
     signedInAs: "Verified as",
     claim: "Open my certificate",
@@ -47,6 +49,8 @@ const copy = {
     stars: "个 GitHub Star",
     directory: "完整贡献者名单",
     search: "搜索 GitHub 用户名",
+    showAll: "展开全部贡献者",
+    showLess: "收起贡献者名单",
     noResults: "没有匹配的贡献者。",
     signedInAs: "已验证身份",
     claim: "打开我的证书",
@@ -185,6 +189,7 @@ export function ContributorsExperience({ data, lang }: { data: ContributorActivi
   const [auth, setAuth] = useState<AuthState>({ status: "loading" });
   const [query, setQuery] = useState("");
   const [certificateOpen, setCertificateOpen] = useState(false);
+  const [directoryExpanded, setDirectoryExpanded] = useState(false);
 
   const mergedPullRequests = useMemo(() => data.contributors.reduce((total, contributor) => total + contributor.mergedPullRequests, 0), [data.contributors]);
   const commits = useMemo(() => data.contributors.reduce((total, contributor) => total + contributor.commits, 0), [data.contributors]);
@@ -248,7 +253,7 @@ export function ContributorsExperience({ data, lang }: { data: ContributorActivi
 
         <div className={styles.heroCertificate}>
           <div className={styles.certificatePreview}>
-            <div className={styles.previewTop}><span><img src="/logo.png" alt="DBX" width={28} height={28} />DBX</span><ShieldCheck size={18} /></div>
+            <div className={styles.previewTop}><span><img src="/logo.png" alt="" aria-hidden="true" width={28} height={28} />DBX</span><ShieldCheck size={18} /></div>
             <small>{text.certificate}</small>
             <strong>@{verifiedContributor?.login ?? "YOUR_NAME"}</strong>
             <p>{text.certificateBody}</p>
@@ -271,7 +276,7 @@ export function ContributorsExperience({ data, lang }: { data: ContributorActivi
       <section className={styles.directorySection}>
         <div className={styles.directoryHeader}><div><h2>{text.directory}</h2></div><label><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text.search} /></label></div>
         {filtered.length ? (
-          <div className={styles.directoryGrid}>
+          <div className={styles.directoryGrid} data-expanded={directoryExpanded || query.trim().length > 0}>
             {filtered.map((contributor) => (
               <a key={contributor.login} href={contributor.profileUrl} target="_blank" rel="noopener noreferrer">
                 <img src={contributor.avatarUrl} alt="" width={46} height={46} loading="lazy" />
@@ -281,13 +286,18 @@ export function ContributorsExperience({ data, lang }: { data: ContributorActivi
             ))}
           </div>
         ) : <div className={styles.empty}>{text.noResults}</div>}
+        {filtered.length > 24 && query.trim().length === 0 ? (
+          <button type="button" className={styles.directoryToggle} aria-expanded={directoryExpanded} onClick={() => setDirectoryExpanded((current) => !current)}>
+            {directoryExpanded ? text.showLess : `${text.showAll} (${filtered.length})`}
+          </button>
+        ) : null}
       </section>
 
       {certificateOpen && verifiedContributor ? (
         <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCertificateOpen(false); }}>
           <section className={styles.modal} role="dialog" aria-modal="true" aria-label={text.certificate}>
             <div className={styles.fullCertificate}>
-              <div className={styles.previewTop}><span><img src="/logo.png" alt="DBX" width={30} height={30} />DBX · OPEN SOURCE DATABASE TOOL</span><ShieldCheck size={20} /></div>
+              <div className={styles.previewTop}><span><img src="/logo.png" alt="" aria-hidden="true" width={30} height={30} />DBX · OPEN SOURCE DATABASE TOOL</span><ShieldCheck size={20} /></div>
               <span className={styles.verifiedText}>{text.verified}</span>
               <small>{text.certificate}</small>
               <em>{text.awardedTo}</em>

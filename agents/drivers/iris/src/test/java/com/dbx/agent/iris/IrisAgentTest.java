@@ -7,8 +7,10 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -44,9 +46,15 @@ class IrisAgentTest {
     }
 
     @Test
-    void readsColumnsWithNativeInformationSchemaQueries() {
-        List<String> sql = new ArrayList<>();
-        Connection conn = fakeConnection(sql);
+    void readsColumnsAndUsesInlinePrimaryKey() {
+        List<String> calls = new ArrayList<>();
+        Connection conn = fakeConnection(
+            calls,
+            true,
+            Collections.emptyList(),
+            null,
+            Collections.emptyList()
+        );
 
         List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
 
@@ -57,42 +65,134 @@ class IrisAgentTest {
         assertTrue(columns.get(0).getIs_primary_key());
         assertEquals("NAME", columns.get(1).getName());
         assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
-        assertFalse(sql.get(0).contains("LIMIT"));
-        assertTrue(sql.get(0).contains("INFORMATION_SCHEMA.KEY_COLUMN_USAGE"));
-        assertTrue(sql.get(1).contains("INFORMATION_SCHEMA.COLUMNS"));
+        assertEquals(1, calls.size());
+        assertFalse(calls.get(0).contains("LIMIT"));
+        assertTrue(calls.get(0).contains("PRIMARY_KEY"));
+        assertTrue(calls.get(0).contains("INFORMATION_SCHEMA.COLUMNS"));
     }
 
-    private static Connection fakeConnection(List<String> sqlLog) {
+    @Test
+    void usesJdbcPrimaryKeysWhenColumnRowsHaveNoPrimaryKey() {
+        List<String> calls = new ArrayList<>();
+        Connection conn = fakeConnection(
+            calls,
+            false,
+            List.of(Map.of("COLUMN_NAME", "ID")),
+            null,
+            List.of(Map.of("COLUMN_NAME", "NATIVE_ID"))
+        );
+
+        List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
+
+        assertTrue(columns.get(0).getIs_primary_key());
+        assertEquals(2, calls.size());
+        assertTrue(calls.get(0).contains("INFORMATION_SCHEMA.COLUMNS"));
+        assertEquals("JDBC_PRIMARY_KEYS", calls.get(1));
+    }
+
+    @Test
+    void fallsBackToNativePrimaryKeysWhenJdbcMetadataFails() {
+        List<String> calls = new ArrayList<>();
+        Connection conn = fakeConnection(
+            calls,
+            false,
+            Collections.emptyList(),
+            new SQLException("IRIS metadata unavailable"),
+            List.of(Map.of("COLUMN_NAME", "ID"))
+        );
+
+        List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
+
+        assertTrue(columns.get(0).getIs_primary_key());
+        assertTrue(calls.get(0).contains("INFORMATION_SCHEMA.COLUMNS"));
+        assertEquals("JDBC_PRIMARY_KEYS", calls.get(1));
+        assertTrue(calls.get(2).contains("INFORMATION_SCHEMA.KEY_COLUMN_USAGE"));
+    }
+
+    @Test
+    void leavesColumnsWithoutPrimaryKeysWhenBothSourcesAreEmpty() {
+        List<String> calls = new ArrayList<>();
+        Connection conn = fakeConnection(
+            calls,
+            false,
+            Collections.emptyList(),
+            null,
+            Collections.emptyList()
+        );
+
+        List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
+
+        assertFalse(columns.get(0).getIs_primary_key());
+        assertFalse(columns.get(1).getIs_primary_key());
+        assertTrue(calls.get(2).contains("INFORMATION_SCHEMA.KEY_COLUMN_USAGE"));
+    }
+
+    private static Connection fakeConnection(
+        List<String> callLog,
+        boolean inlinePrimaryKey,
+        List<Map<String, Object>> jdbcPrimaryKeys,
+        SQLException jdbcPrimaryKeyFailure,
+        List<Map<String, Object>> nativePrimaryKeys
+    ) {
         return proxy(Connection.class, (method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 String sql = (String) args[0];
-                sqlLog.add(sql);
-                return fakeStatement(sql);
+                callLog.add(sql);
+                return fakeStatement(sql, inlinePrimaryKey, nativePrimaryKeys);
             }
             if ("getMetaData".equals(method.getName())) {
+                return fakeMetadata(callLog, jdbcPrimaryKeys, jdbcPrimaryKeyFailure);
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static DatabaseMetaData fakeMetadata(
+        List<String> callLog,
+        List<Map<String, Object>> jdbcPrimaryKeys,
+        SQLException jdbcPrimaryKeyFailure
+    ) {
+        return proxy(DatabaseMetaData.class, (method, args) -> {
+            if ("getPrimaryKeys".equals(method.getName())) {
+                callLog.add("JDBC_PRIMARY_KEYS");
+                assertEquals(null, args[0]);
+                assertEquals("SQLUser", args[1]);
+                assertEquals("People", args[2]);
+                if (jdbcPrimaryKeyFailure != null) {
+                    throw jdbcPrimaryKeyFailure;
+                }
+                return fakeResultSet(jdbcPrimaryKeys);
+            }
+            if ("getColumns".equals(method.getName())) {
                 throw new AssertionError("IRIS columns must not use JDBC DatabaseMetaData.getColumns()");
             }
             return defaultValue(method.getReturnType());
         });
     }
 
-    private static PreparedStatement fakeStatement(String sql) {
+    private static PreparedStatement fakeStatement(
+        String sql,
+        boolean inlinePrimaryKey,
+        List<Map<String, Object>> nativePrimaryKeys
+    ) {
         return proxy(PreparedStatement.class, (method, args) -> {
             if ("executeQuery".equals(method.getName())) {
                 if (sql.contains("KEY_COLUMN_USAGE")) {
-                    return fakeResultSet(List.of(Map.of("COLUMN_NAME", "ID")));
+                    return fakeResultSet(nativePrimaryKeys);
                 }
                 return fakeResultSet(List.of(
                     Map.of(
                         "COLUMN_NAME", "ID",
                         "DATA_TYPE", "INTEGER",
                         "IS_NULLABLE", "NO",
+                        "PRIMARY_KEY", inlinePrimaryKey ? "YES" : "NO",
                         "NUMERIC_PRECISION", 10
                     ),
                     Map.of(
                         "COLUMN_NAME", "NAME",
                         "DATA_TYPE", "VARCHAR",
                         "IS_NULLABLE", "YES",
+                        "PRIMARY_KEY", "NO",
                         "CHARACTER_MAXIMUM_LENGTH", 64
                     )
                 ));

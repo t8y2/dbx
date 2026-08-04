@@ -17,6 +17,12 @@ const defaultCapabilities: TableMetadataCapabilities = {
 };
 
 const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabilities>>> = {
+  mongodb: {
+    columns: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
   clickhouse: {
     foreignKeys: false,
     triggers: false,

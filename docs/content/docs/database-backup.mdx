@@ -1,0 +1,137 @@
+---
+title: Scheduled Database Backups
+description: Create manual, hourly, daily, or weekly SQL backup schedules for MySQL and PostgreSQL in DBX Desktop.
+---
+
+Scheduled database backups use the DBX database-export engine to generate SQL files for MySQL and PostgreSQL connections. They are useful for recurring logical backups of development, test, and small or medium databases and include table scope, retention, run history, and manual execution.
+
+<Callout type="warn">Scheduled backups currently require DBX Desktop to remain running. They are not an independent server scheduler and do not replace physical backups, point-in-time recovery, WAL/binlog archiving, or cloud-provider backup services.</Callout>
+
+## Support Scope
+
+| Item | Current behavior |
+| --- | --- |
+| Databases | MySQL and PostgreSQL |
+| Platform | DBX Desktop |
+| Output | One `.sql` file per database/schema target |
+| Frequency | Every N hours, daily at a time, or weekly on a weekday and time |
+| Contents | Table structure, data, database objects, and optional `DROP TABLE IF EXISTS` |
+| Table scope | All, include by pattern, or exclude by pattern |
+| Retention | Keep a configured number of recent successful backup files |
+
+## Create a Schedule
+
+<Steps>
+  <Step>
+    ### Open backup settings
+
+    Open the database backup page in Settings and create a schedule.
+
+  </Step>
+  <Step>
+    ### Choose connection and databases
+
+    Select a MySQL or PostgreSQL connection. Back up all non-system databases or choose specific databases.
+
+  </Step>
+  <Step>
+    ### Configure table scope
+
+    Choose all tables, include matching patterns, or exclude matching patterns. Patterns support `*` and `?` and can match `schema.table` or `database.schema.table`.
+
+  </Step>
+  <Step>
+    ### Set directory and frequency
+
+    Select a local destination directory and configure hourly, daily, or weekly timing. DBX previews the next run.
+
+  </Step>
+  <Step>
+    ### Choose contents and retention
+
+    Select structure, data, objects, and `DROP TABLE IF EXISTS`, then choose how many historical backups to retain.
+
+  </Step>
+  <Step>
+    ### Save and verify
+
+    Run the schedule manually first. Verify connection permissions, table scope, destination directory, and generated files before enabling automatic execution.
+
+  </Step>
+</Steps>
+
+## Table Patterns
+
+Separate patterns with commas, semicolons, or newlines. For example:
+
+```text
+public.*
+audit_*
+orders_202?
+```
+
+- **Include** exports only matching tables
+- **Exclude** exports everything else and skips matching tables
+- PostgreSQL names are case-sensitive
+- MySQL matching follows `lower_case_table_names`
+
+If an include rule matches no tables, the run fails instead of reporting an empty successful backup.
+
+## Consistency and Execution
+
+Each backup establishes a consistent snapshot session before exporting database/schema targets. DBX rolls back the read-only snapshot transaction afterward and does not commit business changes.
+
+Backup runs appear in the shared export task area and show:
+
+- Current database and object
+- Success, failure, or cancelled status
+- Manual or scheduled trigger
+- Generated file list
+- Error details and timestamps
+
+Cancellation stops remaining exports. On failure or cancellation, DBX attempts to remove partial files from the run so incomplete output is not mistaken for a successful backup.
+
+## Retention and History
+
+Each schedule has a retention count. Older runs beyond the limit are pruned from history and their files are deleted. Individual backup runs and files can also be removed manually.
+
+<Callout type="warn">The destination directory still needs independent OS, NAS, or object-storage backup. Saving to another folder on the same disk does not protect against disk failure, ransomware, or loss of the machine.</Callout>
+
+## Restore Drills
+
+Generated `.sql` files can be imported through [SQL File Execution](/en/docs/sql-file). Regularly verify in an isolated environment that:
+
+- The complete file can be read and executed
+- Schema, indexes, objects, and row counts are correct
+- Charset, timezone, sequence/identity values, and privileges have any required follow-up steps
+- The application can connect to the restored database
+
+A successful backup run means file generation completed; it does not prove restore readiness.
+
+## Scheduled Backup vs. Database Export
+
+| Feature | Best for |
+| --- | --- |
+| [Database Export](/en/docs/database-export) | One-time migration, pre-change backup, and manual scope selection |
+| Scheduled Database Backup | Recurring logical backups for a fixed connection and scope |
+| Native database backup | Large production databases, PITR, incremental/physical backup, HA, and compliance requirements |
+
+## Safety Guidance
+
+- Use a database account with only the read privileges required for backup
+- Protect and encrypt the destination according to the data sensitivity level
+- Never commit SQL files containing business data to a public repository
+- Recheck scope after databases or tables are renamed
+- If DBX Desktop is closed, the computer sleeps, or the destination is unavailable, schedules do not run with server-scheduler reliability
+
+<Cards>
+  <Card title="One-time database export" href="/en/docs/database-export">
+    Manually choose structure, data, objects, and database scope.
+  </Card>
+  <Card title="Restore SQL files" href="/en/docs/sql-file">
+    Execute backup files with statement-level progress and errors.
+  </Card>
+  <Card title="Production safety" href="/en/docs/production-safety">
+    Use read-only accounts, production protection, and least-privilege policies.
+  </Card>
+</Cards>

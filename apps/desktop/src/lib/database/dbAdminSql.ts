@@ -55,6 +55,7 @@ export interface DuplicateTableStructureSqlOptions {
   schema?: string | null;
   sourceName: string;
   targetName: string;
+  tableComment?: string | null;
   columnComments?: Array<{ name: string; comment: string }>;
 }
 
@@ -73,6 +74,7 @@ export interface CopyTableDataSqlOptions {
   columns?: string[];
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
+  normalizeNewTargetName?: boolean;
 }
 
 export function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {
@@ -118,6 +120,13 @@ export function buildDropSchemaSql(options: SchemaNameSqlOptions): Promise<strin
   return api.buildDropSchemaSql(options);
 }
 
+export function damengDropSchemaExecutionSchema(username: string | null | undefined, targetSchema: string): string | null {
+  const executionSchema = username?.trim();
+  const normalizedTargetSchema = targetSchema.trim().toUpperCase();
+  if (!executionSchema || !normalizedTargetSchema || executionSchema.toUpperCase() === normalizedTargetSchema) return null;
+  return executionSchema;
+}
+
 export function supportsSchemaComment(databaseType?: DatabaseType): boolean {
   return ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "yashandb"].includes(databaseType || "");
 }
@@ -151,6 +160,10 @@ export function buildSetSchemaCommentSql(options: SchemaCommentSqlOptions): stri
 
 export function buildDuplicateTableStructureSql(options: DuplicateTableStructureSqlOptions): Promise<string> {
   return api.buildDuplicateTableStructureSql(options);
+}
+
+export function duplicateTableStructureRequiresScript(sql: string): boolean {
+  return /;\s*\n\s*COMMENT ON (?:TABLE|COLUMN)\b/i.test(sql);
 }
 
 export function buildCopyTableDataSql(options: CopyTableDataSqlOptions): Promise<string> {

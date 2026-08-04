@@ -288,12 +288,17 @@ describe("tableStructureEditorState", () => {
     expect(getDefaultLengthForType("mysql", "float")).toBe("10,2");
   });
 
-  it("uses TEXT for a new native SQLite column without changing compatible defaults", () => {
+  it("uses TEXT for SQLite-family columns and dialect defaults elsewhere", () => {
     expect(DATA_TYPE_OPTIONS.sqlite).toContain("text");
+    expect(DATA_TYPE_OPTIONS.duckdb).toContain("TEXT");
+    expect(DATA_TYPE_OPTIONS.h2).toContain("VARCHAR");
     expect(defaultNewColumnDataType("sqlite")).toBe("text");
-    expect(defaultNewColumnDataType("rqlite")).toBe("varchar(255)");
-    expect(defaultNewColumnDataType("turso")).toBe("varchar(255)");
+    expect(defaultNewColumnDataType("rqlite")).toBe("text");
+    expect(defaultNewColumnDataType("turso")).toBe("text");
+    expect(defaultNewColumnDataType("duckdb")).toBe("TEXT");
     expect(defaultNewColumnDataType("mysql")).toBe("varchar(255)");
+    expect(defaultNewColumnDataType("h2").toLowerCase()).toContain("varchar");
+    expect(defaultNewColumnDataType("clickhouse")).toBe("String");
   });
 
   it("requires a SQLite rebuild only for a retained existing column type change", () => {

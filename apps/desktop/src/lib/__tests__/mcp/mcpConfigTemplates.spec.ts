@@ -31,11 +31,12 @@ describe("MCP config templates", () => {
     const nodeLaunch = {
       command: "C:\\Program Files\\nodejs\\node.exe",
       args: ["C:\\Users\\supervisor\\AppData\\Roaming\\npm\\node_modules\\@dbx-app\\mcp-server\\bin\\dbx-mcp-server.js"],
+      env: { DBX_DATA_DIR: "D:\\GreenSoft\\DBX\\data" },
     };
     const nativeBinPath = "C:\\Users\\supervisor\\AppData\\Roaming\\npm\\node_modules\\@dbx-app\\mcp-win32-x64\\bin\\dbx-mcp.exe";
 
     expect(JSON.parse(buildMcpTraeConfig(nodeLaunch, nativeBinPath))).toEqual({
-      mcpServers: { dbx: { command: nativeBinPath } },
+      mcpServers: { dbx: { command: nativeBinPath, env: nodeLaunch.env } },
     });
     expect(JSON.parse(buildMcpTraeConfig(nodeLaunch))).toEqual({
       mcpServers: { dbx: nodeLaunch },
@@ -57,6 +58,16 @@ describe("MCP config templates", () => {
     expect(buildMcpCodexConfig(launch)).toContain('[mcp_servers.dbx.env]\nDBX_WEB_URL = "https://dbx.example.com/tools/dbx"');
     expect(JSON.parse(buildMcpOpenCodeConfig(launch)).mcp.dbx.environment).toEqual(launch.env);
     expect(buildMcpJsonConfig(launch)).not.toContain("DBX_MCP_ALLOW_WRITES");
+  });
+
+  it("includes the portable DBX data directory in JSON and Codex configs", () => {
+    const launch = {
+      command: "dbx-mcp-server",
+      env: { DBX_DATA_DIR: "D:\\GreenSoft\\DBX\\data" },
+    };
+
+    expect(JSON.parse(buildMcpJsonConfig(launch)).mcpServers.dbx.env).toEqual(launch.env);
+    expect(buildMcpCodexConfig(launch)).toContain('DBX_DATA_DIR = "D:\\\\GreenSoft\\\\DBX\\\\data"');
   });
 
   it("keeps a deployed Web base path in DBX_WEB_URL", () => {

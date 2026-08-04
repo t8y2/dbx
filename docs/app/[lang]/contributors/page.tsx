@@ -4,7 +4,7 @@ import { ContributorsExperience } from "@/components/contributors/ContributorsEx
 import { LandingFooter } from "@/components/landing/LandingFooter";
 import { LandingNav } from "@/components/landing/LandingNav";
 import type { ContributorActivityData } from "@/lib/contributorActivity";
-import { SITE_URL } from "@/lib/metadata";
+import { buildMetadata } from "@/lib/metadata";
 
 const pageMetadata = {
   en: {
@@ -22,22 +22,12 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
   const locale = lang === "cn" ? "cn" : "en";
   const metadata = pageMetadata[locale];
 
-  return {
-    ...metadata,
-    alternates: {
-      canonical: `${SITE_URL}/${locale}/contributors`,
-      languages: {
-        en: `${SITE_URL}/en/contributors`,
-        zh: `${SITE_URL}/cn/contributors`,
-        "x-default": `${SITE_URL}/en/contributors`,
-      },
-    },
-    openGraph: {
-      title: metadata.title,
-      description: metadata.description,
-      url: `${SITE_URL}/${locale}/contributors`,
-    },
-  };
+  return buildMetadata({
+    title: metadata.title,
+    description: metadata.description,
+    path: `/${locale}/contributors`,
+    lang: locale,
+  });
 }
 
 export default async function ContributorsPage({ params }: { params: Promise<{ lang: string }> }) {

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
@@ -8,6 +9,7 @@ import type {
   DatabaseConnectionInfo,
   DatabaseInfo,
   DatabaseStorageInfo,
+  SqlServerCompletionContext,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -237,6 +239,12 @@ export interface SnippetSyncConfig {
   provider: SnippetProvider;
   token?: string;
   snippetId?: string;
+  replaceLegacySnippet?: boolean;
+}
+
+export interface SnippetSyncSettings {
+  snippetId?: string;
+  legacyCleanupRequiredId?: string;
 }
 
 export interface SnippetSyncSummary {
@@ -245,6 +253,7 @@ export interface SnippetSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
+  legacyCleanupRequiredId?: string;
 }
 
 export interface SnippetDownloadResult {
@@ -312,6 +321,8 @@ export interface BuildExplainSqlOptions {
   sql: string;
   /** MySQL can return either the existing JSON plan or its native tabular plan. */
   format?: "json" | "standard";
+  /** PostgreSQL only: run the statement so the plan carries measured rows and timings. */
+  analyze?: boolean;
 }
 
 export interface ExplainSqlBuildResult {
@@ -423,6 +434,7 @@ export async function aiAgentStream(
   request: AiCompletionRequest,
   connectionId: string,
   database: string,
+  schema: string | undefined,
   dbType: string,
   onEvent: (event: AgentEvent) => void,
   mode?: string,
@@ -430,6 +442,7 @@ export async function aiAgentStream(
   confirmedWriteSql?: string,
   confirmedConnectionId?: string,
   confirmedDatabase?: string,
+  confirmedSchema?: string,
   _signal?: AbortSignal,
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
@@ -444,12 +457,14 @@ export async function aiAgentStream(
       request,
       connectionId,
       database,
+      schema,
       dbType,
       mode,
       allowWriteSql,
       confirmedWriteSql,
       confirmedConnectionId,
       confirmedDatabase,
+      confirmedSchema,
     });
   } catch (e) {
     unlisten();
@@ -676,16 +691,30 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   return invoke("forget_snippet_saved_token", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncSettings(provider: SnippetProvider): Promise<SnippetSyncSettings> {
+  return invoke("snippet_sync_settings", { provider });
+}
+
+export async function saveSnippetSyncId(provider: SnippetProvider, snippetId?: string): Promise<void> {
+  return invoke("save_snippet_sync_id", { provider, snippetId });
+}
+
+export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Promise<SnippetSyncSettings> {
+  return invoke("retry_snippet_legacy_cleanup", { config });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
+    snippetPassphrase,
+    includeSecrets,
     secretsPassphrase,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
-  return invoke("snippet_sync_download", { config, secretsPassphrase });
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
+  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase });
 }
 
 export async function loadPinnedTreeNodeIds(): Promise<string[]> {
@@ -869,6 +898,10 @@ export async function listDatabaseStorage(connectionId: string, databases: strin
   return invoke("list_database_storage", { connectionId, databases });
 }
 
+export async function getSqlServerCompletionContext(connectionId: string, database: string): Promise<SqlServerCompletionContext> {
+  return invoke("get_sqlserver_completion_context", { connectionId, database });
+}
+
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {
   return invoke("list_doris_catalogs", { connectionId });
 }
@@ -944,7 +977,7 @@ export async function getTableComment(connectionId: string, database: string, sc
   });
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[], filter?: string, limit?: number, offset?: number, catalog?: string): Promise<ObjectInfo[]> {
+export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string): Promise<ObjectInfo[]> {
   return invoke("list_objects", {
     connectionId,
     database,
@@ -1009,6 +1042,16 @@ export async function getSqlServerColumnMetadata(connectionId: string, database:
   });
 }
 
+export interface TableColumnsResult {
+  table_name: string;
+  columns: ColumnInfo[];
+  error?: string;
+}
+
+export async function getAllColumns(connectionId: string, database: string, schema: string): Promise<TableColumnsResult[]> {
+  return invoke("get_all_columns", { connectionId, database, schema });
+}
+
 export async function listDataTypes(connectionId: string, database: string): Promise<string[]> {
   return invoke("list_data_types", { connectionId, database });
 }
@@ -1027,17 +1070,21 @@ export async function executeQuery(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
-    executionMode?: "simple";
+    executionMode?: "simple" | "postgres_read_only_transaction";
   },
 ): Promise<QueryResult> {
-  return invoke("execute_query", {
-    connectionId,
-    database,
-    sql,
-    schema,
-    executionId,
-    ...options,
-  });
+  try {
+    return await invoke("execute_query", {
+      connectionId,
+      database,
+      sql,
+      schema,
+      executionId,
+      ...options,
+    });
+  } catch (error) {
+    throw new BackendErrorException(error);
+  }
 }
 
 export async function executeMulti(
@@ -1059,14 +1106,18 @@ export async function executeMulti(
     executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
-  return invoke("execute_multi", {
-    connectionId,
-    database,
-    sql,
-    schema,
-    executionId,
-    ...options,
-  });
+  try {
+    return await invoke("execute_multi", {
+      connectionId,
+      database,
+      sql,
+      schema,
+      executionId,
+      ...options,
+    });
+  } catch (error) {
+    throw new BackendErrorException(error);
+  }
 }
 
 export interface ExecuteMultiProgress {
@@ -1077,7 +1128,7 @@ export interface ExecuteMultiProgress {
   success: boolean;
   executionTimeMs: number;
   affectedRows: number;
-  error?: string;
+  error?: BackendError;
 }
 
 export async function executeMultiWithProgress(
@@ -1107,6 +1158,8 @@ export async function executeMultiWithProgress(
   });
   try {
     return await invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...invokeOptions });
+  } catch (error) {
+    throw new BackendErrorException(error);
   } finally {
     unlisten();
   }
@@ -1856,6 +1909,7 @@ export interface McpServerStatus {
   bin_path: string | null;
   native_bin_path: string | null;
   script_path: string | null;
+  data_dir: string | null;
   install_command: string;
   update_command: string;
   error: string | null;
@@ -2754,6 +2808,17 @@ export interface MongoCollectionStatsResult {
   nindexes: unknown;
 }
 
+export interface MongoDropIndexFailure {
+  name: string;
+  message: string;
+}
+
+export interface MongoDropIndexesResult {
+  dropped_names: string[];
+  affected_rows: number;
+  failures?: MongoDropIndexFailure[];
+}
+
 export interface MongoGridFsFileInfo {
   id: string;
   filename?: string;
@@ -2830,8 +2895,8 @@ export async function vectorListCollections(connectionId: string, database?: str
   return documentListCollections(connectionId, database || "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
-  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, executionId);
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, collation, executionId);
 }
 
 export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {
@@ -2851,7 +2916,7 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
     database,
@@ -2861,6 +2926,7 @@ export async function documentFindDocuments(connectionId: string, database: stri
     filter,
     projection,
     sort,
+    collation,
     executionId,
   });
 }
@@ -3001,7 +3067,7 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
   });
 }
 
-export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<{ dropped_names: string[]; affected_rows: number }> {
+export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return invoke("mongo_drop_indexes", {
     connectionId,
     database,
@@ -3067,13 +3133,14 @@ export async function mongoDeleteDocument(connectionId: string, database: string
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
   return invoke("document_delete_document", {
     connectionId,
     database,
     collection,
     id,
     routing,
+    documentType,
   });
 }
 
@@ -3270,6 +3337,13 @@ export async function listenSqlFileProgress(handler: (progress: SqlFileProgress)
 export type TransferMode = "append" | "overwrite" | "upsert";
 export type TransferTableNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
+export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
+
+export interface TransferObjectSelection {
+  objectType: TransferObjectKind;
+  names: string[];
+}
 
 export interface TransferRequest {
   transferId: string;
@@ -3283,6 +3357,8 @@ export interface TransferRequest {
   targetCatalog?: string;
   tables: string[];
   createTable: boolean;
+  content: TransferContent;
+  objects: TransferObjectSelection[];
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
   ownershipPolicy?: TransferOwnershipPolicy;
@@ -3538,6 +3614,7 @@ export interface TableExportRequest {
   connectionId: string;
   database: string;
   schema?: string;
+  identifierQuote?: string;
   tableName: string;
   filePath: string;
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";

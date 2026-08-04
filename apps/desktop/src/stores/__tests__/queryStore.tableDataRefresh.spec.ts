@@ -166,6 +166,33 @@ describe("queryStore table data refresh", () => {
     expect(store.tabs.find((tab) => tab.id === secondTabId)?.result).toBeUndefined();
   });
 
+  it("keeps a MySQL table refresh unqualified in the selected database context", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "mysql-1",
+      name: "MySQL Proxy",
+      db_type: "mysql",
+      database: "yf_db",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM `zcyy_write_off_record` LIMIT 100;");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "yf_db", "zcyy_write_off_record", "data");
+    store.setTableMeta(tabId, {
+      database: "yf_db",
+      schema: undefined,
+      tableName: "zcyy_write_off_record",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    await expect(store.refreshDataTab(tabId)).resolves.toBe(true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "mysql", database: "yf_db", schema: undefined, tableName: "zcyy_write_off_record" }));
+    expect(store.tabs.find((tab) => tab.id === tabId)?.sql).toBe("SELECT * FROM `zcyy_write_off_record` LIMIT 100;");
+  });
+
   it("clears a structured sort when refreshed table metadata no longer contains its column", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

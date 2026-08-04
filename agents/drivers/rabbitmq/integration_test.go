@@ -103,12 +103,20 @@ func TestRabbitMQIntegration(t *testing.T) {
 		t.Fatalf("unexpected messages %#v", messages)
 	}
 
-	stats, err := service.getTopicStats(jsonObject{"topic": queue, "virtual_host": vhost})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.(jsonObject)["totalMessages"] != int64(1) {
-		t.Fatalf("unexpected stats %#v", stats)
+	var stats any
+	statsDeadline := time.Now().Add(10 * time.Second)
+	for {
+		stats, err = service.getTopicStats(jsonObject{"topic": queue, "virtual_host": vhost})
+		if err == nil && stats.(jsonObject)["totalMessages"] == int64(1) {
+			break
+		}
+		if time.Now().After(statsDeadline) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Fatalf("unexpected stats %#v", stats)
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 	config, err := service.getTopicConfig(jsonObject{"topic": queue, "virtual_host": vhost})
 	if err != nil {

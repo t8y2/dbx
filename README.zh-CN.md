@@ -397,7 +397,7 @@ make package
 
 DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础设施建设和版本发布都需要长期投入时间与资源。
 
-### 基础设施赞助商
+### 赞助商与合作伙伴
 
 <table>
   <tr>
@@ -424,6 +424,19 @@ DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础�
     </td>
     <td align="center" width="140">
       <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="180">
+      <a href="https://easysearch.cn" target="_blank">
+        <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
+      </a>
+    </td>
+    <td>
+      Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。
+    </td>
+    <td align="center" width="140">
+      <a href="https://easysearch.cn" target="_blank">访问 Easysearch</a>
     </td>
   </tr>
 </table>

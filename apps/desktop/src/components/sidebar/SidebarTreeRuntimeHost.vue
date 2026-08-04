@@ -90,8 +90,10 @@ import {
   supportsTableStructureEditing,
   supportsTransfer,
   usesTreeSchemaMode,
+  isSingleDatabase,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { mongoCollectionTableTypeFromNode, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
@@ -104,6 +106,7 @@ import {
   buildDropDatabaseSql,
   buildDropObjectSql,
   buildDropSchemaSql,
+  damengDropSchemaExecutionSchema,
   buildGetDatabaseCommentSql,
   buildGetSchemaCommentSql,
   buildUpdateDatabasePropertiesSql,
@@ -113,6 +116,7 @@ import {
   buildCopyTableDataSql,
   buildEmptyTableSql,
   buildTruncateTableSql,
+  duplicateTableStructureRequiresScript,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   supportsSchemaComment,
@@ -145,7 +149,7 @@ import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/s
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
 import { createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
-import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
@@ -231,6 +235,11 @@ import {
   dropMongoIndexLoading,
   showDropAllMongoIndexesConfirm,
   dropAllMongoIndexesLoading,
+  showCreateMongoIndexDialog,
+  mongoCreateIndexForm,
+  mongoCreateIndexFieldOptions,
+  mongoCreateIndexError,
+  mongoCreateIndexLoading,
   showFlushRedisDbConfirm,
   showCreateSchemaDialog,
   createSchemaName,
@@ -389,9 +398,18 @@ const {
   mongoIndexNameForNode,
   canDropMongoIndexNode,
   canDropMongoIndex,
-  mongoIndexDropPreview,
   canDropAllMongoIndexes,
+  mongoIndexDropPreview,
   mongoDropAllIndexesPreview,
+  refreshMongoIndexTreeAfterMutation,
+  canCreateMongoIndex,
+  mongoIndexKeyTypes,
+  mongoCreateIndexCanSubmit,
+  mongoCreateIndexCanAddField,
+  prepareCreateMongoIndexDialog,
+  addMongoCreateIndexField,
+  removeMongoCreateIndexField,
+  confirmCreateMongoIndex,
   openCreateNacosNamespaceDialog,
   confirmCreateNacosNamespace,
   openEditNacosNamespaceDialog,
@@ -702,7 +720,7 @@ async function toggle() {
     if (!wasExpanded) node.isExpanded = false;
     const errMsg = e?.message || String(e);
     if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-    toast(t("connection.connectFailed", { message: translateBackendError(t, errMsg) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(errMsg);
   }
 }
@@ -921,6 +939,7 @@ function requestPasteTreeClipboard(): boolean {
     connectionId: entry.connectionId,
     database: entry.database,
     schema: normalizeTreeClipboardSchema(entry.connectionId, entry.database, entry.schema),
+    tableComment: entry.tableComment,
   }));
   showPasteDialog.value = true;
   return true;
@@ -967,6 +986,12 @@ function openRenameMongoCollectionDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   prepareRenameMongoCollectionDialog();
+}
+
+function openCreateMongoIndexDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareCreateMongoIndexDialog();
 }
 
 function openRedisDatabaseAliasDialog() {
@@ -1042,7 +1067,7 @@ function activateDataTableFromDoubleClick() {
   if (node.type !== "table" || !hasNodeDatabaseContext(node)) return;
   const activation = settingsStore.editorSettings.sidebarActivation;
   const existingSameTableTab = findExistingSameTableDataTab();
-  const action = dataTableDoubleClickAction(existingSameTableTab, activation);
+  const action = dataTableDoubleClickAction(existingSameTableTab, activation, settingsStore.editorSettings.reuseDataTab);
   if (action === "none") return;
   if (action === "open") {
     openDataImmediately(node);
@@ -1076,6 +1101,13 @@ function openMongoTreeData(node: TreeNode) {
   if (node.type !== "mongo-collection") return;
   const tab = queryStore.createTab(node.connectionId, node.database, tabTitle, "mongo");
   queryStore.updateSql(tab, node.label);
+  queryStore.setTableMeta(tab, {
+    database: node.database,
+    tableName: node.label,
+    tableType: mongoCollectionTableTypeFromNode(node),
+    columns: [],
+    primaryKeys: [],
+  });
 }
 
 async function openSavedSqlFile() {
@@ -1248,7 +1280,8 @@ async function loadTemplateContext(allowView = false) {
     }
   }
 
-  return { node, dbType, tableSchema, columns, tableType };
+  const identifierQuote = connectionStore.connectionIdentifierQuote(node.connectionId);
+  return { node, dbType, identifierQuote, tableSchema, columns, tableType };
 }
 
 function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {
@@ -1262,6 +1295,7 @@ async function newSelectTemplate() {
     if (!context) return;
     const sql = buildTableSelectTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
@@ -1280,6 +1314,7 @@ async function newInsertTemplate() {
     if (!context) return;
     const sql = buildTableInsertTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
@@ -1299,6 +1334,7 @@ async function newUpdateTemplate() {
     if (!context) return;
     const sql = buildTableUpdateTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
@@ -1317,6 +1353,7 @@ async function newDeleteTemplate() {
     if (!context) return;
     const sql = buildTableDeleteTemplate({
       databaseType: context.dbType,
+      identifierQuote: context.identifierQuote,
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
@@ -1416,6 +1453,7 @@ function updateTreeClipboardForNodes(nodes: TreeNode[]) {
       database: node.database,
       schema: normalizeTreeClipboardSchema(node.connectionId, node.database, node.schema),
       tableName: node.label,
+      tableComment: node.comment,
     })),
   };
 }
@@ -1918,7 +1956,7 @@ function openRenameObjectDialog() {
   showRenameObjectDialog.value = true;
 }
 
-async function executeTreeNodeSqlWithProductionGuard(node: Pick<TreeNode, "connectionId" | "database" | "schema">, sql: string, options: { database?: string; schema?: string } = {}) {
+async function executeTreeNodeSqlWithProductionGuard(node: Pick<TreeNode, "connectionId" | "database" | "schema">, sql: string, options: { database?: string; schema?: string; executeAsScript?: boolean } = {}) {
   if (!node.connectionId) return undefined;
   const database = options.database ?? node.database ?? "";
   return executeWithProductionSqlGuard({
@@ -1926,7 +1964,7 @@ async function executeTreeNodeSqlWithProductionGuard(node: Pick<TreeNode, "conne
     database,
     sql,
     source: t("production.sourceSidebar"),
-    execute: () => api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema),
+    execute: () => (options.executeAsScript ? api.executeScript(node.connectionId!, database, sql, options.schema ?? node.schema) : api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema)),
   });
 }
 
@@ -2025,15 +2063,17 @@ async function confirmDropObject() {
     const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "materialized_view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
-    // Procedure/function drops refresh their parent instead of removing this
-    // node directly, so clear their pin before the old identity can survive.
+    // Refresh the parent object list so group badges and children stay in sync.
+    // Clear the pin first — refresh rebuilds nodes and the old identity must not survive.
     connectionStore.removePinnedTreeNodes([node]);
-    if (node.type === "view" || node.type === "materialized_view") {
-      connectionStore.removeTreeNode(node.id);
-      releaseActiveNodeReference([node.id]);
-    } else {
+    try {
       await refreshTableList(node);
+    } catch (error: any) {
+      // DROP already succeeded; keep the sidebar consistent if metadata refresh fails.
+      connectionStore.removeTreeNode(node.id);
+      toast(t("contextMenu.objectDropRefreshFailed", { message: error?.message || String(error) }), 5000);
     }
+    releaseActiveNodeReference([node.id]);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -2064,27 +2104,61 @@ async function confirmBatchDrop() {
     if (mongoIndexTargets.length) {
       const grouped = new Map<string, TreeNode[]>();
       for (const target of mongoIndexTargets) {
-        const key = `${target.connectionId}:${target.database}:${target.tableName || ""}`;
+        const key = JSON.stringify([target.connectionId, target.database, target.tableName || ""]);
         const list = grouped.get(key) ?? [];
         list.push(target);
         grouped.set(key, list);
       }
+      const mongoIndexGroups = [...grouped.values()];
+      // Confirm every production target before changing any collection so a
+      // cancellation cannot leave a cross-database batch partially applied.
+      for (const groupTargets of mongoIndexGroups) {
+        const groupFirst = groupTargets[0];
+        if (!groupFirst?.connectionId || !groupFirst.database || !groupFirst.tableName) return;
+        const confirmed = await executeWithProductionContextGuard({
+          connection: connectionStore.getConfig(groupFirst.connectionId),
+          database: groupFirst.database,
+          reviewText: groupTargets.map((target) => mongoIndexDropPreview(target, mongoIndexNameForNode(target))).join("\n"),
+          source: t("production.sourceSidebar"),
+          execute: async () => ({ confirmed: true }),
+        });
+        if (confirmed === undefined) return;
+      }
+
       let droppedCount = 0;
-      for (const groupTargets of grouped.values()) {
-        const first = groupTargets[0];
-        if (!first?.connectionId || !first.database || !first.tableName) continue;
-        await connectionStore.ensureConnected(first.connectionId);
+      let failedCount = 0;
+      let firstGroupError: unknown;
+      for (const groupTargets of mongoIndexGroups) {
+        const groupFirst = groupTargets[0];
+        if (!groupFirst?.connectionId || !groupFirst.database || !groupFirst.tableName) continue;
         const names = groupTargets.map((target) => mongoIndexNameForNode(target));
-        const result = await api.mongoDropIndexes(first.connectionId, first.database, first.tableName, JSON.stringify(names.length === 1 ? names[0] : names), false);
-        const dropped = new Set(result.dropped_names);
-        droppedCount += result.dropped_names.length;
-        for (const target of groupTargets) {
-          if (!dropped.has(mongoIndexNameForNode(target))) continue;
-          connectionStore.removeTreeNode(target.id);
-          releaseActiveNodeReference([target.id]);
+        try {
+          await connectionStore.ensureConnected(groupFirst.connectionId);
+          const result = await api.mongoDropIndexes(groupFirst.connectionId, groupFirst.database, groupFirst.tableName, JSON.stringify(names.length === 1 ? names[0] : names), names.length === 1);
+          const dropped = new Set(result.dropped_names);
+          droppedCount += result.dropped_names.length;
+          failedCount += mongoDropIndexFailureCount(result);
+          for (const target of groupTargets) {
+            const indexName = mongoIndexNameForNode(target);
+            if (!dropped.has(indexName)) continue;
+            connectionStore.removeTreeNode(target.id);
+            releaseActiveNodeReference([target.id]);
+          }
+        } catch (error) {
+          // A transport-level failure has no per-index payload; retain prior
+          // successes and continue with independent collection groups.
+          failedCount += groupTargets.length;
+          firstGroupError ??= error;
+        } finally {
+          await refreshMongoIndexTreeAfterMutation(groupFirst);
         }
       }
-      toast(t("contextMenu.batchDropSuccess", { count: droppedCount }), 3000);
+      if (droppedCount === 0 && firstGroupError && failedCount === mongoIndexTargets.length) throw firstGroupError;
+      if (failedCount > 0) {
+        toast(t("contextMenu.dropIndexesPartialFailure", { success: droppedCount, failed: failedCount }), 5000);
+      } else {
+        toast(t("contextMenu.batchDropSuccess", { count: droppedCount }), 3000);
+      }
       showBatchDropConfirm.value = false;
       return;
     }
@@ -2129,6 +2203,7 @@ async function confirmBatchDrop() {
       showBatchDropConfirm.value = false;
       return;
     }
+    const refreshScopes = new Map<string, TreeNode>();
     for (const target of targets) {
       if (!target.connectionId || !target.database) continue;
       await connectionStore.ensureConnected(target.connectionId);
@@ -2136,11 +2211,18 @@ async function confirmBatchDrop() {
       if (!sql) continue;
       await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
       closeDroppedTableObjectTabsForNode(target);
+      // Remove immediately so a later failure cannot leave dropped objects in the tree.
       connectionStore.removeTreeNode(target.id);
       releaseActiveNodeReference([target.id]);
+      refreshScopes.set(`${target.connectionId}:${target.database}:${target.schema ?? ""}`, target);
     }
     toast(t("contextMenu.batchDropSuccess", { count: targets.length }), 3000);
     showBatchDropConfirm.value = false;
+    const refreshResults = await Promise.allSettled([...refreshScopes.values()].map((target) => refreshTableList(target)));
+    const refreshFailure = refreshResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (refreshFailure) {
+      toast(t("contextMenu.objectDropRefreshFailed", { message: refreshFailure.reason?.message || String(refreshFailure.reason) }), 5000);
+    }
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -2272,7 +2354,8 @@ const canCreateSchema = computed(() => {
 
 const canDropSchema = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "schema" && !isSqlServerLinkedNode(activeNode.value) && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
+  const dbType = effectiveDatabaseTypeForConnection(config);
+  return activeNode.value.type === "schema" && !isSqlServerLinkedNode(activeNode.value) && (usesTreeSchemaMode(dbType) || dbType === "dameng") && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 const canEditSchemaComment = computed(() => {
@@ -2931,17 +3014,25 @@ async function confirmDropSchema() {
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
+    const config = connectionStore.getConfig(node.connectionId);
+    const dbType = effectiveDatabaseTypeForConnection(config);
+    let dropExecutionSchema: string | undefined;
+    if (dbType === "dameng") {
+      dropExecutionSchema = damengDropSchemaExecutionSchema(config?.username, node.label) ?? undefined;
+      if (!dropExecutionSchema) throw new Error(t("contextMenu.dropDamengSchemaRequiresDifferentDba"));
+    }
     const sql =
       dropSchemaPreviewSql.value ||
       (await buildDropSchemaSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
       }));
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database });
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: dropExecutionSchema });
     toast(t("contextMenu.dropSchemaSuccess", { name: node.label }), 3000);
-    const config = connectionStore.getConfig(node.connectionId);
     if (config?.db_type === "sqlserver") {
       await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database, { force: true });
+    } else if (isSingleDatabase(dbType)) {
+      await connectionStore.loadDatabases(node.connectionId, { force: true });
     } else {
       await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
     }
@@ -2974,8 +3065,13 @@ async function confirmDuplicateStructure() {
       schema: node.schema,
       sourceName: node.label,
       targetName: newName,
+      tableComment: node.comment,
     });
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    await executeTreeNodeSqlWithProductionGuard(node, sql, {
+      database: node.database,
+      schema: node.schema,
+      executeAsScript: duplicateTableStructureRequiresScript(sql),
+    });
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }), 3000);
     await refreshTableList(node);
   } catch (e: any) {
@@ -3016,8 +3112,13 @@ async function confirmPasteTable() {
           schema: entry.schema,
           sourceName: entry.sourceName,
           targetName,
+          tableComment: entry.tableComment,
         });
-        const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, structureSql, { database: entry.database, schema: entry.schema });
+        const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, structureSql, {
+          database: entry.database,
+          schema: entry.schema,
+          executeAsScript: duplicateTableStructureRequiresScript(structureSql),
+        });
         if (!structureExecuted) {
           pasteCancelled = true;
           break;
@@ -3036,6 +3137,7 @@ async function confirmPasteTable() {
           schema: entry.schema,
           sourceName: entry.sourceName,
           targetName,
+          normalizeNewTargetName: mode === "structure-and-data",
           ...dataCopyColumnOptions,
         });
         const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema });
@@ -3106,6 +3208,7 @@ function openPasteTableDialog() {
     connectionId: entry.connectionId,
     database: entry.database,
     schema: normalizeTreeClipboardSchema(entry.connectionId, entry.database, entry.schema),
+    tableComment: entry.tableComment,
   }));
   showPasteDialog.value = true;
 }
@@ -3622,6 +3725,17 @@ function databaseSpecificDialogCapabilities() {
     renameMongoCollectionPreview,
     renameMongoCollectionLoading,
     confirmRenameMongoCollection,
+    showCreateMongoIndexDialog,
+    mongoCreateIndexForm,
+    mongoCreateIndexFieldOptions,
+    mongoCreateIndexError,
+    mongoCreateIndexLoading,
+    mongoIndexKeyTypes,
+    mongoCreateIndexCanSubmit,
+    mongoCreateIndexCanAddField,
+    addMongoCreateIndexField,
+    removeMongoCreateIndexField,
+    confirmCreateMongoIndex,
     showRedisDatabaseAliasDialog,
     redisDatabaseAliasInput,
     redisDatabaseAliasSaving,
@@ -4172,8 +4286,11 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         shortcut: shortcutRename,
       });
     }
-    if (canDropAllMongoIndexes.value || canDropMongoCollection.value) {
+    if (canCreateMongoIndex.value || canDropAllMongoIndexes.value || canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
+      if (canCreateMongoIndex.value) {
+        items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });
+      }
       if (canDropAllMongoIndexes.value) {
         items.push({ label: t("contextMenu.dropAllIndexes"), action: dropAllMongoIndexes, icon: Trash2, variant: "destructive" as const });
       }
@@ -4445,7 +4562,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
     const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
-    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate;
+    const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
+    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate || hasMongoCreateIndexAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -4461,6 +4579,9 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     }
     if (mysqlObjectTemplate) {
       items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });
+    }
+    if (hasMongoCreateIndexAction) {
+      items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });
     }
     if (hasGroupCreateAction) {
       items.push({ label: "", separator: true });

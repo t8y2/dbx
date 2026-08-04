@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { claimDataGridPaste, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
+import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 
 afterEach(() => clearDataGridClipboardCopy());
 
@@ -18,6 +18,32 @@ function pasteEvent(nativeClipboard: boolean) {
     stopPropagation: vi.fn(),
   };
 }
+
+describe("claimDataGridSelectAll", () => {
+  it("blocks native page selection while the grid is loading", () => {
+    const event = pasteEvent(false);
+
+    expect(claimDataGridSelectAll(event, true, false)).toBe("block");
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("selects grid data after loading", () => {
+    const event = pasteEvent(false);
+
+    expect(claimDataGridSelectAll(event, false, true)).toBe("select");
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("keeps native selection for editors and empty idle grids", () => {
+    const editorEvent = pasteEvent(true);
+    const emptyGridEvent = pasteEvent(false);
+
+    expect(claimDataGridSelectAll(editorEvent, true, false)).toBe("native");
+    expect(claimDataGridSelectAll(emptyGridEvent, false, false)).toBe("native");
+    expect(editorEvent.preventDefault).not.toHaveBeenCalled();
+    expect(emptyGridEvent.preventDefault).not.toHaveBeenCalled();
+  });
+});
 
 describe("claimDataGridPaste", () => {
   it("keeps native paste behavior for editors inside the grid", () => {

@@ -517,7 +517,7 @@ impl MessageQueueAdmin for RabbitMqAdmin {
         _sub: &str,
         count: u32,
         _options: PeekMessagesOptions,
-    ) -> Result<Vec<PeekedMessage>, String> {
+    ) -> Result<PeekMessagesResult, String> {
         let conn_params = build_connection_params(&self.config)?;
         require_specific_vhost(&topic.namespace)?;
         let params = with_virtual_host(
@@ -531,7 +531,9 @@ impl MessageQueueAdmin for RabbitMqAdmin {
         let result: serde_json::Value = self.call("mq_peek_messages", params).await?;
 
         let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(messages.into_iter().enumerate().map(|(idx, m)| peeked_message_from_json(idx, &m)).collect())
+        Ok(PeekMessagesResult::complete(
+            messages.into_iter().enumerate().map(|(idx, m)| peeked_message_from_json(idx, &m)).collect(),
+        ))
     }
 
     async fn expire_messages(&self, _topic: &TopicRef, _sub: &str, _expire_seconds: i64) -> Result<(), String> {

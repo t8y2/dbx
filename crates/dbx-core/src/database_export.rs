@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::RwLock;
 
@@ -97,6 +97,54 @@ fn database_export_total_objects(request: &DatabaseExportRequest, counts: &Datab
 
 fn mysql_sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn mysql_view_dependencies_sql(database: &str) -> String {
+    let database = mysql_sql_string_literal(database);
+    format!(
+        "SELECT VIEW_NAME, TABLE_NAME FROM information_schema.VIEW_TABLE_USAGE \
+         WHERE VIEW_SCHEMA = {database} AND TABLE_SCHEMA = {database} \
+         ORDER BY VIEW_NAME, TABLE_NAME"
+    )
+}
+
+fn mysql_view_dependencies_from_rows(rows: &[Vec<Value>]) -> Vec<(String, String)> {
+    rows.iter()
+        .filter_map(|row| {
+            let view_name = row.first()?.as_str()?.trim();
+            let referenced_name = row.get(1)?.as_str()?.trim();
+            (!view_name.is_empty() && !referenced_name.is_empty())
+                .then(|| (view_name.to_string(), referenced_name.to_string()))
+        })
+        .collect()
+}
+
+async fn list_mysql_export_view_dependencies(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let result = crate::query::execute_sql_statement_with_options(
+        state,
+        connection_id,
+        database,
+        &mysql_view_dependencies_sql(database),
+        None,
+        None,
+        crate::query::QueryExecutionOptions { max_rows: Some(usize::MAX), ..Default::default() },
+    )
+    .await?;
+    Ok(mysql_view_dependencies_from_rows(&result.rows))
+}
+
+fn sort_export_views_by_dependencies<'a>(
+    views: &[&'a crate::types::TableInfo],
+    dependencies: &[(String, String)],
+) -> Vec<&'a crate::types::TableInfo> {
+    let names = views.iter().map(|view| view.name.clone()).collect::<Vec<_>>();
+    let sorted_names = crate::transfer::sort_table_names_by_dependencies(&names, dependencies, true);
+    let views_by_name = views.iter().map(|view| (view.name.as_str(), *view)).collect::<HashMap<_, _>>();
+    sorted_names.iter().filter_map(|name| views_by_name.get(name.as_str()).copied()).collect()
 }
 
 fn mysql_database_export_preamble(database: &str, charset: Option<&str>, collation: Option<&str>) -> String {
@@ -880,7 +928,7 @@ fn is_export_insert_column(
 ) -> bool {
     !is_internal_export_column(database_type, column)
         && !is_postgres_tsvector_export_column(database_type, column_type)
-        && !(database_type == Some(DatabaseType::Mysql) && is_mysql_generated_column_extra(column_extra))
+        && (database_type != Some(DatabaseType::Mysql) || !is_mysql_generated_column_extra(column_extra))
 }
 
 fn is_postgres_json_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
@@ -1272,6 +1320,17 @@ fn concurrent_metadata_prefetch_allowed(pool_kind: Option<&crate::connection::Po
     )
 }
 
+fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize {
+    // PostgreSQL exports can hold a snapshot connection while metadata and UI
+    // requests share the base pool. Keep enough capacity available for normal
+    // browsing instead of filling nearly the entire ten-connection pool.
+    if db_type == DatabaseType::Postgres {
+        4
+    } else {
+        8
+    }
+}
+
 fn record_export_error(file: &mut std::fs::File, fail_on_error: bool, message: String) -> Result<(), String> {
     if fail_on_error {
         Err(message)
@@ -1487,7 +1546,18 @@ pub async fn export_database_sql_core(
         .filter(|table| !postgres_extension_members.relation_names.contains(&table.name))
         .collect::<Vec<_>>();
     let mut tables: Vec<_> = all_tables.iter().filter(|t| !t.table_type.contains("VIEW")).collect();
-    let views: Vec<_> = all_tables.iter().filter(|t| t.table_type.contains("VIEW")).collect();
+    let mut views: Vec<_> = all_tables.iter().filter(|t| t.table_type.contains("VIEW")).collect();
+    if request.include_objects && db_type == DatabaseType::Mysql && views.len() > 1 {
+        match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database).await {
+            Ok(dependencies) => views = sort_export_views_by_dependencies(&views, &dependencies),
+            Err(error) => {
+                log::debug!(
+                    "[database-export] failed to resolve MySQL view dependencies for {}: {error}",
+                    request.database
+                );
+            }
+        }
+    }
     let postgres_sequences = if request.include_structure && matches!(db_type, DatabaseType::Postgres) {
         match list_postgres_export_sequences(
             state,
@@ -1598,7 +1668,6 @@ pub async fn export_database_sql_core(
         ddl: Option<Result<String, String>>,
         columns: Option<Result<Vec<crate::db::ColumnInfo>, String>>,
     }
-    const EXPORT_METADATA_PREFETCH_CONCURRENCY: usize = 8;
     let mut prefetched_table_metadata: Vec<Option<PrefetchedTableMetadata>> = Vec::new();
     prefetched_table_metadata.resize_with(tables.len(), || None);
     // 防护门按「实际连接池种类」放行，而非数据库类型的能力标记：只有确认底层
@@ -1662,7 +1731,7 @@ pub async fn export_database_sql_core(
                 };
                 (index, PrefetchedTableMetadata { ddl, columns })
             }))
-            .buffer_unordered(EXPORT_METADATA_PREFETCH_CONCURRENCY);
+            .buffer_unordered(database_export_metadata_prefetch_concurrency(db_type));
         while let Some((index, metadata)) = prefetch_stream.next().await {
             prefetched_table_metadata[index] = Some(metadata);
             if let Some(table_info) = tables.get(index) {
@@ -2228,18 +2297,19 @@ fn build_database_export_object_source_sql(
 
 #[cfg(test)]
 mod tests {
-    use super::concurrent_metadata_prefetch_allowed;
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
         database_export_total_objects, drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal,
         format_export_table_ddl, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
         generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
-        is_postgres_extension_member_routine, mysql_database_export_preamble, normalize_export_table_ddl,
-        record_export_error, write_database_export_rows, BuildDatabaseSqlExportOptions,
+        is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
+        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_error,
+        sort_export_views_by_dependencies, write_database_export_rows, BuildDatabaseSqlExportOptions,
         BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions,
         ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
+    use super::{concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency};
     use crate::models::connection::DatabaseType;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
     use serde_json::{json, Value};
@@ -2371,7 +2441,6 @@ mod tests {
     #[test]
     fn concurrent_prefetch_only_allowed_for_multi_connection_pools() {
         use crate::connection::PoolKind;
-        use std::sync::Arc;
 
         // ChClient::new 只构造 HTTP 客户端，不发起连接
         let clickhouse = PoolKind::ClickHouse(crate::db::clickhouse_driver::ChClient::new(
@@ -2383,11 +2452,16 @@ mod tests {
         assert!(concurrent_metadata_prefetch_allowed(Some(&clickhouse)));
 
         // Agent（JDBC sidecar）请求超时覆盖排队时间，必须回退串行
-        let agent =
-            PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(crate::db::agent_driver::AgentDriverClient::test_stub())));
+        let agent = PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub());
         assert!(!concurrent_metadata_prefetch_allowed(Some(&agent)));
 
         assert!(!concurrent_metadata_prefetch_allowed(None));
+    }
+
+    #[test]
+    fn postgres_metadata_prefetch_reserves_pool_capacity() {
+        assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Postgres), 4);
+        assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Mysql), 8);
     }
 
     #[test]
@@ -2415,6 +2489,32 @@ mod tests {
         let filtered = filter_export_table_infos(tables, &[], &["audit_log".to_string(), "active_users".to_string()]);
 
         assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["users"]);
+    }
+
+    #[test]
+    fn mysql_export_orders_referenced_views_before_dependents() {
+        let tables = [table("a_view", "VIEW"), table("z_view", "VIEW")];
+        let views = tables.iter().collect::<Vec<_>>();
+        let dependencies =
+            vec![("a_view".to_string(), "z_view".to_string()), ("z_view".to_string(), "base_table".to_string())];
+
+        let sorted = sort_export_views_by_dependencies(&views, &dependencies);
+
+        assert_eq!(sorted.iter().map(|view| view.name.as_str()).collect::<Vec<_>>(), vec!["z_view", "a_view"]);
+    }
+
+    #[test]
+    fn mysql_view_dependency_metadata_is_escaped_and_parsed() {
+        let sql = mysql_view_dependencies_sql("prod'o");
+        assert!(sql.contains("VIEW_SCHEMA = 'prod''o'"));
+        assert!(sql.contains("TABLE_SCHEMA = 'prod''o'"));
+
+        let rows = vec![
+            vec![json!(" a_view "), json!(" z_view ")],
+            vec![Value::Null, json!("ignored")],
+            vec![json!(""), json!("ignored")],
+        ];
+        assert_eq!(mysql_view_dependencies_from_rows(&rows), vec![("a_view".to_string(), "z_view".to_string())]);
     }
 
     #[test]

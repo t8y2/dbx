@@ -4,10 +4,10 @@ import { formatJsonSource, parseJsonPreservingLargeNumbers } from "@/lib/common/
 import type { RedisBlob, RedisCollectionPage, RedisHashItem, RedisListItem, RedisSetItem, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { parseJavaSerializedDetail, type RedisJavaSerializedDetail } from "@/lib/redis/javaSerialized";
 
-export type RedisValueFormat = "utf8" | "ascii" | "binary" | "json" | "javaserialize" | "hex" | "base64";
+export type RedisValueFormat = "utf8" | "ascii" | "binary" | "json" | "javaserialize" | "hex" | "base64" | "decompressed";
 export type RedisMemberDetailFormat = "json" | "text";
 
-export const REDIS_VALUE_FORMAT_DISPLAY_ORDER: RedisValueFormat[] = ["utf8", "ascii", "binary", "json", "javaserialize", "hex", "base64"];
+export const REDIS_VALUE_FORMAT_DISPLAY_ORDER: RedisValueFormat[] = ["utf8", "ascii", "binary", "json", "javaserialize", "hex", "base64", "decompressed"];
 
 export interface RedisMemberDetail {
   text: string;

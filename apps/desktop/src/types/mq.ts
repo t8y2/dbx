@@ -263,7 +263,15 @@ export interface PeekedMessage {
   payloadText?: string;
 }
 
+export interface PeekMessagesResult {
+  messages: PeekedMessage[];
+  /** True when the broker could not finish the requested snapshot before its limit. */
+  incomplete: boolean;
+}
+
 export interface PeekMessagesOptions {
+  /** Kafka only. Omitted starts at earliest unless a legacy caller supplies offset. */
+  startPosition?: "latest" | "earliest" | "offset";
   partition?: number;
   offset?: number;
 }

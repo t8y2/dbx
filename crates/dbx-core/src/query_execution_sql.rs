@@ -20,6 +20,10 @@ pub struct ExplainSqlOptions {
     /// Omitted formats retain the existing JSON behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ExplainFormat>,
+    /// PostgreSQL and SQL Server only: run the statement and report measured
+    /// rows/timings. Every other engine ignores the flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyze: Option<bool>,
     pub sql: String,
 }
 
@@ -53,11 +57,24 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if !is_safe_explain_sql(&source) {
         return explain_err("unsafe");
     }
+    if options.analyze == Some(true)
+        && options.database_type.is_some_and(|database_type| {
+            matches!(database_type, DatabaseType::Postgres | DatabaseType::SqlServer)
+                && is_write_sql_for_database(&source, database_type)
+        })
+    {
+        return explain_err("unsafe");
+    }
     if options.database_type == Some(DatabaseType::SqlServer) && crate::sql::split_sql_batches(&source).len() != 1 {
         return explain_err("unsafe");
     }
 
     let sql = match options.database_type {
+        // ANALYZE executes the statement; is_safe_explain_sql has already limited
+        // the source to SELECT/WITH/TABLE/VALUES. MongoDb shares the plain arm only.
+        Some(DatabaseType::Postgres) if options.analyze == Some(true) => {
+            format!("EXPLAIN (ANALYZE, FORMAT JSON) {source}")
+        }
         Some(DatabaseType::Postgres | DatabaseType::MongoDb) => {
             format!("EXPLAIN (FORMAT JSON) {source}")
         }
@@ -65,6 +82,11 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
             format!("EXPLAIN {source}")
         }
         Some(DatabaseType::Oracle) => format!("EXPLAIN PLAN FOR {source}"),
+        // STATISTICS XML returns the same ShowPlanXML document plus per-operator
+        // runtime counters, at the price of actually running the statement.
+        Some(DatabaseType::SqlServer) if options.analyze == Some(true) => {
+            format!("SET STATISTICS XML ON;\nGO\n{source}\nGO\nSET STATISTICS XML OFF;")
+        }
         Some(DatabaseType::SqlServer) => {
             format!("SET SHOWPLAN_XML ON;\nGO\n{source}\nGO\nSET SHOWPLAN_XML OFF;")
         }
@@ -288,7 +310,7 @@ fn strip_leading_search_engine_comments(input: &str) -> &str {
 }
 
 fn is_write_sql_with_database_type(sql: &str, database_type: Option<DatabaseType>) -> bool {
-    if database_type == Some(DatabaseType::SqlServer) && is_sqlserver_showplan_xml_set(sql) {
+    if database_type == Some(DatabaseType::SqlServer) && is_sqlserver_plan_capture_set(sql) {
         return false;
     }
     if database_type.is_some_and(|database_type| has_dialect_specific_write(sql, database_type)) {
@@ -309,12 +331,15 @@ fn is_write_sql_with_database_type(sql: &str, database_type: Option<DatabaseType
         .any(|statement| is_write_sql_statement(statement, detect_mysql_executable_comments, detect_select_into))
 }
 
-fn is_sqlserver_showplan_xml_set(sql: &str) -> bool {
+/// The explain flows toggle plan capture with a standalone SET statement:
+/// `SHOWPLAN_XML` for the estimated plan, `STATISTICS XML` for the actual one.
+fn is_sqlserver_plan_capture_set(sql: &str) -> bool {
     let normalized = strip_sql_comments(sql)
         .split_whitespace()
         .map(|part| part.trim_end_matches(';').to_ascii_uppercase())
         .collect::<Vec<_>>();
-    matches!(normalized.as_slice(), [set, showplan, value] if set == "SET" && showplan == "SHOWPLAN_XML" && matches!(value.as_str(), "ON" | "OFF"))
+    let tokens = normalized.iter().map(String::as_str).collect::<Vec<_>>();
+    matches!(tokens.as_slice(), ["SET", "SHOWPLAN_XML", "ON" | "OFF"] | ["SET", "STATISTICS", "XML", "ON" | "OFF"])
 }
 
 fn is_mysql_compatible_database(database_type: DatabaseType) -> bool {
@@ -765,6 +790,7 @@ mod tests {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),
             format: None,
+            analyze: None,
             sql: " select * from users where id = 1; ".to_string(),
         });
 
@@ -779,10 +805,147 @@ mod tests {
     }
 
     #[test]
+    fn builds_postgres_analyze_explain_sql() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            format: None,
+            analyze: Some(true),
+            sql: " select * from users where id = 1; ".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN (ANALYZE, FORMAT JSON) select * from users where id = 1".to_string()),
+                reason: None,
+            }
+        );
+
+        // analyze: Some(false) must behave exactly like the omitted flag.
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                format: None,
+                analyze: Some(false),
+                sql: "SELECT 1".to_string(),
+            })
+            .sql,
+            Some("EXPLAIN (FORMAT JSON) SELECT 1".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_sqlserver_actual_plan_explain_sql() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            format: None,
+            analyze: Some(true),
+            sql: " select * from dbo.orders where id = 1; ".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some(
+                    "SET STATISTICS XML ON;\nGO\nselect * from dbo.orders where id = 1\nGO\nSET STATISTICS XML OFF;"
+                        .to_string()
+                ),
+                reason: None,
+            }
+        );
+
+        // analyze: Some(false) must keep the estimated SHOWPLAN plan.
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                format: None,
+                analyze: Some(false),
+                sql: "SELECT 1".to_string(),
+            })
+            .sql,
+            Some("SET SHOWPLAN_XML ON;\nGO\nSELECT 1\nGO\nSET SHOWPLAN_XML OFF;".to_string())
+        );
+    }
+
+    #[test]
+    fn refuses_sqlserver_analyze_on_non_select_sources() {
+        // STATISTICS XML runs the statement, so the safety gate stays load-bearing.
+        for sql in [
+            "delete from dbo.orders",
+            "update dbo.orders set name = 'x'",
+            "SELECT * INTO dbo.orders_copy FROM dbo.orders",
+            "SELECT 1\nGO\nDROP TABLE dbo.orders",
+        ] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::SqlServer),
+                    format: None,
+                    analyze: Some(true),
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) },
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_analyze_for_every_engine_but_postgres_and_sqlserver() {
+        for (db_type, expected) in [
+            (DatabaseType::MongoDb, "EXPLAIN (FORMAT JSON) SELECT 1"),
+            (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1"),
+            (DatabaseType::Dameng, "EXPLAIN SELECT 1"),
+            (DatabaseType::Questdb, "EXPLAIN SELECT 1"),
+            (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1"),
+        ] {
+            let analyzed = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(db_type),
+                format: None,
+                analyze: Some(true),
+                sql: "SELECT 1".to_string(),
+            });
+            let plain = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(db_type),
+                format: None,
+                analyze: None,
+                sql: "SELECT 1".to_string(),
+            });
+
+            assert_eq!(analyzed, plain, "{db_type:?} must ignore the analyze flag");
+            // MongoDb is rejected earlier by supports_explain_plan, so it never
+            // reaches the match arm it nominally shares with Postgres.
+            if db_type != DatabaseType::MongoDb {
+                assert_eq!(analyzed.sql, Some(expected.to_string()), "{db_type:?}");
+            } else {
+                assert_eq!(analyzed.reason, Some("unsupported".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_analyze_on_non_select_sources() {
+        for sql in ["delete from users", "update users set name = 'x'", "SELECT 1; DROP TABLE users"] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    format: None,
+                    analyze: Some(true),
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) },
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
     fn builds_dameng_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Dameng),
             format: None,
+            analyze: None,
             sql: "SELECT * FROM t1 WHERE id = 1".to_string(),
         });
 
@@ -801,6 +964,7 @@ mod tests {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Oracle),
             format: None,
+            analyze: None,
             sql: "WITH rows AS (SELECT 1 AS id FROM dual) SELECT * FROM rows;".to_string(),
         });
 
@@ -819,6 +983,7 @@ mod tests {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::SqlServer),
             format: None,
+            analyze: None,
             sql: "WITH rows AS (SELECT 1 AS id) SELECT * FROM rows;".to_string(),
         });
 
@@ -838,6 +1003,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
                 format: None,
+                analyze: None,
                 sql: "SELECT 1\nGO\nSELECT 2".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
@@ -846,6 +1012,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
                 format: None,
+                analyze: None,
                 sql: "SELECT 'first line\nGO\nlast line' AS text".to_string(),
             })
             .ok
@@ -868,6 +1035,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: None,
+                analyze: None,
                 sql: "SELECT * FROM users;".to_string(),
             }),
             ExplainSqlBuildResult {
@@ -881,6 +1049,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: None,
+                analyze: None,
                 sql: "delete from users".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
@@ -890,6 +1059,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: None,
+                analyze: None,
                 sql: "SELECT * FROM users; DELETE FROM users".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
@@ -899,6 +1069,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: Some(ExplainFormat::Standard),
+                analyze: None,
                 sql: "SELECT * FROM users;".to_string(),
             }),
             ExplainSqlBuildResult {
@@ -1281,13 +1452,22 @@ mod tests {
     }
 
     #[test]
-    fn check_read_only_allows_only_sqlserver_showplan_xml_session_switches() {
-        for sql in ["SET SHOWPLAN_XML ON;", "-- explain\nSET SHOWPLAN_XML OFF"] {
+    fn check_read_only_allows_only_sqlserver_plan_capture_session_switches() {
+        for sql in [
+            "SET SHOWPLAN_XML ON;",
+            "-- explain\nSET SHOWPLAN_XML OFF",
+            "SET STATISTICS XML ON;",
+            "-- actual plan\nSET STATISTICS XML OFF",
+        ] {
             assert_eq!(check_read_only(sql, "readonly", DatabaseType::SqlServer), Ok(()));
         }
         assert!(check_read_only("SET SHOWPLAN_ALL ON", "readonly", DatabaseType::SqlServer).is_err());
+        assert!(check_read_only("SET STATISTICS IO ON", "readonly", DatabaseType::SqlServer).is_err());
         assert!(check_read_only("SET SHOWPLAN_XML ON; SELECT 1", "readonly", DatabaseType::SqlServer).is_err());
         assert!(check_read_only("SET SHOWPLAN_XML OFF; DROP TABLE users", "readonly", DatabaseType::SqlServer).is_err());
+        assert!(
+            check_read_only("SET STATISTICS XML OFF; DROP TABLE users", "readonly", DatabaseType::SqlServer).is_err()
+        );
     }
 
     #[test]

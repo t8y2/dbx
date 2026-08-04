@@ -7,7 +7,7 @@ import { uuid } from "@/lib/common/utils";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema } from "@/lib/database/jdbcDialect";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
-import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, type DataTabOpenMode, type DataTabReuseScope } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
@@ -27,12 +27,13 @@ export function useSidebarDataOpenRuntime() {
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
 
-  async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default") {
+  async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default", options: { reuseScope?: DataTabReuseScope } = {}) {
     if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
     const config = connectionStore.getConfig(node.connectionId);
+    const reuseScope = options.reuseScope ?? (settingsStore.editorSettings.reuseDataTab ? "same-table" : "none");
     if (config?.db_type === "hbase") {
       await connectionStore.ensureConnected(node.connectionId);
-      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, { forceNew: openMode === "new-tab" });
+      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, { forceNew: openMode === "new-tab" || reuseScope === "none" });
       queryStore.updateSql(tabId, node.label);
       return;
     }
@@ -107,7 +108,7 @@ export function useSidebarDataOpenRuntime() {
           });
           return;
         }
-        const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, tableSchema);
+        const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, { schema: tableSchema });
         queryStore.setTableMeta(targetTabId, nextTableMeta);
         openDataLog("info", "metadata:done", {
           traceId,
@@ -125,7 +126,7 @@ export function useSidebarDataOpenRuntime() {
         openDataLog("warn", "metadata:error", { traceId, tabId: targetTabId, elapsed: elapsed(), error });
       }
     };
-    const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab });
+    const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseScope });
     const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
     const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
       tab.title = node.label;
@@ -170,7 +171,7 @@ export function useSidebarDataOpenRuntime() {
         resetReusedDataTabState(existingDataTabCandidate.tab);
         return existingDataTabCandidate.tab.id;
       }
-      return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema);
+      return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, { forceNew: reuseScope === "none" || openMode === "new-tab" });
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
     logPhase("tab-created", { tabId });
@@ -222,7 +223,7 @@ export function useSidebarDataOpenRuntime() {
     // 空列的共享缓存条目不算暖缓存：columns=[] 无法区分"表确实无列"与
     // 占位/异常态，按暖缓存跳过 pending 与刷新会让整行 WHERE 保存路径
     // 在行标识未知时重新可用（#3727 审查意见）
-    const cachedTableMeta = sharedCachedTableMeta?.metadata.columns.length ? tableMetadataToDataTabMeta(sharedCachedTableMeta.metadata, tableSchema) : tabCachedTableMeta;
+    const cachedTableMeta = sharedCachedTableMeta?.metadata.columns.length ? tableMetadataToDataTabMeta(sharedCachedTableMeta.metadata, { schema: tableSchema }) : tabCachedTableMeta;
     const cachedTableMetaAgeMs = sharedCachedTableMeta?.metadata.columns.length ? sharedCachedTableMeta.ageMs : existingTableMetaAgeMs;
     const cachedTableMetaSource = sharedCachedTableMeta?.metadata.columns.length ? "shared" : tabCachedTableMeta ? "tab" : undefined;
     queryStore.setTableMeta(

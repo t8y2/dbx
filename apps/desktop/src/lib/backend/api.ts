@@ -138,6 +138,7 @@ export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 // Schema
 export const listDatabases = forward("listDatabases");
 export const listDatabaseStorage = forward("listDatabaseStorage");
+export const getSqlServerCompletionContext = forward("getSqlServerCompletionContext");
 export const listDorisCatalogs = forward("listDorisCatalogs");
 export const listDorisCatalogDatabases = forward("listDorisCatalogDatabases");
 export const listSqlServerLinkedServers = forward("listSqlServerLinkedServers");
@@ -157,6 +158,7 @@ export const listCompletionObjects = forward("listCompletionObjects");
 export const completionAssistantSearch = forward("completionAssistantSearch");
 export const getObjectSource = forward("getObjectSource");
 export const getColumns = forward("getColumns");
+export const getAllColumns = forward("getAllColumns");
 export const getSqlServerColumnMetadata = forward("getSqlServerColumnMetadata");
 export const listDataTypes = forward("listDataTypes");
 export const listIndexes = forward("listIndexes");
@@ -301,6 +303,9 @@ export const snippetSyncTest = forward("snippetSyncTest");
 export const snippetTokenStatus = forward("snippetTokenStatus");
 export const saveSnippetSavedToken = forward("saveSnippetSavedToken");
 export const forgetSnippetSavedToken = forward("forgetSnippetSavedToken");
+export const snippetSyncSettings = forward("snippetSyncSettings");
+export const saveSnippetSyncId = forward("saveSnippetSyncId");
+export const retrySnippetLegacyCleanup = forward("retrySnippetLegacyCleanup");
 export const snippetSyncUpload = forward("snippetSyncUpload");
 export const snippetSyncDownload = forward("snippetSyncDownload");
 export const saveAiConversation = forward("saveAiConversation");
@@ -635,6 +640,7 @@ export type {
   WebDavDownloadResult,
   SnippetProvider,
   SnippetSyncConfig,
+  SnippetSyncSettings,
   SnippetSyncSummary,
   SnippetDownloadResult,
   SnippetTokenStatus,
@@ -714,6 +720,9 @@ export type {
   TransferRequest,
   TransferProgress,
   TransferMode,
+  TransferContent,
+  TransferObjectKind,
+  TransferObjectSelection,
   TransferTableNameCase,
   TransferOwnershipPolicy,
   TransferOwnershipPreview,

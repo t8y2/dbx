@@ -1,37 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { shouldLoadTableStructureTriggers, visibleTableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
+import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 
 describe("table structure metadata loading", () => {
-  it("does not request triggers while opening the default columns tab", () => {
-    expect(visibleTableStructureRefreshScope("columns").triggers).toBe(false);
+  it.each([
+    ["columns", { columns: true, indexes: false, foreignKeys: false, triggers: false, tableComment: true }],
+    ["indexes", { columns: true, indexes: true, foreignKeys: false, triggers: false, tableComment: true }],
+    ["foreignKeys", { columns: true, indexes: false, foreignKeys: true, triggers: false, tableComment: true }],
+    ["triggers", { columns: false, indexes: false, foreignKeys: false, triggers: true, tableComment: true }],
+    ["ddl", { columns: false, indexes: false, foreignKeys: false, triggers: false, tableComment: false }],
+  ] as const)("requests only the metadata required by the %s tab", (tab, expected) => {
+    expect(visibleTableStructureRefreshScope(tab)).toEqual(expected);
   });
 
-  it("requests triggers when the structure editor opens on the trigger tab", () => {
-    expect(visibleTableStructureRefreshScope("triggers").triggers).toBe(true);
+  it("requests only index metadata after columns and comments are already loaded", () => {
+    const scope = unloadedTableStructureRefreshScope("indexes", new Set(["columns", "comment"]));
+
+    expect(scope).toEqual({ columns: false, indexes: true, foreignKeys: false, triggers: false, tableComment: false });
+    expect(hasTableStructureRefreshWork(scope)).toBe(true);
+    expect(hasTableStructureRefreshWork(unloadedTableStructureRefreshScope("indexes", new Set(["columns", "indexes", "comment"])))).toBe(false);
   });
 
-  it("loads trigger metadata once when the trigger tab becomes visible", () => {
-    const base = {
-      activeTab: "triggers" as const,
-      isCreateMode: false,
-      supported: true,
-      loading: false,
-      structureLoading: false,
-    };
-
-    expect(shouldLoadTableStructureTriggers({ ...base, loaded: false })).toBe(true);
-    expect(shouldLoadTableStructureTriggers({ ...base, loaded: true })).toBe(false);
-  });
-
-  it("waits for the initial structure load and skips create mode", () => {
-    const base = {
-      activeTab: "triggers" as const,
-      supported: true,
-      loaded: false,
-      loading: false,
-    };
-
-    expect(shouldLoadTableStructureTriggers({ ...base, isCreateMode: false, structureLoading: true })).toBe(false);
-    expect(shouldLoadTableStructureTriggers({ ...base, isCreateMode: true, structureLoading: false })).toBe(false);
+  it("requests trigger metadata only until that facet is loaded", () => {
+    expect(unloadedTableStructureRefreshScope("triggers", new Set(["comment"]))).toEqual({ columns: false, indexes: false, foreignKeys: false, triggers: true, tableComment: false });
+    expect(hasTableStructureRefreshWork(unloadedTableStructureRefreshScope("triggers", new Set(["triggers", "comment"])))).toBe(false);
   });
 });

@@ -984,6 +984,7 @@ pub async fn run_codex_agent(
 
 #[cfg(test)]
 mod tests {
+    use super::codex_process_env_with_system_proxy;
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
@@ -996,7 +997,7 @@ mod tests {
         DEFAULT_CODEX_MODELS,
     };
     #[cfg(not(windows))]
-    use super::{codex_process_env, codex_process_env_with_system_proxy, common_executable_dirs, merged_path_with_dir};
+    use super::{codex_process_env, common_executable_dirs, merged_path_with_dir};
     #[cfg(windows)]
     use super::{
         direct_program_path, first_windows_program_path, program_path_candidates, resolve_codex_command,
@@ -1044,6 +1045,7 @@ mod tests {
             connection_id: "conn-1".to_string(),
             connection_name: "local".to_string(),
             database: "demo".to_string(),
+            schema: None,
             agent_mode: true,
             allow_writes: false,
             allow_dangerous: false,

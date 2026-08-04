@@ -401,7 +401,7 @@ The installer will be in `src-tauri/target/release/bundle/`.
 
 DBX is free and open source, but ongoing maintenance, database compatibility testing, infrastructure, and release work require sustained time and resources.
 
-### Infrastructure Sponsors
+### Sponsors & Partners
 
 <table>
   <tr>
@@ -428,6 +428,19 @@ DBX is free and open source, but ongoing maintenance, database compatibility tes
     </td>
     <td align="center" width="140">
       <a href="https://www.qiniu.com/" target="_blank">Visit Qiniu Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="180">
+      <a href="https://easysearch.cn" target="_blank">
+        <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
+      </a>
+    </td>
+    <td>
+      Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.
+    </td>
+    <td align="center" width="140">
+      <a href="https://easysearch.cn" target="_blank">Visit Easysearch</a>
     </td>
   </tr>
 </table>

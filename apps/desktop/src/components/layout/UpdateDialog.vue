@@ -144,7 +144,7 @@ watch(
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.installing") }}
             </Button>
-            <Button v-else-if="isDownloadingUpdate" disabled>
+            <Button v-else-if="isDownloadingUpdate" class="w-52" disabled>
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.downloading", { progress: downloadProgress }) }}
             </Button>

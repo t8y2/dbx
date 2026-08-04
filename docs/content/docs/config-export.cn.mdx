@@ -5,6 +5,8 @@ description: 导出数据库连接配置（AES-256-GCM 加密），安全地在�
 
 <Callout type="info">导出你的数据库连接配置（含加密密码），用 AES-256-GCM 加密保护，安全地在不同电脑之间迁移。</Callout>
 
+<Callout type="warn">这里导出的是 DBX 连接配置，不包含业务数据库的表结构或数据，也不是数据库备份。数据库内容请使用 [数据库导出](/cn/docs/database-export) 或 [数据库备份](/cn/docs/database-backup)。</Callout>
+
 ## 导出
 
 <Steps>
@@ -41,5 +43,6 @@ description: 导出数据库连接配置（AES-256-GCM 加密），安全地在�
 | URL 参数、SSL、SSH、代理、可见数据库设置       | 包含                               |
 | 数据库密码、SSH 密码、SSH 密钥密码、连接字符串 | 包含，并在导出文件中加密           |
 | 厂商 JDBC 驱动 JAR 文件                        | 不包含；目标机器需要重新安装或导入 |
+| 已保存 SQL、界面/编辑器设置和侧边栏布局         | 不包含；需要迁移这些内容时使用 [云同步](/cn/docs/cloud-sync) |
 
 如果要迁移 JDBC 连接，先在这里导出连接配置，再在目标机器通过 [JDBC 插件](/cn/docs/plugins) 安装插件并导入驱动 JAR。

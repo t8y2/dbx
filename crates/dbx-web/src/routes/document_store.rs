@@ -66,6 +66,7 @@ pub struct DocumentFindRequest {
     pub filter: Option<String>,
     pub projection: Option<String>,
     pub sort: Option<String>,
+    pub collation: Option<String>,
     pub execution_id: Option<String>,
 }
 
@@ -107,6 +108,7 @@ pub struct DocumentDeleteRequest {
     pub collection: String,
     pub id: String,
     pub routing: Option<String>,
+    pub document_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +192,7 @@ pub async fn find_documents(
             req.filter.as_deref(),
             req.projection.as_deref(),
             req.sort.as_deref(),
+            req.collation.as_deref(),
         ),
     )
     .await?;
@@ -256,13 +259,14 @@ pub async fn delete_document(
     Json(req): Json<DocumentDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
-    let result = dbx_core::document_ops::delete_document_core(
+    let result = dbx_core::document_ops::delete_document_core_with_type(
         &state.app,
         &req.connection_id,
         &req.database,
         &req.collection,
         &req.id,
         req.routing.as_deref(),
+        req.document_type.as_deref(),
     )
     .await
     .map_err(AppError::from)?;

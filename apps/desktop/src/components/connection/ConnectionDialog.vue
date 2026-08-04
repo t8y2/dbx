@@ -35,9 +35,11 @@ import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/con
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
+import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
+import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
@@ -49,6 +51,7 @@ import { JDBCX_DEFAULT_URL, JDBCX_DRIVER_PROFILE, JDBCX_JDBC_DRIVER_CLASS, ensur
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
+import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
 import { postgresTlsModeForForm } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
@@ -1482,7 +1485,7 @@ async function refreshLocalAgentDrivers(): Promise<AgentDriverInstallState[]> {
 }
 
 function beginAgentDriverInstall(driverKey: string, label: string) {
-  agentInstallOperationId.value = crypto.randomUUID();
+  agentInstallOperationId.value = uuid();
   agentInstallDriverKey.value = driverKey;
   agentInstallLabel.value = label;
   agentInstallProgress.value = null;
@@ -1502,7 +1505,7 @@ function finishAgentDriverInstall() {
 function failAgentDriverInstall(error: unknown) {
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
-  agentInstallError.value = translateBackendError(t, errorMessage(error));
+  agentInstallError.value = translateBackendError(t, error);
   showAgentInstallDialog.value = true;
 }
 
@@ -1559,7 +1562,7 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
-    testResult.value = { ok: false, message: errorMessage(error) };
+    testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
   }
@@ -1601,7 +1604,7 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
-    testResult.value = { ok: false, message: errorMessage(error) };
+    testResult.value = { ok: false, message: translateBackendError(t, error) };
     failAgentDriverInstall(error);
     throw error;
   }
@@ -2661,6 +2664,13 @@ const zookeeperConnectString = computed({
     form.value.connection_string = normalizeZooKeeperConnectString(value);
   },
 });
+const zookeeperAuthScheme = computed<ZooKeeperAuthScheme>({
+  get: () => resolveZooKeeperAuthScheme(form.value.url_params),
+  set: (scheme) => {
+    form.value.url_params = setZooKeeperAuthScheme(form.value.url_params, scheme);
+    resetTestState();
+  },
+});
 const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isCloudflareD1Connection(form.value) && !isH2FileMode.value && !(form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns"));
 const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
@@ -2884,7 +2894,7 @@ const mongoRetryWrites = computed({
   },
 });
 const mongoDriverMode = computed({
-  get: () => (form.value.driver_profile === "mongodb-legacy" ? "legacy" : "auto"),
+  get: () => (isMongoLegacyDriverProfile(form.value.driver_profile) ? "legacy" : "auto"),
   set: (value: string) => {
     form.value.driver_profile = value === "legacy" ? "mongodb-legacy" : "mongodb";
     form.value.driver_label = value === "legacy" ? "MongoDB (Legacy)" : "MongoDB";
@@ -3276,9 +3286,14 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else if (config.db_type === "mongodb") {
     config.connection_string = normalizeMongoConnectionString(config.connection_string?.trim() || "");
   }
-  if (config.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy") {
-    config.driver_profile = "mongodb";
-    config.driver_label = "MongoDB";
+  if (config.db_type === "mongodb") {
+    if (isMongoLegacyDriverProfile(config.driver_profile)) {
+      config.driver_profile = "mongodb-legacy";
+      config.driver_label = "MongoDB (Legacy)";
+    } else {
+      config.driver_profile = "mongodb";
+      config.driver_label = "MongoDB";
+    }
   }
   if (config.db_type === "mongodb") {
     const mongoTls = normalizeMongoTlsFormState(!!config.ssl, config.url_params, config.ca_cert_path);
@@ -4721,7 +4736,7 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape">
+    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
       <DialogHeader>
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
@@ -4870,6 +4885,10 @@ function openExternalUrl(url: string) {
                       <TooltipContent>{{ t("connection.parseConnectionUrl") }}</TooltipContent>
                     </Tooltip>
                   </div>
+                </div>
+                <div v-if="form.db_type === 'zookeeper'" class="grid grid-cols-4 items-start gap-4">
+                  <span />
+                  <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">{{ t("connection.zookeeperClusterInputHint") }}</p>
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">
@@ -5692,6 +5711,18 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.zookeeperAuthMethod") }}</Label>
+                    <Select v-model="zookeeperAuthScheme">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="digest">{{ t("connection.zookeeperAuthDigest") }}</SelectItem>
+                        <SelectItem value="sasl_digest">{{ t("connection.zookeeperAuthSaslDigest") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
                   </div>
@@ -5970,7 +6001,10 @@ function openExternalUrl(url: string) {
 
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.gbaseServer") }}</Label>
-                    <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="form.gbase_server" placeholder="gbase01" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.gbaseServerHint") }}</p>
+                    </div>
                   </div>
 
                   <div v-if="form.db_type === 'informix'" class="grid grid-cols-4 items-center gap-4">
@@ -7096,7 +7130,7 @@ function openExternalUrl(url: string) {
   </Dialog>
 
   <Dialog v-model:open="showVisibleDatabasesDialog">
-    <DialogContent class="sm:max-w-[460px]">
+    <DialogContent class="sm:max-w-[520px]" @keydown="preventDialogDocumentSelectAll">
       <DialogHeader>
         <DialogTitle>{{ t(visibleObjectTitleKey) }}</DialogTitle>
         <p class="text-sm text-muted-foreground">
@@ -7144,9 +7178,7 @@ function openExternalUrl(url: string) {
           <Loader2 class="h-4 w-4 animate-spin" />
           {{ t("common.loading") }}
         </div>
-        <div v-else-if="visibleDatabaseError" class="p-3 text-sm text-destructive">
-          {{ t(visibleObjectLoadFailedKey, { message: visibleDatabaseError }) }}
-        </div>
+        <textarea v-else-if="visibleDatabaseError" class="h-full w-full resize-none overflow-auto border-0 bg-transparent p-3 text-sm leading-5 text-destructive outline-none" :value="t(visibleObjectLoadFailedKey, { message: visibleDatabaseError })" readonly />
         <div v-else-if="!filteredVisibleDatabaseNames.length" class="p-3 text-sm text-muted-foreground">
           {{ t("grid.noSearchResults") }}
         </div>

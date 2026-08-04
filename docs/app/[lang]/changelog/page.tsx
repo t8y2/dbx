@@ -1,4 +1,5 @@
 import { LandingNav } from "@/components/landing/LandingNav";
+import { LandingFooter } from "@/components/landing/LandingFooter";
 import { ChangelogRuntime } from "@/components/landing/ChangelogRuntime";
 import { fetchChangelog } from "@/lib/changelog";
 import { buildMetadata } from "@/lib/metadata";
@@ -35,17 +36,19 @@ export default async function ChangelogPage({ params }: { params: Promise<{ lang
   const initialData = await fetchChangelog(l);
 
   return (
-    <div className="min-h-screen bg-[#0b1120] text-landing-ink">
+    <main className="min-h-screen bg-[#0b1120] text-landing-ink">
       <LandingNav lang={l} active="changelog" />
 
-      <div className="max-w-[860px] mx-auto px-6 pt-32 pb-4">
+      <div className="max-w-[860px] mx-auto px-6 pt-32 pb-4 max-[760px]:px-[18px] max-[760px]:pt-28">
         <h1 className="text-4xl font-[820] tracking-tight">{t.title}</h1>
         <p className="mt-3 text-landing-muted text-lg">{t.desc}</p>
       </div>
 
-      <div className="max-w-[860px] mx-auto px-6 pb-24">
+      <div className="max-w-[860px] mx-auto px-6 pb-24 max-[760px]:px-[18px]">
         <ChangelogRuntime lang={l} initialReleases={initialData.releases} />
       </div>
-    </div>
+
+      <LandingFooter lang={l} />
+    </main>
   );
 }

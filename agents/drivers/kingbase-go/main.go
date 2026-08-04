@@ -135,6 +135,8 @@ type server struct {
 	mode                       kingbaseMode
 	usePgDefaultExpression     bool
 	catalogIdentityUnsupported bool
+	infoColumnTypeUnsupported  bool
+	infoUdtNameUnsupported     bool
 	currentSchema              string
 	schemaSet                  bool
 	sessions                   map[string]*querySession
@@ -455,6 +457,8 @@ func (s *server) connect(cp connectParams) error {
 	s.mode = detectKingbaseMode(db, cp.MySQLCompatMode)
 	s.usePgDefaultExpression = false
 	s.catalogIdentityUnsupported = false
+	s.infoColumnTypeUnsupported = false
+	s.infoUdtNameUnsupported = false
 	return nil
 }
 
@@ -517,6 +521,8 @@ func (s *server) disconnect() error {
 	s.closeAllQuerySessions()
 	s.usePgDefaultExpression = false
 	s.catalogIdentityUnsupported = false
+	s.infoColumnTypeUnsupported = false
+	s.infoUdtNameUnsupported = false
 	s.currentSchema = ""
 	s.schemaSet = false
 	if s.db == nil {

@@ -3546,17 +3546,37 @@ fn build_gemini_contents(messages: &[AiMessage]) -> Vec<serde_json::Value> {
             }
             if m.role == "assistant" && !m.tool_calls.is_empty() {
                 let mut parts: Vec<serde_json::Value> = Vec::new();
-                if !m.content.is_empty() {
-                    parts.push(json!({ "text": m.content }));
-                }
-                for tc in &m.tool_calls {
-                    if let Some(payload) =
-                        tc.provider_payload.as_ref().filter(|payload| payload.get("functionCall").is_some())
-                    {
-                        parts.push(payload.clone());
-                    } else {
-                        parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.arguments } }));
+                let mut has_text_part = false;
+                if let Some(model_parts) = m
+                    .tool_calls
+                    .iter()
+                    .filter_map(|tc| tc.provider_payload.as_ref())
+                    .find_map(|payload| payload.get("model_parts").and_then(serde_json::Value::as_array))
+                {
+                    for part in model_parts {
+                        if part.get("text").is_some() {
+                            has_text_part = true;
+                        }
+                        parts.push(part.clone());
                     }
+                } else {
+                    for tc in &m.tool_calls {
+                        if let Some(payload) = &tc.provider_payload {
+                            if payload.get("functionCall").is_some()
+                                || payload.get("thought_signature").is_some()
+                                || payload.get("thoughtSignature").is_some()
+                            {
+                                parts.push(payload.clone());
+                            } else {
+                                parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.arguments } }));
+                            }
+                        } else {
+                            parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.arguments } }));
+                        }
+                    }
+                }
+                if !m.content.is_empty() && !has_text_part {
+                    parts.insert(0, json!({ "text": m.content }));
                 }
                 contents.push(json!({ "role": "model", "parts": parts }));
             } else {
@@ -3576,19 +3596,31 @@ fn build_gemini_contents(messages: &[AiMessage]) -> Vec<serde_json::Value> {
     contents
 }
 
-fn emit_gemini_tool_call_part(part: &serde_json::Value, index: u32, on_event: &impl Fn(StreamToolEvent)) -> bool {
-    let Some(function_call) = part.get("functionCall") else {
-        return false;
+fn append_gemini_model_parts(event: &serde_json::Value, model_parts: &mut Vec<serde_json::Value>) {
+    let Some(parts) = event["candidates"][0]["content"]["parts"].as_array() else {
+        return;
     };
+    model_parts.extend(parts.iter().cloned());
+}
 
-    let name = function_call["name"].as_str().unwrap_or_default().to_string();
-    let arguments = function_call["args"].clone();
-    let id = format!("gemini-tc-{name}-{index}");
-    on_event(StreamToolEvent::ToolCallStart { index, id, name });
-    on_event(StreamToolEvent::ToolCallProviderPayload { index, payload: part.clone() });
-    on_event(StreamToolEvent::ToolCallDelta { index, fragment: arguments.to_string() });
-    on_event(StreamToolEvent::ToolCallComplete { index });
-    true
+fn emit_gemini_tool_call_parts(model_parts: &[serde_json::Value], on_event: &impl Fn(StreamToolEvent)) -> u32 {
+    let mut index = 0;
+    for part in model_parts {
+        let Some(function_call) = part.get("functionCall") else {
+            continue;
+        };
+
+        let name = function_call["name"].as_str().unwrap_or_default().to_string();
+        let arguments = function_call["args"].clone();
+        let id = format!("gemini-tc-{name}-{index}");
+        on_event(StreamToolEvent::ToolCallStart { index, id, name });
+        let payload = if index == 0 { json!({ "model_parts": model_parts }) } else { part.clone() };
+        on_event(StreamToolEvent::ToolCallProviderPayload { index, payload });
+        on_event(StreamToolEvent::ToolCallDelta { index, fragment: arguments.to_string() });
+        on_event(StreamToolEvent::ToolCallComplete { index });
+        index += 1;
+    }
+    index
 }
 
 /// Streaming Gemini call with tool support.
@@ -3639,7 +3671,7 @@ async fn stream_gemini_with_tools(
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
-            let mut tool_call_idx: u32 = 0;
+            let mut model_parts: Vec<serde_json::Value> = Vec::new();
             let mut token_usage: Option<TokenUsage> = None;
 
             loop {
@@ -3672,12 +3704,9 @@ async fn stream_gemini_with_tools(
                                                     done: false,
                                                 }));
                                             }
-                                            // Function call (Gemini sends complete objects, not deltas)
                                             emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                                            if emit_gemini_tool_call_part(part, tool_call_idx, on_event) {
-                                                tool_call_idx += 1;
-                                            }
                                         }
+                                        append_gemini_model_parts(&event, &mut model_parts);
                                     }
                                 }
                             }
@@ -3689,6 +3718,7 @@ async fn stream_gemini_with_tools(
                 }
             }
 
+            emit_gemini_tool_call_parts(&model_parts, on_event);
             Ok(token_usage)
         }
     })
@@ -3811,9 +3841,9 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
+        append_gemini_model_parts, apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
         build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt, complete,
-        drain_next_stream_line, emit_gemini_tool_call_part, emit_responses_function_call_item, format_transport_error,
+        drain_next_stream_line, emit_gemini_tool_call_parts, emit_responses_function_call_item, format_transport_error,
         gemini_text, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after,
         measure_first_stream_chunk, merge_global_max_retries, ollama_selected_model_tool_support, openai_response_text,
         openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
@@ -4329,16 +4359,20 @@ mod tests {
             "thoughtSignature": "encrypted-signature"
         });
         let accumulator = RefCell::new(StreamingToolCallAccumulator::new());
+        let model_parts = vec![response_part.clone()];
 
-        assert!(emit_gemini_tool_call_part(&response_part, 0, &|event| {
-            accumulator.borrow_mut().process(event, &|_| {});
-        }));
+        assert_eq!(
+            emit_gemini_tool_call_parts(&model_parts, &|event| {
+                accumulator.borrow_mut().process(event, &|_| {});
+            }),
+            1
+        );
 
         let calls = accumulator.into_inner().finalize();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "list_tables");
         assert_eq!(calls[0].arguments, serde_json::json!({ "schema": "public" }));
-        assert_eq!(calls[0].provider_payload.as_ref(), Some(&response_part));
+        assert_eq!(calls[0].provider_payload.as_ref(), Some(&serde_json::json!({ "model_parts": model_parts })));
 
         let contents = build_gemini_contents(&[
             AiMessage {
@@ -4363,6 +4397,116 @@ mod tests {
         assert_eq!(contents[0]["role"], "model");
         assert_eq!(contents[0]["parts"][0], response_part);
         assert_eq!(contents[1]["parts"][0]["functionResponse"]["name"], "list_tables");
+    }
+
+    #[test]
+    fn gemini_tool_call_replays_parts_accumulated_across_stream_events() {
+        let first_event = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "thought": true,
+                        "text": "planning",
+                        "thoughtSignature": "encrypted-signature"
+                    }]
+                }
+            }]
+        });
+        let second_event = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "list_tables",
+                            "args": { "schema": "public" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut model_parts = Vec::new();
+        append_gemini_model_parts(&first_event, &mut model_parts);
+        append_gemini_model_parts(&second_event, &mut model_parts);
+        let accumulator = RefCell::new(StreamingToolCallAccumulator::new());
+
+        assert_eq!(
+            emit_gemini_tool_call_parts(&model_parts, &|event| {
+                accumulator.borrow_mut().process(event, &|_| {});
+            }),
+            1
+        );
+
+        let calls = accumulator.into_inner().finalize();
+        let contents = build_gemini_contents(&[AiMessage {
+            role: "assistant".to_string(),
+            content: "planning".to_string(),
+            tool_call_id: None,
+            tool_calls: vec![ToolCallRef {
+                id: calls[0].id.clone(),
+                name: calls[0].name.clone(),
+                arguments: calls[0].arguments.clone(),
+                provider_payload: calls[0].provider_payload.clone(),
+            }],
+        }]);
+
+        assert_eq!(contents[0]["parts"], serde_json::Value::Array(model_parts));
+    }
+
+    #[test]
+    fn gemini_parallel_tool_calls_replay_model_parts_once() {
+        let model_parts = vec![
+            serde_json::json!({ "thought": true, "thoughtSignature": "encrypted-signature" }),
+            serde_json::json!({ "functionCall": { "name": "list_tables", "args": { "schema": "public" } } }),
+            serde_json::json!({ "functionCall": { "name": "get_columns", "args": { "table": "users" } } }),
+        ];
+        let accumulator = RefCell::new(StreamingToolCallAccumulator::new());
+        assert_eq!(
+            emit_gemini_tool_call_parts(&model_parts, &|event| {
+                accumulator.borrow_mut().process(event, &|_| {});
+            }),
+            2
+        );
+        let calls = accumulator.into_inner().finalize();
+
+        let contents = build_gemini_contents(&[AiMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: calls
+                .iter()
+                .map(|call| ToolCallRef {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    provider_payload: call.provider_payload.clone(),
+                })
+                .collect(),
+        }]);
+
+        assert_eq!(contents[0]["parts"], serde_json::Value::Array(model_parts));
+        assert_eq!(contents[0]["parts"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn gemini_incomplete_stream_does_not_emit_partial_tool_calls() {
+        let event = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "list_tables",
+                            "args": { "schema": "public" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut model_parts = Vec::new();
+        append_gemini_model_parts(&event, &mut model_parts);
+        let accumulator = StreamingToolCallAccumulator::new();
+
+        assert_eq!(model_parts.len(), 1);
+        assert!(accumulator.finalize().is_empty());
     }
 
     #[test]

@@ -46,12 +46,23 @@ export function HeroProductStage() {
     >
       <div className="relative aspect-[16/10] overflow-hidden">
         {productSlides.map((slide, index) => (
-          <img alt={slide.alt} aria-hidden={index !== activeSlide} className="landing-product-slide absolute inset-0 z-[1] w-full h-full object-cover object-left-top" data-active={index === activeSlide} key={slide.src} src={slide.src} />
+          <img
+            alt={slide.alt}
+            aria-hidden={index !== activeSlide}
+            className="landing-product-slide absolute inset-0 z-[1] w-full h-full object-cover object-left-top"
+            data-active={index === activeSlide}
+            decoding="async"
+            fetchPriority={index === 0 ? "high" : "auto"}
+            key={slide.src}
+            loading={index === 0 ? "eager" : "lazy"}
+            sizes="(max-width: 760px) calc(100vw - 36px), (max-width: 1040px) calc(100vw - 56px), 1180px"
+            src={slide.src}
+          />
         ))}
       </div>
-      <div className="landing-product-dots absolute right-[18px] bottom-4 z-[5] flex gap-[7px] items-center rounded-full p-1.5 max-[760px]:right-3 max-[760px]:bottom-[11px]" aria-label="DBX product screenshots">
+      <div className="landing-product-dots absolute right-[18px] bottom-4 z-[5] flex items-center rounded-full p-1 max-[760px]:right-2 max-[760px]:bottom-2" aria-label="DBX product screenshots">
         {productSlides.map((slide, index) => (
-          <button aria-current={index === activeSlide} aria-label={`Show ${slide.label} screenshot`} key={slide.src} onClick={() => setActiveSlide(index)} title={slide.label} type="button" className="block w-[9px] h-[9px] border-0 rounded-full p-0 cursor-pointer">
+          <button aria-current={index === activeSlide} aria-label={`Show ${slide.label} screenshot`} key={slide.src} onClick={() => setActiveSlide(index)} title={slide.label} type="button" className="landing-product-dot block size-8 border-0 rounded-full p-0 cursor-pointer">
             <span>{slide.label}</span>
           </button>
         ))}

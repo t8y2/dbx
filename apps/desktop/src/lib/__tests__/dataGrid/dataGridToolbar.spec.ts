@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
+  dataGridDeleteRowToolbarState,
+  dataGridToolbarCompactBreakpoint,
   dataGridToolbarIntervalOptions,
+  isDataGridToolbarCompact,
+  selectDataGridToolbarAddRowItem,
   selectDataGridToolbarAutoRefreshInterval,
   selectDataGridToolbarCopyItem,
   selectDataGridToolbarExportItem,
@@ -28,6 +33,36 @@ function autoRefreshCapability(overrides: Partial<DataGridToolbarAutoRefreshCapa
 }
 
 describe("data grid toolbar capabilities", () => {
+  it("shows delete only for editable grids with a supported deletion path", () => {
+    expect(dataGridDeleteRowToolbarState({ editable: false, canDeleteRows: true, canDeleteExistingRows: true, deletableTargetCount: 1, isSaving: false })).toEqual({ visible: false, disabled: false });
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: true, deletableTargetCount: 0, isSaving: false })).toEqual({ visible: true, disabled: true });
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: false, deletableTargetCount: 0, isSaving: false })).toEqual({ visible: false, disabled: true });
+  });
+
+  it("keeps unsaved deletable rows available when existing-row deletion is unsupported", () => {
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: false, deletableTargetCount: 1, isSaving: false })).toEqual({ visible: true, disabled: false });
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: true, deletableTargetCount: 2, isSaving: true })).toEqual({ visible: true, disabled: true });
+  });
+
+  it("uses a viewport-relative compact breakpoint within stable bounds", () => {
+    expect(dataGridToolbarCompactBreakpoint(1920)).toBe(1050);
+    expect(dataGridToolbarCompactBreakpoint(1280)).toBe(960);
+    expect(dataGridToolbarCompactBreakpoint(1080)).toBe(900);
+  });
+
+  it("keeps a scaled 1080p workspace expanded while compacting a narrower pane", () => {
+    expect(isDataGridToolbarCompact(1040, 1920)).toBe(true);
+    expect(isDataGridToolbarCompact(1040, 1280)).toBe(false);
+    expect(isDataGridToolbarCompact(900, 1280)).toBe(true);
+    expect(isDataGridToolbarCompact(0, 1280)).toBe(false);
+  });
+
+  it("preserves condition input space in embedded data grids", () => {
+    expect(dataGridToolbarCompactBreakpoint(1100, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(1050);
+    expect(isDataGridToolbarCompact(1000, 1100, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(true);
+    expect(isDataGridToolbarCompact(1000, 1100)).toBe(false);
+  });
+
   it("does not invoke hidden or disabled actions", async () => {
     const onTrigger = vi.fn();
 
@@ -112,5 +147,26 @@ describe("data grid toolbar capabilities", () => {
     await expect(selectDataGridToolbarCopyItem(capability, "sql-updates")).resolves.toBe(false);
     expect(onCopy).not.toHaveBeenCalled();
     expect(onSelect).toHaveBeenCalledWith("tsv");
+  });
+
+  it("routes add-row menu selections and rejects disabled or unknown items", async () => {
+    const onSelect = vi.fn();
+    const capability = {
+      label: "Add Row",
+      items: [
+        { value: "insert-multiple", label: "Insert Multiple Rows" },
+        { value: "position-above", label: "Place above selected row", disabled: true },
+        { value: "position-below", label: "Place below selected row", selected: true },
+        { value: "position-end", label: "Place at the end of data" },
+      ],
+      onTrigger: vi.fn(),
+      onSelect,
+    };
+
+    await expect(selectDataGridToolbarAddRowItem(capability, "position-below")).resolves.toBe(true);
+    await expect(selectDataGridToolbarAddRowItem(capability, "position-above")).resolves.toBe(false);
+    await expect(selectDataGridToolbarAddRowItem(capability, "unknown")).resolves.toBe(false);
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onSelect).toHaveBeenCalledWith("position-below");
   });
 });

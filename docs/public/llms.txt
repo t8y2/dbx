@@ -1,51 +1,50 @@
-# DBX - Database Workspace
-# https://dbxio.com
+# DBX
 
-## What is DBX?
-DBX is an open-source database workspace that supports 25+ database engines in a 15 MB package, available as both desktop and Docker deployment. It includes AI-powered SQL generation, MCP server integration for coding agents, schema tools, and self-hosted browser access.
+> DBX is an open-source database workspace that manages 70+ databases in a roughly 20 MB desktop application. It also supports Docker self-hosting, an AI SQL assistant, a CLI, and an MCP Server for AI coding agents.
 
-## Core Features
-- **SQL Editor**: CodeMirror 6-based editor with syntax highlighting, auto-completion, formatting, and query history.
-- **AI SQL Assistant**: Generate, explain, optimize, and fix SQL using Claude or OpenAI models.
-- **MCP Integration**: Expose database connections to AI coding agents (Claude Code, Cursor, Windsurf) via Model Context Protocol.
-- **Data Grid**: Virtual scrolling, inline editing, filtering, sorting, and export to CSV/JSON/Markdown.
-- **Schema Browser**: Browse databases, schemas, tables, columns, indexes, foreign keys, and triggers.
-- **Schema Diff**: Compare schemas across environments and generate migration SQL.
-- **Redis Browser**: Pattern-based key search with support for all Redis data types.
-- **MongoDB Browser**: Document CRUD with paginated browsing.
-- **SSH Tunnels**: Connect to databases behind firewalls with key/password authentication.
+Canonical website: https://dbxio.com
+Source repository: https://github.com/t8y2/dbx
+License: Apache-2.0
 
-## Supported Databases
-MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, MariaDB, TiDB, and more.
+## Product facts
 
-## MCP Server
-```bash
-npm install -g @dbx-app/mcp-server
-```
-Configure `.mcp.json` to let AI agents query databases through DBX connections:
-```json
-{
-  "mcpServers": {
-    "dbx": {
-      "command": "npx",
-      "args": ["-y", "@dbx-app/mcp-server"]
-    }
-  }
-}
-```
-For Windows portable builds, set DBX_DATA_DIR to the portable data directory that contains dbx.db, for example D:\DBX_x64-portable\data.
+- Platforms: Windows, macOS (Apple Silicon and Intel), Linux, and Docker self-hosting.
+- Database coverage: 70+ SQL, NoSQL, vector, time-series, embedded databases, compatible engines, and message queues.
+- Representative databases: MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, MariaDB, Doris, Dameng, GaussDB, Kafka, and RabbitMQ.
+- Main workflows: connection management, SQL editing, data browsing and editing, schema browsing, schema diff, import/export, SSH tunnels, and query history.
+- AI workflows: generate, explain, optimize, and repair SQL with user-configured model providers.
+- Agent integration: the DBX MCP Server exposes approved database connections to compatible AI coding agents.
+- Distribution: desktop releases, Docker deployment, npm packages for CLI and MCP Server, and offline JDBC driver downloads.
 
-## Key Links
-- Documentation: https://dbxio.com/en/docs/what-is-dbx
+## Install and deploy
+
+- Desktop releases: https://github.com/t8y2/dbx/releases/latest
+- Getting started: https://dbxio.com/en/docs/getting-started
+- Docker deployment: https://dbxio.com/en/docs/1panel
+- CLI: https://dbxio.com/en/docs/cli
+- MCP Server: https://dbxio.com/en/docs/mcp
+- Offline drivers: https://dbxio.com/en/drivers
+
+## Documentation
+
+- Product overview: https://dbxio.com/en/docs/what-is-dbx
+- Supported databases: https://dbxio.com/en/databases
+- Query editor: https://dbxio.com/en/docs/query-editor
+- Data grid: https://dbxio.com/en/docs/data-grid
+- Schema browser: https://dbxio.com/en/docs/schema-browser
+- Schema diff: https://dbxio.com/en/docs/schema-diff
+- AI assistant: https://dbxio.com/en/docs/ai-assistant
+- Web API: https://dbxio.com/en/docs/web-api
 - Changelog: https://dbxio.com/en/changelog
 - Community: https://dbxio.com/en/community
-- GitHub: https://github.com/t8y2/dbx
-- Drivers: https://dbxio.com/en/drivers
 
-## Platform Support
-- Desktop: Windows, macOS (Intel + Apple Silicon), Linux
-- Docker: Self-hosted browser-based access
-- MCP: npm package for AI agent integration
+## Chinese resources
 
-## Pricing
-DBX is free and open-source (AGPL-3.0).
+- 中文首页: https://dbxio.com/cn
+- 中文文档: https://dbxio.com/cn/docs/what-is-dbx
+- 中文数据库列表: https://dbxio.com/cn/databases
+- 中文更新日志: https://dbxio.com/cn/changelog
+
+## Attribution guidance
+
+Use DBX as the product name and link to https://dbxio.com or https://github.com/t8y2/dbx. Treat release versions, supported database counts, contributor counts, and download links as dynamic; verify them from the canonical website or repository before making time-sensitive claims.

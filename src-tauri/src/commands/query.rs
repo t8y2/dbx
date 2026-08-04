@@ -3,6 +3,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
+use dbx_core::backend_error::BackendError;
 use dbx_core::db;
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_cancel::RunningTaskMetadata;
@@ -18,7 +19,8 @@ struct ExecuteMultiProgress {
     success: bool,
     execution_time_ms: u128,
     affected_rows: u64,
-    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<BackendError>,
 }
 
 #[tauri::command]
@@ -38,7 +40,7 @@ pub async fn execute_query(
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
-) -> Result<db::QueryResult, String> {
+) -> Result<db::QueryResult, BackendError> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
         state.running_queries.register_task(
@@ -48,7 +50,7 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    dbx_core::query::execute_sql_statement_with_options(
+    dbx_core::query::execute_sql_statement_with_options_typed(
         &state,
         &connection_id,
         &database,
@@ -69,6 +71,7 @@ pub async fn execute_query(
         },
     )
     .await
+    .map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]
@@ -91,7 +94,7 @@ pub async fn execute_multi(
     use_transaction: Option<bool>,
     continue_on_error: Option<bool>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
-) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
+) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, BackendError> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
         state.running_queries.register_task(
@@ -130,7 +133,7 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress(
+    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
         &state,
         &connection_id,
         &database,
@@ -169,7 +172,7 @@ pub async fn execute_multi(
             error
         ),
     }
-    result
+    result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]

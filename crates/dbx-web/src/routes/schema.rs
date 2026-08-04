@@ -52,6 +52,17 @@ pub async fn list_database_storage(
     Ok(Json(result))
 }
 
+pub async fn get_sqlserver_completion_context(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::sqlserver::SqlServerCompletionContext>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::get_sqlserver_completion_context_core(&state.app, &q.connection_id, database)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 /// Resolve a non-internal catalog for dispatch to the Doris multi-catalog path.
 async fn external_doris_catalog(state: &Arc<WebState>, connection_id: &str, catalog: Option<&str>) -> Option<String> {
     dbx_core::schema::resolve_external_doris_catalog(&state.app, connection_id, catalog).await
@@ -342,6 +353,18 @@ pub async fn list_columns(
         .await
         .map_err(AppError::from)?
     };
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn get_all_columns(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let result = dbx_core::schema::get_all_columns_core(&state.app, &q.connection_id, database, schema)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 

@@ -202,6 +202,62 @@ pub fn starts_with_duckdb_result_sql_keyword(sql: &str) -> bool {
         .any(|keyword| {
             token.eq_ignore_ascii_case(keyword) || (*keyword == "DESCRIBE" && token.eq_ignore_ascii_case("DESC"))
         })
+        || matches!(token.to_ascii_uppercase().as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+            && contains_unquoted_sql_keyword(sql, "RETURNING")
+}
+
+fn contains_unquoted_sql_keyword(sql: &str, keyword: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' if !in_double => {
+                if in_single && bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                    continue;
+                }
+                in_single = !in_single;
+                index += 1;
+            }
+            b'"' if !in_single => {
+                if in_double && bytes.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                    continue;
+                }
+                in_double = !in_double;
+                index += 1;
+            }
+            b'-' if !in_single && !in_double && bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if !in_single && !in_double && bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            byte if !in_single && !in_double && (byte.is_ascii_alphabetic() || byte == b'_') => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+                    index += 1;
+                }
+                if sql[start..index].eq_ignore_ascii_case(keyword) {
+                    return true;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+
+    false
 }
 
 fn first_executable_sql_token(sql: &str) -> Option<&str> {
@@ -269,6 +325,8 @@ mod tests {
     fn detects_result_statements_after_comments() {
         assert!(starts_with_duckdb_result_sql_keyword("/* note */ WITH rows AS (SELECT 1) SELECT * FROM rows"));
         assert!(starts_with_duckdb_result_sql_keyword("DESC SELECT 1"));
+        assert!(starts_with_duckdb_result_sql_keyword("INSERT INTO items VALUES (1) RETURNING id"));
+        assert!(!starts_with_duckdb_result_sql_keyword("INSERT INTO items(note) VALUES ('RETURNING')"));
         assert!(!starts_with_duckdb_result_sql_keyword("INSERT INTO items VALUES (1)"));
     }
 }

@@ -30,7 +30,7 @@ import type {
   MqIssuedToken,
   BacklogStats,
   RocketMqConsumerGroupConfig,
-  PeekedMessage,
+  PeekMessagesResult,
   PeekMessagesOptions,
   MqRawRequest,
   MqRawResponse,
@@ -237,7 +237,7 @@ export async function mqClearBacklog(connectionId: string, topic: TopicRef, sub:
   return post("/api/mq/subscriptions/clear-backlog", { connectionId, topic, sub });
 }
 
-export async function mqPeekMessages(connectionId: string, topic: TopicRef, sub: string, count: number, options?: PeekMessagesOptions): Promise<PeekedMessage[]> {
+export async function mqPeekMessages(connectionId: string, topic: TopicRef, sub: string, count: number, options?: PeekMessagesOptions): Promise<PeekMessagesResult> {
   return post("/api/mq/subscriptions/peek-messages", { connectionId, topic, sub, count, options });
 }
 

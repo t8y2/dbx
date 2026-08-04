@@ -2,6 +2,7 @@ import { matchesModifierOnlyShortcut, type ShortcutLikeEvent } from "@/lib/edito
 import type { QueryTab, TreeNodeType } from "@/types/database";
 
 export type DataTabOpenMode = "default" | "new-tab";
+export type DataTabReuseScope = "none" | "same-table";
 
 type DataTabLike = Pick<QueryTab, "id" | "mode" | "connectionId" | "database" | "schema" | "title" | "tableMeta" | "tableMetaUpdatedAt">;
 
@@ -15,7 +16,7 @@ export interface DataTabTarget {
 
 export type ExistingDataTabCandidate<T extends DataTabLike> = {
   tab: T;
-  match: "same-table" | "database";
+  match: "same-table";
 };
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
@@ -47,13 +48,10 @@ export function dataTabMetadataNeedsRefresh(tab: DataTabLike, maxAgeMs: number, 
   return now - tab.tableMetaUpdatedAt >= maxAgeMs;
 }
 
-export function findExistingDataTabCandidate<T extends DataTabLike>(tabs: T[], target: DataTabTarget, options: { openMode: DataTabOpenMode; reuseDataTab: boolean }): ExistingDataTabCandidate<T> | undefined {
-  if (options.openMode === "new-tab") return undefined;
+export function findExistingDataTabCandidate<T extends DataTabLike>(tabs: T[], target: DataTabTarget, options: { openMode: DataTabOpenMode; reuseScope: DataTabReuseScope }): ExistingDataTabCandidate<T> | undefined {
+  if (options.openMode === "new-tab" || options.reuseScope === "none") return undefined;
 
   const sameTable = tabs.find((tab) => isSameTable(tab, target));
   if (sameTable) return { tab: sameTable, match: "same-table" };
-  if (!options.reuseDataTab) return undefined;
-
-  const sameDatabase = tabs.find((tab) => isSameDatabase(tab, target));
-  return sameDatabase ? { tab: sameDatabase, match: "database" } : undefined;
+  return undefined;
 }

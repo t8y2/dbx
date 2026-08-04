@@ -2,8 +2,10 @@ import type { CSSProperties } from "react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { LandingNav } from "@/components/landing/LandingNav";
+import { LandingFooter } from "@/components/landing/LandingFooter";
 import { Spotlight } from "@/components/aceternity/Spotlight";
 import { RevealSection } from "@/components/landing/RevealSection";
+import { ExpandableDatabaseGrid } from "@/components/landing/ExpandableDatabaseGrid";
 import { buildMetadata } from "@/lib/metadata";
 
 const databaseSupport = [
@@ -130,48 +132,48 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
   const t = i18n[l];
 
   return (
-    <div className="min-h-screen bg-[#0b1120] text-landing-ink">
+    <main className="min-h-screen bg-[#0b1120] text-landing-ink">
       <LandingNav lang={l} active="databases" />
 
       {/* Hero */}
-      <section className="relative pt-28 pb-6">
+      <section className="relative overflow-hidden pt-28 pb-6">
         <Spotlight />
-        <div className="relative z-[1] max-w-[1180px] mx-auto px-7">
+        <div className="relative z-[1] max-w-[1180px] mx-auto px-7 max-[760px]:px-[18px]">
           <h1 className="text-4xl font-[820] tracking-tight">{t.title}</h1>
           <p className="mt-3 text-landing-muted text-lg max-w-[640px]">{t.desc}</p>
         </div>
       </section>
 
       {/* Database Grid */}
-      <RevealSection className="max-w-[1180px] mx-auto px-7 pb-10">
-        <div className="grid grid-cols-9 gap-3 max-[1240px]:grid-cols-7 max-[960px]:grid-cols-5 max-[640px]:grid-cols-3 max-[440px]:grid-cols-2 max-[760px]:gap-2.5">
+      <RevealSection className="max-w-[1180px] mx-auto px-7 pb-10 max-[760px]:px-[18px]">
+        <ExpandableDatabaseGrid lang={l}>
           {databaseSupport.map((db) => {
             const isCta = "href" in db && db.href;
             const CardTag = isCta ? "a" : "div";
             return (
             <CardTag
-              className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:py-4 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
+              className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:px-1.5 max-[760px]:py-2.5 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
               key={db.name}
               {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
               style={{ "--db-tone": db.tone } as CSSProperties}
               data-stagger
             >
-              <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px]">
+              <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px] max-[760px]:size-8 max-[760px]:mb-2">
                 {isCta ? (
                   <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
                 ) : (
-                  <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
+                  <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
                 )}
               </div>
-              <strong className={`text-sm font-[650] leading-[1.2] text-center ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
+              <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
             </CardTag>
             );
           })}
-        </div>
+        </ExpandableDatabaseGrid>
       </RevealSection>
 
       {/* Vendor CTA */}
-      <RevealSection className="max-w-[1180px] mx-auto px-7 pb-16">
+      <RevealSection className="max-w-[1180px] mx-auto px-7 pb-16 max-[760px]:px-[18px]">
         <div className="landing-glass-card rounded-[10px] p-8 text-center max-w-[640px] mx-auto">
           <h2 className="text-[21px] font-[720]">{t.ctaTitle}</h2>
           <p className="mt-2 text-landing-muted text-sm leading-[1.65]">{t.ctaDesc}</p>
@@ -186,12 +188,14 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
       </RevealSection>
 
       {/* Footer link to docs */}
-      <div className="max-w-[1180px] mx-auto px-7 pb-20 text-center">
+      <div className="max-w-[1180px] mx-auto px-7 pb-20 text-center max-[760px]:px-[18px]">
         <Link href={`/${l}/docs/databases`} className="landing-inline-link inline-flex items-center gap-[7px] text-sm font-[650]">
           {t.footerLink}
           <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
         </Link>
       </div>
-    </div>
+
+      <LandingFooter lang={l} />
+    </main>
   );
 }

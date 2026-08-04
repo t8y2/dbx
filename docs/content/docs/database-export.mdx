@@ -1,78 +1,124 @@
 ---
 title: Database Export
-description: Export database structure and data as SQL for backup, migration, or test datasets.
+description: Stream structure, data, and readable database objects from one or more databases into SQL files.
 ---
 
-Database Export writes table structure and table data into a SQL file. Use it before high-risk operations, for small database migrations, or to create reproducible development and test datasets.
+Database Export creates reviewable SQL scripts for small backups, migrations, test datasets, or snapshots before risky changes. It can export one database/schema or orchestrate separate exports for multiple databases in a connection.
 
-## What Gets Exported
+<Callout type="info">SQL export is a logical export, not a database-native physical backup. Use official database tools for large production systems, point-in-time recovery, incremental backup, or strict consistency. For scheduled consistent MySQL and PostgreSQL exports, see [Database Backup](/en/docs/database-backup).</Callout>
 
-| Content         | Details                                                                         |
-| --------------- | ------------------------------------------------------------------------------- |
-| Structure       | `CREATE TABLE`, columns, primary keys, indexes, constraints, and other DDL      |
-| Data            | Rows exported as `INSERT` statements                                            |
-| Batched inserts | Multiple rows grouped into one `INSERT` to reduce file size and import overhead |
-| Objects         | Views, procedures, and functions where the database exposes source definitions  |
+## Exported Content
 
-Example:
+| Content | Details |
+| --- | --- |
+| Table structure | `CREATE TABLE`, columns, primary keys, indexes, constraints, and other DDL visible through the driver |
+| Table data | Rows read in batches and written as `INSERT` statements without loading the entire table first |
+| Database objects | Views, sequences, extensions, procedures, and functions where the engine exposes readable definitions |
+| Database creation | Optional MySQL `CREATE DATABASE IF NOT EXISTS` and `USE` preamble |
+| Import helpers | Engine-specific setup and cleanup for foreign-key checks, identity writes, routine delimiters, and similar requirements |
 
-```sql
-INSERT INTO users (id, name, email) VALUES
-  (1, 'Alice', 'alice@example.com'),
-  (2, 'Bob', 'bob@example.com'),
-  (3, 'Carol', 'carol@example.com');
-```
+When exporting only selected tables, structure and data are limited to that subset. Schema-wide routines are not pulled in merely because a few tables were selected. Object coverage always depends on the database and driver.
 
-## Workflow
+## Single-Database Export
 
 <Steps>
   <Step>
     ### Select Connection and Database
 
-    Choose the database to export and verify the environment.
+    Choose a database and schema when applicable, then select the tables to include.
 
   </Step>
   <Step>
-    ### Configure Export Options
+    ### Configure Content and DDL
 
-    Choose whether to include structure, data, and database objects. You can export all tables or a selected table subset.
-
-  </Step>
-  <Step>
-    ### Choose Output Location
-
-    Select where the `.sql` file should be saved.
+    Select structure, data, objects, drop-existing-table behavior, MySQL database creation, and auto-increment handling.
 
   </Step>
   <Step>
-    ### Start Export
+    ### Choose the Output
 
-    DBX generates a SQL file and reports the current object, progress, row counts, errors, and cancellation state.
+    Desktop writes to a selected local `.sql` path. Docker/Web writes to temporary server storage and downloads the result through the browser.
+
+  </Step>
+  <Step>
+    ### Generate in Background and Review
+
+    Progress reports preparation, the current object, object index, exported rows, errors, and cancellation. The task remains visible in the progress center.
 
   </Step>
 </Steps>
 
-## Batching And Selection
+After a successful Desktop export, the task result can reveal the output in the file manager. Web removes the temporary server file after download.
 
-DBX reads table data in batches and writes generated `INSERT` statements into the output file. If batch size is not set, the export uses a default batch size of 1000 rows.
+## Export All Databases
 
-Selected-table export filters the table list before generating DDL and data. Routine objects such as procedures and functions are included only when object export is enabled and the export is not limited to a table subset.
+Enable Export All Databases to search and select multiple databases from the current connection:
 
-<Callout type="info">For MySQL exports, DBX temporarily writes `SET FOREIGN_KEY_CHECKS = 0` before table content and re-enables it at the end of the file.</Callout>
+- Non-schema engines normally produce one `.sql` file per database
+- Schema-aware engines such as PostgreSQL build a plan per schema; when a database has multiple schemas, filenames include both database and schema
+- Desktop writes each plan item into a selected output directory
+- Docker/Web generates each file on the server and triggers browser downloads
+- If one plan item fails or is cancelled, later items stop; already completed files are not removed automatically
 
-## Cancellation And Errors
+All-database export is serial orchestration of independent logical exports. It is not one cross-database transaction or an instance-wide consistent snapshot.
 
-You can cancel an export between objects or row batches. If a specific table or object cannot be exported, DBX writes a SQL comment with the error and continues with the remaining export where possible.
+## Structure Options
 
-## Importing the Export
+### Drop Existing Tables
 
-The generated `.sql` file can be imported with [SQL File Execution](/en/docs/sql-file).
+When enabled, DBX writes database-adapted `DROP TABLE IF EXISTS` statements before the matching `CREATE TABLE`. Running the script can delete target data, so review this option carefully.
 
-<Callout type="warn">Export files may contain sensitive data, account information, business identifiers, or user privacy data. Mask data before sharing when needed.</Callout>
+### MySQL Create Database
 
-## Recommendations
+MySQL exports can add `CREATE DATABASE IF NOT EXISTS` and `USE` at the beginning. The importing account needs appropriate privileges. The option is off by default to avoid unexpected database creation or context switching.
 
-- Export a backup before high-risk schema operations
-- Test imports in a non-production database before migration
-- Use native database backup tools for large production databases or complete backups
-- Keep exported SQL files out of public repositories
+### MySQL Auto-Increment Start
+
+By default, table-level `AUTO_INCREMENT=N` is preserved. Omit Auto Increment removes only that table option; it does not remove the column's `AUTO_INCREMENT` attribute. This is useful when a fresh environment should choose its own starting sequence value.
+
+## Data Writing and Consistency
+
+DBX uses paged or streaming reads and writes rows incrementally. Interactive exports currently use a batch size of 1000 rows. Generated inserts may be multi-row or single-row depending on database capabilities.
+
+The export path attempts to:
+
+- Disable and later restore MySQL foreign-key checks
+- Wrap explicit writes to supported identity columns when required
+- Format strings, dates, JSON, arrays, binary values, and `NULL` for the target dialect
+- Add routine delimiters or batch boundaries required by the database
+- Use a stable session on supported connections to reduce drift between batches of the same table
+
+Interactive SQL export still cannot promise one global snapshot across every database and object. Use [Database Backup](/en/docs/database-backup) or native database tooling when consistency is required.
+
+## Errors and Cancellation
+
+- When a table or object cannot be read, regular export paths may write an error as an SQL comment and continue; metadata, connection, or file failures can terminate the task
+- Cancellation takes effect between objects or row batches
+- Desktop may leave a partial file that must be checked before reuse
+- Web cleans temporary server files after failure or cancellation and does not trigger a successful download
+- A successful export only confirms file generation, not a successful restore on another database
+
+## Restore and Validation
+
+Use [SQL File Execution](/en/docs/sql-file) to preview and run an exported script. Before restoring, check:
+
+- Target engine and version compatibility
+- Whether the file contains `DROP TABLE`, `CREATE DATABASE`, or large insert batches
+- Create, object, and data-write privileges
+- Table counts, row counts, indexes, constraints, sequences, and critical objects after import
+
+<Callout type="warn">Exported files may contain password hashes, tokens, personal information, and business-sensitive data. Do not commit unmasked exports to public repositories or send them to untrusted environments.</Callout>
+
+## Related Features
+
+<Cards>
+  <Card title="Database Backup" href="/en/docs/database-backup">
+    Schedule consistent MySQL and PostgreSQL SQL backups in Desktop.
+  </Card>
+  <Card title="SQL File Execution" href="/en/docs/sql-file">
+    Preview, batch-execute, and review SQL file results.
+  </Card>
+  <Card title="Data Transfer" href="/en/docs/data-transfer">
+    Copy table data directly between connections without an intermediate SQL file.
+  </Card>
+</Cards>

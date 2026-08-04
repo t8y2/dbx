@@ -57,6 +57,8 @@ test("labels native and compatibility database products with their families", ()
     ["Dremio", ["db/dremio", "db/jdbc"]],
     ["Apache Kafka", ["db/kafka", "db/mq"]],
     ["RabbitMQ", ["db/mq", "db/rabbitmq"]],
+    ["MQTT 5.0", ["db/mqtt"]],
+    ["EMQX 5.8", ["db/mqtt"]],
   ];
 
   for (const [database, expected] of cases) {

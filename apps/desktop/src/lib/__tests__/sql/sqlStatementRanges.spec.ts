@@ -335,6 +335,44 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 'GO'\n-- GO\nSELECT 2", "SELECT 3"]);
   });
 
+  it("keeps SQL Server IF...BEGIN...END block together as a single statement", () => {
+    const sql = `IF OBJECT_ID ('CATEGORIA') IS NOT NULL
+BEGIN
+DROP TABLE CATEGORIA
+END
+CREATE TABLE CATEGORIA
+(
+  COD_CATE CHAR(3) NOT NULL PRIMARY KEY,
+  NOMBRE VARCHAR(25) NOT NULL
+)`;
+    const ranges = splitSqlStatementRanges(sql, "sqlserver");
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+  });
+
+  it("keeps SQL Server IF...BEGIN...END block together in executable ranges", () => {
+    const sql = `IF OBJECT_ID ('CATEGORIA') IS NOT NULL
+BEGIN
+DROP TABLE CATEGORIA
+END
+CREATE TABLE CATEGORIA
+(
+  COD_CATE CHAR(3) NOT NULL PRIMARY KEY,
+  NOMBRE VARCHAR(25) NOT NULL
+)`;
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([sql]);
+  });
+
+  it("keeps SQL Server IF...BEGIN...END block together at cursor position", () => {
+    const sql = `IF OBJECT_ID ('CATEGORIA') IS NOT NULL
+BEGIN
+DROP TABLE CATEGORIA
+END`;
+    const cursorPos = sql.indexOf("BEGIN") + 2;
+    const range = statementRangeAtCursor(sql, cursorPos, "sqlserver");
+    expect(range).not.toBeNull();
+    expect(range!.sql.trim()).toBe(sql.trim());
+  });
+
   it("keeps Oracle PL/SQL blocks together and treats slash lines as delimiters", () => {
     const ranges = splitSqlStatementRanges(oraclePlSqlFixture, "oracle");
     expect(rangeSqlTexts(ranges)).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);

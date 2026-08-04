@@ -651,6 +651,7 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
+  if (supportsSqlServerGoCommands(databaseType) && startsWithSqlServerTsqlBlock(statement.sql)) return [statement];
 
   const lineStarts = topLevelSoftStatementLineStarts(sql, statement, databaseType, parameterOptions);
   if (lineStarts.length <= 1) return [statement];
@@ -1935,6 +1936,12 @@ function supportsSqlServerGoCommands(databaseType?: DatabaseType): boolean {
 function isSqlServerGoLine(sql: string, pos: number): boolean {
   const lineEnd = findLineEnd(sql, pos);
   return /^go(?:\s+\d+)?$/i.test(sql.slice(pos, lineEnd).trim());
+}
+
+function startsWithSqlServerTsqlBlock(sql: string): boolean {
+  const match = /^[A-Za-z_][\w$]*/.exec(sql.trimStart());
+  if (!match || match[0].toUpperCase() !== "IF") return false;
+  return /\bBEGIN\b/i.test(sql);
 }
 
 function startsDelimiterCommand(sql: string, pos: number): boolean {

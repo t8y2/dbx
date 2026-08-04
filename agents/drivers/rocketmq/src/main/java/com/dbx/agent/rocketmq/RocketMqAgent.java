@@ -65,8 +65,6 @@ public final class RocketMqAgent {
     private static final long CONSUMER_GROUP_ENRICH_BUDGET_MS = 8_000;
     /** Wall-clock budget for parallel getAllSubscriptionGroup across masters. */
     private static final long CONSUMER_GROUP_COLLECT_BUDGET_MS = 12_000;
-    /** Per-broker timeout when collecting subscription groups (shorter than full RPC). */
-    private static final long CONSUMER_GROUP_COLLECT_PER_BROKER_MS = 5_000;
     private static final int CONSUMER_GROUP_COLLECT_CONCURRENCY = 8;
     private static final long CONSUMER_LAG_BUDGET_MS = 10_000;
     private static final int CONSUMER_LAG_CONCURRENCY = 8;
@@ -1118,13 +1116,42 @@ public final class RocketMqAgent {
 
     private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigs(
         DefaultMQAdminExt admin, JsonObject conn) throws Exception {
+        long requestTimeoutMs = intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS);
+        // Prefer connection RPC timeout over the legacy 5s hard-code so slow-but-alive brokers
+        // still contribute within the shared wall-clock budget.
+        long perBrokerMs = Math.min(Math.max(1_000L, requestTimeoutMs), CONSUMER_GROUP_COLLECT_BUDGET_MS);
         return collectConsumerGroupConfigs(
             admin,
             conn,
             CONSUMER_GROUP_COLLECT_CONCURRENCY,
             CONSUMER_GROUP_COLLECT_BUDGET_MS,
-            CONSUMER_GROUP_COLLECT_PER_BROKER_MS
+            perBrokerMs
         );
+    }
+
+    /**
+     * Topic-filtered lists skip full-cluster collect for speed; still load configs from the first
+     * reachable master so FIFO/{@code consumeMessageOrderly} typing stays accurate.
+     */
+    private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigsFromFirstBroker(
+        DefaultMQAdminExt admin, JsonObject conn) {
+        long timeoutMs = Math.max(1_000L, intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS));
+        try {
+            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
+                try {
+                    SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, timeoutMs);
+                    if (wrapper != null && wrapper.getSubscriptionGroupTable() != null
+                        && !wrapper.getSubscriptionGroupTable().isEmpty()) {
+                        return new TreeMap<>(wrapper.getSubscriptionGroupTable());
+                    }
+                } catch (Exception ignored) {
+                    // Try next master.
+                }
+            }
+        } catch (Exception ignored) {
+            // No reachable masters.
+        }
+        return Collections.emptyMap();
     }
 
     /**
@@ -1276,16 +1303,8 @@ public final class RocketMqAgent {
     private static GroupList queryTopicConsumeByWhoOnBroker(
         DefaultMQAdminExt admin, String brokerAddr, String topic) throws Exception {
         try {
-            var implField = DefaultMQAdminExt.class.getDeclaredField("defaultMQAdminExtImpl");
-            implField.setAccessible(true);
-            Object impl = implField.get(admin);
-            var mqClientMethod = impl.getClass().getMethod("getMqClientInstance");
-            Object mqClient = mqClientMethod.invoke(impl);
-            var apiMethod = mqClient.getClass().getMethod("getMQClientAPIImpl");
-            Object api = apiMethod.invoke(mqClient);
-            var timeoutField = impl.getClass().getDeclaredField("timeoutMillis");
-            timeoutField.setAccessible(true);
-            long timeout = timeoutField.getLong(impl);
+            Object api = mqClientApiImpl(admin);
+            long timeout = adminTimeoutMillis(admin);
             var queryMethod = api.getClass().getMethod(
                 "queryTopicConsumeByWho", String.class, String.class, long.class);
             return (GroupList) queryMethod.invoke(api, brokerAddr, topic, timeout);
@@ -1359,8 +1378,8 @@ public final class RocketMqAgent {
         if (!topicFilter.isBlank()) {
             // Dashboard-style: discover groups via topic; skip full-cluster subscription dump.
             groups.addAll(queryTopicConsumeByWhoRemapped(admin, conn, topicFilter));
-            // groupType falls back to name-based classification when config is absent.
-            configs = Collections.emptyMap();
+            // One master dump restores FIFO typing without reintroducing N-broker collect latency.
+            configs = collectConsumerGroupConfigsFromFirstBroker(admin, conn);
         } else {
             configs = collectConsumerGroupConfigs(admin, conn);
             groups.addAll(configs.keySet());
@@ -1418,44 +1437,40 @@ public final class RocketMqAgent {
             thread.setDaemon(true);
             return thread;
         });
+        // Nullable Long: omit totalLag on failure so UI does not treat errors as healthy zero lag.
         List<Callable<Long>> tasks = new ArrayList<>(page.size());
         for (Map<String, Object> row : page) {
             String groupId = String.valueOf(row.get("groupId"));
             tasks.add(() -> {
-                try {
-                    ConsumeStats stats = examineConsumeStatsRemapped(admin, conn, groupId, topic);
-                    long totalLag = 0;
-                    if (stats.getOffsetTable() != null) {
-                        for (var entry : stats.getOffsetTable().entrySet()) {
-                            totalLag += Math.max(0, entry.getValue().getBrokerOffset() - entry.getValue().getConsumerOffset());
-                        }
+                ConsumeStats stats = examineConsumeStatsRemapped(admin, conn, groupId, topic);
+                long totalLag = 0;
+                if (stats.getOffsetTable() != null) {
+                    for (var entry : stats.getOffsetTable().entrySet()) {
+                        totalLag += Math.max(0, entry.getValue().getBrokerOffset() - entry.getValue().getConsumerOffset());
                     }
-                    return totalLag;
-                } catch (Exception e) {
-                    return 0L;
                 }
+                return totalLag;
             });
         }
         try {
             List<Future<Long>> results =
                 executor.invokeAll(tasks, Math.max(1, CONSUMER_LAG_BUDGET_MS), TimeUnit.MILLISECONDS);
             for (int i = 0; i < page.size(); i++) {
-                long lag = 0L;
                 Future<Long> future = i < results.size() ? results.get(i) : null;
-                if (future != null && !future.isCancelled()) {
-                    try {
-                        lag = future.get();
-                    } catch (Exception ignored) {
-                        lag = 0L;
-                    }
+                if (future == null || future.isCancelled()) {
+                    continue;
                 }
-                page.get(i).put("totalLag", lag);
+                try {
+                    Long lag = future.get();
+                    if (lag != null) {
+                        page.get(i).put("totalLag", lag);
+                    }
+                } catch (Exception ignored) {
+                    // Leave totalLag unset; Rust/UI treat missing lag as unknown rather than 0.
+                }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            for (Map<String, Object> row : page) {
-                row.putIfAbsent("totalLag", 0L);
-            }
         } finally {
             executor.shutdownNow();
         }
@@ -1761,7 +1776,9 @@ public final class RocketMqAgent {
                     continue;
                 }
                 try {
-                    ConsumerRunningInfo runningInfo = admin.getConsumerRunningInfo(groupId, clientId, false);
+                    // DefaultMQAdminExt picks the first NameServer-registered broker (often Docker-internal).
+                    ConsumerRunningInfo runningInfo =
+                        getConsumerRunningInfoRemapped(admin, conn, groupId, clientId, false);
                     if (runningInfo == null || runningInfo.getMqTable() == null) {
                         continue;
                     }
@@ -1776,6 +1793,105 @@ public final class RocketMqAgent {
             // Connection lookup failed; return empty map.
         }
         return results;
+    }
+
+    /**
+     * Like {@link DefaultMQAdminExt#getConsumerRunningInfo}, but remaps broker addresses for
+     * Docker/host-published ports before invoking {@code MQClientAPIImpl}.
+     */
+    static ConsumerRunningInfo getConsumerRunningInfoRemapped(
+        DefaultMQAdminExt admin,
+        JsonObject conn,
+        String groupId,
+        String clientId,
+        boolean jstack
+    ) {
+        // Upstream walks %RETRY%{group} route and contacts the first broker addr as registered.
+        try {
+            String retryTopic = MixAll.RETRY_GROUP_TOPIC_PREFIX + groupId;
+            TopicRouteData route = admin.examineTopicRouteInfo(retryTopic);
+            if (route != null && route.getBrokerDatas() != null) {
+                for (BrokerData brokerData : route.getBrokerDatas()) {
+                    String rawAddr = brokerData.selectBrokerAddr();
+                    if (rawAddr == null || rawAddr.isBlank()) {
+                        continue;
+                    }
+                    String brokerAddr = remapBrokerAddrForClient(rawAddr, conn);
+                    try {
+                        ConsumerRunningInfo info =
+                            getConsumerRunningInfoOnBroker(admin, brokerAddr, groupId, clientId, jstack);
+                        if (info != null) {
+                            return info;
+                        }
+                    } catch (Exception ignored) {
+                        // Try next remapped broker.
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Fall through to master-broker scan.
+        }
+        try {
+            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
+                try {
+                    ConsumerRunningInfo info =
+                        getConsumerRunningInfoOnBroker(admin, brokerAddr, groupId, clientId, jstack);
+                    if (info != null) {
+                        return info;
+                    }
+                } catch (Exception ignored) {
+                    // Try next master.
+                }
+            }
+        } catch (Exception ignored) {
+            // No reachable masters.
+        }
+        return null;
+    }
+
+    /** Broker-scoped ConsumerRunningInfo; DefaultMQAdminExt has no remapped overload. */
+    private static ConsumerRunningInfo getConsumerRunningInfoOnBroker(
+        DefaultMQAdminExt admin,
+        String brokerAddr,
+        String groupId,
+        String clientId,
+        boolean jstack
+    ) throws Exception {
+        try {
+            Object api = mqClientApiImpl(admin);
+            long timeout = adminTimeoutMillis(admin);
+            var method = api.getClass().getMethod(
+                "getConsumerRunningInfo",
+                String.class,
+                String.class,
+                String.class,
+                boolean.class,
+                long.class
+            );
+            return (ConsumerRunningInfo) method.invoke(api, brokerAddr, groupId, clientId, jstack, timeout);
+        } catch (ReflectiveOperationException e) {
+            throw new MQClientException(
+                "Failed to get consumer running info on broker " + brokerAddr, e);
+        }
+    }
+
+    private static Object mqClientApiImpl(DefaultMQAdminExt admin) throws ReflectiveOperationException {
+        var implField = DefaultMQAdminExt.class.getDeclaredField("defaultMQAdminExtImpl");
+        implField.setAccessible(true);
+        Object impl = implField.get(admin);
+        var mqClientMethod = impl.getClass().getMethod("getMqClientInstance");
+        Object mqClient = mqClientMethod.invoke(impl);
+        var apiMethod = mqClient.getClass().getMethod("getMQClientAPIImpl");
+        return apiMethod.invoke(mqClient);
+    }
+
+    private static long adminTimeoutMillis(DefaultMQAdminExt admin) throws ReflectiveOperationException {
+        var implField = DefaultMQAdminExt.class.getDeclaredField("defaultMQAdminExtImpl");
+        implField.setAccessible(true);
+        Object impl = implField.get(admin);
+        var timeoutField = impl.getClass().getDeclaredField("timeoutMillis");
+        timeoutField.setAccessible(true);
+        return timeoutField.getLong(impl);
     }
 
     private static Object listProducers(JsonObject params) throws Exception {

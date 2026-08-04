@@ -5,6 +5,7 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ConsumerInfo, ProducerInfo, SubscriptionInfo, TopicInfo, TopicRef, TopicStats, MqSystemKind } from "@/types/mq";
 import { mqGetTopicStats, mqListConsumers, mqListProducers, mqListSubscriptions, mqUnloadTopic } from "@/lib/backend/api";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
 interface Props {
@@ -26,6 +27,7 @@ const emit = defineEmits<{
   topicSelected: [topic: TopicInfo | undefined];
 }>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 interface PartitionClientRow {
   name: string;
@@ -273,6 +275,7 @@ async function loadRuntimeClients() {
 async function unloadTopic() {
   const current = topicRef.value;
   if (!current || props.readOnly || unloading.value) return;
+  if (!(await confirmMqWrite(t("mqClients.unloadTopic")))) return;
   if (!confirm(t("mqClients.confirmUnload"))) return;
 
   unloading.value = true;

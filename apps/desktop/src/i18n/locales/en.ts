@@ -6325,6 +6325,8 @@ export default {
     enrichFailedHint: "Online member/topic details could not be loaded ({error}). Showing the fast list only.",
     noSubscriptions: "No subscriptions for this topic",
     noConsumerGroups: "No consumer groups",
+    noMatches: "No matching consumer groups",
+    backlogPartialFailed: "Failed to load backlog for {count} topic(s): {error}",
     viewDetail: "Details",
     editConfig: "Config",
     save: "Save",

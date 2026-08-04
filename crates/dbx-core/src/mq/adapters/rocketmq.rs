@@ -100,9 +100,9 @@ impl RocketMqAdmin {
     /// Spawn the RocketMQ Java agent, perform handshake, and connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
         // Fail fast on unreachable NameServer before paying for JVM agent startup.
-        // Use only a fraction of connect_timeout — the outer build_adapter_with_connect_timeout
-        // wraps the whole new() call, so a full-budget probe would leave no time for agent spawn.
-        let probe_budget = (cfg.connect_timeout() / 3).max(Duration::from_millis(500));
+        // Keep half of connect_timeout for JVM spawn; probe itself uses per-host caps so one
+        // blackholed HA NameServer cannot consume the whole budget.
+        let probe_budget = (cfg.connect_timeout() / 2).max(Duration::from_millis(500));
         probe_namesrv_tcp(&namesrv_addr(&cfg), probe_budget).await?;
 
         let mut client = AgentDriverClient::spawn(launch).await?;
@@ -946,6 +946,12 @@ async fn probe_namesrv_tcp(namesrv: &str, budget: Duration) -> Result<(), String
     }
 
     let deadline = tokio::time::Instant::now() + budget;
+    // Multi-NS HA: cap each attempt so a blackholed first node leaves budget for later hosts.
+    let per_attempt = if hosts.len() <= 1 {
+        budget
+    } else {
+        (budget / hosts.len() as u32).clamp(Duration::from_millis(500), Duration::from_secs(3))
+    };
     let mut last_error = String::new();
     for host in &hosts {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -981,13 +987,15 @@ async fn probe_namesrv_tcp(namesrv: &str, budget: Duration) -> Result<(), String
             if remaining.is_zero() {
                 break;
             }
-            match timeout(remaining, TcpStream::connect(addr)).await {
+            let attempt = remaining.min(per_attempt);
+            match timeout(attempt, TcpStream::connect(addr)).await {
                 Ok(Ok(_stream)) => return Ok(()),
                 Ok(Err(e)) => {
                     last_error = format!("Cannot reach RocketMQ NameServer {host}: {e}");
                 }
                 Err(_) => {
-                    last_error = format!("RocketMQ NameServer {host} connect timed out after {}s", budget.as_secs());
+                    last_error =
+                        format!("RocketMQ NameServer {host} connect timed out after {}ms", attempt.as_millis());
                 }
             }
         }

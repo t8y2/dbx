@@ -510,7 +510,7 @@ watch(
       <div v-if="!error && loading && !subscriptions.length" class="panel-loading">{{ t("mqSubscriptions.loading") }}</div>
 
       <div v-else-if="!error && !filteredSubscriptions.length" class="panel-placeholder">
-        {{ isClusterWideMode ? t("mqSubscriptions.noConsumerGroups") : t("mqSubscriptions.noSubscriptions") }}
+        {{ isClusterWideMode ? (subscriptions.length ? t("mqSubscriptions.noMatches") : t("mqSubscriptions.noConsumerGroups")) : t("mqSubscriptions.noSubscriptions") }}
       </div>
 
       <div v-else-if="!error && filteredSubscriptions.length" class="subscriptions-table">

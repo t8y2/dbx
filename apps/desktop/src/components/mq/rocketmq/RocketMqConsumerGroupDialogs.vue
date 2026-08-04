@@ -14,6 +14,7 @@ interface TopicConsumeDetail {
   delay: number;
   lastTimestamp?: number;
   partitions: PartitionBacklog[];
+  error?: string;
 }
 
 interface Props {
@@ -119,12 +120,25 @@ async function loadDetail() {
             lastTimestamp,
             partitions,
           };
-        } catch {
-          return { topic, delay: 0, partitions: [] as PartitionBacklog[] };
+        } catch (e: unknown) {
+          // Keep offsets empty but surface the failure — delay 0 alone looks healthy.
+          return {
+            topic,
+            delay: 0,
+            partitions: [] as PartitionBacklog[],
+            error: formatError(e) || String(e),
+          };
         }
       }),
     );
     topicConsumeDetails.value = detailRows;
+    const backlogFailures = detailRows.filter((row) => row.error);
+    if (backlogFailures.length) {
+      dialogError.value = t("mqSubscriptions.backlogPartialFailed", {
+        count: backlogFailures.length,
+        error: backlogFailures[0]?.error ?? "",
+      });
+    }
   } catch (e: unknown) {
     dialogError.value = formatError(e);
   } finally {

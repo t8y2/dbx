@@ -6324,6 +6324,8 @@ export default withEnglishFallback({
     refreshing: "刷新中...",
     noSubscriptions: "该主题暂无订阅",
     noConsumerGroups: "暂无 Consumer Group",
+    noMatches: "没有匹配的 Consumer Group",
+    backlogPartialFailed: "{count} 个 Topic 的堆积信息加载失败：{error}",
     viewDetail: "详情",
     editConfig: "配置",
     save: "保存",

@@ -1365,9 +1365,12 @@ impl ConnectionConfig {
     }
 
     fn mqtt_broker_url(&self) -> String {
-        use crate::mqtt::types::MqttConnectionConfig;
-        if let Ok(config) = MqttConnectionConfig::from_connection(self) {
-            return config.broker_url();
+        #[cfg(feature = "mq-admin")]
+        {
+            use crate::mqtt::types::MqttConnectionConfig;
+            if let Ok(config) = MqttConnectionConfig::from_connection(self) {
+                return config.broker_url();
+            }
         }
         let scheme = if self.ssl { "mqtts" } else { "mqtt" };
         format!("{}://{}:{}", scheme, self.host, self.port)

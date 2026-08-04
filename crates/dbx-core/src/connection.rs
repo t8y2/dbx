@@ -118,6 +118,7 @@ pub enum PoolKind {
     /// Nacos admin connection marker.
     Nacos,
     /// MQTT broker connection with an active client.
+    #[cfg(feature = "mq-admin")]
     Mqtt(Arc<super::mqtt::client::MqttClient>),
 }
 
@@ -2210,10 +2211,17 @@ impl AppState {
                         .to_string(),
                 );
             }
+            #[cfg(feature = "mq-admin")]
             DatabaseType::Mqtt => {
                 let mqtt_config = crate::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
                 let client = crate::mqtt::client::MqttClient::connect(mqtt_config).await?;
                 PoolKind::Mqtt(client)
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::Mqtt => {
+                return Err(
+                    "MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string()
+                );
             }
         };
 
@@ -2954,8 +2962,9 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Mqtt(_)
                 | PoolKind::Nacos => false,
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(_) => false,
             }
         };
 
@@ -3830,8 +3839,9 @@ impl AppState {
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
-                | PoolKind::Mqtt(_)
                 | PoolKind::Nacos => true,
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(_) => true,
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy && !matches!(pool, PoolKind::Agent(_)) {
@@ -4425,6 +4435,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         }
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
+        #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
     }
@@ -4482,6 +4493,7 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
+        #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(client) => {
             // 发送 DISCONNECT 并等待事件循环任务结束
             client.disconnect().await;

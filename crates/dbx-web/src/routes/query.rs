@@ -1033,6 +1033,7 @@ mod tests {
             error: Some(dbx_core::backend_error::BackendError::from_sql_detail(
                 "relation customer_orders does not exist",
             )),
+            server_message: false,
         };
 
         let payload = serde_json::to_value(execute_multi_response(vec![result]).0).unwrap();

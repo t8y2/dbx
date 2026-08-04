@@ -5386,6 +5386,8 @@ watch(
 
 function pauseCanvasGridWork() {
   dataGridIsActive = false;
+  gridFocusActivationToken += 1;
+  gridRef.value?.setAttribute("data-grid-active", "false");
   stopLoadingElapsedTimer();
   if (gridSurfaceBusy.value) finishDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.pause();
@@ -5400,6 +5402,7 @@ function pauseCanvasGridWork() {
 
 function resumeCanvasGridWork() {
   dataGridIsActive = true;
+  gridRef.value?.setAttribute("data-grid-active", "true");
   startLoadingElapsedTimer();
   if (gridSurfaceBusy.value) beginDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.resume();
@@ -5421,6 +5424,7 @@ function clearInternalClipboardCopy() {
 // grid never gets it back on its own, which breaks arrow-key cell navigation
 // after returning to the tab.
 let lastFocusedWithinGrid: HTMLElement | null = null;
+let gridFocusActivationToken = 0;
 
 function onGridFocusIn(event: FocusEvent) {
   if (event.target instanceof HTMLElement) lastFocusedWithinGrid = event.target;
@@ -5428,7 +5432,9 @@ function onGridFocusIn(event: FocusEvent) {
 
 function restoreGridFocusAfterActivation() {
   if (!lastFocusedWithinGrid) return;
+  const activationToken = ++gridFocusActivationToken;
   nextTick(() => {
+    if (!dataGridIsActive || activationToken !== gridFocusActivationToken) return;
     if (editingCell.value) return; // the cell editor restores its own input focus
     const target = resolveGridFocusRestoreTarget(gridRef.value, lastFocusedWithinGrid, document.activeElement);
     target?.focus({ preventScroll: true });
@@ -8420,7 +8426,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 </script>
 
 <template>
-  <div ref="gridRef" data-grid-root class="h-full flex flex-col overflow-hidden outline-none" :class="{ 'data-grid--editing-cell': !!editingCell, 'data-grid--dark': isDark }" :style="gridStyle" tabindex="0" @keydown="onGridKeydown" @paste="onGridPaste" @focusin="onGridFocusIn">
+  <div
+    ref="gridRef"
+    data-grid-root
+    data-grid-active="true"
+    class="h-full flex flex-col overflow-hidden outline-none"
+    :class="{ 'data-grid--editing-cell': !!editingCell, 'data-grid--dark': isDark }"
+    :style="gridStyle"
+    tabindex="0"
+    @keydown="onGridKeydown"
+    @paste="onGridPaste"
+    @focusin="onGridFocusIn"
+  >
     <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->

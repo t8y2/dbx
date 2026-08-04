@@ -2,12 +2,10 @@
  * Decide where focus should go when a kept-alive data grid becomes active
  * again after a tab switch.
  *
- * Switching away from a tab moves focus to the tab strip (or body), so the
- * grid root loses keyboard focus and arrow-key cell navigation stops working
- * when the user comes back. To match Navicat / DataGrip behavior, focus
- * returns to the element that last held it inside the grid (toolbar buttons,
- * search inputs, ...), falling back to the grid root when that element is
- * gone (e.g. a re-rendered cell editor).
+ * Switching away from a tab moves focus to the tab strip, body, or an element
+ * inside the grid that is being deactivated. Focus is restored only from one
+ * of those states so activation never steals focus from a dialog, editor,
+ * input, menu, or another active grid.
  *
  * Returns null when no focus restore should happen: the grid never held
  * focus, or focus is already inside the grid (e.g. the cell editor restored
@@ -16,8 +14,21 @@
 export function resolveGridFocusRestoreTarget(root: HTMLElement | null | undefined, lastFocusedWithinGrid: HTMLElement | null | undefined, activeElement: Element | null): HTMLElement | null {
   if (!root || !lastFocusedWithinGrid) return null;
   if (root.contains(activeElement)) return null;
+  if (!gridFocusCanTransferFrom(root, activeElement)) return null;
   if (lastFocusedWithinGrid.isConnected && root.contains(lastFocusedWithinGrid)) {
     return lastFocusedWithinGrid;
   }
   return root;
+}
+
+function gridFocusCanTransferFrom(root: HTMLElement, activeElement: Element | null): boolean {
+  if (!activeElement || !activeElement.isConnected) return true;
+  const ownerDocument = root.ownerDocument;
+  if (activeElement === ownerDocument?.body || activeElement === ownerDocument?.documentElement) return true;
+
+  const closest = (activeElement as HTMLElement).closest?.bind(activeElement as HTMLElement);
+  if (!closest) return false;
+  const activeGrid = closest("[data-grid-root]") as HTMLElement | null;
+  if (activeGrid && activeGrid !== root) return activeGrid.dataset.gridActive !== "true";
+  return !!closest(".app-tab-bar, [role='tab'], [role='tablist']");
 }

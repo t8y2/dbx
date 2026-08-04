@@ -1242,12 +1242,15 @@ public final class RocketMqAgent {
     private static ConsumeStats examineConsumeStatsRemapped(
         DefaultMQAdminExt admin, JsonObject conn, String groupId, String topic) throws Exception {
         List<String> masters = resolveMasterBrokerAddrs(admin, conn);
+        // RocketMQ 5.3.1: 3-arg examineConsumeStats(clusterName, group, topic) is NOT broker-scoped.
+        // Must use 4-arg (brokerAddr, group, topic, timeout) or remapped Docker addrs never hit brokers.
+        long timeout = adminTimeoutMillis(admin);
         ConsumeStats merged = new ConsumeStats();
         int successCount = 0;
         Exception lastError = null;
         for (String brokerAddr : masters) {
             try {
-                ConsumeStats stats = admin.examineConsumeStats(brokerAddr, groupId, topic);
+                ConsumeStats stats = admin.examineConsumeStats(brokerAddr, groupId, topic, timeout);
                 successCount++;
                 if (stats != null && stats.getOffsetTable() != null) {
                     merged.getOffsetTable().putAll(stats.getOffsetTable());
@@ -1257,16 +1260,24 @@ public final class RocketMqAgent {
                 lastError = e;
             }
         }
-        // Empty offset after a successful broker reply is a real "no progress" result.
-        // All-broker failure must not collapse to totalLag=0 (looks healthy in UI).
-        ensureConsumeStatsProbeSucceeded(masters.size(), successCount, lastError, groupId);
+        boolean mergedEmpty = merged.getOffsetTable() == null || merged.getOffsetTable().isEmpty();
+        // Empty offset after every attempted broker succeeded is a real "no progress" result.
+        // All-broker failure, or partial failure with an empty merge, must not become totalLag=0.
+        ensureConsumeStatsProbeSucceeded(masters.size(), successCount, mergedEmpty, lastError, groupId);
         return merged;
     }
 
-    /** Fail closed when no master answered; empty offset tables after success remain valid. */
+    /**
+     * Fail closed when no master answered, or when some masters failed and the merge is empty
+     * (partial outage otherwise looks like healthy zero lag).
+     */
     static void ensureConsumeStatsProbeSucceeded(
-        int attemptedBrokers, int successCount, Exception lastError, String groupId)
-        throws MQClientException {
+        int attemptedBrokers,
+        int successCount,
+        boolean mergedEmpty,
+        Exception lastError,
+        String groupId
+    ) throws MQClientException {
         if (attemptedBrokers <= 0) {
             throw new MQClientException(
                 "No reachable RocketMQ master brokers for consume stats of group " + groupId, null);
@@ -1274,6 +1285,12 @@ public final class RocketMqAgent {
         if (successCount <= 0) {
             throw new MQClientException(
                 "Failed to examine consume stats for group " + groupId + " on all masters",
+                lastError);
+        }
+        if (mergedEmpty && successCount < attemptedBrokers) {
+            throw new MQClientException(
+                "Failed to examine consume stats for group " + groupId
+                    + " on some masters (empty merge after partial failure)",
                 lastError);
         }
     }

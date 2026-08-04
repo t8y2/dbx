@@ -40,6 +40,9 @@ const loading = ref(false);
 const dialogError = ref<string>();
 const terminals = ref<ConsumerInfo[]>([]);
 const topicConsumeDetails = ref<TopicConsumeDetail[]>([]);
+/** Drops stale detail/config responses when enrich reloads the open dialog. */
+let detailLoadSeq = 0;
+let configLoadSeq = 0;
 const configForm = ref<RocketMqConsumerGroupConfig>({
   groupName: "",
   consumeEnable: true,
@@ -91,6 +94,7 @@ function partitionRowKey(topic: string, partition: PartitionBacklog, index: numb
 
 async function loadDetail() {
   if (!props.group || !props.tenant || !props.namespace) return;
+  const seq = ++detailLoadSeq;
   loading.value = true;
   dialogError.value = undefined;
   terminals.value = [];
@@ -98,14 +102,16 @@ async function loadDetail() {
   try {
     const topicRef = buildTopicRef("");
     if (topicRef) {
-      terminals.value = await mqListConsumers(props.connectionId, topicRef, props.group.name);
+      const online = await mqListConsumers(props.connectionId, topicRef, props.group.name);
+      if (seq !== detailLoadSeq) return;
+      terminals.value = online;
     }
     const topics = subscribedTopics.value;
     const detailRows = await Promise.all(
       topics.map(async (topic) => {
         const ref = buildTopicRef(topic);
         if (!ref) {
-          return { topic, delay: 0, partitions: [] as PartitionBacklog[] };
+          return { topic, partitions: [] as PartitionBacklog[], error: "Invalid topic scope" };
         }
         try {
           const stats = await mqGetBacklog(props.connectionId, ref, props.group!.name);
@@ -131,6 +137,7 @@ async function loadDetail() {
         }
       }),
     );
+    if (seq !== detailLoadSeq) return;
     topicConsumeDetails.value = detailRows;
     const backlogFailures = detailRows.filter((row) => row.error);
     if (backlogFailures.length) {
@@ -140,9 +147,9 @@ async function loadDetail() {
       });
     }
   } catch (e: unknown) {
-    dialogError.value = formatError(e);
+    if (seq === detailLoadSeq) dialogError.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (seq === detailLoadSeq) loading.value = false;
   }
 }
 
@@ -162,11 +169,13 @@ function resetConfigForm(groupName: string) {
 
 async function loadConfig() {
   if (!props.group) return;
+  const seq = ++configLoadSeq;
   resetConfigForm(props.group.name);
   loading.value = true;
   dialogError.value = undefined;
   try {
     const config = await mqGetConsumerGroupConfig(props.connectionId, props.group.name);
+    if (seq !== configLoadSeq) return;
     configForm.value = {
       groupName: config.groupName || props.group.name,
       consumeEnable: config.consumeEnable ?? true,
@@ -179,9 +188,9 @@ async function loadConfig() {
       whichBrokerWhenConsumeSlowly: config.whichBrokerWhenConsumeSlowly ?? 0,
     };
   } catch (e: unknown) {
-    dialogError.value = formatError(e);
+    if (seq === configLoadSeq) dialogError.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (seq === configLoadSeq) loading.value = false;
   }
 }
 
@@ -284,7 +293,7 @@ watch(
                     ><strong>{{ t("mqSubscriptions.operationTopic") }}:</strong> {{ detail.topic }}</span
                   >
                   <span
-                    ><strong>{{ t("mqSubscriptions.consumeDelay") }}:</strong> {{ detail.error ? "-" : (detail.delay ?? 0).toLocaleString() }}</span
+                    ><strong>{{ t("mqSubscriptions.consumeDelay") }}:</strong> {{ detail.delay == null ? "-" : detail.delay.toLocaleString() }}</span
                   >
                   <span
                     ><strong>{{ t("mqSubscriptions.lastConsumeTime") }}:</strong> {{ formatConsumeTimestamp(detail.lastTimestamp) }}</span

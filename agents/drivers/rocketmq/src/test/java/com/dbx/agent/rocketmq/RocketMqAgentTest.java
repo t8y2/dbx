@@ -631,20 +631,38 @@ class RocketMqAgentTest {
     void ensureConsumeStatsProbeSucceededRejectsAllBrokerFailures() {
         MQClientException noMasters = assertThrows(
             MQClientException.class,
-            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(0, 0, null, "GID_A"));
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(0, 0, true, null, "GID_A"));
         assertTrue(noMasters.getMessage().contains("No reachable RocketMQ master"));
 
         Exception cause = new RuntimeException("broker down");
         MQClientException allFailed = assertThrows(
             MQClientException.class,
-            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(2, 0, cause, "GID_A"));
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(2, 0, true, cause, "GID_A"));
         assertTrue(allFailed.getMessage().contains("Failed to examine consume stats"));
         assertSame(cause, allFailed.getCause());
     }
 
     @Test
-    void ensureConsumeStatsProbeSucceededAllowsEmptyOffsetsAfterSuccess() throws Exception {
-        RocketMqAgent.ensureConsumeStatsProbeSucceeded(1, 1, null, "GID_A");
-        RocketMqAgent.ensureConsumeStatsProbeSucceeded(3, 1, new RuntimeException("partial"), "GID_A");
+    void ensureConsumeStatsProbeSucceededRejectsPartialFailureWithEmptyMerge() {
+        Exception cause = new RuntimeException("one broker down");
+        MQClientException partialEmpty = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(3, 1, true, cause, "GID_A"));
+        assertTrue(partialEmpty.getMessage().contains("partial failure"));
+        assertSame(cause, partialEmpty.getCause());
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededAllowsEmptyOffsetsWhenAllBrokersSucceed() throws Exception {
+        // Genuine offline / unused group: every broker answered, offset table empty.
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(1, 1, true, null, "GID_A");
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(3, 3, true, null, "GID_A");
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededAllowsPartialFailureWhenMergeHasOffsets() throws Exception {
+        // One broker failed but another returned queue offsets — keep partial lag.
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(
+            3, 1, false, new RuntimeException("partial"), "GID_A");
     }
 }

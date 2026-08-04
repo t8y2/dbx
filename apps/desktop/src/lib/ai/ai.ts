@@ -352,7 +352,7 @@ function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode, cust
 
 function buildVectorModePromptLines(context: AiContext, mode: AiAssistantMode, isZh: boolean): string[] {
   if (mode === "agent") {
-    return [isZh ? "你处于 Agent 模式。你有以下工具可用：list_collections、browse_collection。" : "You are in Agent mode. You have the following tools available: list_collections, browse_collection."];
+    return [isZh ? "你处于 Agent 模式。你有以下工具可用：list_collections、browse_collection、get_current_time。" : "You are in Agent mode. You have the following tools available: list_collections, browse_collection, get_current_time."];
   }
   return [
     isZh
@@ -364,7 +364,7 @@ function buildVectorModePromptLines(context: AiContext, mode: AiAssistantMode, i
 function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
   if (mode === "agent") {
     return [
-      isZh ? "你处于 Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_sample_data。" : "You are in Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_sample_data.",
+      isZh ? "你处于 Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_sample_data、get_current_time。" : "You are in Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_sample_data, get_current_time.",
       isZh
         ? "用户提出数据查询意图时，必须调用 execute_query 工具执行 SQL，不要只输出 SQL 文本后停止。先用 list_tables/get_columns 了解 schema，再调用 execute_query 获取真实结果，最后基于结果回答用户。"
         : "When the user expresses a data query intent, you MUST call the execute_query tool to run the SQL — do NOT just output SQL text and stop. Use list_tables/get_columns to understand the schema first, then call execute_query to get real results, then answer based on the actual data.",

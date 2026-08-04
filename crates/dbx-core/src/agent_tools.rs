@@ -111,13 +111,49 @@ pub fn is_vector_db(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb)
 }
 
+/// `get_current_time` tool definition — DB-independent utility that returns
+/// the current UTC and local time with timezone information.
+fn get_current_time_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_current_time",
+        description: "Get the current date and time with timezone information. \
+                      Returns UTC and local timestamps. Use this to resolve \
+                      relative time expressions like \"last 7 days\", \
+                      \"yesterday\", \"this month\" into concrete dates \
+                      for constructing SQL queries.",
+        parameters: json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+        read_only: true,
+        parallel_ok: true,
+    }
+}
+
+/// Execute `get_current_time` — returns a JSON payload with utc, local,
+/// utc_offset_minutes, and readable fields.
+fn execute_get_current_time() -> Result<String, String> {
+    let utc = chrono::Utc::now();
+    let local = chrono::Local::now();
+    let offset = local.offset().local_minus_utc() / 60; // minutes
+    let readable = local.format("%Y-%m-%d %H:%M:%S (UTC%:z)").to_string();
+    Ok(serde_json::json!({
+        "utc": utc.to_rfc3339(),
+        "local": local.to_rfc3339(),
+        "utc_offset_minutes": offset,
+        "readable": readable,
+    })
+    .to_string())
+}
+
 /// Get read-only tool definitions for the given database type.
 /// Returns vector tools for vector DBs, SQL tools otherwise.
 pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        vec![list_collections_tool()]
+        vec![list_collections_tool(), get_current_time_tool()]
     } else {
-        vec![list_tables_tool(), get_columns_tool()]
+        vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()]
     }
 }
 
@@ -126,9 +162,9 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
 /// explain_query for database types that support them.
 pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        return vec![list_collections_tool(), browse_collection_tool()];
+        return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
-    let mut tools = vec![list_tables_tool(), get_columns_tool()];
+    let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
     if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
@@ -358,6 +394,7 @@ pub async fn execute_tool(
                 }
             }
         }
+        "get_current_time" => execute_get_current_time(),
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -1096,7 +1133,9 @@ for line in sys.stdin:
         let tools = read_only_tools(DatabaseType::Qdrant);
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(!names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
     }
 
     #[test]
@@ -1104,7 +1143,9 @@ for line in sys.stdin:
         let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections", "browse_collection"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
     }
 
     #[test]
@@ -1467,5 +1508,125 @@ for line in sys.stdin:
         // contract — the frontend is responsible for only sending
         // allow_write_sql=true when a specific SQL was confirmed.
         assert!(sql_matches_confirmed_write("INSERT INTO t VALUES (1)", &None));
+    }
+
+    // ── get_current_time tests ────────────────────────────────────────────
+
+    #[test]
+    fn get_current_time_is_in_all_tools_postgres() {
+        let tools = all_tools(DatabaseType::Postgres, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_postgres() {
+        let tools = read_only_tools(DatabaseType::Postgres);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_all_tools_qdrant() {
+        let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_qdrant() {
+        let tools = read_only_tools(DatabaseType::Qdrant);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_tool_is_read_only_and_parallel_ok() {
+        let tool = get_current_time_tool();
+        assert!(tool.read_only, "get_current_time must be read_only");
+        assert!(tool.parallel_ok, "get_current_time must be parallel_ok");
+    }
+
+    #[test]
+    fn execute_get_current_time_returns_valid_timestamps() {
+        let before_secs = chrono::Utc::now().timestamp();
+        let result = execute_get_current_time().expect("get_current_time should succeed");
+        let after_secs = chrono::Utc::now().timestamp();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("get_current_time result should be valid JSON");
+
+        let utc_str = parsed["utc"].as_str().expect("utc field should be a string");
+        let local_str = parsed["local"].as_str().expect("local field should be a string");
+
+        // Parse as RFC3339 timestamps.
+        let _utc_dt = chrono::DateTime::parse_from_rfc3339(utc_str).expect("utc should be valid RFC3339");
+        let local_dt = chrono::DateTime::parse_from_rfc3339(local_str).expect("local should be valid RFC3339");
+
+        // Verify UTC is within tolerance.
+        let utc_dt_utc = chrono::DateTime::parse_from_rfc3339(utc_str)
+            .expect("utc should parse as rfc3339")
+            .with_timezone(&chrono::Utc);
+        let utc_ts = utc_dt_utc.timestamp();
+        assert!(
+            utc_ts >= before_secs && utc_ts <= after_secs + 1,
+            "UTC timestamp {utc_ts} should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // Verify local is within tolerance (converted to UTC).
+        let local_ts = local_dt.with_timezone(&chrono::Utc).timestamp();
+        assert!(
+            local_ts >= before_secs && local_ts <= after_secs + 1,
+            "Local timestamp {local_ts} (UTC) should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // utc_offset_minutes should match the offset in local.
+        let offset_minutes =
+            parsed["utc_offset_minutes"].as_i64().expect("utc_offset_minutes should be an integer") as i32;
+        let local_offset_secs = local_dt.offset().local_minus_utc();
+        // The offset from the RFC3339 timestamp should match utc_offset_minutes * 60.
+        assert_eq!(
+            local_offset_secs / 60,
+            offset_minutes,
+            "utc_offset_minutes {offset_minutes} does not match local offset {}",
+            local_offset_secs / 60
+        );
+
+        // readable should be a non-empty string.
+        let readable = parsed["readable"].as_str().expect("readable field should be a string");
+        assert!(!readable.is_empty(), "readable should not be empty");
+    }
+
+    #[test]
+    fn execute_tool_get_current_time_is_not_error() {
+        // Test via execute_tool dispatch. All args can be dummy since the tool
+        // does not use any of them.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let storage = crate::storage::Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+            let state = std::sync::Arc::new(crate::connection::AppState::new(storage));
+            let tool_call = ToolCall {
+                id: "call-gct".to_string(),
+                name: "get_current_time".to_string(),
+                arguments: serde_json::json!({}),
+                provider_payload: None,
+            };
+            let result = execute_tool(
+                &tool_call,
+                &state,
+                "dummy",
+                "dummy",
+                None,
+                &DatabaseType::Postgres,
+                AgentSqlPermissions::default(),
+            )
+            .await;
+            assert!(!result.is_error, "execute_tool get_current_time should not error: {}", result.content);
+            let parsed: serde_json::Value = serde_json::from_str(&result.content).expect("result should be valid JSON");
+            assert!(parsed["utc"].is_string());
+            assert!(parsed["local"].is_string());
+            assert!(parsed["readable"].is_string());
+        });
     }
 }

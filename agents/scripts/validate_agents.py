@@ -18,6 +18,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
     "vastbase": "drivers/vastbase-go",
+    "tdengine": "drivers/tdengine",
     "xugu": "drivers/xugu",
     "rabbitmq": "drivers/rabbitmq",
 }
@@ -27,7 +28,6 @@ JDBC_ARCHITECTURE_ALLOWLIST = {
     "access": "shared lifecycle with a test-only non-creating Access URL",
     "dameng": "shared lifecycle with protocol-safe driver loading and native explain access",
     "informix": "shared lifecycle with contextual connection error reporting",
-    "tdengine": "shared lifecycle with WebSocket-to-REST transport fallback",
 }
 APPROVED_JDBC_BASES = {
     "AbstractJdbcAgent",

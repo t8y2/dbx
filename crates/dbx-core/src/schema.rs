@@ -2853,6 +2853,14 @@ mod tests {
     }
 
     #[test]
+    fn mysql_object_source_sql_emits_show_create_trigger() {
+        assert_eq!(
+            mysql_object_source_sql("tenant_db", "before_insert", &db::ObjectSourceKind::Trigger),
+            "SHOW CREATE TRIGGER `tenant_db`.`before_insert`"
+        );
+    }
+
+    #[test]
     fn mysql_object_source_sql_emits_show_create_materialized_view() {
         // Regression for the review comment: Doris / StarRocks ride on the MySQL
         // protocol, so the MV branch of mysql_object_source_sql must produce a
@@ -2879,6 +2887,7 @@ mod tests {
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::MaterializedView), 1);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Procedure), 2);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Function), 2);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Trigger), 2);
     }
 
     #[test]
@@ -6596,8 +6605,8 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {qualified_name}"),
         db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {qualified_name}"),
         db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {qualified_name}"),
-        db::ObjectSourceKind::Trigger
-        | db::ObjectSourceKind::Sequence
+        db::ObjectSourceKind::Trigger => format!("SHOW CREATE TRIGGER {qualified_name}"),
+        db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
@@ -6621,7 +6630,7 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
 /// The shape of the result is dialect-dependent:
 /// - `SHOW CREATE VIEW`, Doris/StarRocks `SHOW CREATE MATERIALIZED VIEW` →
 ///   `(Name, DDL)` → DDL at index `1`.
-/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION` →
+/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION`, `SHOW CREATE TRIGGER` →
 ///   `(Name, sql_mode, DDL, …)` → DDL at index `2`.
 ///
 /// Encoded as a function so the index can be unit-tested without a live DB.

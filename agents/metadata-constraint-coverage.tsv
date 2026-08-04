@@ -20,6 +20,6 @@ oracle-go	native-pushdown	native-go	Uses Oracle-compatible metadata SQL with typ
 snowflake	native-pushdown	java-sql	Uses INFORMATION_SCHEMA with type, filter, stable order, and literal LIMIT/OFFSET.
 spark	intentional-fallback	java-show-metadata	Uses SHOW TABLES/SHOW DATABASES; stable server-side fuzzy paging is not portable, common constraints filter locally.
 sundb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
-tdengine	intentional-fallback	java-show-metadata	Uses SHOW STABLES/TABLES; stable server-side fuzzy paging is not portable, common constraints filter locally.
+tdengine	shared-fallback	native-rust	Uses SHOW STABLES/TABLES with information_schema parent enrichment, then applies stable filtering and paging in the native agent.
 trino	native-pushdown	java-sql	Uses information_schema.tables with type, filter, stable order, and literal LIMIT/OFFSET.
 xugu	native-pushdown	native-go	Uses ALL_TABLES/ALL_VIEWS metadata with type, filter, stable order, and ROWNUM paging.

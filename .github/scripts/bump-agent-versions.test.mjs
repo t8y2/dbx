@@ -34,6 +34,20 @@ test("bumps DuckDB after its initial release", () => {
   assert.equal(result.versions.duckdb, "0.1.1");
 });
 
+test("classifies TDengine Rust changes as native-only", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { tdengine: "0.1.39" },
+    changedFiles: ["agents/drivers/tdengine/src/driver.rs"],
+    moduleExists: (path) => path === "agents/drivers/tdengine",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.tdengine, "0.1.40");
+  assert.deepEqual(result.changedModules, ["tdengine"]);
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["tdengine"]);
+});
+
 test("bumps the native RabbitMQ agent from its Go directory", () => {
   const result = evaluateAgentVersionBump({
     versions: { rabbitmq: "0.1.0" },

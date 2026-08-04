@@ -515,6 +515,117 @@ jobs:
           name: duckdb-native-${{ matrix.platform }}
           path: "release-native/dbx-agent-duckdb-*"
 
+  build-tdengine-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'tdengine') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            extension: ""
+            smoke: true
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x64
+            extension: ""
+            smoke: true
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64
+          - runner: windows-2022
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            extension: .exe
+          - runner: windows-2022
+            target: x86_64-win7-windows-msvc
+            platform: windows-x64
+            extension: .exe
+            smoke: true
+            win7: true
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/tdengine-driver
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        if: runner.os != 'Linux' && matrix.win7 != true
+        with:
+          targets: ${{ matrix.target }}
+      - name: Setup Rust for Windows 7
+        if: matrix.win7 == true
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+      - name: Build TDengine native driver
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp/dbx-rust-home \
+              -e CARGO_INCREMENTAL=0 \
+              -e CARGO_TARGET_DIR=/workspace/target/tdengine-driver \
+              -v "${{ github.workspace }}:/workspace" \
+              -w /workspace \
+              "${{ matrix.manylinux_image }}" \
+              bash -lc '
+                mkdir -p "$HOME"
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+                source "$HOME/.cargo/env"
+                cargo build \
+                  --manifest-path agents/drivers/tdengine/Cargo.toml \
+                  --locked \
+                  --release \
+                  --bin dbx-tdengine-driver \
+                  --target "${{ matrix.target }}"
+              '
+          else
+            BUILD_STD=()
+            if [ "${{ matrix.win7 }}" = "true" ]; then
+              BUILD_STD=(-Z build-std=std,panic_abort)
+            fi
+            cargo build \
+              --manifest-path agents/drivers/tdengine/Cargo.toml \
+              --locked \
+              --release \
+              --bin dbx-tdengine-driver \
+              --target "${{ matrix.target }}" \
+              "${BUILD_STD[@]}"
+          fi
+          mkdir -p release-native
+          cp \
+            "target/tdengine-driver/${{ matrix.target }}/release/dbx-tdengine-driver${{ matrix.extension }}" \
+            "release-native/dbx-agent-tdengine-${{ matrix.platform }}${{ matrix.extension }}"
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "${{ github.workspace }}/release-native:/driver:ro" \
+              "${{ matrix.manylinux_image }}" \
+              "/driver/dbx-agent-tdengine-${{ matrix.platform }}" < /dev/null
+          elif [ "${{ matrix.smoke }}" = "true" ]; then
+            "release-native/dbx-agent-tdengine-${{ matrix.platform }}${{ matrix.extension }}" < /dev/null
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tdengine-native-${{ matrix.platform }}
+          path: "release-native/dbx-agent-tdengine-*"
+
   build-jre:
     needs: [bump-versions]
     if: ${{ needs.bump-versions.outputs.build_jre == 'true' }}
@@ -624,7 +735,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-cassandra-native, build-kingbase-native, build-vastbase-native, build-duckdb-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-cassandra-native, build-kingbase-native, build-vastbase-native, build-duckdb-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -747,6 +858,7 @@ jobs:
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
               cassandra) echo "Apache Cassandra" ;;
+              tdengine) echo "TDengine" ;;
               *) echo "$name" ;;
             esac
           }
@@ -810,7 +922,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase vastbase duckdb rabbitmq cassandra; do
+          for name in oracle xugu kingbase vastbase duckdb rabbitmq cassandra tdengine; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -881,6 +993,7 @@ jobs:
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
               cassandra) echo "Apache Cassandra" ;;
+              tdengine) echo "TDengine" ;;
               *) echo "$name" ;;
             esac
           }

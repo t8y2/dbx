@@ -136,10 +136,19 @@ class ValidateAgentsTest(unittest.TestCase):
                 "include(*(infrastructureModules + driverModules))\n",
                 encoding="utf-8",
             )
-            for driver in ("cassandra-go", "oracle-go", "kingbase-go", "vastbase-go", "xugu", "duckdb", "rabbitmq"):
+            for driver in (
+                "cassandra-go",
+                "oracle-go",
+                "kingbase-go",
+                "vastbase-go",
+                "xugu",
+                "duckdb",
+                "rabbitmq",
+                "tdengine",
+            ):
                 (root / "drivers" / driver).mkdir(parents=True)
             (root / "versions.json").write_text(
-                json.dumps({"h2": "0.1.0", "cassandra": "0.1.0", "oracle": "0.1.0", "kingbase": "0.1.0", "vastbase": "0.1.0", "xugu": "0.1.0", "rabbitmq": "0.1.0"}),
+                json.dumps({"h2": "0.1.0", "cassandra": "0.1.0", "oracle": "0.1.0", "kingbase": "0.1.0", "vastbase": "0.1.0", "xugu": "0.1.0", "rabbitmq": "0.1.0", "tdengine": "0.1.0"}),
                 encoding="utf-8",
             )
 

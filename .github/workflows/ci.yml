@@ -575,6 +575,9 @@ jobs:
       - name: DuckDB driver tests
         run: cargo test --manifest-path drivers/duckdb/Cargo.toml --locked
 
+      - name: TDengine driver tests
+        run: cargo test --manifest-path drivers/tdengine/Cargo.toml --locked
+
       - name: Agent validation
         run: python3 scripts/validate_agents.py
 
@@ -617,6 +620,52 @@ jobs:
       - name: Vastbase native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-vastbase-linux-x64 .
         working-directory: agents/drivers/vastbase-go
+
+      - name: TDengine native agent build
+        run: cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
+
+      - name: TDengine native agent integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r version image; do
+            name="dbx-tdengine-${version//./-}"
+            docker rm -fv "$name" >/dev/null 2>&1 || true
+            docker run -d --name "$name" \
+              --memory 4g \
+              --ulimit nofile=65535:65535 \
+              -p 6030:6030 \
+              -p 6041:6041 \
+              "$image"
+            cleanup() {
+              docker rm -fv "$name" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            ready=false
+            for _ in $(seq 1 90); do
+              if docker exec "$name" taos -s 'SELECT server_version()' >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != "true" ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            TDENGINE_INTEGRATION=1 \
+              TDENGINE_TEST_HOST=127.0.0.1 \
+              TDENGINE_TEST_PORT=6041 \
+              cargo test --manifest-path drivers/tdengine/Cargo.toml --locked --test live -- --nocapture
+            cleanup
+            trap - EXIT
+          done <<'EOF'
+          2.4.0.14|tdengine/tdengine:2.4.0.14
+          2.6.0.34|tdengine/tdengine:2.6.0.34
+          3.0.7.1|tdengine/tdengine:3.0.7.1
+          3.3.6.13|tdengine/tdengine:3.3.6.13
+          3.4.2.2|tdengine/tsdb:3.4.2.2
+          EOF
 
       - name: Cassandra native agent integration tests
         shell: bash

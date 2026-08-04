@@ -1,0 +1,65 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '9.0.0-beta12'
+}
+
+group = 'app.dbx'
+version = '0.1.27'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+def mavenResolverVersion = '2.0.18'
+def mavenCoreVersion = '4.0.0-rc-5'
+
+dependencies {
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    implementation('org.slf4j:slf4j-api') {
+        version {
+            strictly '1.7.36'
+        }
+    }
+    implementation 'org.apache.commons:commons-lang3:3.18.0'
+
+    implementation "org.apache.maven.resolver:maven-resolver-api:${mavenResolverVersion}"
+    implementation "org.apache.maven.resolver:maven-resolver-spi:${mavenResolverVersion}"
+    implementation "org.apache.maven.resolver:maven-resolver-util:${mavenResolverVersion}"
+    implementation "org.apache.maven.resolver:maven-resolver-impl:${mavenResolverVersion}"
+    implementation "org.apache.maven.resolver:maven-resolver-connector-basic:${mavenResolverVersion}"
+    implementation "org.apache.maven.resolver:maven-resolver-transport-file:${mavenResolverVersion}"
+    implementation "org.apache.maven.resolver:maven-resolver-transport-jdk:${mavenResolverVersion}"
+    implementation "org.apache.maven.resolver:maven-resolver-supplier-mvn4:${mavenResolverVersion}"
+    implementation "org.apache.maven:maven-resolver-provider:${mavenCoreVersion}"
+    implementation "org.apache.maven:maven-model-builder:${mavenCoreVersion}"
+
+    runtimeOnly 'org.slf4j:slf4j-nop:1.7.36'
+
+    testImplementation 'com.h2database:h2:2.2.224'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+tasks.named('shadowJar') {
+    archiveBaseName = 'dbx-jdbc-plugin'
+    archiveVersion = ''
+    archiveClassifier = 'all'
+    mergeServiceFiles()
+    manifest {
+        attributes 'Main-Class': 'app.dbx.jdbc.DbxJdbcPlugin'
+    }
+}
+
+tasks.named('build') {
+    dependsOn tasks.named('shadowJar')
+}

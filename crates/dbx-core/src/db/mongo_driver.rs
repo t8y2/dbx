@@ -1,6 +1,6 @@
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::{ClientOptions, GridFsBucketOptions, IndexOptions, UpdateModifications},
+    options::{ClientOptions, Collation, GridFsBucketOptions, IndexOptions, UpdateModifications},
     Client, Cursor, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,18 @@ use std::{collections::HashSet, time::Duration};
 pub use super::document_result::DocumentQueryResult;
 /// Backward-compatible name for callers of Mongo-specific APIs.
 pub type MongoDocumentResult = DocumentQueryResult;
+
+const MONGO_COLLATION_FIELDS: &[&str] = &[
+    "locale",
+    "strength",
+    "caseLevel",
+    "caseFirst",
+    "numericOrdering",
+    "alternate",
+    "maxVariable",
+    "normalization",
+    "backwards",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MongoDropIndexesResult {
@@ -636,6 +648,23 @@ fn index_info_from_model(model: IndexModel) -> IndexInfo {
     }
 }
 
+fn parse_find_collation(value: Option<&str>) -> Result<Option<Collation>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let json: serde_json::Value =
+        serde_json::from_str(raw).map_err(|error| format!("Invalid collation JSON: {error}"))?;
+    let object = json.as_object().ok_or_else(|| "Invalid collation: expected an options object".to_string())?;
+    if let Some(field) = object.keys().find(|field| !MONGO_COLLATION_FIELDS.contains(&field.as_str())) {
+        return Err(format!("Unsupported collation option: {field}"));
+    }
+    let collation: Collation = serde_json::from_value(json).map_err(|error| format!("Invalid collation: {error}"))?;
+    if collation.locale.trim().is_empty() {
+        return Err("Invalid collation: locale must not be empty".to_string());
+    }
+    Ok(Some(collation))
+}
+
 pub async fn find_documents(
     client: &Client,
     database: &str,
@@ -645,6 +674,7 @@ pub async fn find_documents(
     filter: Option<&str>,
     projection: Option<&str>,
     sort: Option<&str>,
+    collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     let col = client.database(database).collection::<Document>(collection);
 
@@ -656,9 +686,14 @@ pub async fn find_documents(
         _ => doc! {},
     };
 
+    let collation = parse_find_collation(collation)?;
     let count_is_exact = !filter_doc.is_empty();
     let total_result = if count_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
+        let mut count = col.count_documents(filter_doc.clone());
+        if let Some(collation) = collation.clone() {
+            count = count.collation(collation);
+        }
+        count.await.map_err(|e| e.to_string())
     } else {
         col.estimated_document_count().await.map_err(|e| e.to_string())
     };
@@ -678,6 +713,9 @@ pub async fn find_documents(
             let sort_doc = json_object_to_document(&json).map_err(|e| format!("Invalid sort: {e}"))?;
             find = find.sort(sort_doc);
         }
+    }
+    if let Some(collation) = collation {
+        find = find.collation(collation);
     }
 
     let mut cursor = find.await.map_err(|e| e.to_string())?;
@@ -791,6 +829,7 @@ pub async fn find_documents_extended_json(
     filter: Option<&str>,
     projection: Option<&str>,
     sort: Option<&str>,
+    collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     let col = client.database(database).collection::<Document>(collection);
 
@@ -802,9 +841,14 @@ pub async fn find_documents_extended_json(
         _ => doc! {},
     };
 
+    let collation = parse_find_collation(collation)?;
     let count_is_exact = !filter_doc.is_empty();
     let total_result = if count_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
+        let mut count = col.count_documents(filter_doc.clone());
+        if let Some(collation) = collation.clone() {
+            count = count.collation(collation);
+        }
+        count.await.map_err(|e| e.to_string())
     } else {
         col.estimated_document_count().await.map_err(|e| e.to_string())
     };
@@ -824,6 +868,9 @@ pub async fn find_documents_extended_json(
             let sort_doc = json_object_to_document(&json).map_err(|e| format!("Invalid sort: {e}"))?;
             find = find.sort(sort_doc);
         }
+    }
+    if let Some(collation) = collation {
+        find = find.collation(collation);
     }
 
     let mut cursor = find.await.map_err(|e| e.to_string())?;
@@ -2087,6 +2134,37 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_find_collation_options() {
+        let collation = parse_find_collation(Some(
+            r#"{"locale":"en","strength":1,"caseLevel":true,"caseFirst":"upper","numericOrdering":true,"alternate":"shifted","maxVariable":"space","normalization":true,"backwards":false}"#,
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(collation.locale, "en");
+        assert!(matches!(collation.strength, Some(mongodb::options::CollationStrength::Primary)));
+        assert_eq!(collation.case_level, Some(true));
+        assert!(matches!(collation.case_first, Some(mongodb::options::CollationCaseFirst::Upper)));
+        assert_eq!(collation.numeric_ordering, Some(true));
+        assert!(matches!(collation.alternate, Some(mongodb::options::CollationAlternate::Shifted)));
+        assert!(matches!(collation.max_variable, Some(mongodb::options::CollationMaxVariable::Space)));
+        assert_eq!(collation.normalization, Some(true));
+        assert_eq!(collation.backwards, Some(false));
+    }
+
+    #[test]
+    fn rejects_invalid_find_collation_options() {
+        assert!(parse_find_collation(Some(r#"{"strength":1}"#)).unwrap_err().contains("locale"));
+        assert!(parse_find_collation(Some(r#"{"locale":""}"#)).unwrap_err().contains("locale"));
+        assert!(parse_find_collation(Some(r#"{"locale":"en","unknown":true}"#))
+            .unwrap_err()
+            .contains("Unsupported collation option"));
+        assert!(parse_find_collation(Some(r#"{"locale":"en","strength":"primary"}"#))
+            .unwrap_err()
+            .contains("Invalid collation"));
+    }
 
     #[test]
     fn mongo_find_count_failure_returns_loaded_lower_bound() {

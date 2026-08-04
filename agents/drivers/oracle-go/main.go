@@ -31,7 +31,7 @@ const defaultMaxRows = 1000
 const oracleCharsetZHS32GB18030 = 854
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
-const oracleLegacyLOBMaxMajorVersion = 11
+const oracleLegacyLOBMaxMajorVersion = 10
 const oracleDatabaseVersionProbeTimeout = 3 * time.Second
 
 const oracleDatabaseVersionSQL = `
@@ -390,6 +390,7 @@ type triggerInfo struct {
 type server struct {
 	db                     *sql.DB
 	params                 connectParams
+	legacyLOBFetchDeferred bool
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -669,6 +670,11 @@ func (s *server) handleLine(line string) (response, bool) {
 }
 
 func (s *server) dispatch(method string, params map[string]json.RawMessage) (any, bool, error) {
+	if oracleMethodMayReadLOB(method) {
+		if err := s.ensureLegacyOracleLOBFetch(); err != nil {
+			return nil, false, err
+		}
+	}
 	switch method {
 	case "handshake":
 		return map[string]any{
@@ -806,46 +812,29 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 
 func (s *server) connect(params connectParams) error {
 	_ = s.disconnect()
-	db, effectiveParams, err := openSessionDB(params, 15*time.Second)
+	db, err := openConfiguredSessionDB(params, 15*time.Second)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if _, err := db.ExecContext(ctx, "ALTER SESSION SET NLS_LANGUAGE='AMERICAN'"); err != nil {
-		db.Close()
-		return err
-	}
+	majorVersion, versionKnown := oracleServerMajorVersion(db, 15*time.Second)
 	s.db = db
-	s.params = effectiveParams
+	s.params = params
+	s.legacyLOBFetchDeferred = shouldUseLegacyOracleLOBFetch(params, majorVersion, versionKnown)
 	return nil
 }
 
-func openSessionDB(params connectParams, timeout time.Duration) (*sql.DB, connectParams, error) {
+func openConfiguredSessionDB(params connectParams, timeout time.Duration) (*sql.DB, error) {
 	db, err := openAndPingDB(params, timeout)
 	if err != nil {
-		return nil, params, err
+		return nil, err
 	}
-	if hasOracleLOBFetchOption(params) {
-		return db, params, nil
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, "ALTER SESSION SET NLS_LANGUAGE='AMERICAN'"); err != nil {
+		db.Close()
+		return nil, err
 	}
-	majorVersion, ok := oracleServerMajorVersion(db, timeout)
-	if !shouldUseLegacyOracleLOBFetch(params, majorVersion, ok) {
-		return db, params, nil
-	}
-
-	effectiveParams := withOracleLOBFetchPost(params)
-	if effectiveParams == params {
-		return db, params, nil
-	}
-	if err := db.Close(); err != nil {
-		return nil, params, err
-	}
-	db, err = openAndPingDB(effectiveParams, timeout)
-	if err != nil {
-		return nil, params, err
-	}
-	return db, effectiveParams, nil
+	return db, nil
 }
 
 func oracleServerMajorVersion(db *sql.DB, timeout time.Duration) (int, bool) {
@@ -854,6 +843,9 @@ func oracleServerMajorVersion(db *sql.DB, timeout time.Duration) (int, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if majorVersion, ok := oracleServerMajorVersionFromDBConn(ctx, db); ok {
+		return majorVersion, true
+	}
 	for _, query := range oracleDatabaseVersionQueries {
 		var version string
 		err := db.QueryRowContext(ctx, query).Scan(&version)
@@ -864,6 +856,40 @@ func oracleServerMajorVersion(db *sql.DB, timeout time.Duration) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func oracleServerMajorVersionFromDBConn(ctx context.Context, db *sql.DB) (int, bool) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, false
+	}
+	defer conn.Close()
+	var majorVersion int
+	var versionKnown bool
+	if err := conn.Raw(func(driverConn any) error {
+		majorVersion, versionKnown = oracleServerMajorVersionFromDriverConn(driverConn)
+		return nil
+	}); err != nil {
+		return 0, false
+	}
+	return majorVersion, versionKnown
+}
+
+func oracleServerMajorVersionFromDriverConn(driverConn any) (int, bool) {
+	conn, ok := driverConn.(*go_ora.Connection)
+	if !ok {
+		return 0, false
+	}
+	return parseOracleAuthVersionNumber(conn.SessionProperties["AUTH_VERSION_NO"])
+}
+
+func parseOracleAuthVersionNumber(value string) (int, bool) {
+	encoded, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	majorVersion := int(encoded >> 24)
+	return majorVersion, majorVersion > 0
 }
 
 func parseOracleMajorVersion(version string) (int, bool) {
@@ -877,6 +903,38 @@ func parseOracleMajorVersion(version string) (int, bool) {
 
 func shouldUseLegacyOracleLOBFetch(params connectParams, majorVersion int, versionKnown bool) bool {
 	return versionKnown && majorVersion <= oracleLegacyLOBMaxMajorVersion && !hasOracleLOBFetchOption(params)
+}
+
+func oracleMethodMayReadLOB(method string) bool {
+	switch method {
+	case "get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *server) ensureLegacyOracleLOBFetch() error {
+	if !s.legacyLOBFetchDeferred {
+		return nil
+	}
+	effectiveParams := withOracleLOBFetchPost(s.params)
+	if effectiveParams == s.params {
+		s.legacyLOBFetchDeferred = false
+		return nil
+	}
+	db, err := openConfiguredSessionDB(effectiveParams, 15*time.Second)
+	if err != nil {
+		return err
+	}
+	oldDB := s.db
+	s.db = db
+	s.params = effectiveParams
+	s.legacyLOBFetchDeferred = false
+	if oldDB != nil {
+		_ = oldDB.Close()
+	}
+	return nil
 }
 
 func hasOracleLOBFetchOption(params connectParams) bool {
@@ -922,6 +980,7 @@ func withOracleLOBFetchPost(params connectParams) connectParams {
 
 func (s *server) disconnect() error {
 	s.closeAllQuerySessions()
+	s.legacyLOBFetchDeferred = false
 	if s.db == nil {
 		return nil
 	}
@@ -2960,6 +3019,41 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 }
 
 func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+	return executeOracleSelectWithXMLTypeRetry(
+		sqlText,
+		func(query string) (queryResult, error) {
+			return s.executeSelectOnce(query, maxRows, timeoutSecs)
+		},
+		s.rewriteXMLTypeSelectSQL,
+	)
+}
+
+func executeOracleSelectWithXMLTypeRetry(
+	sqlText string,
+	execute func(string) (queryResult, error),
+	rewrite func(string) (string, error),
+) (queryResult, error) {
+	result, err := execute(sqlText)
+	if err == nil || !shouldRetryOracleXMLTypeRewrite(err) {
+		return result, err
+	}
+	rewritten, rewriteErr := rewrite(sqlText)
+	if rewriteErr != nil || rewritten == sqlText {
+		return result, err
+	}
+	return execute(rewritten)
+}
+
+func shouldRetryOracleXMLTypeRewrite(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "abnormal data representation for date") ||
+		strings.Contains(message, "TTC error: received code ")
+}
+
+func (s *server) executeSelectOnce(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
 	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, timeoutSecs)
 	if err != nil {
 		return queryResult{}, err

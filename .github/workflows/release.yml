@@ -87,16 +87,16 @@ jobs:
         shell: bash
         run: |
           TMP_DIR="$(mktemp -d)"
-          cp plugins/jdbc/pom.xml "$TMP_DIR/pom.xml"
+          cp plugins/jdbc/build.gradle "$TMP_DIR/build.gradle"
           cp plugins/jdbc/manifest.json "$TMP_DIR/manifest.json"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin main
           git switch -C jdbc-plugin-version-bump origin/main
-          cp "$TMP_DIR/pom.xml" plugins/jdbc/pom.xml
+          cp "$TMP_DIR/build.gradle" plugins/jdbc/build.gradle
           cp "$TMP_DIR/manifest.json" plugins/jdbc/manifest.json
-          git add plugins/jdbc/pom.xml plugins/jdbc/manifest.json
+          git add plugins/jdbc/build.gradle plugins/jdbc/manifest.json
           if git diff --cached --quiet; then
             echo "JDBC plugin version ${{ steps.bump.outputs.new_version }} is already on main."
             exit 0
@@ -599,8 +599,8 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
-          cache: maven
+          java-version: "21"
+          cache: gradle
 
       - name: Apply automatic JDBC plugin version bump
         shell: bash
@@ -610,7 +610,7 @@ jobs:
         id: jdbc-plugin
         shell: bash
         run: |
-          VERSION="$(grep -m1 '<version>' plugins/jdbc/pom.xml | sed -E 's/.*<version>([^<]+)<.*/\1/')"
+          VERSION="$(sed -nE "s/^version[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" plugins/jdbc/build.gradle | head -n 1)"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Package JDBC plugin

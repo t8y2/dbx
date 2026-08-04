@@ -37,7 +37,7 @@ function shortcutKeyName(key: string): string | null {
   return key;
 }
 
-export function eventToShortcut(event: ShortcutLikeEvent): string | null {
+export function eventToShortcut(event: ShortcutLikeEvent, platform = globalThis.navigator?.platform || ""): string | null {
   if (event.isComposing) return null;
 
   const key = shortcutKeyName(event.key);
@@ -46,9 +46,17 @@ export function eventToShortcut(event: ShortcutLikeEvent): string | null {
   const hasModifier = !!event.metaKey || !!event.ctrlKey || !!event.altKey || !!event.shiftKey;
   if (!hasModifier && event.key.length === 1 && event.key !== " ") return null;
 
+  const isMac = isMacShortcutPlatform(platform);
   const parts: string[] = [];
   if (event.shiftKey) parts.push("Shift");
-  if (event.metaKey || event.ctrlKey) parts.push("Mod");
+  if (isMac) {
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.metaKey) parts.push("Mod");
+  } else if (event.ctrlKey && event.metaKey) {
+    parts.push("Mod", "Meta");
+  } else if (event.ctrlKey || event.metaKey) {
+    parts.push("Mod");
+  }
   if (event.altKey) parts.push("Alt");
   parts.push(key);
   return parts.join("+");
@@ -87,7 +95,13 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, plat
   const usesCtrl = modifiers.has("Ctrl");
 
   if (usesMod) {
-    if (!event.metaKey && !event.ctrlKey) return false;
+    if (isMacShortcutPlatform(platform)) {
+      if (!event.metaKey || !!event.ctrlKey !== usesCtrl) return false;
+    } else {
+      if (!event.metaKey && !event.ctrlKey) return false;
+      if (usesCtrl && (!event.ctrlKey || !event.metaKey)) return false;
+      if (usesMeta && (!event.metaKey || !event.ctrlKey)) return false;
+    }
   } else {
     if (!!event.metaKey !== usesMeta) return false;
     if (!!event.ctrlKey !== usesCtrl) return false;

@@ -18,6 +18,8 @@ coverage/
 plugins/jdbc/target/
 plugins/jdbc/dependency-reduced-pom.xml
 plugins/jdbc/lib/*.jar
+plugins/jdbc/.gradle/
+plugins/jdbc/build/
 plugins/jdbc/dist/
 docs/.next/
 docs/out/

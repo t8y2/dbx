@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	go_ora "github.com/sijms/go-ora/v2"
 	"github.com/sijms/go-ora/v2/configurations"
 )
 
@@ -271,6 +272,112 @@ func TestNormalizeValueKeepsOracleZonedDateTimeOffsets(t *testing.T) {
 		if got := normalizeValue(value, columnType); got != "2026-07-23T13:42:13.123456+08:00" {
 			t.Fatalf("normalizeValue time for %q = %#v, want RFC3339 offset", columnType, got)
 		}
+	}
+}
+
+func TestExecuteOracleSelectRetriesXMLTypeDecodeFailures(t *testing.T) {
+	originalSQL := `SELECT * FROM (SELECT * FROM "DBX"."TEST_LOBS") WHERE ROWNUM <= 100`
+	rewrittenSQL := `SELECT * FROM (SELECT "ID", XMLSERIALIZE(CONTENT "XML_CONTENT" AS CLOB) AS "XML_CONTENT" FROM "DBX"."TEST_LOBS") WHERE ROWNUM <= 100`
+	calls := []string{}
+
+	result, err := executeOracleSelectWithXMLTypeRetry(
+		originalSQL,
+		func(sqlText string) (queryResult, error) {
+			calls = append(calls, sqlText)
+			if sqlText == originalSQL {
+				return queryResult{}, errors.New("abnormal data representation for date")
+			}
+			return queryResult{Columns: []string{"ID", "XML_CONTENT"}, Rows: [][]any{{"1", "<root/>"}}}, nil
+		},
+		func(sqlText string) (string, error) {
+			if sqlText != originalSQL {
+				t.Fatalf("rewrite input = %q, want original SQL", sqlText)
+			}
+			return rewrittenSQL, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{originalSQL, rewrittenSQL}) {
+		t.Fatalf("execute calls = %#v, want original and rewritten SQL", calls)
+	}
+	if len(result.Rows) != 1 || result.Rows[0][1] != "<root/>" {
+		t.Fatalf("unexpected retry result: %#v", result)
+	}
+}
+
+func TestExecuteOracleSelectDoesNotRewriteSuccessfulQueries(t *testing.T) {
+	calls := 0
+	rewriteCalled := false
+	want := queryResult{Columns: []string{"ID"}, Rows: [][]any{{"1"}}}
+
+	result, err := executeOracleSelectWithXMLTypeRetry(
+		`SELECT ID FROM TEST_TABLE`,
+		func(string) (queryResult, error) {
+			calls++
+			return want, nil
+		},
+		func(sqlText string) (string, error) {
+			rewriteCalled = true
+			return sqlText, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("result = %#v, want %#v", result, want)
+	}
+	if calls != 1 || rewriteCalled {
+		t.Fatalf("successful query should not rewrite: calls=%d rewriteCalled=%t", calls, rewriteCalled)
+	}
+}
+
+func TestExecuteOracleSelectDoesNotRetryOrdinaryErrors(t *testing.T) {
+	calls := 0
+	rewriteCalled := false
+	originalErr := errors.New("ORA-00942: table or view does not exist")
+
+	_, err := executeOracleSelectWithXMLTypeRetry(
+		`SELECT * FROM MISSING_TABLE`,
+		func(string) (queryResult, error) {
+			calls++
+			return queryResult{}, originalErr
+		},
+		func(sqlText string) (string, error) {
+			rewriteCalled = true
+			return sqlText, nil
+		},
+	)
+	if !errors.Is(err, originalErr) {
+		t.Fatalf("error = %v, want original error", err)
+	}
+	if calls != 1 || rewriteCalled {
+		t.Fatalf("ordinary error should not retry: calls=%d rewriteCalled=%t", calls, rewriteCalled)
+	}
+}
+
+func TestExecuteOracleSelectKeepsDecodeErrorWhenNoXMLTypeRewriteApplies(t *testing.T) {
+	calls := 0
+	originalErr := errors.New("TTC error: received code 36 during response reading")
+	sqlText := `SELECT * FROM TEST_DATES`
+
+	_, err := executeOracleSelectWithXMLTypeRetry(
+		sqlText,
+		func(string) (queryResult, error) {
+			calls++
+			return queryResult{}, originalErr
+		},
+		func(input string) (string, error) {
+			return input, nil
+		},
+	)
+	if !errors.Is(err, originalErr) {
+		t.Fatalf("error = %v, want original error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("unchanged SQL should not retry, got %d executions", calls)
 	}
 }
 
@@ -813,6 +920,41 @@ func TestParseOracleMajorVersion(t *testing.T) {
 	}
 }
 
+func TestParseOracleAuthVersionNumber(t *testing.T) {
+	tests := []struct {
+		value string
+		major int
+		ok    bool
+	}{
+		{value: "169870336", major: 10, ok: true},
+		{value: "186647040", major: 11, ok: true},
+		{value: "301989888", major: 18, ok: true},
+		{value: "", ok: false},
+		{value: "not-a-version", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			major, ok := parseOracleAuthVersionNumber(tt.value)
+			if major != tt.major || ok != tt.ok {
+				t.Fatalf("parseOracleAuthVersionNumber(%q) = (%d, %t), want (%d, %t)", tt.value, major, ok, tt.major, tt.ok)
+			}
+		})
+	}
+}
+
+func TestOracleServerMajorVersionUsesDriverSessionProperties(t *testing.T) {
+	major, ok := oracleServerMajorVersionFromDriverConn(&go_ora.Connection{
+		SessionProperties: map[string]string{"AUTH_VERSION_NO": "186647040"},
+	})
+	if !ok || major != 11 {
+		t.Fatalf("oracleServerMajorVersionFromDriverConn() = (%d, %t), want (11, true)", major, ok)
+	}
+	if _, ok := oracleServerMajorVersionFromDriverConn(struct{}{}); ok {
+		t.Fatal("non-Oracle connections should not expose a server version")
+	}
+}
+
 func TestOracleServerMajorVersionUsesProductComponentVersion(t *testing.T) {
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
 		{
@@ -923,17 +1065,27 @@ func TestShouldUseLegacyOracleLOBFetchOnlyForLegacyServers(t *testing.T) {
 	if !shouldUseLegacyOracleLOBFetch(params, 10, true) {
 		t.Fatal("Oracle 10g should use streamed LOB reads")
 	}
-	if !shouldUseLegacyOracleLOBFetch(params, 11, true) {
-		t.Fatal("Oracle 11g should use streamed LOB reads")
-	}
-	if shouldUseLegacyOracleLOBFetch(params, 12, true) || shouldUseLegacyOracleLOBFetch(params, 19, true) {
-		t.Fatal("modern Oracle versions should retain the driver's default LOB mode")
+	if shouldUseLegacyOracleLOBFetch(params, 11, true) || shouldUseLegacyOracleLOBFetch(params, 19, true) {
+		t.Fatal("Oracle 11g and newer should retain the driver's default LOB mode")
 	}
 	if shouldUseLegacyOracleLOBFetch(params, 0, false) {
 		t.Fatal("unknown Oracle versions should retain the driver's default LOB mode")
 	}
 	if shouldUseLegacyOracleLOBFetch(connectParams{URLParams: "LOB+FETCH=INLINE"}, 10, true) {
 		t.Fatal("an explicit user LOB mode should not be overridden")
+	}
+}
+
+func TestOracleMethodMayReadLOB(t *testing.T) {
+	for _, method := range []string{"get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction"} {
+		if !oracleMethodMayReadLOB(method) {
+			t.Fatalf("%s should enable deferred legacy LOB reads", method)
+		}
+	}
+	for _, method := range []string{"list_schemas", "list_tables", "list_objects", "get_columns", "list_indexes", "list_triggers"} {
+		if oracleMethodMayReadLOB(method) {
+			t.Fatalf("%s should not reconnect while loading metadata", method)
+		}
 	}
 }
 

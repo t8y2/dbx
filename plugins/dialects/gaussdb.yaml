@@ -8,6 +8,7 @@ dialect:
       status: "COMPATIBLE"
 
 types:
+  # --- PostgreSQL native types (A-mode) ---
   - name: "SMALLINT"
     category: "INTEGER"
     aliases: ["INT2"]
@@ -35,6 +36,10 @@ types:
     category: "DECIMAL"
     has_precision: true
     aliases: ["DECIMAL"]
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["NUMERIC"]
   - name: "VARCHAR"
     category: "STRING"
     has_length: true
@@ -74,6 +79,33 @@ types:
     category: "JSON"
     semantic_fidelity_base: 0.9
   - name: "POINT"
+    category: "SPATIAL"
+
+  # --- MySQL-compatible types (M-mode) ---
+  - name: "MEDIUMINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "DOUBLE"
+    category: "FLOAT"
+    aliases: ["DOUBLE PRECISION", "REAL"]
+  - name: "TINYTEXT"
+    category: "STRING"
+  - name: "MEDIUMTEXT"
+    category: "STRING"
+  - name: "LONGTEXT"
+    category: "STRING"
+  - name: "TINYBLOB"
+    category: "BINARY"
+  - name: "MEDIUMBLOB"
+    category: "BINARY"
+  - name: "LONGBLOB"
+    category: "BINARY"
+  - name: "DATETIME"
+    category: "DATETIME"
+  - name: "YEAR"
+    category: "INTEGER"
+  - name: "GEOMETRY"
     category: "SPATIAL"
 
 ddl_capabilities:

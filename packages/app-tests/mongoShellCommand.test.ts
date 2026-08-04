@@ -59,6 +59,19 @@ test("parseMongoFindCommand parses getCollection find with chained sort skip and
   });
 });
 
+test("parseMongoFindCommand preserves chained collation for execution and pagination", () => {
+  const command = parseMongoFindCommand(`db.t_user.find({name: 'xxx'})
+    .collation({ locale: "en", strength: 1 })
+    .limit(20)`);
+
+  assert.ok(command);
+  assert.equal(command.collection, "t_user");
+  assert.deepEqual(JSON.parse(command.filter), { name: "xxx" });
+  assert.deepEqual(JSON.parse(command.collation ?? "null"), { locale: "en", strength: 1 });
+  assert.equal(command.skip, 0);
+  assert.equal(command.limit, 20);
+});
+
 test("planMongoFindPagination pages unbounded find queries", () => {
   const command = parseMongoFindCommand("db.users.find({})");
   assert.ok(command);

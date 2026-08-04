@@ -3716,6 +3716,7 @@ async fn find_mongo_documents_for_rows(
         None,
         None,
         Some(r#"{"_id":1}"#),
+        None,
     )
     .await
 }
@@ -5421,7 +5422,7 @@ fn native_postgres_dependency_pool(pool_kind: Option<&PoolKind>) -> Option<deadp
     }
 }
 
-fn sort_table_names_by_dependencies(
+pub(crate) fn sort_table_names_by_dependencies(
     tables: &[String],
     dependencies: &[(String, String)],
     parents_first: bool,

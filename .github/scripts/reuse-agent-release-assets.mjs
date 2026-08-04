@@ -15,7 +15,7 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const REGISTRY_ASSET = "agent-registry.json";
-const NATIVE_MODULES = new Set(["duckdb", "oracle", "xugu", "kingbase", "rabbitmq"]);
+const NATIVE_MODULES = new Set(["duckdb", "oracle", "xugu", "kingbase", "vastbase", "rabbitmq"]);
 const PLATFORMS = [
   "macos-aarch64",
   "macos-x64",

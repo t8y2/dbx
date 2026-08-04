@@ -23,6 +23,7 @@ export type SqlExecutionTargetKind = "cursor" | "all";
  */
 export interface SqlExecutionCandidate {
   kind: SqlExecutionTargetKind;
+  supportedKinds: SqlExecutionTargetKind[];
   label: string;
   sql: string;
   from: number;
@@ -38,6 +39,11 @@ export interface SqlExecutionChoiceRequest {
 
 export function isSqlExecutionSnapshot(value: SqlExecutionOverride | undefined): value is SqlExecutionSnapshot {
   return typeof value === "object" && value !== null && typeof value.fullSql === "string" && typeof value.selectedSql === "string" && typeof value.cursorPos === "number" && typeof value.selectionFrom === "number" && typeof value.selectionTo === "number";
+}
+
+export function executionCandidateForMode(candidates: SqlExecutionCandidate[], mode: ExecuteMode): SqlExecutionCandidate | null {
+  const targetKind: SqlExecutionTargetKind = mode === "current" ? "cursor" : "all";
+  return candidates.find((candidate) => candidate.supportedKinds.includes(targetKind)) ?? null;
 }
 
 export function resolveExecutableSql(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number }): string {

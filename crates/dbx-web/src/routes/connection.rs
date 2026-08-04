@@ -181,6 +181,10 @@ async fn run_temporary_connection_test(
     };
 
     app.remove_connection_pools(&temp_id).await;
+    // Pool drain intentionally keeps durable MQ adapters for reconnect reuse; temporary
+    // probes must still release any registry entry if a cached path was used.
+    #[cfg(feature = "mq-admin")]
+    app.mq_registry.drop_connection(&temp_id).await;
     app.reset_connection_transport_for_config(&temp_id, &config).await;
     app.configs.write().await.remove(&temp_id);
 
@@ -669,6 +673,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn mq_connection_test_does_not_retain_temporary_adapter() {
+        let (state, dir) = test_web_state().await;
+        let admin_url = spawn_pulsar_clusters_server().await;
+        let config = mq_config("pulsar-probe", &admin_url);
+
+        let result = test_connection(State(state.clone()), Json(ConnectRequest { config, client_attempt: None }))
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(result.0, "Connection successful");
+
+        assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
+        assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
+        let cached = state.app.mq_registry.cached_connection_ids().await;
+        assert!(
+            cached.iter().all(|id| !id.starts_with("__test_")),
+            "temporary MQ connection tests must not retain registry adapters: {cached:?}"
+        );
+        assert!(!state.app.mq_registry.has_cached_connection("pulsar-probe").await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn invalid_persistent_sqlite_attachments_do_not_replace_live_web_state() {
         let (state, dir) = test_web_state().await;
@@ -898,7 +926,7 @@ mod tests {
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.app.configs.write().await.insert(initial.id.clone(), initial.clone());
         state.app.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
-        let first = state.app.mq_registry.get_or_build(&initial).await.unwrap();
+        let first = state.app.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
         let result =
@@ -918,7 +946,7 @@ mod tests {
             .map(str::to_string);
         assert_eq!(cached_admin_url.as_deref(), Some("http://127.0.0.1:8081"));
 
-        let second = state.app.mq_registry.get_or_build(&updated).await.unwrap();
+        let second = state.app.mq_registry.get_or_build(&updated).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&first, &second));
         assert!(!state.app.connections.read().await.contains_key(&initial.id));
 
@@ -932,7 +960,7 @@ mod tests {
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.app.configs.write().await.insert(initial.id.clone(), initial.clone());
         state.app.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
-        let first = state.app.mq_registry.get_or_build(&initial).await.unwrap();
+        let first = state.app.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", &spawn_pulsar_clusters_server().await);
         let result =
@@ -940,7 +968,7 @@ mod tests {
                 .await;
         assert!(result.is_ok());
 
-        let second = state.app.mq_registry.get_or_build(&updated).await.unwrap();
+        let second = state.app.mq_registry.get_or_build(&updated).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&first, &second));
 
         let _ = std::fs::remove_dir_all(dir);
@@ -982,7 +1010,7 @@ mod tests {
             configs.insert(kept.id.clone(), kept.clone());
             configs.insert(removed.id.clone(), removed.clone());
         }
-        let stale = state.app.mq_registry.get_or_build(&removed).await.unwrap();
+        let stale = state.app.mq_registry.get_or_build(&removed).await.unwrap().adapter;
 
         let result =
             save_connections(State(state.clone()), Json(SaveConnectionsRequest { configs: vec![kept.clone()] })).await;
@@ -993,7 +1021,7 @@ mod tests {
         assert!(!configs.contains_key("removed-mq"));
         drop(configs);
 
-        let rebuilt = state.app.mq_registry.get_or_build(&removed).await.unwrap();
+        let rebuilt = state.app.mq_registry.get_or_build(&removed).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&stale, &rebuilt));
 
         let _ = std::fs::remove_dir_all(dir);
@@ -1120,7 +1148,7 @@ mod tests {
         let config = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.app.configs.write().await.insert(config.id.clone(), config.clone());
         state.app.connections.write().await.insert(config.id.clone(), PoolKind::MessageQueue);
-        let first = state.app.mq_registry.get_or_build(&config).await.unwrap();
+        let first = state.app.mq_registry.get_or_build(&config).await.unwrap().adapter;
 
         let result = disconnect_db(
             State(state.clone()),
@@ -1130,7 +1158,7 @@ mod tests {
         assert!(result.is_ok());
 
         assert!(!state.app.connections.read().await.contains_key(&config.id));
-        let second = state.app.mq_registry.get_or_build(&config).await.unwrap();
+        let second = state.app.mq_registry.get_or_build(&config).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&first, &second));
 
         let _ = std::fs::remove_dir_all(dir);

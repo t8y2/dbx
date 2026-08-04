@@ -61,6 +61,9 @@ public final class RocketMqAgent {
     private static final int DEFAULT_LIST_LIMIT = 200;
     private static final int CONSUMER_GROUP_ENRICH_CONCURRENCY = 8;
     private static final long CONSUMER_GROUP_ENRICH_BUDGET_MS = 8_000;
+    /** Nameserver route enrichment for listTopics fallback when bulk broker config is unavailable. */
+    private static final int TOPIC_LIST_ROUTE_CONCURRENCY = 8;
+    private static final long TOPIC_LIST_ROUTE_BUDGET_MS = 8_000;
     private static final String AUTO_CREATE_TOPIC_KEY = "TBW102";
     /** RocketMQ 5.x topic attribute key for message type (NORMAL/DELAY/FIFO/TRANSACTION). */
     private static final String TOPIC_MESSAGE_TYPE_ATTRIBUTE = "message.type";
@@ -364,24 +367,19 @@ public final class RocketMqAgent {
     private static Object connect(JsonObject params) throws Exception {
         JsonObject conn = connectionObject(params);
         DefaultMQAdminExt nextAdmin = null;
-        DefaultMQProducer nextProducer = null;
         try {
             nextAdmin = buildAdminClient(conn);
-            nextAdmin.examineBrokerClusterInfo();
-            nextProducer = buildProducer(conn);
+            // One ClusterInfo per connect — reuse for name/broker resolution and test payload.
+            ClusterInfo clusterInfo = nextAdmin.examineBrokerClusterInfo();
             closeClients();
             adminClient = nextAdmin;
-            producer = nextProducer;
             cachedConnection = conn.deepCopy();
-            cachedClusterName = resolveClusterName(nextAdmin, conn);
-            cachedBrokerAddr = resolveBrokerAddr(nextAdmin, conn);
-            return Collections.singletonMap("ok", true);
+            cachedClusterName = resolveClusterName(clusterInfo, conn);
+            cachedBrokerAddr = resolveBrokerAddr(nextAdmin, conn, clusterInfo);
+            return buildClusterTestResult(clusterInfo, nextAdmin, conn);
         } catch (Exception e) {
             if (nextAdmin != null) {
                 nextAdmin.shutdown();
-            }
-            if (nextProducer != null) {
-                nextProducer.shutdown();
             }
             throw e;
         }
@@ -389,27 +387,47 @@ public final class RocketMqAgent {
 
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject conn = connectionObject(params);
+        if (adminClient != null && cachedConnection != null && connectionMatches(cachedConnection, conn)) {
+            ClusterInfo clusterInfo = adminClient.examineBrokerClusterInfo();
+            return buildClusterTestResult(clusterInfo, adminClient, conn);
+        }
         DefaultMQAdminExt probe = null;
         try {
             probe = buildAdminClient(conn);
             ClusterInfo clusterInfo = probe.examineBrokerClusterInfo();
-            String clusterName = resolveClusterName(clusterInfo, conn);
-            List<Map<String, Object>> brokers = brokerNodes(clusterInfo);
-            boolean aclEnabled = probeAclSupport(probe);
-
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("ok", true);
-            result.put("clusterId", clusterName);
-            result.put("brokers", brokers);
-            result.put("nodeCount", brokers.size());
-            result.put("controller", brokers.isEmpty() ? null : brokers.get(0));
-            result.put("aclEnabled", aclEnabled);
-            return result;
+            return buildClusterTestResult(clusterInfo, probe, conn);
         } finally {
             if (probe != null) {
                 probe.shutdown();
             }
         }
+    }
+
+    private static Map<String, Object> buildClusterTestResult(
+        ClusterInfo clusterInfo,
+        DefaultMQAdminExt admin,
+        JsonObject conn
+    ) throws Exception {
+        String clusterName = resolveClusterName(clusterInfo, conn);
+        List<Map<String, Object>> brokers = brokerNodes(clusterInfo);
+        boolean aclEnabled = probeAclSupport(admin, clusterInfo);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("clusterId", clusterName);
+        result.put("brokers", brokers);
+        result.put("nodeCount", brokers.size());
+        result.put("controller", brokers.isEmpty() ? null : brokers.get(0));
+        result.put("aclEnabled", aclEnabled);
+        return result;
+    }
+
+    static boolean connectionMatches(JsonObject cached, JsonObject requested) {
+        return namesrvAddr(cached).equals(namesrvAddr(requested))
+            && clusterName(cached).equals(clusterName(requested))
+            && brokerAddress(cached).equals(brokerAddress(requested))
+            && credential(cached, "access_key", "accessKey").equals(credential(requested, "access_key", "accessKey"))
+            && credential(cached, "secret_key", "secretKey").equals(credential(requested, "secret_key", "secretKey"));
     }
 
     private static void closeClients() {
@@ -430,47 +448,129 @@ public final class RocketMqAgent {
         DefaultMQAdminExt admin = requireAdmin();
         String keyword = stringOrEmpty(params, "keyword").toLowerCase(Locale.ROOT);
         int offset = Math.max(0, intOrDefault(params, "offset", 0));
+        // limit <= 0: return all rows from offset (legacy single-shot signal).
+        // Large positive limits (e.g. Integer.MAX_VALUE) also return the full remaining
+        // catalog and stay compatible with older agents that coerced limit<=0 to 200.
         int limit = intOrDefault(params, "limit", DEFAULT_LIST_LIMIT);
-        if (limit <= 0) {
-            limit = DEFAULT_LIST_LIMIT;
+        JsonObject conn = connectionObject(params);
+
+        // One ClusterInfo per list call — avoid repeated examineBrokerClusterInfo in helpers.
+        ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
+        Set<String> brokerSystemTopics = collectBrokerSystemTopics(admin);
+        Set<String> brokerNames = collectBrokerNames(clusterInfo);
+        String cluster = resolveClusterName(clusterInfo, conn);
+        BrokerTopicConfigSnapshot brokerSnapshot = collectBrokerTopicConfigSnapshot(admin, conn, clusterInfo);
+        Map<String, TopicConfig> brokerTopics = brokerSnapshot.topics();
+        Map<String, Map<String, String>> topicAttributes = topicAttributesFromConfigs(brokerTopics);
+
+        Set<String> nameserverTopics = Set.of();
+        if (!brokerSnapshot.complete() || brokerTopics.isEmpty()) {
+            // Reuse resolved cluster — do not call examineBrokerClusterInfo again via clusterName(conn, admin).
+            TopicList topicList = fetchTopicList(admin, cluster);
+            nameserverTopics = topicList.getTopicList();
+        }
+        Set<String> topicNames = topicCatalogNames(brokerSnapshot, nameserverTopics);
+
+        List<Map<String, Object>> topics = buildTopicCatalogRows(
+            topicNames,
+            brokerTopics,
+            topicAttributes,
+            brokerSystemTopics,
+            brokerNames,
+            cluster,
+            keyword,
+            admin::examineTopicRouteInfo,
+            TOPIC_LIST_ROUTE_CONCURRENCY,
+            TOPIC_LIST_ROUTE_BUDGET_MS
+        );
+        topics.sort(Comparator.comparing(m -> String.valueOf(m.get("name"))));
+
+        int total = topics.size();
+        List<Map<String, Object>> page = paginate(topics, offset, limit);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("topics", page);
+        result.put("total", total);
+        result.put("offset", offset);
+        result.put("limit", limit);
+        return result;
+    }
+
+    @FunctionalInterface
+    interface TopicRouteLookup {
+        TopicRouteData load(String topic) throws Exception;
+    }
+
+    @FunctionalInterface
+    interface BrokerTopicConfigLookup {
+        TopicConfigSerializeWrapper load(String brokerAddr) throws Exception;
+    }
+
+    static final class BrokerTopicConfigSnapshot {
+        private final Map<String, TopicConfig> topics;
+        private final boolean complete;
+
+        private BrokerTopicConfigSnapshot(Map<String, TopicConfig> topics, boolean complete) {
+            this.topics = topics;
+            this.complete = complete;
         }
 
-        TopicList topicList = fetchTopicList(admin, connectionObject(params));
-        Set<String> brokerSystemTopics = collectBrokerSystemTopics(admin);
-        Set<String> brokerNames = collectBrokerNames(admin);
-        String cluster = clusterName(params, admin);
-        JsonObject conn = connectionObject(params);
-        Map<String, TopicConfig> brokerTopics = collectBrokerTopicConfigs(admin, conn);
-        Map<String, Map<String, String>> topicAttributes = topicAttributesFromConfigs(brokerTopics);
-        // Prefer broker topic configs (Dashboard ground truth); nameserver routes can outlive broker deletion.
-        Set<String> topicNames = brokerTopics.isEmpty()
-            ? new TreeSet<>(topicList.getTopicList())
-            : brokerTopics.keySet();
+        Map<String, TopicConfig> topics() {
+            return topics;
+        }
+
+        boolean complete() {
+            return complete;
+        }
+    }
+
+    static Set<String> topicCatalogNames(
+        BrokerTopicConfigSnapshot brokerSnapshot, Set<String> nameserverTopics) {
+        if (brokerSnapshot.complete() && !brokerSnapshot.topics().isEmpty()) {
+            return new TreeSet<>(brokerSnapshot.topics().keySet());
+        }
+        Set<String> topics = new TreeSet<>(brokerSnapshot.topics().keySet());
+        topics.addAll(nameserverTopics);
+        return topics;
+    }
+
+    /**
+     * Build topic catalog rows from names + optional bulk broker configs.
+     * When bulk configs are empty, partition counts are filled via a single budgeted route RPC
+     * per topic; per-topic examineTopicConfig / resolveTopicMessageType is never used (that path
+     * hits the same broker that already failed getAllTopicConfig and can stall for minutes).
+     */
+    static List<Map<String, Object>> buildTopicCatalogRows(
+        Set<String> topicNames,
+        Map<String, TopicConfig> brokerTopics,
+        Map<String, Map<String, String>> topicAttributes,
+        Set<String> brokerSystemTopics,
+        Set<String> brokerNames,
+        String cluster,
+        String keyword,
+        TopicRouteLookup routeLookup,
+        int routeConcurrency,
+        long routeBudgetMs
+    ) {
+        String keywordLower = keyword == null ? "" : keyword.toLowerCase(Locale.ROOT);
+        boolean hasBrokerCatalog = brokerTopics != null && !brokerTopics.isEmpty();
         List<Map<String, Object>> topics = new ArrayList<>();
+        List<Map<String, Object>> needsRoute = new ArrayList<>();
         for (String topic : topicNames) {
-            if (!keyword.isBlank() && !topic.toLowerCase(Locale.ROOT).contains(keyword)) {
+            if (!keywordLower.isBlank() && !topic.toLowerCase(Locale.ROOT).contains(keywordLower)) {
                 continue;
             }
-            TopicConfig brokerConfig = brokerTopics.get(topic);
-            int partitions = brokerConfig == null ? 1 : Math.max(brokerConfig.getReadQueueNums(), 1);
-            if (brokerConfig == null) {
-                try {
-                    TopicRouteData route = admin.examineTopicRouteInfo(topic);
-                    if (route.getQueueDatas() != null && !route.getQueueDatas().isEmpty()) {
-                        partitions = Math.max(route.getQueueDatas().get(0).getReadQueueNums(), 1);
-                    }
-                } catch (Exception ignored) {
-                    // Stale nameserver-only topics are skipped below when broker configs are available.
-                    if (!brokerTopics.isEmpty()) {
-                        continue;
-                    }
-                }
+            TopicConfig brokerConfig = hasBrokerCatalog ? brokerTopics.get(topic) : null;
+            // Nameserver-only stale topics are skipped when broker catalog is the source of truth.
+            if (hasBrokerCatalog && brokerConfig == null) {
+                continue;
             }
-            Map<String, String> attributes = topicAttributes.get(topic);
-            if (isUserTopic(topic) && readTopicMessageTypeAttribute(attributes) == null) {
-                String resolved = brokerConfig == null
-                    ? resolveTopicMessageType(admin, conn, topic)
-                    : readTopicMessageType(brokerConfig);
+            int partitions = brokerConfig == null ? 1 : Math.max(brokerConfig.getReadQueueNums(), 1);
+            Map<String, String> attributes = topicAttributes == null ? null : topicAttributes.get(topic);
+            // Type from bulk config attributes only — never examineTopicConfig per topic on fallback.
+            if (brokerConfig != null
+                && isUserTopic(topic)
+                && readTopicMessageTypeAttribute(attributes) == null) {
+                String resolved = readTopicMessageType(brokerConfig);
                 if (resolved != null && !resolved.isBlank()) {
                     attributes = attributes == null ? new HashMap<>() : new HashMap<>(attributes);
                     attributes.put("+" + TOPIC_MESSAGE_TYPE_ATTRIBUTE, resolved);
@@ -488,17 +588,71 @@ public final class RocketMqAgent {
             row.put("internal", internal);
             row.put("messageType", messageType);
             topics.add(row);
+            if (brokerConfig == null) {
+                needsRoute.add(row);
+            }
         }
-        topics.sort(Comparator.comparing(m -> String.valueOf(m.get("name"))));
+        if (!needsRoute.isEmpty() && routeLookup != null) {
+            enrichTopicPartitions(needsRoute, routeLookup, routeConcurrency, routeBudgetMs);
+        }
+        return topics;
+    }
 
-        int total = topics.size();
-        List<Map<String, Object>> page = paginate(topics, offset, limit);
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("topics", page);
-        result.put("total", total);
-        result.put("offset", offset);
-        result.put("limit", limit);
-        return result;
+    static int partitionsFromRoute(TopicRouteData route) {
+        if (route == null || route.getQueueDatas() == null || route.getQueueDatas().isEmpty()) {
+            return 1;
+        }
+        return Math.max(route.getQueueDatas().get(0).getReadQueueNums(), 1);
+    }
+
+    /**
+     * Fill {@code partitions} via nameserver route lookups with bounded concurrency and a global
+     * time budget. Unfinished/failed topics keep the default partitions=1.
+     */
+    static void enrichTopicPartitions(
+        List<Map<String, Object>> rows,
+        TopicRouteLookup lookup,
+        int concurrency,
+        long budgetMs) {
+        if (rows.isEmpty() || lookup == null) {
+            return;
+        }
+        int workers = Math.max(1, Math.min(concurrency, rows.size()));
+        ExecutorService executor = Executors.newFixedThreadPool(workers, runnable -> {
+            Thread thread = new Thread(runnable, "dbx-rocketmq-topic-route");
+            thread.setDaemon(true);
+            return thread;
+        });
+        List<Callable<Integer>> tasks = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            String topic = String.valueOf(row.get("name"));
+            tasks.add(() -> {
+                try {
+                    return partitionsFromRoute(lookup.load(topic));
+                } catch (Exception ignored) {
+                    return 1;
+                }
+            });
+        }
+        List<Future<Integer>> results = Collections.emptyList();
+        try {
+            results = executor.invokeAll(tasks, Math.max(1, budgetMs), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            executor.shutdownNow();
+        }
+        for (int index = 0; index < rows.size(); index++) {
+            Map<String, Object> row = rows.get(index);
+            if (index < results.size() && !results.get(index).isCancelled()) {
+                try {
+                    row.put("partitions", results.get(index).get());
+                } catch (Exception ignored) {
+                    // Keep default partitions=1 when enrichment fails.
+                }
+            }
+            row.putIfAbsent("partitions", 1);
+        }
     }
 
     private static Object createTopic(JsonObject params) throws Exception {
@@ -1819,9 +1973,8 @@ public final class RocketMqAgent {
         return addr;
     }
 
-    private static TopicList fetchTopicList(DefaultMQAdminExt admin, JsonObject conn) throws Exception {
-        String cluster = clusterName(conn, admin);
-        if (!cluster.isBlank()) {
+    private static TopicList fetchTopicList(DefaultMQAdminExt admin, String cluster) throws Exception {
+        if (cluster != null && !cluster.isBlank()) {
             return admin.fetchTopicsByCLuster(cluster);
         }
         return admin.fetchAllTopicList();
@@ -1865,30 +2018,43 @@ public final class RocketMqAgent {
 
     static List<String> resolveMasterBrokerAddrs(
         DefaultMQAdminExt admin, JsonObject conn, String brokerNameFilter) throws Exception {
-        ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
-        LinkedHashSet<String> addrs = new LinkedHashSet<>();
-        if (clusterInfo.getBrokerAddrTable() != null) {
-            for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
-                if (brokerNameFilter != null && !brokerNameFilter.isBlank()
-                    && !brokerNameFilter.equals(broker.getBrokerName())) {
-                    continue;
-                }
-                String masterAddr = null;
-                if (broker.getBrokerAddrs() != null && broker.getBrokerAddrs().containsKey(0L)) {
-                    masterAddr = broker.getBrokerAddrs().get(0L);
-                }
-                if (masterAddr == null || masterAddr.isBlank()) {
-                    masterAddr = broker.selectBrokerAddr();
-                }
-                if (masterAddr != null && !masterAddr.isBlank()) {
-                    addrs.add(remapBrokerAddrForClient(masterAddr, conn));
-                }
-            }
-        }
+        return resolveMasterBrokerAddrs(admin, conn, brokerNameFilter, admin.examineBrokerClusterInfo());
+    }
+
+    static List<String> resolveMasterBrokerAddrs(
+        DefaultMQAdminExt admin, JsonObject conn, String brokerNameFilter, ClusterInfo clusterInfo)
+        throws Exception {
+        LinkedHashSet<String> addrs = masterBrokerAddrsFromClusterInfo(clusterInfo, conn, brokerNameFilter);
         if (addrs.isEmpty()) {
-            addrs.add(resolveBrokerAddr(admin, conn));
+            addrs.add(resolveBrokerAddr(admin, conn, clusterInfo));
         }
         return new ArrayList<>(addrs);
+    }
+
+    /** Extract remapped master broker addresses from a ClusterInfo snapshot. */
+    static LinkedHashSet<String> masterBrokerAddrsFromClusterInfo(
+        ClusterInfo clusterInfo, JsonObject conn, String brokerNameFilter) {
+        LinkedHashSet<String> addrs = new LinkedHashSet<>();
+        if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+            return addrs;
+        }
+        for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
+            if (brokerNameFilter != null && !brokerNameFilter.isBlank()
+                && !brokerNameFilter.equals(broker.getBrokerName())) {
+                continue;
+            }
+            String masterAddr = null;
+            if (broker.getBrokerAddrs() != null && broker.getBrokerAddrs().containsKey(0L)) {
+                masterAddr = broker.getBrokerAddrs().get(0L);
+            }
+            if (masterAddr == null || masterAddr.isBlank()) {
+                masterAddr = broker.selectBrokerAddr();
+            }
+            if (masterAddr != null && !masterAddr.isBlank()) {
+                addrs.add(remapBrokerAddrForClient(masterAddr, conn));
+            }
+        }
+        return addrs;
     }
 
     private static void applyTopicConfigValue(TopicConfig config, String key, String value) {
@@ -2071,9 +2237,11 @@ public final class RocketMqAgent {
         };
     }
 
-    private static boolean probeAclSupport(DefaultMQAdminExt admin) {
+    private static boolean probeAclSupport(DefaultMQAdminExt admin, ClusterInfo clusterInfo) {
         try {
-            ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
+            if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+                return false;
+            }
             for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
                 String brokerAddr = broker.selectBrokerAddr();
                 if (brokerAddr == null || brokerAddr.isBlank()) {
@@ -2101,22 +2269,30 @@ public final class RocketMqAgent {
         if (!configured.isBlank()) {
             return configured;
         }
-        if (clusterInfo.getClusterAddrTable() != null && !clusterInfo.getClusterAddrTable().isEmpty()) {
+        if (clusterInfo != null
+            && clusterInfo.getClusterAddrTable() != null
+            && !clusterInfo.getClusterAddrTable().isEmpty()) {
             return clusterInfo.getClusterAddrTable().keySet().iterator().next();
         }
         return "DefaultCluster";
     }
 
     private static String resolveBrokerAddr(DefaultMQAdminExt admin, JsonObject conn) throws Exception {
+        return resolveBrokerAddr(admin, conn, admin.examineBrokerClusterInfo());
+    }
+
+    private static String resolveBrokerAddr(DefaultMQAdminExt admin, JsonObject conn, ClusterInfo clusterInfo)
+        throws Exception {
         String explicit = brokerAddress(conn);
         if (!explicit.isBlank()) {
             return explicit;
         }
-        ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
-        for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
-            String addr = broker.selectBrokerAddr();
-            if (addr != null && !addr.isBlank()) {
-                return remapBrokerAddrForClient(addr, conn);
+        if (clusterInfo != null && clusterInfo.getBrokerAddrTable() != null) {
+            for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
+                String addr = broker.selectBrokerAddr();
+                if (addr != null && !addr.isBlank()) {
+                    return remapBrokerAddrForClient(addr, conn);
+                }
             }
         }
         throw new IllegalStateException("No RocketMQ broker address found");
@@ -2364,18 +2540,23 @@ public final class RocketMqAgent {
     }
 
     private static Set<String> collectBrokerNames(DefaultMQAdminExt admin) {
-        Set<String> names = new HashSet<>();
         try {
-            ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
-            if (clusterInfo.getBrokerAddrTable() != null) {
-                for (BrokerData brokerData : clusterInfo.getBrokerAddrTable().values()) {
-                    if (brokerData.getBrokerName() != null && !brokerData.getBrokerName().isBlank()) {
-                        names.add(brokerData.getBrokerName());
-                    }
-                }
-            }
+            return collectBrokerNames(admin.examineBrokerClusterInfo());
         } catch (Exception ignored) {
             // Fall back to static reserved-topic filtering only.
+            return Set.of();
+        }
+    }
+
+    static Set<String> collectBrokerNames(ClusterInfo clusterInfo) {
+        Set<String> names = new HashSet<>();
+        if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+            return names;
+        }
+        for (BrokerData brokerData : clusterInfo.getBrokerAddrTable().values()) {
+            if (brokerData.getBrokerName() != null && !brokerData.getBrokerName().isBlank()) {
+                names.add(brokerData.getBrokerName());
+            }
         }
         return names;
     }
@@ -2397,29 +2578,44 @@ public final class RocketMqAgent {
     }
 
     private static Map<String, TopicConfig> collectBrokerTopicConfigs(DefaultMQAdminExt admin, JsonObject conn) {
-        Map<String, TopicConfig> merged = new LinkedHashMap<>();
         try {
-            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
-                try {
-                    TopicConfigSerializeWrapper wrapper =
-                        admin.getAllTopicConfig(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS);
-                    if (wrapper == null || wrapper.getTopicConfigTable() == null) {
+            return collectBrokerTopicConfigSnapshot(admin, conn, admin.examineBrokerClusterInfo()).topics();
+        } catch (Exception ignored) {
+            return new LinkedHashMap<>();
+        }
+    }
+
+    private static BrokerTopicConfigSnapshot collectBrokerTopicConfigSnapshot(
+        DefaultMQAdminExt admin, JsonObject conn, ClusterInfo clusterInfo) throws Exception {
+        List<String> brokerAddrs = resolveMasterBrokerAddrs(admin, conn, null, clusterInfo);
+        return collectBrokerTopicConfigs(
+            brokerAddrs,
+            brokerAddr -> admin.getAllTopicConfig(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS)
+        );
+    }
+
+    static BrokerTopicConfigSnapshot collectBrokerTopicConfigs(
+        List<String> brokerAddrs, BrokerTopicConfigLookup lookup) {
+        Map<String, TopicConfig> merged = new LinkedHashMap<>();
+        boolean complete = !brokerAddrs.isEmpty();
+        for (String brokerAddr : brokerAddrs) {
+            try {
+                TopicConfigSerializeWrapper wrapper = lookup.load(brokerAddr);
+                if (wrapper == null || wrapper.getTopicConfigTable() == null) {
+                    complete = false;
+                    continue;
+                }
+                for (TopicConfig config : wrapper.getTopicConfigTable().values()) {
+                    if (config.getTopicName() == null || config.getTopicName().isBlank()) {
                         continue;
                     }
-                    for (TopicConfig config : wrapper.getTopicConfigTable().values()) {
-                        if (config.getTopicName() == null || config.getTopicName().isBlank()) {
-                            continue;
-                        }
-                        merged.merge(config.getTopicName(), config, RocketMqAgent::preferTopicConfig);
-                    }
-                } catch (Exception ignored) {
-                    // Some brokers may reject bulk config reads.
+                    merged.merge(config.getTopicName(), config, RocketMqAgent::preferTopicConfig);
                 }
+            } catch (Exception ignored) {
+                complete = false;
             }
-        } catch (Exception ignored) {
-            // Fall back to nameserver topic list in listTopics.
         }
-        return merged;
+        return new BrokerTopicConfigSnapshot(merged, complete);
     }
 
     private static TopicConfig preferTopicConfig(TopicConfig left, TopicConfig right) {
@@ -2478,12 +2674,23 @@ public final class RocketMqAgent {
 
     private static String resolveTopicMessageType(DefaultMQAdminExt admin, JsonObject conn, String topic) {
         try {
+            return resolveTopicMessageType(admin, conn, topic, admin.examineBrokerClusterInfo());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String resolveTopicMessageType(
+        DefaultMQAdminExt admin, JsonObject conn, String topic, ClusterInfo clusterInfo) {
+        try {
             TopicRouteData route = admin.examineTopicRouteInfo(topic);
             if (route.getQueueDatas() == null || route.getQueueDatas().isEmpty()) {
                 return null;
             }
             String brokerName = route.getQueueDatas().get(0).getBrokerName();
-            ClusterInfo clusterInfo = admin.examineBrokerClusterInfo();
+            if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
+                return null;
+            }
             BrokerData brokerData = clusterInfo.getBrokerAddrTable().get(brokerName);
             if (brokerData == null) {
                 return null;
@@ -2499,9 +2706,16 @@ public final class RocketMqAgent {
         }
     }
 
+    /**
+     * Slice {@code items} from {@code offset}. When {@code limit <= 0}, return all remaining items
+     * (used by the Rust adapter's single-shot full list request).
+     */
     static <T> List<T> paginate(List<T> items, int offset, int limit) {
         if (offset >= items.size()) {
             return Collections.emptyList();
+        }
+        if (limit <= 0) {
+            return new ArrayList<>(items.subList(offset, items.size()));
         }
         int end = Math.min(items.size(), offset + limit);
         return new ArrayList<>(items.subList(offset, end));
@@ -2514,9 +2728,12 @@ public final class RocketMqAgent {
         return adminClient;
     }
 
-    private static DefaultMQProducer requireProducer() {
+    private static DefaultMQProducer requireProducer() throws Exception {
         if (producer == null) {
-            throw new IllegalStateException("Producer is not initialized. Call connect first.");
+            if (cachedConnection == null) {
+                throw new IllegalStateException("Not connected. Call connect first.");
+            }
+            producer = buildProducer(cachedConnection);
         }
         return producer;
     }

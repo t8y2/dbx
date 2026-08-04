@@ -16,6 +16,9 @@ import com.mongodb.MongoClientSettings;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Collation;
+import com.mongodb.client.model.CollationStrength;
+import com.mongodb.client.model.CountOptions;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
@@ -191,6 +194,45 @@ class MongoAgentTest {
         assertEquals(42L, total.value());
         assertTrue(total.exact());
         assertEquals(List.of("countDocuments:{\"status\": \"active\"}"), calls);
+    }
+
+    @Test
+    void parsesFindCollationAndUsesItForExactCounts() {
+        Collation collation = MongoAgent.collationOrNull(Document.parse(
+            "{\"locale\":\"en\",\"strength\":1,\"caseLevel\":false,\"numericOrdering\":true}"
+        ));
+        assertNotNull(collation);
+        assertEquals("en", collation.getLocale());
+        assertEquals(CollationStrength.PRIMARY, collation.getStrength());
+        assertEquals(false, collation.getCaseLevel());
+        assertEquals(true, collation.getNumericOrdering());
+
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(
+            collection,
+            new Document("name", "xxx"),
+            collation
+        );
+
+        assertEquals(42L, total.value());
+        assertEquals(List.of("countDocuments:{\"name\": \"xxx\"}:collation=en/1"), calls);
+    }
+
+    @Test
+    void rejectsInvalidFindCollationOptions() {
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.collationOrNull(Document.parse("{\"strength\":1}"))
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.collationOrNull(Document.parse("{\"locale\":\"en\",\"unknown\":true}"))
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.collationOrNull(Document.parse("{\"locale\":\"en\",\"strength\":1.5}"))
+        );
     }
 
     @Test
@@ -822,7 +864,12 @@ class MongoAgentTest {
                 }
                 if ("countDocuments".equals(method.getName())) {
                     Document filter = (Document) args[0];
-                    calls.add("countDocuments:" + filter.toJson());
+                    String call = "countDocuments:" + filter.toJson();
+                    if (args.length > 1 && args[1] instanceof CountOptions options && options.getCollation() != null) {
+                        Collation collation = options.getCollation();
+                        call += ":collation=" + collation.getLocale() + "/" + collation.getStrength().getIntRepresentation();
+                    }
+                    calls.add(call);
                     return 42L;
                 }
                 throw new UnsupportedOperationException(method.getName());

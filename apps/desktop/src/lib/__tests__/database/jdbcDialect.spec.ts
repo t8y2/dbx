@@ -5,6 +5,7 @@ import {
   connectionObjectTreeNodeSchema,
   connectionObjectTreeQuerySchema,
   connectionQueryExecutionSchema,
+  connectionShouldDiscoverJdbcSchemas,
   connectionShouldLoadIdentifierQuote,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
@@ -87,6 +88,8 @@ describe("jdbc dialect inference", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.postgresql.Driver" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8s" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
     expect(
       connectionShouldLoadIdentifierQuote({
         db_type: "jdbc",
@@ -94,6 +97,11 @@ describe("jdbc dialect inference", () => {
         external_config: { gaussdbIdentifierQuoteStyle: "backtick" },
       }),
     ).toBe(false);
+  });
+
+  it("falls back to a flat table tree when GBase 8s reports no schemas", () => {
+    expect(connectionShouldDiscoverJdbcSchemas({ db_type: "gbase", driver_profile: "gbase8s" })).toBe(true);
+    expect(connectionShouldDiscoverJdbcSchemas({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
   });
 
   it("recognizes GaussDB reached through PostgreSQL-compatible JDBC drivers", () => {

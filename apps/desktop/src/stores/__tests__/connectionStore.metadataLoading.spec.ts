@@ -88,6 +88,17 @@ function informixConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function gbase8sConnection(): ConnectionConfig {
+  return {
+    ...informixConnection(),
+    id: "gbase8s-1",
+    name: "GBase 8s",
+    db_type: "gbase",
+    driver_profile: "gbase8s",
+    database: "dbx_test",
+  } as ConnectionConfig;
+}
+
 function procedure(name: string): ObjectInfo {
   return {
     name,
@@ -268,6 +279,40 @@ describe("connectionStore metadata loading", () => {
     expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
     expect(listTables).toHaveBeenCalled();
     expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "t", undefined]]);
+  });
+
+  it("keeps the flat object tree for GBase 8s databases that cannot qualify schemas in DML", async () => {
+    const listSchemaInfos = vi.fn().mockResolvedValue([]);
+    const listTables = vi.fn().mockResolvedValue([{ name: "connection_smoke", table_type: "TABLE", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listSchemaInfos,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    const connection = gbase8sConnection();
+    const databaseNode: TreeNode = { id: `${connection.id}:dbx_test`, label: "dbx_test", type: "database", connectionId: connection.id, database: "dbx_test", isExpanded: false, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: true, children: [databaseNode] }];
+
+    await store.loadTreeNodeChildren(databaseNode, { force: true });
+
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "dbx_test");
+    expect(listTables).toHaveBeenCalled();
+    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "connection_smoke", undefined]]);
   });
 
   it("renders simple-mode table children without waiting for supplemental objects", async () => {

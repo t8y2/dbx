@@ -276,6 +276,46 @@ jobs:
           name: rabbitmq-native
           path: "release-native/dbx-agent-rabbitmq-*"
 
+  build-cassandra-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'cassandra') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test Cassandra native agent
+        working-directory: agents/drivers/cassandra-go
+        run: go test ./...
+      - name: Cross-compile Cassandra native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/cassandra-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-cassandra-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cassandra-native
+          path: "release-native/dbx-agent-cassandra-*"
+
   build-kingbase-native:
     needs: [bump-versions]
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'kingbase') }}
@@ -315,6 +355,46 @@ jobs:
         with:
           name: kingbase-native
           path: "release-native/dbx-agent-kingbase-*"
+
+  build-vastbase-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'vastbase') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test Vastbase native agent
+        working-directory: agents/drivers/vastbase-go
+        run: go test ./...
+      - name: Cross-compile Vastbase native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/vastbase-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-vastbase-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vastbase-native
+          path: "release-native/dbx-agent-vastbase-*"
 
   build-duckdb-native:
     needs: [bump-versions]
@@ -531,7 +611,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-kingbase-native, build-duckdb-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-cassandra-native, build-kingbase-native, build-vastbase-native, build-duckdb-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -649,9 +729,11 @@ jobs:
             local name="$1"
             case "$name" in
               kingbase) echo "人大金仓 KingbaseES" ;;
+              vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
+              cassandra) echo "Apache Cassandra" ;;
               *) echo "$name" ;;
             esac
           }
@@ -715,7 +797,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase duckdb rabbitmq; do
+          for name in oracle xugu kingbase vastbase duckdb rabbitmq cassandra; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -780,10 +862,12 @@ jobs:
             local name="$1"
             case "$name" in
               kingbase) echo "人大金仓 KingbaseES" ;;
+              vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
+              cassandra) echo "Apache Cassandra" ;;
               *) echo "$name" ;;
             esac
           }
@@ -806,6 +890,10 @@ jobs:
               LOG_PATH="agents/drivers/oracle-go/"
             elif [ "$name" = "kingbase" ]; then
               LOG_PATH="agents/drivers/kingbase-go/"
+            elif [ "$name" = "vastbase" ]; then
+              LOG_PATH="agents/drivers/vastbase-go/"
+            elif [ "$name" = "cassandra" ]; then
+              LOG_PATH="agents/drivers/cassandra-go/"
             elif [ -d "agents/drivers/$name" ]; then
               LOG_PATH="agents/drivers/$name/"
             else

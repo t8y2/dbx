@@ -332,8 +332,8 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
-          cache: maven
+          java-version: "21"
+          cache: gradle
 
       - name: JDBC plugin version guard
         env:
@@ -538,6 +538,14 @@ jobs:
         run: go test ./...
         working-directory: agents/drivers/rabbitmq
 
+      - name: Cassandra native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/cassandra-go
+
+      - name: Vastbase native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/vastbase-go
+
       - name: Oracle native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-oracle-linux-x64 .
         working-directory: agents/drivers/oracle-go
@@ -549,6 +557,55 @@ jobs:
       - name: RabbitMQ native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rabbitmq-linux-x64 .
         working-directory: agents/drivers/rabbitmq
+
+      - name: Cassandra native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-cassandra-linux-x64 .
+        working-directory: agents/drivers/cassandra-go
+
+      - name: Vastbase native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-vastbase-linux-x64 .
+        working-directory: agents/drivers/vastbase-go
+
+      - name: Cassandra native agent integration tests
+        shell: bash
+        working-directory: agents/drivers/cassandra-go
+        run: |
+          set -euo pipefail
+          for version in 3.11.19 5.0.6; do
+            name="dbx-cassandra-${version//./-}"
+            docker rm -fv "$name" >/dev/null 2>&1 || true
+            docker run -d --name "$name" \
+              -e CASSANDRA_CLUSTER_NAME="DBX Cassandra CI $version" \
+              -e CASSANDRA_DC=dc1 \
+              -e CASSANDRA_RACK=rack1 \
+              -e CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch \
+              -e CASSANDRA_NUM_TOKENS=16 \
+              -e MAX_HEAP_SIZE=512M \
+              -e HEAP_NEWSIZE=100M \
+              -p 9042:9042 \
+              "cassandra:$version"
+            cleanup() {
+              docker rm -fv "$name" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            ready=false
+            for _ in $(seq 1 100); do
+              if docker exec "$name" cqlsh -e 'SELECT release_version FROM system.local' >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 3
+            done
+            if [ "$ready" != "true" ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            CASSANDRA_TEST_HOST=127.0.0.1 \
+              CASSANDRA_TEST_PORT=9042 \
+              go test -run '^TestCassandraIntegration$' -count=1 ./...
+            cleanup
+            trap - EXIT
+          done
 
       - name: RabbitMQ native agent integration tests
         shell: bash

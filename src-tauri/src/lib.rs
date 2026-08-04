@@ -306,9 +306,12 @@ fn linux_selected_drm_render_device<'a>(
     devices.iter().find(|device| device.boot_vga).or_else(|| devices.first())
 }
 
-#[cfg(target_os = "linux")]
-fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_drm_render_devices_from_paths(
+    sys_class_drm: &std::path::Path,
+    dev_dri: &std::path::Path,
+) -> Vec<LinuxDrmRenderDevice> {
+    let Ok(entries) = std::fs::read_dir(sys_class_drm) else {
         return Vec::new();
     };
     let mut devices = entries
@@ -320,20 +323,25 @@ fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
             if render_index.is_empty() || !render_index.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
+            let device_file = dev_dri.join(node_name);
+            if std::fs::OpenOptions::new().read(true).write(true).open(&device_file).is_err() {
+                return None;
+            }
             let device_path = entry.path().join("device");
             let driver = std::fs::read_link(device_path.join("driver"))
                 .ok()
                 .and_then(|path| path.file_name().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase));
             let boot_vga = std::fs::read_to_string(device_path.join("boot_vga")).is_ok_and(|value| value.trim() == "1");
-            Some(LinuxDrmRenderDevice {
-                device_file: std::path::Path::new("/dev/dri").join(node_name),
-                driver,
-                boot_vga,
-            })
+            Some(LinuxDrmRenderDevice { device_file, driver, boot_vga })
         })
         .collect::<Vec<_>>();
     devices.sort_by(|left, right| left.device_file.cmp(&right.device_file));
     devices
+}
+
+#[cfg(target_os = "linux")]
+fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
+    linux_drm_render_devices_from_paths(std::path::Path::new("/sys/class/drm"), std::path::Path::new("/dev/dri"))
 }
 
 #[cfg(target_os = "linux")]
@@ -354,7 +362,10 @@ fn linux_nvidia_driver() -> LinuxNvidiaDriver {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&'static str, &'static str)] {
+fn linux_webkit_rendering_workarounds(
+    driver: LinuxNvidiaDriver,
+    has_render_device: bool,
+) -> &'static [(&'static str, &'static str)] {
     match driver {
         LinuxNvidiaDriver::Proprietary => {
             // NVIDIA's proprietary driver needs both DMABuf and explicit-sync
@@ -364,6 +375,14 @@ fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&
         LinuxNvidiaDriver::Nouveau => {
             // WebKitGTK's DMABuf renderer can produce a fully black WebView on
             // Nouveau while the DOM remains interactive.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        }
+        LinuxNvidiaDriver::None if !has_render_device => {
+            // No DRM render node means Mesa can only render through llvmpipe.
+            // WebKitGTK's DMABuf compositing then drives llvmpipe's gallivm
+            // LLVM JIT, which can fail to materialize the compositing shaders
+            // (blank/white window on GPU-less VMs and servers), so disable the
+            // DMABuf renderer there as well.
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         }
         LinuxNvidiaDriver::None => {
@@ -430,7 +449,8 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver()) {
+    let has_render_device = !linux_drm_render_devices().is_empty();
+    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver(), has_render_device) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -830,12 +850,12 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_system_gtk_immodules_cache,
-        linux_appimage_wayland_backend_override, linux_nvidia_driver_from_state, linux_selected_drm_render_device,
-        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
-        LinuxNvidiaDriver,
+        linux_appimage_wayland_backend_override, linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state,
+        linux_selected_drm_render_device, linux_webkit_rendering_workarounds, native_window_decorations_override,
+        should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
+        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1002,6 +1022,25 @@ mod tests {
     }
 
     #[test]
+    fn discovers_only_usable_linux_drm_render_device_files() {
+        let root = std::env::temp_dir().join(format!("dbx-drm-render-devices-{}", uuid::Uuid::new_v4()));
+        let sys_class_drm = root.join("sys/class/drm");
+        let dev_dri = root.join("dev/dri");
+        std::fs::create_dir_all(sys_class_drm.join("renderD128/device")).unwrap();
+        std::fs::create_dir_all(sys_class_drm.join("renderD129/device")).unwrap();
+        std::fs::create_dir_all(&dev_dri).unwrap();
+
+        assert!(linux_drm_render_devices_from_paths(&sys_class_drm, &dev_dri).is_empty());
+
+        std::fs::write(dev_dri.join("renderD129"), []).unwrap();
+        let devices = linux_drm_render_devices_from_paths(&sys_class_drm, &dev_dri);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_file, dev_dri.join("renderD129"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn keeps_linux_dmabuf_when_nouveau_is_loaded_but_not_the_default_renderer() {
         let devices = [
             drm_render_device("/dev/dri/renderD128", "i915", true),
@@ -1054,14 +1093,20 @@ mod tests {
     #[test]
     fn applies_driver_specific_linux_webkit_rendering_workarounds() {
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
-        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None), &[]);
+        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, true), &[]);
+        // Without any DRM render node (GPU-less VM / server) Mesa falls back to
+        // llvmpipe, whose DMABuf compositing path can crash the WebKit process.
+        assert_eq!(
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, false),
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        );
     }
 
     #[test]

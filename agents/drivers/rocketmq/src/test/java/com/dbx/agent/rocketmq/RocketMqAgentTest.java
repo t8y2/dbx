@@ -14,17 +14,23 @@ import org.apache.rocketmq.remoting.protocol.admin.TopicStatsTable;
 import org.apache.rocketmq.remoting.protocol.admin.TopicOffset;
 import org.apache.rocketmq.remoting.protocol.body.ProducerInfo;
 import org.apache.rocketmq.remoting.protocol.body.ProducerTableInfo;
+import org.apache.rocketmq.remoting.protocol.body.TopicConfigSerializeWrapper;
 import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
+import org.apache.rocketmq.remoting.protocol.route.QueueData;
+import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 import org.apache.rocketmq.common.message.MessageQueue;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -181,6 +187,29 @@ class RocketMqAgentTest {
     }
 
     @Test
+    void paginateLimitZeroReturnsAllFromOffset() {
+        List<Integer> items = IntStream.range(0, 341).boxed().toList();
+        assertEquals(341, RocketMqAgent.paginate(items, 0, 0).size());
+        assertEquals(141, RocketMqAgent.paginate(items, 200, 0).size());
+        assertEquals(200, RocketMqAgent.paginate(items, 200, 0).get(0));
+    }
+
+    @Test
+    void collectBrokerNamesFromClusterInfoSnapshot() {
+        org.apache.rocketmq.remoting.protocol.body.ClusterInfo clusterInfo =
+            new org.apache.rocketmq.remoting.protocol.body.ClusterInfo();
+        java.util.HashMap<String, org.apache.rocketmq.remoting.protocol.route.BrokerData> table =
+            new java.util.HashMap<>();
+        org.apache.rocketmq.remoting.protocol.route.BrokerData broker =
+            new org.apache.rocketmq.remoting.protocol.route.BrokerData();
+        broker.setBrokerName("broker-a");
+        table.put("broker-a", broker);
+        clusterInfo.setBrokerAddrTable(table);
+        assertEquals(Set.of("broker-a"), RocketMqAgent.collectBrokerNames(clusterInfo));
+        assertEquals(Set.of(), RocketMqAgent.collectBrokerNames(null));
+    }
+
+    @Test
     void resolveNameServerAddrSetSplitsMultiAddr() {
         JsonObject conn = JsonParser.parseString("""
             {"namesrv_addr":"127.0.0.1:9876;192.168.1.2:9876"}
@@ -293,6 +322,187 @@ class RocketMqAgentTest {
     }
 
     @Test
+    void enrichTopicPartitionsRunsIndependentLookupsConcurrently() throws Exception {
+        List<Map<String, Object>> rows = IntStream.range(0, 4)
+            .mapToObj(index -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("name", "topic-" + index);
+                row.put("partitions", 1);
+                return row;
+            })
+            .toList();
+        CountDownLatch started = new CountDownLatch(rows.size());
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+
+        CompletableFuture<Void> enrichment = CompletableFuture.runAsync(() ->
+            RocketMqAgent.enrichTopicPartitions(rows, topic -> {
+                int current = active.incrementAndGet();
+                maxActive.accumulateAndGet(current, Math::max);
+                started.countDown();
+                try {
+                    release.await(1, TimeUnit.SECONDS);
+                    return routeWithReadQueues(8);
+                } finally {
+                    active.decrementAndGet();
+                }
+            }, 4, 1_000)
+        );
+
+        assertTrue(started.await(1, TimeUnit.SECONDS));
+        release.countDown();
+        enrichment.get(2, TimeUnit.SECONDS);
+
+        assertTrue(maxActive.get() > 1);
+        for (Map<String, Object> row : rows) {
+            assertEquals(8, row.get("partitions"));
+        }
+    }
+
+    @Test
+    void enrichTopicPartitionsReturnsDefaultsWhenBudgetExpires() {
+        List<Map<String, Object>> rows = IntStream.range(0, 4)
+            .mapToObj(index -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("name", "slow-topic-" + index);
+                row.put("partitions", 1);
+                return row;
+            })
+            .toList();
+        CountDownLatch blocked = new CountDownLatch(1);
+        long startedAt = System.nanoTime();
+
+        RocketMqAgent.enrichTopicPartitions(rows, topic -> {
+            blocked.await();
+            return routeWithReadQueues(16);
+        }, 2, 50);
+
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        assertTrue(elapsedMs < 1_000, "topic route enrichment exceeded its response budget: " + elapsedMs + "ms");
+        for (Map<String, Object> row : rows) {
+            assertEquals(1, row.get("partitions"));
+        }
+    }
+
+    @Test
+    void buildTopicCatalogRowsFallbackIssuesAtMostOneRouteRpcPerTopic() {
+        Set<String> topicNames = new TreeSet<>(List.of("Alpha", "Beta", "Gamma"));
+        Map<String, AtomicInteger> routeCalls = new ConcurrentHashMap<>();
+        AtomicInteger totalRouteCalls = new AtomicInteger();
+
+        List<Map<String, Object>> rows = RocketMqAgent.buildTopicCatalogRows(
+            topicNames,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            Set.of(),
+            Set.of(),
+            "DefaultCluster",
+            "",
+            topic -> {
+                totalRouteCalls.incrementAndGet();
+                routeCalls.computeIfAbsent(topic, ignored -> new AtomicInteger()).incrementAndGet();
+                return routeWithReadQueues(4);
+            },
+            8,
+            2_000
+        );
+
+        assertEquals(3, rows.size());
+        assertEquals(3, totalRouteCalls.get(), "fallback must not repeat examineTopicRouteInfo per topic");
+        for (String topic : topicNames) {
+            assertEquals(1, routeCalls.get(topic).get());
+        }
+        for (Map<String, Object> row : rows) {
+            assertEquals(4, row.get("partitions"));
+            // Bulk config unavailable — classify without per-topic examineTopicConfig.
+            assertEquals("UNSPECIFIED", row.get("messageType"));
+        }
+    }
+
+    @Test
+    void buildTopicCatalogRowsUsesBrokerConfigWithoutRouteLookup() {
+        TopicConfig config = new TopicConfig("Orders");
+        config.setReadQueueNums(12);
+        config.setAttributes(Map.of("message.type", "NORMAL"));
+        Map<String, TopicConfig> brokerTopics = Map.of("Orders", config);
+        AtomicInteger routeCalls = new AtomicInteger();
+
+        List<Map<String, Object>> rows = RocketMqAgent.buildTopicCatalogRows(
+            Set.of("Orders"),
+            brokerTopics,
+            Map.of("Orders", Map.of("message.type", "NORMAL")),
+            Set.of(),
+            Set.of(),
+            "DefaultCluster",
+            "",
+            topic -> {
+                routeCalls.incrementAndGet();
+                return routeWithReadQueues(99);
+            },
+            8,
+            2_000
+        );
+
+        assertEquals(1, rows.size());
+        assertEquals(0, routeCalls.get(), "broker catalog path must not call examineTopicRouteInfo");
+        assertEquals(12, rows.get(0).get("partitions"));
+        assertEquals("NORMAL", rows.get(0).get("messageType"));
+    }
+
+    @Test
+    void partialBrokerTopicConfigsMergeNameServerCatalog() {
+        TopicConfig orders = new TopicConfig("Orders");
+        TopicConfigSerializeWrapper wrapper = new TopicConfigSerializeWrapper();
+        wrapper.setTopicConfigTable(new ConcurrentHashMap<>(Map.of("Orders", orders)));
+
+        RocketMqAgent.BrokerTopicConfigSnapshot snapshot = RocketMqAgent.collectBrokerTopicConfigs(
+            List.of("broker-a", "broker-b"),
+            brokerAddr -> {
+                if (brokerAddr.equals("broker-b")) {
+                    throw new IllegalStateException("broker unavailable");
+                }
+                return wrapper;
+            }
+        );
+
+        assertFalse(snapshot.complete());
+        assertEquals(Set.of("Orders"), snapshot.topics().keySet());
+        assertEquals(
+            Set.of("Invoices", "Orders"),
+            RocketMqAgent.topicCatalogNames(snapshot, Set.of("Invoices", "Orders"))
+        );
+    }
+
+    @Test
+    void completeBrokerTopicConfigsRemainAuthoritative() {
+        TopicConfig orders = new TopicConfig("Orders");
+        TopicConfigSerializeWrapper wrapper = new TopicConfigSerializeWrapper();
+        wrapper.setTopicConfigTable(new ConcurrentHashMap<>(Map.of("Orders", orders)));
+
+        RocketMqAgent.BrokerTopicConfigSnapshot snapshot = RocketMqAgent.collectBrokerTopicConfigs(
+            List.of("broker-a"),
+            brokerAddr -> wrapper
+        );
+
+        assertTrue(snapshot.complete());
+        assertEquals(
+            Set.of("Orders"),
+            RocketMqAgent.topicCatalogNames(snapshot, Set.of("DeletedButStillRouted", "Orders"))
+        );
+    }
+
+    private static TopicRouteData routeWithReadQueues(int readQueueNums) {
+        QueueData queueData = new QueueData();
+        queueData.setBrokerName("broker-a");
+        queueData.setReadQueueNums(readQueueNums);
+        queueData.setWriteQueueNums(readQueueNums);
+        TopicRouteData route = new TopicRouteData();
+        route.setQueueDatas(List.of(queueData));
+        return route;
+    }
+
+    @Test
     void isEmptyQueryMessageResultDetectsRocketMqCode208() {
         MQClientException empty = new MQClientException(208, "query message by key finished, but no message");
         assertTrue(RocketMqAgent.isEmptyQueryMessageResult(empty));
@@ -345,5 +555,24 @@ class RocketMqAgentTest {
         assertEquals(1, producers.size());
         assertEquals("CLIENT_INNER_PRODUCER", producers.get(0).get("producerName"));
         assertEquals("127.0.0.1:39688", producers.get(0).get("address"));
+    }
+
+    @Test
+    void connectionMatchesComparesRocketMqConnectFields() {
+        JsonObject base = JsonParser.parseString("""
+            {
+              "namesrv_addr": "127.0.0.1:9876",
+              "cluster_name": "DefaultCluster",
+              "broker_addr": "",
+              "access_key": "ak",
+              "secret_key": "sk"
+            }
+            """).getAsJsonObject();
+        JsonObject same = base.deepCopy();
+        JsonObject differentNamesrv = base.deepCopy();
+        differentNamesrv.addProperty("namesrv_addr", "127.0.0.1:9877");
+
+        assertTrue(RocketMqAgent.connectionMatches(base, same));
+        assertFalse(RocketMqAgent.connectionMatches(base, differentNamesrv));
     }
 }

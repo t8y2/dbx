@@ -402,6 +402,7 @@ pub async fn find_documents_core(
     filter: Option<&str>,
     projection: Option<&str>,
     sort: Option<&str>,
+    collation: Option<&str>,
 ) -> Result<DocumentQueryResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
@@ -410,7 +411,7 @@ pub async fn find_documents_core(
             // Document browser responses must retain BSON type metadata so nested filters
             // can round-trip ObjectId, Date, and int64 values through Extended JSON.
             mongo_driver::find_documents_extended_json(
-                client, database, collection, skip, limit, filter, projection, sort,
+                client, database, collection, skip, limit, filter, projection, sort, collation,
             )
             .await
         }
@@ -442,6 +443,9 @@ pub async fn find_documents_core(
             });
             if let Some(projection) = projection {
                 params["projection"] = serde_json::json!(projection);
+            }
+            if let Some(collation) = collation {
+                params["collation"] = serde_json::json!(collation);
             }
             match client.mongo_find_documents_extended_json(params.clone()).await {
                 Ok(result) => Ok(result),

@@ -34,6 +34,17 @@ describe("qualifiedTableName — SQLite attached databases", () => {
   });
 });
 
+describe("qualifiedTableName — GBase 8s", () => {
+  it("keeps the owner unquoted when the driver reports no identifier quote support", () => {
+    expect(qualifiedTableName({ databaseType: "informix", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("gbasedbt.connection_smoke");
+    expect(quoteTableDataIdentifier("informix", "connection_smoke", "")).toBe("connection_smoke");
+  });
+
+  it("keeps native Informix qualification when no driver capability was loaded", () => {
+    expect(qualifiedTableName({ databaseType: "informix", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("gbasedbt.connection_smoke");
+  });
+});
+
 describe("quoteTableIdentifier", () => {
   it("backtick-quotes mysql identifiers", () => {
     expect(quoteTableIdentifier("mysql", "orders")).toBe("`orders`");

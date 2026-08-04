@@ -24,6 +24,7 @@ export interface MongoFindCommand {
   skip: number;
   limit: number;
   sort?: string;
+  collation?: string;
 }
 
 export interface MongoFindPaginationPlan {
@@ -162,6 +163,14 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
     sort = parsedSort;
   }
 
+  const collationArg = readChainedCallArgument(chain, "collation");
+  let collation: string | undefined;
+  if (collationArg !== undefined) {
+    const parsedCollation = normalizeJsonArgument(collationArg);
+    if (!parsedCollation) return null;
+    collation = parsedCollation;
+  }
+
   const skip = readChainedIntegerArgument(chain, "skip", 0);
   const limit = readChainedIntegerArgument(chain, "limit", DEFAULT_LIMIT);
   if (skip === null || limit === null) return null;
@@ -173,6 +182,7 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
     skip,
     limit,
     sort,
+    ...(collation ? { collation } : {}),
   };
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.5.74",
+  "version": "0.5.75",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -89,6 +89,7 @@
     "elkjs": "^0.11.1",
     "leaflet": "^1.9.4",
     "marked": "^18.0.4",
+    "pako": "^3.0.1",
     "pinia": "^3.0.0",
     "proj4": "^2.20.9",
     "reka-ui": "^2.10.1",

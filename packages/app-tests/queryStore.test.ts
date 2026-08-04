@@ -1062,6 +1062,26 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
   assert.equal(tab.resultLocalSortOriginalMongoCopyDocuments, undefined);
 });
 
+test("sortTabResultLocally uses result column types for numeric strings", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.result = {
+    columns: ["QUANTITY_IN_STOCK"],
+    column_types: ["NUMBER"],
+    rows: [["-27700"], ["-78800"], ["297500"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+  };
+
+  store.sortTabResultLocally(tabId, "QUANTITY_IN_STOCK", 0, "asc");
+
+  assert.deepEqual(tab.result.rows, [["-78800"], ["-27700"], ["297500"]]);
+});
+
 test("selecting a result run restores its displayed result without changing SQL draft", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
@@ -4561,7 +4581,10 @@ test("mongo dropIndexes execution exposes partial failures and refreshes loaded 
     assert.equal(indexRefreshRequested, true);
     const indexGroup = connectionStore.treeNodes[0]?.children?.[0]?.children?.[0]?.children?.[0];
     assert.equal(indexGroup?.isExpanded, false);
-    assert.deepEqual(indexGroup?.children?.map((node) => node.label), ["_id_ (_id)"]);
+    assert.deepEqual(
+      indexGroup?.children?.map((node) => node.label),
+      ["_id_ (_id)"],
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

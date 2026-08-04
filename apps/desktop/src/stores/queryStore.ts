@@ -1158,7 +1158,8 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const originalRows = tab.resultLocalSortOriginalRows;
-    const rowIndexes = direction ? sortDataGridRowIndexes(originalRows, columnIndex, direction) : originalRows.map((_, index) => index);
+    const columnType = tab.result.column_types?.[columnIndex];
+    const rowIndexes = direction ? sortDataGridRowIndexes(originalRows, columnIndex, direction, columnType) : originalRows.map((_, index) => index);
     const rows = rowIndexes.map((index) => originalRows[index]!);
     const originalMongoDocuments = tab.resultLocalSortOriginalMongoDocuments;
     const mongo_documents = originalMongoDocuments ? rowIndexes.map((index) => originalMongoDocuments[index]) : undefined;

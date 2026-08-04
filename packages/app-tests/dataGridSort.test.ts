@@ -38,6 +38,13 @@ test("sortDataGridRows uses natural string order and keeps equal values stable",
   ]);
 });
 
+test("sortDataGridRows sorts numeric strings by signed value for numeric columns", () => {
+  const rows = [["-27700"], ["-78800"], ["297500"], ["9007199254740993"], ["9007199254740992"], ["-1.2e3"], ["-1.19e3"], ["1.01"], ["1.001"]];
+
+  assert.deepEqual(sortDataGridRows(rows, 0, "asc", "NUMBER"), [["-78800"], ["-27700"], ["-1.2e3"], ["-1.19e3"], ["1.001"], ["1.01"], ["297500"], ["9007199254740992"], ["9007199254740993"]]);
+  assert.deepEqual(sortDataGridRows([["-27700"], ["-78800"]], 0, "asc", "VARCHAR2"), [["-27700"], ["-78800"]]);
+});
+
 test("sortDataGridRows sorts ISO date strings by time", () => {
   const rows = [["2026-02-01"], ["2025-12-31"], ["2026-01-01"]];
 

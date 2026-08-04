@@ -344,7 +344,7 @@ describe("DataGridColumnHeader", () => {
 });
 
 describe("DataGridFilterBuilder", () => {
-  it("clips long selected values inside the filter grid", () => {
+  it("keeps selected columns and values readable without stretching the controls", () => {
     const mounted = mountComponent(DataGridFilterBuilder, {
       rules: [{ id: "r1", columnName: "appointmentStatusWithAnExceptionallyLongName", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
       columns: ["appointmentStatusWithAnExceptionallyLongName", "name"],
@@ -357,7 +357,7 @@ describe("DataGridFilterBuilder", () => {
     const triggers = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectTrigger");
     const selectValues = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectValue");
     const items = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem");
-    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[minmax(0,1fr)_80px_minmax(0,1fr)_auto]"));
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]"));
     const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
 
@@ -371,7 +371,8 @@ describe("DataGridFilterBuilder", () => {
     expect(items.every((item) => String(item.props.class).includes("rounded-none"))).toBe(true);
     expect(searchInput.props.placeholder).toBe("grid.filterBuilderSearchColumns");
     expect(valueEditor.props.placeholder).toBe("grid.filterBuilderValue");
-    expect(String(ruleGrid.props.class)).toContain("grid-cols-[minmax(0,1fr)_80px_minmax(0,1fr)_auto]");
+    expect(String(ruleGrid.props.class)).toContain("grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]");
+    expect(String(ruleGrid.props.class)).toContain("justify-start");
     for (const trigger of triggers) {
       expect(String(trigger.props.class)).toContain("w-full");
       expect(String(trigger.props.class)).toContain("overflow-hidden");
@@ -598,7 +599,7 @@ describe("DataGridQueryControls", () => {
     });
     const popoverContent = findOne(mounted.root, (node) => node.props["data-stub"] === "PopoverContent");
 
-    expect(String(popoverContent.props.class)).toContain("w-[480px]");
+    expect(String(popoverContent.props.class)).toContain("w-[624px]");
     expect(String(popoverContent.props.class)).toContain("max-w-[calc(100vw-24px)]");
   });
 

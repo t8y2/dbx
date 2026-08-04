@@ -62,20 +62,21 @@ export function orderedSubsequenceSpan(text: string, query: string): { first: nu
 /**
  * Generic matcher for small pick-lists (grid condition editor, ...):
  * prefix > pinyin-initials prefix > substring > pinyin-initials subsequence.
- * Returns -1 for no match; higher is better. An empty query matches everything.
+ * Returns -1 for no match; scores are per-tier constants so same-tier
+ * candidates keep their original order. An empty query matches everything.
  */
 export function pinyinAwareMatchScore(candidate: string, query: string): number {
   const text = candidate.toLowerCase();
   const normalized = query.trim().toLowerCase();
   if (!normalized) return 0;
-  if (text.startsWith(normalized)) return 400 - text.length;
+  if (text.startsWith(normalized)) return 400;
   const asciiQuery = /^[a-z0-9]+$/.test(normalized);
   const han = containsHan(text);
-  if (asciiQuery && han && pinyinFirstLetters(text).startsWith(normalized)) return 300 - text.length;
-  if (text.includes(normalized)) return 200 - text.length;
+  if (asciiQuery && han && pinyinFirstLetters(text).startsWith(normalized)) return 300;
+  if (text.includes(normalized)) return 200;
   if (asciiQuery && han) {
     const subsequence = orderedSubsequenceSpan(pinyinFirstLetters(text), normalized);
-    if (subsequence) return 100 - subsequence.first * 3 - subsequence.span - text.length;
+    if (subsequence) return 100;
   }
   return -1;
 }

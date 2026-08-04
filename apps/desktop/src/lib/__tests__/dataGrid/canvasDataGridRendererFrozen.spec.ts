@@ -108,6 +108,17 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     ).toEqual({ pixelWidth: 1125, pixelHeight: 500, scaleX: 1.25, scaleY: 1.25, measured: false });
   });
 
+  it("caps the observed backing store at the configured pixel ratio", () => {
+    expect(
+      resolveCanvasBackingStoreMetrics({
+        width: 801,
+        height: 399,
+        pixelRatio: 4,
+        devicePixelSize: { cssWidth: 801, cssHeight: 399, pixelWidth: 4005, pixelHeight: 1995 },
+      }),
+    ).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: true });
+  });
+
   it("draws without errors when frozenColumnCount is 0", () => {
     const canvas = createMockCanvas();
     const options = createBaseOptions({ canvas, frozenColumnCount: 0 });

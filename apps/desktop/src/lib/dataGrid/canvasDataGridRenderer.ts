@@ -116,8 +116,10 @@ export function resolveCanvasBackingStoreMetrics(options: { width: number; heigh
   const fallbackRatio = Math.max(1, options.pixelRatio);
   const measured = options.devicePixelSize;
   const measurementMatches = !!measured && Math.abs(measured.cssWidth - width) <= 0.5 && Math.abs(measured.cssHeight - height) <= 0.5 && measured.pixelWidth > 0 && measured.pixelHeight > 0;
-  const pixelWidth = measurementMatches ? measured.pixelWidth : Math.max(1, Math.ceil(width * fallbackRatio));
-  const pixelHeight = measurementMatches ? measured.pixelHeight : Math.max(1, Math.ceil(height * fallbackRatio));
+  const fallbackPixelWidth = Math.max(1, Math.ceil(width * fallbackRatio));
+  const fallbackPixelHeight = Math.max(1, Math.ceil(height * fallbackRatio));
+  const pixelWidth = measurementMatches ? Math.min(measured.pixelWidth, fallbackPixelWidth) : fallbackPixelWidth;
+  const pixelHeight = measurementMatches ? Math.min(measured.pixelHeight, fallbackPixelHeight) : fallbackPixelHeight;
   return {
     pixelWidth,
     pixelHeight,

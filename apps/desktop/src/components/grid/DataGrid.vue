@@ -214,6 +214,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { resolveGridFocusRestoreTarget } from "@/lib/dataGrid/dataGridFocusRestore";
 import { buildOrderedGridRows, type GridInsertRowPosition, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import { DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH, isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAddRowCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
@@ -5415,6 +5416,27 @@ function clearInternalClipboardCopy() {
   clearDataGridClipboardCopy();
 }
 
+// Remember the last element that held focus inside the grid. Switching to
+// another tab moves focus onto the tab strip (or body) and the kept-alive
+// grid never gets it back on its own, which breaks arrow-key cell navigation
+// after returning to the tab.
+let lastFocusedWithinGrid: HTMLElement | null = null;
+
+function onGridFocusIn(event: FocusEvent) {
+  if (event.target instanceof HTMLElement) lastFocusedWithinGrid = event.target;
+}
+
+function restoreGridFocusAfterActivation() {
+  if (!lastFocusedWithinGrid) return;
+  nextTick(() => {
+    if (editingCell.value) return; // the cell editor restores its own input focus
+    const target = resolveGridFocusRestoreTarget(gridRef.value, lastFocusedWithinGrid, document.activeElement);
+    target?.focus({ preventScroll: true });
+  });
+}
+
+onActivated(restoreGridFocusAfterActivation);
+
 onMounted(resumeCanvasGridWork);
 onActivated(resumeCanvasGridWork);
 onMounted(() => {
@@ -8398,7 +8420,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 </script>
 
 <template>
-  <div ref="gridRef" data-grid-root class="h-full flex flex-col overflow-hidden outline-none" :class="{ 'data-grid--editing-cell': !!editingCell, 'data-grid--dark': isDark }" :style="gridStyle" tabindex="0" @keydown="onGridKeydown" @paste="onGridPaste">
+  <div ref="gridRef" data-grid-root class="h-full flex flex-col overflow-hidden outline-none" :class="{ 'data-grid--editing-cell': !!editingCell, 'data-grid--dark': isDark }" :style="gridStyle" tabindex="0" @keydown="onGridKeydown" @paste="onGridPaste" @focusin="onGridFocusIn">
     <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->

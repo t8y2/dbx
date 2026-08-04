@@ -457,6 +457,9 @@ jobs:
       - name: Build DuckDB native driver
         shell: bash
         run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+          fi
           if [ -n "${{ matrix.manylinux_image }}" ]; then
             docker run --rm \
               --user "$(id -u):$(id -g)" \

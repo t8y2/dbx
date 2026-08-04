@@ -5386,9 +5386,9 @@ watch(
 
 function pauseCanvasGridWork() {
   dataGridIsActive = false;
+  stopLoadingElapsedTimer();
   gridFocusActivationToken += 1;
   gridRef.value?.setAttribute("data-grid-active", "false");
-  stopLoadingElapsedTimer();
   if (gridSurfaceBusy.value) finishDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.pause();
   gridScrollbarsRuntime.pause();
@@ -5402,8 +5402,8 @@ function pauseCanvasGridWork() {
 
 function resumeCanvasGridWork() {
   dataGridIsActive = true;
-  gridRef.value?.setAttribute("data-grid-active", "true");
   startLoadingElapsedTimer();
+  gridRef.value?.setAttribute("data-grid-active", "true");
   if (gridSurfaceBusy.value) beginDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.resume();
   gridScrollbarsRuntime.resume();

@@ -20,6 +20,38 @@ afterEach(() => {
 });
 
 describe("CustomContextMenu lifecycle", () => {
+  it("removes the capture keydown listener when unmounted while open", async () => {
+    const documentAdd = vi.spyOn(document, "addEventListener");
+    const documentRemove = vi.spyOn(document, "removeEventListener");
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            CustomContextMenu,
+            { items: [{ label: "Inspect" }] },
+            {
+              default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "context-target", onContextmenu: onContextMenu }, "Target"),
+            },
+          );
+      },
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    container.querySelector("#context-target")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    const keydownListener = callsFor(documentAdd, "keydown").at(-1)?.[1];
+    expect(keydownListener).toBeTruthy();
+
+    app.unmount();
+    await nextTick();
+
+    expect(documentRemove.mock.calls).toContainEqual(["keydown", keydownListener, true]);
+  });
+
   it("uses one shared listener set across repeated bulk mount cycles", async () => {
     const documentAdd = vi.spyOn(document, "addEventListener");
     const documentRemove = vi.spyOn(document, "removeEventListener");

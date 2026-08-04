@@ -179,6 +179,24 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyRow.value).toBe(true);
   });
 
+  it("counts only visible non-draft rows selected for copying", () => {
+    const first = { ...row([1, "Ada"]), sourceIndex: 0 };
+    const draft = { ...row([2, "Draft"]), id: 2, sourceIndex: 1, isDraft: true };
+    const state = createMongoExportState({
+      columns: ["id", "name"],
+      item: first,
+      items: [first, draft],
+      mongoDocuments: [
+        { id: 1, name: "Ada" },
+        { id: 2, name: "Draft" },
+      ],
+      selectedRowIds: new Set([1, 2, 999]),
+    });
+
+    expect(state.copyRowCount.value).toBe(1);
+    expect(state.canCopyRow.value).toBe(true);
+  });
+
   it("builds SQL UPDATE from only selected writable columns while retaining a hidden primary key", async () => {
     const item = row([7, "Ada", true]);
     const matrix: CellSelectionMatrix = {

@@ -264,7 +264,7 @@ onBeforeUnmount(() => {
   contextMenuRegistration?.dispose();
   contextMenuRegistration = null;
   document.removeEventListener("pointerdown", onPointerDownOutside, true);
-  document.removeEventListener("keydown", onKeydown);
+  document.removeEventListener("keydown", onKeydown, true);
   document.removeEventListener("scroll", onScroll, true);
   window.removeEventListener("resize", onResize);
 });

@@ -4,7 +4,15 @@ const HAN_CHAR = /\p{Script=Han}/u;
 const ASCII_ALNUM = /[a-z0-9]/i;
 
 const firstLetterCache = new Map<string, string>();
-const MAX_CACHE_ENTRIES = 10_000;
+const MAX_CACHE_ENTRIES = 100_000;
+
+function cacheFirstLetters(text: string, result: string): void {
+  if (firstLetterCache.size >= MAX_CACHE_ENTRIES) {
+    const oldest = firstLetterCache.keys().next().value;
+    if (oldest !== undefined) firstLetterCache.delete(oldest);
+  }
+  firstLetterCache.set(text, result);
+}
 
 export function containsHan(text: string): boolean {
   return HAN_CHAR.test(text);
@@ -19,7 +27,11 @@ export function containsHan(text: string): boolean {
  */
 export function pinyinFirstLetters(text: string): string {
   const cached = firstLetterCache.get(text);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    firstLetterCache.delete(text);
+    firstLetterCache.set(text, cached);
+    return cached;
+  }
   let result = "";
   for (const char of text) {
     if (HAN_CHAR.test(char)) {
@@ -28,8 +40,7 @@ export function pinyinFirstLetters(text: string): string {
       result += char.toLowerCase();
     }
   }
-  if (firstLetterCache.size >= MAX_CACHE_ENTRIES) firstLetterCache.clear();
-  firstLetterCache.set(text, result);
+  cacheFirstLetters(text, result);
   return result;
 }
 

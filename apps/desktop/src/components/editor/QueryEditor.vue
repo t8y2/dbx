@@ -2510,10 +2510,11 @@ function consumeSqlCompletionAutoStartSuppression() {
 function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp, prefix?: string) {
   if (items.length === 0) return null;
   const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
+  const resultItems = bypassFilter && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
   return {
     from,
     // Keep CodeMirror's live filtering enabled so an already-open menu follows the typed prefix.
-    options: items.map((item) => completionOptionForItem(item)),
+    options: resultItems.map((item) => completionOptionForItem(item)),
     validFor,
     // When bypassing CodeMirror's matcher, supply our own highlight ranges so
     // the matched characters (Han substring or pinyin initials) stay marked.
@@ -2528,8 +2529,17 @@ function buildCompletionResult(items: QueryCompletionItem[], from: number, valid
 // skip the second-stage filter exactly in the cases it would break.
 function shouldBypassCompletionFilter(prefix: string, items: QueryCompletionItem[]): boolean {
   if (!prefix) return false;
-  if ([...prefix].length === 1) return true;
+  if (/\p{Script=Han}/u.test(prefix)) return true;
   return /^[a-z0-9]+$/i.test(prefix) && items.some((item) => /\p{Script=Han}/u.test(item.label));
+}
+
+function completionItemsForBypassedFilter(prefix: string, items: QueryCompletionItem[]): QueryCompletionItem[] {
+  if ([...prefix].length !== 1 || !/^[a-z0-9]$/i.test(prefix)) return items;
+  const normalized = prefix.toLowerCase();
+  return items.filter((item) => {
+    const renderedLabel = "displayLabel" in item && typeof item.displayLabel === "string" ? item.displayLabel : item.label;
+    return /\p{Script=Han}/u.test(item.label) || renderedLabel.toLowerCase().startsWith(normalized);
+  });
 }
 
 function localCompletionDatabaseNames(completionContext: ReturnType<typeof getSqlCompletionContext>): string[] {

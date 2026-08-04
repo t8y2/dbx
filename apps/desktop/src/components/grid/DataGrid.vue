@@ -5603,6 +5603,7 @@ const {
 
 function copyExtractorLabel(extractor: DataGridCopyExtractorId): string {
   const labels: Record<DataGridCopyExtractorId, string> = {
+    raw: t("grid.copyExtractorRaw"),
     tsv: "TSV",
     "tsv-with-headers": t("grid.copyExtractorWithHeaders", { format: "TSV" }),
     csv: "CSV",

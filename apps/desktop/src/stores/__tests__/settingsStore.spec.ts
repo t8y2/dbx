@@ -123,10 +123,12 @@ describe("normalizeEditorSettings", () => {
   });
 
   it("defaults the global data grid copy extractor and preserves valid choices", () => {
-    expect(normalizeEditorSettings({}).dataGridCopyExtractor).toBe("tsv");
+    expect(normalizeEditorSettings({}).dataGridCopyExtractor).toBe("raw");
+    expect(normalizeEditorSettings({ dataGridCopyExtractor: "raw" }).dataGridCopyExtractor).toBe("raw");
+    expect(normalizeEditorSettings({ dataGridCopyExtractor: "tsv" }).dataGridCopyExtractor).toBe("tsv");
     expect(normalizeEditorSettings({ dataGridCopyExtractor: "sql-updates" }).dataGridCopyExtractor).toBe("sql-updates");
     expect(normalizeEditorSettings({ dataGridCopyExtractor: "markdown" }).dataGridCopyExtractor).toBe("markdown");
-    expect(normalizeEditorSettings({ dataGridCopyExtractor: "invalid" as any }).dataGridCopyExtractor).toBe("tsv");
+    expect(normalizeEditorSettings({ dataGridCopyExtractor: "invalid" as any }).dataGridCopyExtractor).toBe("raw");
   });
 
   it("normalizes persistent extractor configuration fail-fast defaults", () => {

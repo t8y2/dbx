@@ -1394,6 +1394,7 @@ export default withEnglishFallback({
     redoChange: "変更をやり直す",
     filterBuilderSearchColumns: "フィールドを検索...",
     filterBuilderNoMatchingColumns: "一致するフィールドがありません",
+    copyExtractorRaw: "生データ",
     copyExtractorWithHeaders: "{format}（ヘッダー付き）",
     copyExtractorOneRow: "単行CSV",
     copyExtractorSqlInList: "SQL IN リスト",

@@ -1056,6 +1056,7 @@ export default {
     noFilteredRows: "No rows match the filter",
     noFilteredRowsDescription: "Adjust the search text or row status filter.",
     copy: "Copy",
+    copyExtractorRaw: "Raw Data",
     copyExtractorWithHeaders: "{format} with Headers",
     copyExtractorOneRow: "One-row",
     copyExtractorSqlInList: "SQL IN List",

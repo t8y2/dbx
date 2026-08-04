@@ -6,12 +6,14 @@ mod contract;
 mod delimited;
 mod document;
 mod json;
+mod raw;
 mod sql;
 
 pub use contract::*;
 use delimited::{write_dsv, write_one_row};
 use document::{write_html, write_markdown, write_pretty, write_xml};
 use json::{write_json, write_json_lines};
+use raw::write_raw;
 use sql::{write_sql_in_list, write_sql_inserts, write_sql_updates, write_where_clause};
 
 const DATA_GRID_EXTRACTOR_MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -251,6 +253,10 @@ fn write_extraction(
 ) -> Result<WriteMetadata, DataGridExtractError> {
     let extractor = context.request.extractor;
     match extractor {
+        DataGridExtractorId::Raw => {
+            write_raw(context, output)?;
+            Ok(text_metadata("text/plain", "txt"))
+        }
         DataGridExtractorId::Tsv | DataGridExtractorId::TsvWithHeaders => {
             let options = DataGridDsvOptions {
                 column_separator: "\t".to_string(),

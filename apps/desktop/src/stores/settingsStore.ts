@@ -650,7 +650,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
-  dataGridCopyExtractor: "tsv",
+  dataGridCopyExtractor: "raw",
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
   resultRunDisplayMode: "tabs",
   dataGridAutoTransposeSingleRow: false,

@@ -214,11 +214,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       if (!result.text) return false;
       // Derive the grid paste-back payload from the effective request schema so
       // hidden support columns, row headers, NULLs, tabs, and newlines keep the
-      // same shape and values as the rendered TSV.
-      const isTsv = extractor === "tsv" || extractor === "tsv-with-headers";
-      const gridCopy = isTsv
+      // same shape and values as the rendered raw text or TSV.
+      const isGridTabularCopy = extractor === "raw" || extractor === "tsv" || extractor === "tsv-with-headers";
+      const gridCopy = isGridTabularCopy
         ? (() => {
-            const includeRowHeader = request.options.dsv.includeRowHeader;
+            const includeRowHeader = extractor !== "raw" && request.options.dsv.includeRowHeader;
             const rows = request.rows.map((row, rowIndex) => {
               const selectedRow = request.selectedColumnIndexes.map((index) => row[index]);
               return includeRowHeader ? [rowIndex + 1, ...selectedRow] : selectedRow;

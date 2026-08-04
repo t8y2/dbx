@@ -1036,6 +1036,7 @@ export default withEnglishFallback({
     noFilteredRows: "필터와 일치하는 행이 없습니다",
     noFilteredRowsDescription: "검색 텍스트나 행 상태 필터를 조정하세요.",
     copy: "복사",
+    copyExtractorRaw: "원본 데이터",
     copyExtractorWithHeaders: "머리글 포함 {format}",
     copyExtractorOneRow: "단일 행",
     copyExtractorSqlInList: "SQL IN 목록",

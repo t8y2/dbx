@@ -1372,6 +1372,7 @@ export default withEnglishFallback({
     truncatedHint: "I risultati sono stati troncati dopo il caricamento di {count} righe. Usa la paginazione in basso per consultare i dati caricati; l'esportazione del risultato completo riesegue la query sul database.",
     filterBuilderSearchColumns: "Cerca campi...",
     filterBuilderNoMatchingColumns: "Nessun campo corrispondente",
+    copyExtractorRaw: "Dati non elaborati",
     copyExtractorWithHeaders: "{format} (con intestazione)",
     copyExtractorOneRow: "CSV a riga singola",
     copyExtractorSqlInList: "Lista SQL IN",

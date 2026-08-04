@@ -18,6 +18,7 @@ const DEFAULT_JSON_PRETTY: bool = true;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum DataGridExtractorId {
+    Raw,
     Tsv,
     TsvWithHeaders,
     Csv,

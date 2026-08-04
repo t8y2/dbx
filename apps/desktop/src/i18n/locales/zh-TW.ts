@@ -1373,6 +1373,7 @@ export default withEnglishFallback({
     truncatedHint: "結果已截斷，已載入前 {count} 筆。可透過底部分頁瀏覽已載入資料；匯出完整結果時會重新查詢資料庫。",
     filterBuilderSearchColumns: "搜尋欄位...",
     filterBuilderNoMatchingColumns: "沒有匹配的欄位",
+    copyExtractorRaw: "原始資料",
     copyExtractorWithHeaders: "{format}（含表頭）",
     copyExtractorOneRow: "單行 CSV",
     copyExtractorSqlInList: "SQL IN 列表",

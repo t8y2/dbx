@@ -1,14 +1,15 @@
 import type { DatabaseType } from "@/types/database";
 import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 
-export const DATA_GRID_COPY_EXTRACTOR_IDS = ["tsv", "tsv-with-headers", "csv", "csv-with-headers", "pipe-separated", "dsv", "json", "json-lines", "one-row", "sql-in-list", "sql-inserts", "sql-updates", "where-clause", "markdown", "html", "xml", "pretty"] as const;
+export const DATA_GRID_COPY_EXTRACTOR_IDS = ["raw", "tsv", "tsv-with-headers", "csv", "csv-with-headers", "pipe-separated", "dsv", "json", "json-lines", "one-row", "sql-in-list", "sql-inserts", "sql-updates", "where-clause", "markdown", "html", "xml", "pretty"] as const;
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
-export type DataGridExtractorCategory = "delimited" | "json" | "sql" | "document";
+export type DataGridExtractorCategory = "raw" | "delimited" | "json" | "sql" | "document";
 
 export const DATA_GRID_EXTRACTOR_CONTRACT_VERSION = 1 as const;
 
 export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorId, { category: DataGridExtractorCategory; separatorBefore?: boolean }> = {
+  raw: { category: "raw" },
   tsv: { category: "delimited" },
   "tsv-with-headers": { category: "delimited" },
   csv: { category: "delimited" },
@@ -157,7 +158,7 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
 const DATA_GRID_COPY_EXTRACTOR_ID_SET = new Set<string>(DATA_GRID_COPY_EXTRACTOR_IDS);
 
 export function normalizeDataGridCopyExtractorId(value: unknown): DataGridCopyExtractorId {
-  return typeof value === "string" && DATA_GRID_COPY_EXTRACTOR_ID_SET.has(value) ? (value as DataGridCopyExtractorId) : "tsv";
+  return typeof value === "string" && DATA_GRID_COPY_EXTRACTOR_ID_SET.has(value) ? (value as DataGridCopyExtractorId) : "raw";
 }
 
 export function validateDataGridExtractorOptions(extractor: DataGridCopyExtractorId, options: DataGridExtractorOptions): DataGridExtractorOptionsError | null {

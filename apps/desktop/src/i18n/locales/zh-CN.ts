@@ -1057,6 +1057,7 @@ export default withEnglishFallback({
     noFilteredRows: "没有符合条件的行",
     noFilteredRowsDescription: "调整搜索词或状态筛选试试。",
     copy: "复制",
+    copyExtractorRaw: "原始数据",
     copyExtractorWithHeaders: "{format}（含表头）",
     copyExtractorOneRow: "单行 CSV",
     copyExtractorSqlInList: "SQL IN 列表",

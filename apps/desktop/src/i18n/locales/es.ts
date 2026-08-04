@@ -1374,6 +1374,7 @@ export default withEnglishFallback({
     truncatedHint: "Los resultados se truncaron después de cargar {count} filas. Usa la paginación inferior para explorar los datos cargados; al exportar el resultado completo se vuelve a consultar la base de datos.",
     filterBuilderSearchColumns: "Buscar columnas...",
     filterBuilderNoMatchingColumns: "Sin columnas coincidentes",
+    copyExtractorRaw: "Datos sin formato",
     copyExtractorWithHeaders: "{format} (con encabezados)",
     copyExtractorOneRow: "CSV de una fila",
     copyExtractorSqlInList: "Lista SQL IN",

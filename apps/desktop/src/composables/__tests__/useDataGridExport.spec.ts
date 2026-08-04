@@ -333,6 +333,29 @@ describe("useDataGridExport prepared row statements", () => {
     ]);
   });
 
+  it("preserves the raw selection matrix across copy and paste", async () => {
+    const rows = [
+      [1, '{"msg":"success"}'],
+      [2, "inside\ttab\nnext line"],
+    ];
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows,
+    };
+    const text = '1\t{"msg":"success"}\n2\tinside\ttab\nnext line';
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text, mimeType: "text/plain", fileExtension: "txt", rowCount: 2, columnCount: 2 });
+    const state = createExportState(editableTable, ["id", "name"], matrix, undefined, undefined, rows);
+
+    await expect(state.copyWithExtractor("raw")).resolves.toBe(true);
+
+    expect(parseDataGridClipboard(text)).toEqual([
+      ["1", '{"msg":"success"}'],
+      ["2", "inside\ttab\nnext line"],
+    ]);
+  });
+
   it("rejects SQL UPDATE when the selection contains no writable non-key column", () => {
     const matrix: CellSelectionMatrix = {
       rowIndexes: [0],

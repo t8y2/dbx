@@ -47,6 +47,11 @@ $forbiddenImports = [ordered]@{
   "GetDpiForWindow" = "GetDpiForWindow is unavailable on Windows 7."
   "GetSystemMetricsForDpi" = "GetSystemMetricsForDpi is unavailable on Windows 7."
   "SetThreadDpiAwarenessContext" = "SetThreadDpiAwarenessContext is unavailable on Windows 7."
+  "VCRUNTIME140.dll" = "The Windows 7 package must not require a separately installed VC++ Runtime."
+  "VCRUNTIME140_1.dll" = "The Windows 7 package must not require a separately installed VC++ Runtime."
+  "MSVCP140.dll" = "The Windows 7 package must not require a separately installed VC++ Runtime."
+  "ucrtbase.dll" = "The Windows 7 package must link the Universal CRT statically."
+  "api-ms-win-crt-" = "The Windows 7 package must not require separately installed Universal CRT API sets."
 }
 
 $violations = @()

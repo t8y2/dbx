@@ -101,6 +101,7 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v5
 
@@ -132,7 +133,10 @@ jobs:
         run: pnpm build
 
       - name: Build DBX for Windows 7
-        run: cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
       - name: Audit Windows 7 PE imports
         shell: pwsh
@@ -141,6 +145,10 @@ jobs:
       - name: Prepare WebView2 109 fixed runtime
         shell: pwsh
         run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
 
       - name: Bundle Windows 7 fixed-runtime installer
         shell: pwsh
@@ -155,6 +163,14 @@ jobs:
             exit 1
           }
           Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+
+      - name: Audit Windows 7 installer contents
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "target/x86_64-win7-windows-msvc/release/bundle/nsis" -Filter "*.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
 
       - name: Upload Windows 7 test installer
         uses: actions/upload-artifact@v4
@@ -505,6 +521,8 @@ jobs:
               - '.github/workflows/update-nix-pnpm-hash.yml'
             windows_win7_bundle:
               - '.github/scripts/assert-win7-pe-compat.ps1'
+              - '.github/scripts/assert-win7-installer-content.ps1'
+              - '.github/scripts/assert-webview2-win7-runtime.ps1'
               - '.github/scripts/prepare-webview2-win7-loader.ps1'
               - '.github/scripts/prepare-webview2-win7-runtime.ps1'
               - '.github/workflows/ci.yml'
@@ -518,6 +536,7 @@ jobs:
               - 'vendor/ctor/**'
               - 'vendor/dirs-sys/**'
               - 'vendor/pageant/**'
+              - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
               - '.github/workflows/ci.yml'

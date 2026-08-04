@@ -7,8 +7,12 @@ const template = readFileSync(resolve(process.cwd(), "src-tauri/windows/nsis/ins
 const win7Config = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
 const win7RuntimeScript = readFileSync(resolve(process.cwd(), ".github/scripts/prepare-webview2-win7-runtime.ps1"), "utf8");
 const win7PeAuditScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-win7-pe-compat.ps1"), "utf8");
+const win7RuntimeProbeScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-webview2-win7-runtime.ps1"), "utf8");
+const win7InstallerAuditScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-win7-installer-content.ps1"), "utf8");
 const appCargoToml = readFileSync(resolve(process.cwd(), "src-tauri/Cargo.toml"), "utf8");
+const workspaceCargoToml = readFileSync(resolve(process.cwd(), "Cargo.toml"), "utf8");
 const appBuildScript = readFileSync(resolve(process.cwd(), "src-tauri/build.rs"), "utf8");
+const wryWebView2Source = readFileSync(resolve(process.cwd(), "vendor/wry/src/webview2/mod.rs"), "utf8");
 const ciWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/ci.yml"), "utf8");
 const releaseWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/release.yml"), "utf8");
 
@@ -97,7 +101,34 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(win7PeAuditScript).toContain('"api-ms-win-core-winrt-"');
     expect(win7PeAuditScript).toContain('"CoIncrementMTAUsage"');
     expect(win7PeAuditScript).toContain('"GetSystemTimePreciseAsFileTime"');
+    expect(win7PeAuditScript).toContain('"VCRUNTIME140.dll"');
+    expect(win7PeAuditScript).toContain('"MSVCP140.dll"');
+    expect(win7PeAuditScript).toContain('"ucrtbase.dll"');
+    expect(win7PeAuditScript).toContain('"api-ms-win-crt-"');
     expect(win7PeAuditScript).toContain("dumpbin.exe");
+  });
+
+  it("probes the fixed runtime through the Win7-compatible loader", () => {
+    expect(win7RuntimeProbeScript).toContain("GetAvailableCoreWebView2BrowserVersionString");
+    expect(win7RuntimeProbeScript).toContain('$ExpectedVersion = "109.0.1518.78"');
+    expect(win7RuntimeProbeScript).toContain("msedgewebview2.exe");
+    expect(ciWorkflow).toContain("./.github/scripts/assert-webview2-win7-runtime.ps1");
+    expect(releaseWorkflow).toContain("./.github/scripts/assert-webview2-win7-runtime.ps1");
+  });
+
+  it("passes the configured fixed-runtime folder to WebView2 discovery and creation", () => {
+    expect(workspaceCargoToml).toContain('wry = { path = "vendor/wry" }');
+    expect(wryWebView2Source).toContain('std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER")');
+    expect(wryWebView2Source).toContain(`CreateCoreWebView2EnvironmentWithOptions(
+        browser_executable_folder_ptr,`);
+    expect(wryWebView2Source).toContain("GetAvailableCoreWebView2BrowserVersionString(browser_executable_folder_ptr, &mut versioninfo)");
+  });
+
+  it("audits the files produced by the silent Win7 installer", () => {
+    expect(win7InstallerAuditScript).toContain('"webview2-fixed-runtime\\msedgewebview2.exe"');
+    expect(win7InstallerAuditScript).toContain('"dbx.exe"');
+    expect(ciWorkflow).toContain("./.github/scripts/assert-win7-installer-content.ps1");
+    expect(releaseWorkflow).toContain("./.github/scripts/assert-win7-installer-content.ps1");
   });
 
   it("builds the Windows 7 executable with the production custom protocol", () => {
@@ -106,5 +137,9 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(appBuildScript).toContain("CARGO_CFG_TARGET_VENDOR");
     expect(ciWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
     expect(releaseWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
+    expect(ciWorkflow).toContain("TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw");
+    expect(releaseWorkflow).toContain("TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw");
+    expect(ciWorkflow).toContain("target-feature=+crt-static");
+    expect(releaseWorkflow).toContain("target-feature=+crt-static");
   });
 });

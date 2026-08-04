@@ -37,6 +37,11 @@ try {
     throw "WebView2 SDK $sdkVersion does not contain the x64 static loader."
   }
 
+  $legacyLoaderDll = Join-Path $extractedPath "build/native/x64/WebView2Loader.dll"
+  if (!(Test-Path -LiteralPath $legacyLoaderDll -PathType Leaf)) {
+    throw "WebView2 SDK $sdkVersion does not contain the x64 loader DLL."
+  }
+
   $actualLoaderSha256 = (Get-FileHash -LiteralPath $legacyLoader -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actualLoaderSha256 -ne $loaderSha256) {
     throw "Unexpected Windows 7 WebView2 loader SHA256: $actualLoaderSha256"
@@ -86,7 +91,13 @@ try {
     throw "Windows 7 WebView2 loader replacement failed: $installedLoaderSha256"
   }
 
+  $probeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "dbx-win7-webview2-loader-probe"
+  New-Item -ItemType Directory -Path $probeDirectory -Force | Out-Null
+  $probeLoader = Join-Path $probeDirectory "WebView2Loader.dll"
+  Copy-Item -LiteralPath $legacyLoaderDll -Destination $probeLoader -Force
+
   Write-Host "Prepared WebView2 SDK $sdkVersion static loader for Windows 7: $loaderDestination"
+  Write-Host "Prepared WebView2 SDK $sdkVersion loader probe DLL: $probeLoader"
 }
 finally {
   if (Test-Path -LiteralPath $temporaryRoot) {

@@ -220,3 +220,11 @@ test("buildUserPrompt skips action instruction for vector databases", () => {
   assert.match(sqlPrompt, /Action: generate/);
   assert.match(sqlPrompt, /生成 SQL/);
 });
+
+test("ask mode exposes current-time guidance for relative time filters", () => {
+  const sqlPrompt = buildSystemPrompt("generate", context(), "ask");
+  const vectorPrompt = buildSystemPrompt("generate", vectorContext(), "ask");
+
+  assert.match(sqlPrompt, /get_current_time/);
+  assert.match(vectorPrompt, /get_current_time/);
+});

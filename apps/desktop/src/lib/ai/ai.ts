@@ -358,6 +358,7 @@ function buildVectorModePromptLines(context: AiContext, mode: AiAssistantMode, i
     isZh
       ? `你处于 Ask 模式。你只能使用 list_collections 确认集合清单；不要浏览集合数据。${dbLabel(context.databaseType)} 的查询格式为 REST API（METHOD /path + JSON body），具体格式因数据库类型而异。只生成查询请求文本和说明，不要暗示已经执行。`
       : `You are in Ask mode. You may only use list_collections to inspect collection names; do not browse collection data. ${dbLabel(context.databaseType)} uses a REST API query format (METHOD /path + JSON body) that varies by database type. Generate query strings and explanations only; do not imply execution.`,
+    "When a request needs a relative time expression such as yesterday, last 7 days, this month, or today resolved into a concrete filter, call get_current_time first; do not guess the current date or timezone.",
   ];
 }
 
@@ -375,7 +376,10 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
     ];
   }
 
-  return [isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run."];
+  return [
+    isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run.",
+    "When a request needs a relative time expression such as yesterday, last 7 days, this month, or today resolved into a concrete SQL date or time range, call get_current_time first; do not guess the current date or timezone.",
+  ];
 }
 
 function schemaCoverageLine(context: AiContext, isZh: boolean): string {

@@ -528,10 +528,10 @@ async function toggle() {
       node.isExpanded = false;
       if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       connectionStore.cancelTreeNodeLoad(node.id);
-      emit("node-toggled", node, true);
+      emitNodeToggled(node, true, false);
     } else {
       node.isExpanded = true;
-      emit("node-toggled", node, false);
+      emitNodeToggled(node, false);
     }
     return;
   }
@@ -541,13 +541,13 @@ async function toggle() {
   if (node.type === "connection-group") {
     node.isExpanded = !node.isExpanded;
     connectionStore.toggleConnectionGroupCollapsed(node.id);
-    emit("node-toggled", node, wasExpanded);
+    emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "group-partitions") {
     node.isExpanded = !node.isExpanded;
-    emit("node-toggled", node, wasExpanded);
+    emitNodeToggled(node, wasExpanded);
     return;
   }
 
@@ -558,27 +558,27 @@ async function toggle() {
   if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
-    emit("node-toggled", node, wasExpanded);
+    emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "group-extensions" && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
-    emit("node-toggled", node, wasExpanded);
+    emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.isExpanded) {
     node.isExpanded = false;
     if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
-    emit("node-toggled", node, wasExpanded);
+    emitNodeToggled(node, wasExpanded, false);
     return;
   }
 
   try {
     if (await loadSidebarObjectGroup(node, connectionStore)) {
-      emit("node-toggled", node, wasExpanded);
+      emitNodeToggled(node, wasExpanded);
       return;
     }
 
@@ -721,7 +721,7 @@ async function toggle() {
     } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await connectionStore.refreshTreeNode(node);
     }
-    emit("node-toggled", node, wasExpanded);
+    emitNodeToggled(node, wasExpanded);
   } catch (e: any) {
     if (!wasExpanded) node.isExpanded = false;
     const errMsg = e?.message || String(e);
@@ -4677,6 +4677,15 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
 function activateRuntimeNode(node: TreeNode) {
   activeNode.value = node;
+}
+
+// Async loaders can rebuild a connection node while awaiting the backend.
+// Publish the live tree node so a stale rendered row cannot reset expansion.
+function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?: boolean) {
+  const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
+  if (expandedOverride !== undefined) liveNode.isExpanded = expandedOverride;
+  activeNode.value = liveNode;
+  emit("node-toggled", liveNode, wasExpanded);
 }
 
 function activateActionTarget(target: SidebarActionTarget) {

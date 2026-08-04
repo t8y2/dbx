@@ -84,6 +84,18 @@ test("builds a manually versioned module even without runtime file changes", () 
   assert.equal(result.versions.duckdb, "0.1.1");
 });
 
+test("bumps DuckDB when its Cargo target configuration changes", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { duckdb: "0.1.2" },
+    changedFiles: ["agents/drivers/duckdb/.cargo/config.toml"],
+    moduleExists: (path) => path === "agents/drivers/duckdb",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.duckdb, "0.1.3");
+  assert.deepEqual(result.nativeModules, ["duckdb"]);
+});
+
 test("builds only common-dependent Java modules for a shared runtime change", () => {
   const existing = new Set([
     "agents/drivers/access",

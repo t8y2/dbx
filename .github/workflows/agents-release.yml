@@ -447,6 +447,10 @@ jobs:
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.13"
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: "v0.10.0"
@@ -460,14 +464,14 @@ jobs:
               -e CARGO_INCREMENTAL=0 \
               -e CARGO_TARGET_DIR=/workspace/target/duckdb-driver \
               -v "${{ github.workspace }}:/workspace" \
-              -w /workspace \
+              -w /workspace/agents/drivers/duckdb \
               "${{ matrix.manylinux_image }}" \
               bash -lc '
                 mkdir -p "$HOME"
                 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
                 source "$HOME/.cargo/env"
                 cargo build \
-                  --manifest-path agents/drivers/duckdb/Cargo.toml \
+                  --manifest-path Cargo.toml \
                   --locked \
                   --release \
                   --bin dbx-duckdb-driver \
@@ -478,18 +482,24 @@ jobs:
             if [ "${{ matrix.win7 }}" = "true" ]; then
               BUILD_STD=(-Z build-std=std,panic_abort)
             fi
+            pushd agents/drivers/duckdb
             cargo build \
-              --manifest-path agents/drivers/duckdb/Cargo.toml \
+              --manifest-path Cargo.toml \
               --locked \
               --release \
               --bin dbx-duckdb-driver \
               --target "${{ matrix.target }}" \
               "${BUILD_STD[@]}"
+            popd
           fi
           mkdir -p release-native
           cp \
             "target/duckdb-driver/${{ matrix.target }}/release/dbx-duckdb-driver${{ matrix.extension }}" \
             "release-native/dbx-agent-duckdb-${{ matrix.platform }}${{ matrix.extension }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python agents/scripts/validate_windows_pe_dependencies.py \
+              "release-native/dbx-agent-duckdb-${{ matrix.platform }}${{ matrix.extension }}"
+          fi
           if [ -n "${{ matrix.manylinux_image }}" ]; then
             docker run --rm \
               --user "$(id -u):$(id -g)" \

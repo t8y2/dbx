@@ -320,6 +320,11 @@ pub struct SshTunnelConfig {
     /// password auth if the key is rejected.
     #[serde(default)]
     pub auth_method: String,
+    /// Allow an SSH session exec channel to run `nc` when the server rejects
+    /// `direct-tcpip`. Disabled by default because this can bypass a server's
+    /// TCP-forwarding policy; enable only for trusted JumpServer/Koko setups.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_exec_channel_proxy: bool,
     /// When non-empty, this layer references a shared tunnel profile
     /// (Settings > Tunnels). The profile's configuration replaces this
     /// layer's own fields at connect time; only `id` and `enabled` are

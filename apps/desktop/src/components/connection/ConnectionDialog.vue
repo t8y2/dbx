@@ -310,6 +310,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     use_ssh_agent: false,
     ssh_agent_sock_path: "",
     auth_method: "password",
+    allow_exec_channel_proxy: false,
   };
 }
 
@@ -343,6 +344,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     use_ssh_agent: !!hop.use_ssh_agent,
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
     auth_method: hop.auth_method || inferSshAuthMethod(hop),
+    allow_exec_channel_proxy: !!hop.allow_exec_channel_proxy,
     profile_id: hop.profile_id || undefined,
   };
 }
@@ -7148,6 +7150,13 @@ function openExternalUrl(url: string) {
                       <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" v-model="selectedSshLayer.expose_lan" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
                         <span class="text-xs text-muted-foreground">{{ t("connection.sshExposeLan") }}</span>
+                      </label>
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <label class="col-span-3 flex items-start gap-2 cursor-pointer">
+                        <input type="checkbox" v-model="selectedSshLayer.allow_exec_channel_proxy" class="mt-0.5 mr-0" :disabled="selectedSshLayer.enabled === false" />
+                        <span class="text-xs text-muted-foreground">{{ t("connection.sshAllowExecChannelProxy") }}</span>
                       </label>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">

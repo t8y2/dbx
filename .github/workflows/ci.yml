@@ -148,6 +148,51 @@ jobs:
           }
           Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
 
+  duckdb-windows-driver:
+    needs: changes
+    if: needs.changes.outputs.duckdb_windows == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust for Windows 7
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Build DuckDB Windows driver
+        shell: bash
+        run: |
+          pushd agents/drivers/duckdb
+          cargo build \
+            --locked \
+            --release \
+            --bin dbx-duckdb-driver \
+            --target x86_64-win7-windows-msvc \
+            -Z build-std=std,panic_abort
+          popd
+
+      - name: Validate DuckDB Windows driver
+        shell: bash
+        run: |
+          DRIVER="target/duckdb-driver/x86_64-win7-windows-msvc/release/dbx-duckdb-driver.exe"
+          python agents/scripts/validate_windows_pe_dependencies.py "$DRIVER"
+          "$DRIVER" < /dev/null
+
   rust-fmt-clippy:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -370,6 +415,7 @@ jobs:
       rust_full: ${{ steps.rust-mode.outputs.full }}
       jdbc: ${{ steps.filter.outputs.jdbc }}
       agents: ${{ steps.filter.outputs.agents }}
+      duckdb_windows: ${{ steps.filter.outputs.duckdb_windows }}
       nix: ${{ steps.filter.outputs.nix }}
       windows_win7_bundle: ${{ steps.filter.outputs.windows_win7_bundle }}
       github_scripts: ${{ steps.filter.outputs.github_scripts }}
@@ -419,6 +465,11 @@ jobs:
               - 'Cargo.lock'
               - '.github/scripts/bump-agent-versions.mjs'
               - '.github/scripts/bump-agent-versions.test.mjs'
+              - '.github/workflows/agents-release.yml'
+              - '.github/workflows/ci.yml'
+            duckdb_windows:
+              - 'agents/drivers/duckdb/**'
+              - 'agents/scripts/validate_windows_pe_dependencies.py'
               - '.github/workflows/agents-release.yml'
               - '.github/workflows/ci.yml'
             nix:

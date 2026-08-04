@@ -2318,6 +2318,7 @@ impl AppState {
                         "127.0.0.1",
                         1,
                         false,
+                        ssh.allow_exec_channel_proxy,
                     )
                     .await;
                 self.tunnels.stop_tunnel(&probe_id).await;
@@ -5582,6 +5583,7 @@ mod tests {
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
+            allow_exec_channel_proxy: false,
             profile_id: String::new(),
         });
         assert!(state.test_tunnel_profile(&ssh).await.is_err());
@@ -7256,6 +7258,7 @@ for line in sys.stdin:
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
+            allow_exec_channel_proxy: false,
             profile_id: profile_id.to_string(),
         }
     }

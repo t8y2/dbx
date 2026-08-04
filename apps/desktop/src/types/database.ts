@@ -240,6 +240,8 @@ export interface SshTunnelConfig {
    * for connections that already have `use_ssh_agent` configured.
    */
   auth_method?: "password" | "key" | "key+password" | "agent" | "none";
+  /** Allow `nc` through an SSH exec channel when direct-tcpip is prohibited. */
+  allow_exec_channel_proxy?: boolean;
   /**
    * When set, this layer references a shared tunnel profile; the profile's
    * configuration replaces this layer's fields at connect time (only `id`

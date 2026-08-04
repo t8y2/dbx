@@ -680,6 +680,11 @@ impl MessageQueueAdmin for RocketMqAdmin {
             )
             .await?;
 
+        // Agent omits totalLag on probe failure; never coerce that to healthy zero backlog.
+        if result.get("totalLag").and_then(|v| v.as_i64()).is_none() {
+            return Err(format!("RocketMQ consumer lag unavailable for group '{group_id}' on topic '{}'", topic.topic));
+        }
+
         Ok(backlog_stats_from_consumer_lag(&result))
     }
 
@@ -924,6 +929,8 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
     SubscriptionInfo {
         name: group_id.to_string(),
         sub_type: group_type.clone(),
+        // Missing totalLag means lag was not loaded (or probe failed); SubscriptionInfo
+        // cannot express unknown, so keep 0 and rely on detail/backlog RPC for truth.
         msg_backlog: group.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0),
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,

@@ -11,7 +11,8 @@ export type RocketMqConsumerGroupDialogKind = "detail" | "config";
 
 interface TopicConsumeDetail {
   topic: string;
-  delay: number;
+  /** Undefined when backlog probe failed — do not render as healthy zero. */
+  delay?: number;
   lastTimestamp?: number;
   partitions: PartitionBacklog[];
   error?: string;
@@ -121,10 +122,9 @@ async function loadDetail() {
             partitions,
           };
         } catch (e: unknown) {
-          // Keep offsets empty but surface the failure — delay 0 alone looks healthy.
+          // Keep offsets empty; omit delay so the row does not look like lag=0.
           return {
             topic,
-            delay: 0,
             partitions: [] as PartitionBacklog[],
             error: formatError(e) || String(e),
           };
@@ -211,7 +211,8 @@ async function saveConfig() {
 }
 
 watch(
-  () => [props.dialog, props.group?.name],
+  // Reload when enrich fills topics after the dialog was opened on a fast-list row.
+  () => [props.dialog, props.group?.name, (props.group?.topics ?? []).join("\0")] as const,
   () => {
     if (props.dialog === "detail") {
       void loadDetail();
@@ -283,13 +284,16 @@ watch(
                     ><strong>{{ t("mqSubscriptions.operationTopic") }}:</strong> {{ detail.topic }}</span
                   >
                   <span
-                    ><strong>{{ t("mqSubscriptions.consumeDelay") }}:</strong> {{ detail.delay.toLocaleString() }}</span
+                    ><strong>{{ t("mqSubscriptions.consumeDelay") }}:</strong> {{ detail.error ? "-" : (detail.delay ?? 0).toLocaleString() }}</span
                   >
                   <span
                     ><strong>{{ t("mqSubscriptions.lastConsumeTime") }}:</strong> {{ formatConsumeTimestamp(detail.lastTimestamp) }}</span
                   >
                 </div>
-                <div v-if="!detail.partitions.length" class="panel-placeholder panel-placeholder-compact">
+                <div v-if="detail.error" class="panel-placeholder panel-placeholder-compact form-error">
+                  {{ detail.error }}
+                </div>
+                <div v-else-if="!detail.partitions.length" class="panel-placeholder panel-placeholder-compact">
                   {{ t("mqSubscriptions.noQueueConsumeProgress") }}
                 </div>
                 <div v-else class="detail-table-scroll">

@@ -1241,19 +1241,41 @@ public final class RocketMqAgent {
 
     private static ConsumeStats examineConsumeStatsRemapped(
         DefaultMQAdminExt admin, JsonObject conn, String groupId, String topic) throws Exception {
+        List<String> masters = resolveMasterBrokerAddrs(admin, conn);
         ConsumeStats merged = new ConsumeStats();
-        for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
+        int successCount = 0;
+        Exception lastError = null;
+        for (String brokerAddr : masters) {
             try {
                 ConsumeStats stats = admin.examineConsumeStats(brokerAddr, groupId, topic);
+                successCount++;
                 if (stats != null && stats.getOffsetTable() != null) {
                     merged.getOffsetTable().putAll(stats.getOffsetTable());
                     merged.setConsumeTps(merged.getConsumeTps() + stats.getConsumeTps());
                 }
-            } catch (Exception ignored) {
-                // Try next broker.
+            } catch (Exception e) {
+                lastError = e;
             }
         }
+        // Empty offset after a successful broker reply is a real "no progress" result.
+        // All-broker failure must not collapse to totalLag=0 (looks healthy in UI).
+        ensureConsumeStatsProbeSucceeded(masters.size(), successCount, lastError, groupId);
         return merged;
+    }
+
+    /** Fail closed when no master answered; empty offset tables after success remain valid. */
+    static void ensureConsumeStatsProbeSucceeded(
+        int attemptedBrokers, int successCount, Exception lastError, String groupId)
+        throws MQClientException {
+        if (attemptedBrokers <= 0) {
+            throw new MQClientException(
+                "No reachable RocketMQ master brokers for consume stats of group " + groupId, null);
+        }
+        if (successCount <= 0) {
+            throw new MQClientException(
+                "Failed to examine consume stats for group " + groupId + " on all masters",
+                lastError);
+        }
     }
 
     /**
@@ -1437,11 +1459,12 @@ public final class RocketMqAgent {
             thread.setDaemon(true);
             return thread;
         });
-        // Nullable Long: omit totalLag on failure so UI does not treat errors as healthy zero lag.
+        // Nullable Long: omit totalLag when probe fails so list does not show healthy zero lag.
         List<Callable<Long>> tasks = new ArrayList<>(page.size());
         for (Map<String, Object> row : page) {
             String groupId = String.valueOf(row.get("groupId"));
             tasks.add(() -> {
+                // examineConsumeStatsRemapped throws when no master succeeds.
                 ConsumeStats stats = examineConsumeStatsRemapped(admin, conn, groupId, topic);
                 long totalLag = 0;
                 if (stats.getOffsetTable() != null) {

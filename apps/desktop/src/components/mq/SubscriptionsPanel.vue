@@ -183,6 +183,7 @@ async function loadSubscriptions() {
     const page = await mqListSubscriptions(props.connectionId, topicRef);
     if (seq !== loadSeq) return;
     subscriptions.value = page;
+    syncSelectedSubscription(page);
     if (isClusterWideMode.value && page.length >= 500) {
       truncatedHint.value = t("mqSubscriptions.truncatedHint", { count: page.length });
     }
@@ -192,6 +193,8 @@ async function loadSubscriptions() {
         const enriched = await mqEnrichSubscriptions(props.connectionId, topicRef);
         if (seq !== loadSeq) return;
         subscriptions.value = enriched;
+        // Detail dialog holds a snapshot; refresh so topics/members arrive after enrich.
+        syncSelectedSubscription(enriched);
         if (enriched.length >= 500) {
           truncatedHint.value = t("mqSubscriptions.truncatedHint", { count: enriched.length });
         }
@@ -221,6 +224,14 @@ function openCreateDialog() {
     startFrom: "latest",
   };
   showCreateDialog.value = true;
+}
+
+/** Keep open dialog/selection pointing at the latest list row for the same group name. */
+function syncSelectedSubscription(rows: SubscriptionInfo[]) {
+  const current = selectedSub.value;
+  if (!current) return;
+  const updated = rows.find((row) => row.name === current.name);
+  if (updated) selectedSub.value = updated;
 }
 
 function openRocketMqDetail(sub: SubscriptionInfo) {

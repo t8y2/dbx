@@ -122,6 +122,12 @@ impl MqAdminRegistry {
         self.instances.read().await.get(connection_id).map(|entry| entry.adapter.clone())
     }
 
+    /// Whether `adapter` is still the live registry entry for this connection (Arc identity).
+    /// Used so a stale keepalive cannot drop a replacement built after reconnect.
+    pub async fn is_current_adapter(&self, connection_id: &str, adapter: &Arc<dyn MessageQueueAdmin>) -> bool {
+        self.instances.read().await.get(connection_id).is_some_and(|entry| Arc::ptr_eq(&entry.adapter, adapter))
+    }
+
     /// Drop the cached adapter for a connection (called on disconnect).
     pub async fn drop_connection(&self, connection_id: &str) {
         self.instances.write().await.remove(connection_id);

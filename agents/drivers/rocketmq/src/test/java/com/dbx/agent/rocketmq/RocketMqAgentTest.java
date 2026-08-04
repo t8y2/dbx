@@ -2,6 +2,7 @@ package com.dbx.agent.rocketmq;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -624,5 +625,26 @@ class RocketMqAgentTest {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> partitions = (List<Map<String, Object>>) empty.get("partitions");
         assertTrue(partitions.isEmpty());
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededRejectsAllBrokerFailures() {
+        MQClientException noMasters = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(0, 0, null, "GID_A"));
+        assertTrue(noMasters.getMessage().contains("No reachable RocketMQ master"));
+
+        Exception cause = new RuntimeException("broker down");
+        MQClientException allFailed = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(2, 0, cause, "GID_A"));
+        assertTrue(allFailed.getMessage().contains("Failed to examine consume stats"));
+        assertSame(cause, allFailed.getCause());
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededAllowsEmptyOffsetsAfterSuccess() throws Exception {
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(1, 1, null, "GID_A");
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(3, 1, new RuntimeException("partial"), "GID_A");
     }
 }

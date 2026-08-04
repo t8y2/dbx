@@ -4,6 +4,7 @@ import { focusEditorView, type EditorViewLike } from "@/lib/editor/queryEditorFo
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
+const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
 
 function createMockView(overrides: Partial<EditorViewLike> = {}): EditorViewLike {
   return {
@@ -45,5 +46,12 @@ describe("QueryEditor auto focus wiring", () => {
 
   it("enables auto focus for query tabs", () => {
     expect(contentAreaSource).toMatch(/<QueryEditor[\s\S]*?\sauto-focus\s[\s\S]*?:model-value="activeTab\.sql"/);
+  });
+});
+
+describe("QueryEditor toolbar focus", () => {
+  it("does not move focus from the editor when clicking execute", () => {
+    expect(editorToolbarSource).toMatch(/:disabled="activeTab\.isCancelling[\s\S]*?@mousedown\.prevent[\s\S]*?@click="activeTab\.isExecuting \? emit\('cancel'\) : emit\('execute'\)"/);
+    expect(queryEditorSource).toMatch(/function requestExecute\([\s\S]*?const currentView = view\.value;[\s\S]*?currentView\.focus\(\);[\s\S]*?requestExecuteFromView\(currentView/);
   });
 });

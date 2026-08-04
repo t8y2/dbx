@@ -622,6 +622,7 @@ function emitExecutionRequest(source: SqlExecutionOverride, openInNewResultTab =
 function requestExecute(options: RequestExecuteOptions = {}) {
   const currentView = view.value;
   if (!currentView) return false;
+  currentView.focus();
   return requestExecuteFromView(currentView, currentView.state.selection.main.head, options);
 }
 

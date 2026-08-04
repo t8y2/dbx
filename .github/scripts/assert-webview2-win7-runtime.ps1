@@ -20,10 +20,10 @@ $source = @"
 using System;
 using System.Runtime.InteropServices;
 
-internal static class DbxWebView2LoaderProbe
+public static class DbxWebView2LoaderProbe
 {
     [DllImport(@"$escapedLoaderPath", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    internal static extern int GetAvailableCoreWebView2BrowserVersionString(
+    public static extern int GetAvailableCoreWebView2BrowserVersionString(
         string browserExecutableFolder,
         out IntPtr versionInfo);
 }

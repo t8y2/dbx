@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -48,6 +50,8 @@ vi.mock("@/components/ui/button", async () => {
 });
 
 import SshHostKeyPromptDialog from "@/components/ssh/SshHostKeyPromptDialog.vue";
+
+const dialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/ssh/SshHostKeyPromptDialog.vue"), "utf8");
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -113,6 +117,13 @@ async function mountDialog() {
 }
 
 describe("SshHostKeyPromptDialog web bridge", () => {
+  it("requires an explicit answer for blocking SSH prompts", () => {
+    expect(dialogSource).toContain(':show-close-button="false"');
+    expect(dialogSource).toContain("@interact-outside.prevent");
+    expect(dialogSource).toContain("@escape-key-down.prevent");
+    expect(dialogSource).not.toContain(':dismissible="false"');
+  });
+
   it("shows an SSE host-key prompt and posts the user's acceptance", async () => {
     await mountDialog();
 
@@ -216,5 +227,45 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     // A disconnect re-arms polling so prompts are not lost during the outage.
     eventSource?.error();
     expect(setSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits a keyboard-interactive TOTP challenge as a secret response", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "totp-1",
+        kind: "SecretInput",
+        host: "jump.example.test",
+        port: 2222,
+        prompt: "JumpServer\n\nOTP Code:",
+        echo: false,
+      },
+    });
+    await nextTick();
+
+    expect(document.body.textContent).toContain("SSH Verification Required");
+    expect(document.body.textContent).toContain("OTP Code:");
+
+    const input = document.body.querySelector<HTMLInputElement>("input");
+    expect(input?.type).toBe("password");
+    if (!input) throw new Error("TOTP input was not rendered");
+    input.value = "123456";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    const buttons = document.body.querySelectorAll<HTMLButtonElement>("button");
+    buttons.item(buttons.length - 1).click();
+
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "totp-1",
+        action: "secret",
+        remember: undefined,
+        secret: "123456",
+      });
+    });
   });
 });

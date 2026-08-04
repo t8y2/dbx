@@ -1,0 +1,103 @@
+use std::sync::Arc;
+use tauri::State;
+
+use crate::commands::connection::AppState;
+use dbx_core::connection::PoolKind;
+use dbx_core::mqtt::service;
+use dbx_core::mqtt::types::*;
+
+/// 从 connections map 中获取 MQTT 客户端
+async fn get_mqtt_client(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<Arc<dbx_core::mqtt::client::MqttClient>, String> {
+    let connections = state.connections.read().await;
+    let pool = connections.get(connection_id).ok_or_else(|| format!("连接 {} 未建立", connection_id))?;
+    match pool {
+        PoolKind::Mqtt(client) => Ok(Arc::clone(client)),
+        _ => Err(format!("连接 {} 不是 MQTT 类型", connection_id)),
+    }
+}
+
+/// 获取 broker 基本信息
+#[tauri::command]
+pub async fn mqtt_get_broker_info(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<MqttBrokerInfo, String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::get_broker_info(&client).await
+}
+
+/// 订阅 topic
+#[tauri::command]
+pub async fn mqtt_subscribe(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: String,
+    qos: Option<MqttQoS>,
+) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::subscribe(&client, &topic, qos.unwrap_or_default()).await
+}
+
+/// 取消订阅 topic
+#[tauri::command]
+pub async fn mqtt_unsubscribe(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: String,
+) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::unsubscribe(&client, &topic).await
+}
+
+/// 发布消息
+#[tauri::command]
+pub async fn mqtt_publish(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    request: MqttPublishRequest,
+) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::publish(&client, &request).await
+}
+
+/// 获取已订阅的 topic 列表
+#[tauri::command]
+pub async fn mqtt_list_topics(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<(String, MqttQoS)>, String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::list_topics(&client).await
+}
+
+/// 获取 topic 树结构
+#[tauri::command]
+pub async fn mqtt_get_topic_tree(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<MqttTopicNode, String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::get_topic_tree(&client).await
+}
+
+/// 获取消息列表
+#[tauri::command]
+pub async fn mqtt_get_messages(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic_filter: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<MqttMessage>, String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::get_messages(&client, topic_filter.as_deref(), limit.unwrap_or(50)).await
+}
+
+/// 清空消息历史记录
+#[tauri::command]
+pub async fn mqtt_clear_messages(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::clear_messages(&client).await
+}

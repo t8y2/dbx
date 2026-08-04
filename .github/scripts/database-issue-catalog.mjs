@@ -84,6 +84,7 @@ const supplementalDrivers = [
   { dbType: "kafka", label: "Apache Kafka" },
   { dbType: "rocketmq", label: "Apache RocketMQ" },
   { dbType: "rabbitmq", label: "RabbitMQ" },
+  { dbType: "mqtt", label: "MQTT", aliases: ["emqx", "hivemq", "mosquitto"] },
 ];
 
 const manifestUrl = new URL("../../crates/dbx-core/assets/database-drivers.manifest.json", import.meta.url);

@@ -34,6 +34,20 @@ test("bumps DuckDB after its initial release", () => {
   assert.equal(result.versions.duckdb, "0.1.1");
 });
 
+test("classifies TDengine Rust changes as native-only", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { tdengine: "0.1.39" },
+    changedFiles: ["agents/drivers/tdengine/src/driver.rs"],
+    moduleExists: (path) => path === "agents/drivers/tdengine",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.tdengine, "0.1.40");
+  assert.deepEqual(result.changedModules, ["tdengine"]);
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["tdengine"]);
+});
+
 test("bumps the native RabbitMQ agent from its Go directory", () => {
   const result = evaluateAgentVersionBump({
     versions: { rabbitmq: "0.1.0" },
@@ -69,6 +83,19 @@ test("bumps Cassandra from its native Go source directory", () => {
   assert.deepEqual(result.nativeModules, ["cassandra"]);
 });
 
+test("bumps Neo4j from its native Go source directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { neo4j: "0.1.39" },
+    changedFiles: ["agents/drivers/neo4j-go/main.go"],
+    moduleExists: (path) => path === "agents/drivers/neo4j-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.neo4j, "0.1.40");
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["neo4j"]);
+});
+
 test("builds a manually versioned module even without runtime file changes", () => {
   const result = evaluateAgentVersionBump({
     versions: { duckdb: "0.1.1" },
@@ -82,6 +109,18 @@ test("builds a manually versioned module even without runtime file changes", () 
   assert.deepEqual(result.nativeModules, ["duckdb"]);
   assert.deepEqual(result.reusedModules, []);
   assert.equal(result.versions.duckdb, "0.1.1");
+});
+
+test("bumps DuckDB when its Cargo target configuration changes", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { duckdb: "0.1.2" },
+    changedFiles: ["agents/drivers/duckdb/.cargo/config.toml"],
+    moduleExists: (path) => path === "agents/drivers/duckdb",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.duckdb, "0.1.3");
+  assert.deepEqual(result.nativeModules, ["duckdb"]);
 });
 
 test("builds only common-dependent Java modules for a shared runtime change", () => {

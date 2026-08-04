@@ -4,6 +4,14 @@ import { describe, expect, it } from "vitest";
 const runtimeSource = readFileSync(new URL("../SidebarTreeRuntimeHost.vue", import.meta.url), "utf8");
 
 describe("cross-database table paste", () => {
+  it("publishes the live node after async tree loads", () => {
+    expect(runtimeSource).toContain("function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?: boolean)");
+    expect(runtimeSource).toContain("findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node");
+    expect(runtimeSource).toContain("emitNodeToggled(node, wasExpanded, false)");
+    expect(runtimeSource).toMatch(/await connectionStore\.loadMongoDatabases\(node\.connectionId\);[\s\S]*?emitNodeToggled\(node, wasExpanded\)/);
+    expect(runtimeSource).toContain("connectionStore.cancelTreeNodeLoad(node.id)");
+  });
+
   it("routes a table clipboard from another context to data transfer", () => {
     expect(runtimeSource).toContain("function canTransferTreeClipboardToCurrentNode()");
     expect(runtimeSource).toContain("function openTransferFromTreeClipboard()");

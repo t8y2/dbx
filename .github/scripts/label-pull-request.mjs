@@ -53,6 +53,7 @@ const DRIVER_DATABASE_ALIASES = {
   "h2-legacy": "h2",
   kafka: "mq",
   "kingbase-go": "kingbase",
+  "neo4j-go": "neo4j",
   "oracle-10g": "oracle",
   "oracle-go": "oracle",
   "oracle-legacy": "oracle",

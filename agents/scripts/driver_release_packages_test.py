@@ -26,6 +26,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
             rabbitmq_source.write_bytes(b"\x7fELFtest-rabbitmq-agent")
             cassandra_source = release_dir / "dbx-agent-cassandra-linux-x64"
             cassandra_source.write_bytes(b"\x7fELFtest-cassandra-agent")
+            tdengine_source = release_dir / "dbx-agent-tdengine-windows-aarch64.exe"
+            tdengine_source.write_bytes(b"MZtest-tdengine-agent")
             java_source = release_dir / "dbx-agent-h2.jar"
             java_source.write_bytes(b"test-jar")
             versions = {
@@ -37,6 +39,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "duckdb": "0.1.0",
                 "rabbitmq": "0.1.0",
                 "cassandra": "0.1.37",
+                "tdengine": "0.1.0",
             }
 
             renamed = version_agent_artifacts(release_dir, versions)
@@ -46,7 +49,19 @@ class DriverReleasePackagesTest(unittest.TestCase):
             versioned_duckdb = release_dir / "dbx-agent-duckdb-0.1.0-macos-aarch64"
             versioned_rabbitmq = release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64"
             versioned_cassandra = release_dir / "dbx-agent-cassandra-0.1.37-linux-x64"
-            self.assertEqual(renamed, [versioned_java, versioned_cassandra, versioned_native, versioned_vastbase, versioned_duckdb, versioned_rabbitmq])
+            versioned_tdengine = release_dir / "dbx-agent-tdengine-0.1.0-windows-aarch64.exe"
+            self.assertEqual(
+                renamed,
+                [
+                    versioned_java,
+                    versioned_cassandra,
+                    versioned_native,
+                    versioned_vastbase,
+                    versioned_duckdb,
+                    versioned_rabbitmq,
+                    versioned_tdengine,
+                ],
+            )
 
             registry = {
                 "jres": {"21": {"version": "21", "platforms": {}}},
@@ -123,6 +138,19 @@ class DriverReleasePackagesTest(unittest.TestCase):
                             }
                         },
                     },
+                    "tdengine": {
+                        "version": "0.1.0",
+                        "label": "TDengine",
+                        "min_app_version": "0.6.0",
+                        "jre": "21",
+                        "jar": {"url": "https://example.com/legacy-placeholder.jar", "size": 0},
+                        "native": {
+                            "windows-aarch64": {
+                                "url": f"https://example.com/{versioned_tdengine.name}",
+                                "size": versioned_tdengine.stat().st_size,
+                            }
+                        },
+                    },
                 },
             }
             (release_dir / "agent-registry.json").write_text(json.dumps(registry), encoding="utf-8")
@@ -138,6 +166,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     release_dir / "dbx-agent-vastbase-0.1.37-linux-x64.tar.zst",
                     release_dir / "dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
                     release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64.tar.zst",
+                    release_dir / "dbx-agent-tdengine-0.1.0-windows-aarch64.tar.zst",
                 ],
             )
             package_cases = [
@@ -147,6 +176,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 (outputs[3], "vastbase", versioned_vastbase, "native", "linux-x64"),
                 (outputs[4], "duckdb", versioned_duckdb, "native", "macos-aarch64"),
                 (outputs[5], "rabbitmq", versioned_rabbitmq, "native", "linux-x64"),
+                (outputs[6], "tdengine", versioned_tdengine, "native", "windows-aarch64"),
             ]
             for output, driver_name, source, artifact_type, platform in package_cases:
                 tar_bytes = subprocess.run(
@@ -176,6 +206,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 (final_registry["drivers"]["vastbase"]["native"]["linux-x64"], outputs[3]),
                 (final_registry["drivers"]["duckdb"]["native"]["macos-aarch64"], outputs[4]),
                 (final_registry["drivers"]["rabbitmq"]["native"]["linux-x64"], outputs[5]),
+                (final_registry["drivers"]["tdengine"]["native"]["windows-aarch64"], outputs[6]),
             ]
             for artifact, output in release_artifacts:
                 self.assertEqual(artifact["url"], f"https://example.com/{output.name}")
@@ -184,7 +215,18 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 self.assertEqual(len(artifact["sha256"]), 64)
 
             removed = remove_raw_driver_artifacts(release_dir)
-            self.assertEqual(removed, [versioned_cassandra, versioned_duckdb, versioned_java, versioned_native, versioned_rabbitmq, versioned_vastbase])
+            self.assertEqual(
+                removed,
+                [
+                    versioned_cassandra,
+                    versioned_duckdb,
+                    versioned_java,
+                    versioned_native,
+                    versioned_rabbitmq,
+                    versioned_tdengine,
+                    versioned_vastbase,
+                ],
+            )
             self.assertTrue(all(output.is_file() for output in outputs))
 
     def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:

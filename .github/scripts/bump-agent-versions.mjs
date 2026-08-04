@@ -49,10 +49,12 @@ const nativeDriverDirectories = {
   duckdb: "duckdb",
   oracle: "oracle-go",
   kingbase: "kingbase-go",
+  neo4j: "neo4j-go",
   vastbase: "vastbase-go",
   rabbitmq: "rabbitmq",
+  tdengine: "tdengine",
 };
-const nativeDriverModules = new Set(["cassandra", "duckdb", "oracle", "xugu", "kingbase", "vastbase", "rabbitmq"]);
+const nativeDriverModules = new Set(["cassandra", "duckdb", "oracle", "xugu", "kingbase", "neo4j", "vastbase", "rabbitmq", "tdengine"]);
 
 function resolveAgentModule(moduleName, { legacyStandaloneModules, moduleExists, readModuleFile }) {
   let checkDir = null;

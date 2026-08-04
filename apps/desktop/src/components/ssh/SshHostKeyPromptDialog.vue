@@ -17,6 +17,7 @@ interface SshPromptRequest {
   key_type?: string | null;
   fingerprint?: string | null;
   prompt?: string | null;
+  echo?: boolean;
 }
 
 interface SshHostKeyNotice {
@@ -35,6 +36,7 @@ const { toast } = useToast();
 // Using a queue keyed by request id means every prompt is shown and answered.
 const queue = ref<SshPromptRequest[]>([]);
 const current = computed<SshPromptRequest | null>(() => queue.value[0] ?? null);
+const isSecretPrompt = computed(() => current.value?.kind === "SecretInput");
 const visible = ref(false);
 
 const remember = ref(true);
@@ -235,17 +237,19 @@ function submitSecret() {
 </script>
 
 <template>
-  <Dialog v-model:open="visible" :dismissible="false">
-    <DialogContent class="sm:max-w-[460px]">
+  <Dialog v-model:open="visible">
+    <DialogContent class="sm:max-w-[460px]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader>
-        <DialogTitle>{{ t("connection.sshHostKeyVerifyTitle") }}</DialogTitle>
+        <DialogTitle>
+          {{ t(isSecretPrompt ? "connection.sshInteractiveTitle" : "connection.sshHostKeyVerifyTitle") }}
+        </DialogTitle>
         <DialogDescription class="text-muted-foreground">
-          {{ t("connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
+          {{ t(isSecretPrompt ? "connection.sshInteractiveMessage" : "connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
         </DialogDescription>
       </DialogHeader>
 
       <div v-if="current" class="space-y-3 py-1">
-        <div class="rounded-md border border-border bg-muted/40 p-3 text-sm">
+        <div v-if="current.kind === 'HostKeyVerify'" class="rounded-md border border-border bg-muted/40 p-3 text-sm">
           <div class="flex items-center justify-between gap-3">
             <span class="text-muted-foreground">{{ t("connection.sshHostKeyVerifyKeyType") }}</span>
             <span class="font-medium">{{ current.key_type || "—" }}</span>
@@ -262,18 +266,29 @@ function submitSecret() {
         </label>
 
         <div v-else-if="current.kind === 'SecretInput'" class="space-y-2">
-          <p class="text-sm text-muted-foreground">{{ current.prompt || "Enter verification code" }}</p>
-          <input v-model="secretCode" type="text" autocomplete="off" class="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring" :placeholder="'••••••'" />
+          <p class="whitespace-pre-wrap text-sm text-muted-foreground">
+            {{ current.prompt || t("connection.sshInteractiveDefaultPrompt") }}
+          </p>
+          <input
+            v-model="secretCode"
+            :type="current.echo ? 'text' : 'password'"
+            autocomplete="one-time-code"
+            class="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+            :placeholder="t('connection.sshInteractivePlaceholder')"
+            @keydown.enter="submitSecret"
+          />
         </div>
       </div>
 
       <DialogFooter>
-        <Button variant="outline" :disabled="resolving" @click="reject">{{ t("connection.sshHostKeyVerifyReject") }}</Button>
+        <Button variant="outline" :disabled="resolving" @click="reject">
+          {{ t(isSecretPrompt ? "connection.sshInteractiveCancel" : "connection.sshHostKeyVerifyReject") }}
+        </Button>
         <Button v-if="current?.kind !== 'SecretInput'" :disabled="resolving" @click="accept">
           {{ t("connection.sshHostKeyVerifyAccept") }}
         </Button>
         <Button v-else :disabled="resolving || !secretCode" @click="submitSecret">
-          {{ t("connection.sshHostKeyVerifyAccept") }}
+          {{ t("connection.sshInteractiveSubmit") }}
         </Button>
       </DialogFooter>
     </DialogContent>

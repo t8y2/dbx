@@ -2658,6 +2658,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadVectorCollections(connectionId);
     } else if (config.db_type === "mq") {
       await loadMqTenants(connectionId, { force: true });
+    } else if (config.db_type === "mqtt") {
+      await loadMqttTopics(connectionId);
     } else if (config.db_type === "nacos") {
       await loadNacosNamespaces(connectionId, { force: true });
     } else {
@@ -3322,6 +3324,48 @@ export const useConnectionStore = defineStore("connection", () => {
     } finally {
       finishTreeNodeLoad(load);
     }
+  }
+
+  async function loadMqttTopics(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const { mqttGetTopicTree } = await import("@/lib/backend/api");
+      const topicTree = (await mqttGetTopicTree(connectionId)) as { name: string; fullPath: string; children?: unknown[]; isLeaf: boolean };
+      const topicNodes = mqttTopicTreeToSidebarNodes(connectionId, topicTree);
+      // Always prepend a synthetic console entry so users can open the MQTT admin
+      // even when no topics are subscribed yet.
+      const consoleNode: TreeNode = {
+        id: `${connectionId}:mqtt-topic:__console__`,
+        label: "MQTT 控制台",
+        type: "mqtt-topic" as const,
+        connectionId,
+        children: topicNodes.length > 0 ? topicNodes : [],
+        isExpanded: topicNodes.length > 0,
+      };
+      setChildren(node, [consoleNode]);
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  function mqttTopicTreeToSidebarNodes(connectionId: string, tree: { name: string; fullPath: string; children?: unknown[]; isLeaf: boolean }): TreeNode[] {
+    const children = tree.children ?? [];
+    return children.map((child: any) => ({
+      id: `${connectionId}:mqtt-topic:${child.fullPath}`,
+      label: child.isLeaf ? child.name : `${child.name}/`,
+      type: "mqtt-topic",
+      connectionId,
+      children: child.children?.length > 0 ? mqttTopicTreeToSidebarNodes(connectionId, child) : [],
+      isExpanded: false,
+    })) as TreeNode[];
   }
 
   async function loadMqTenants(connectionId: string, options?: LoadTreeOptions) {
@@ -5089,6 +5133,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await loadMqTenants(node.connectionId, options);
+      } else if (config?.db_type === "mqtt") {
+        await loadMqttTopics(node.connectionId);
       } else if (config?.db_type === "nacos") {
         await loadNacosNamespaces(node.connectionId, options);
       } else {
@@ -6863,6 +6909,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadEtcdRoot,
     loadZooKeeperRoot,
     loadMqTenants,
+    loadMqttTopics,
     loadNacosNamespaces,
     updateRedisDbKeyStats,
     loadMongoDatabases,

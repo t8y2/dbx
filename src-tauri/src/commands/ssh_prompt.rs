@@ -264,6 +264,7 @@ mod tests {
             key_type: Some("ssh-ed25519".to_string()),
             fingerprint: Some("SHA256:test".to_string()),
             prompt: None,
+            echo: false,
         }
     }
 

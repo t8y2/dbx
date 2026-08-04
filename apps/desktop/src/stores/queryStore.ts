@@ -1735,6 +1735,33 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openMqttAdmin(connectionId: string, target?: { initialTopic?: string }) {
+    const existing = tabs.value.find((tab) => tab.mode === "mqtt" && tab.connectionId === connectionId);
+    if (existing) {
+      if (target?.initialTopic) existing.mqttInitialTopic = target.initialTopic;
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${conn?.name || "MQTT"} Console`,
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mqtt",
+      mqttInitialTopic: target?.initialTopic,
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function clearNacosNavigationTarget(connectionId: string, namespace: string, requestId?: number) {
     const tab = tabs.value.find((candidate) => candidate.mode === "nacos" && candidate.connectionId === connectionId && (candidate.nacosNamespace || "") === namespace);
     if (!tab || (requestId !== undefined && tab.nacosTargetRequestId !== requestId)) return;
@@ -5312,6 +5339,7 @@ export const useQueryStore = defineStore("query", () => {
     openNacosDashboard,
     openDamengJobAdmin,
     openMqAdmin,
+    openMqttAdmin,
     openNacosAdmin,
     clearNacosNavigationTarget,
     openTableStructure,

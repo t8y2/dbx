@@ -2,7 +2,7 @@
 //! authentication callbacks) and the frontend UI.
 //!
 //! russh invokes `Handler::check_server_key` *before* any credential is sent,
-//! and (in the future) drives keyboard-interactive challenges mid-auth. Both
+//! and drives keyboard-interactive challenges mid-auth. Both
 //! need to pause the backend task, ask the user via a dialog, and resume with
 //! the answer. This module provides a process-wide gateway so the backend can
 //! suspend on a `oneshot` while the Tauri layer forwards the request to the UI
@@ -25,7 +25,6 @@ pub enum SshPromptKind {
     /// Confirm/deny a server host key (explicit TOFU).
     HostKeyVerify,
     /// Collect a secret typed by the user (e.g. a dynamic verification code).
-    /// Reserved for the future keyboard-interactive flow.
     SecretInput,
 }
 
@@ -46,6 +45,10 @@ pub struct SshPromptRequest {
     /// SecretInput: the challenge text to show the user.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// SecretInput: whether the server allows the response to be echoed.
+    /// Passwords and verification codes normally set this to false.
+    #[serde(default)]
+    pub echo: bool,
 }
 
 /// The user's answer, sent from the UI back to the backend.
@@ -105,6 +108,21 @@ pub fn host_key_verify_request(
         key_type,
         fingerprint,
         prompt: None,
+        echo: false,
+    }
+}
+
+/// Build a [`SshPromptRequest`] for a keyboard-interactive challenge.
+pub fn secret_input_request(host: &str, port: u16, prompt: String, echo: bool) -> SshPromptRequest {
+    SshPromptRequest {
+        id: Uuid::new_v4().to_string(),
+        kind: SshPromptKind::SecretInput,
+        host: host.to_string(),
+        port,
+        key_type: None,
+        fingerprint: None,
+        prompt: Some(prompt),
+        echo,
     }
 }
 

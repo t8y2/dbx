@@ -7,7 +7,7 @@ license = "Apache-2.0"
 [features]
 default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = []
-mq-admin = []
+mq-admin = ["dep:rumqttc"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 openapi = ["dep:utoipa"]
 system-fonts = ["font-kit"]
@@ -51,6 +51,7 @@ prometheus-parse = "=0.2.5"
 futures = "0.3"
 iana-time-zone = "0.1"
 mongodb = "3.2.5"
+rumqttc = { version = "0.24", features = ["websocket"], optional = true }
 russh = "0.60"
 pageant = "0.2"
 portpicker = "0.1.1"

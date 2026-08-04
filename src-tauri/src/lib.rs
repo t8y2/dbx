@@ -1967,6 +1967,22 @@ pub fn run() {
             commands::mq_cmd::mq_raw_request,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_send_message,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_broker_info,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_subscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_unsubscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_publish,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_list_topics,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_topic_tree,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_clear_messages,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,

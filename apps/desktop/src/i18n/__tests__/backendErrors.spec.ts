@@ -55,6 +55,11 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
   {
+    name: "SSH TOTP prompt cancelled",
+    message: "SSH layer 1 failed: SSH keyboard-interactive authentication was cancelled",
+    key: "connection.sshTotpCancelled",
+  },
+  {
     name: "streaming export unsupported",
     message: "Streaming export is unsupported for this query. Simplify it or use a supported driver.",
     key: "exportProgress.streamingUnsupported",

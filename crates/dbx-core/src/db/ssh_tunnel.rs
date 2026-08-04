@@ -8,14 +8,13 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use russh::client::{self, AuthResult, Config, Handle};
+use russh::client::{self, AuthResult, Config, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::{client::AgentClient, AgentIdentity};
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
 use russh::MethodKind;
 use russh::MethodSet;
-use russh::{kex, mac, ChannelMsg, Preferred};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use russh::{kex, mac, ChannelOpenFailure, Preferred};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -41,6 +40,9 @@ const IDLE_SESSION_PING_TIMEOUT: Duration = Duration::from_secs(10);
 /// (explicit TOFU). Fail-closed: if the UI does not answer in time, the host
 /// is rejected and no credential is sent.
 const TOFU_PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Maximum time to wait for the user to answer one keyboard-interactive
+/// challenge (for example a TOTP code).
+const KEYBOARD_INTERACTIVE_PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// SSH client handler. Holds a host-key verifier so that
 /// [`client::Handler::check_server_key`] can reject untrusted/changed server
@@ -183,6 +185,95 @@ fn server_offers_password(remaining_methods: &MethodSet) -> bool {
     remaining_methods.contains(&MethodKind::Password)
 }
 
+fn server_offers_keyboard_interactive(remaining_methods: &MethodSet) -> bool {
+    remaining_methods.contains(&MethodKind::KeyboardInteractive)
+}
+
+fn auth_result_offers_keyboard_interactive(result: &AuthResult) -> bool {
+    matches!(
+        result,
+        AuthResult::Failure { remaining_methods, .. }
+            if server_offers_keyboard_interactive(remaining_methods)
+    )
+}
+
+fn keyboard_interactive_prompt_text(name: &str, instructions: &str, prompt: &str) -> String {
+    [name.trim(), instructions.trim(), prompt.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+async fn request_keyboard_interactive_answer(
+    host: &str,
+    port: u16,
+    name: &str,
+    instructions: &str,
+    prompt: &russh::client::Prompt,
+) -> Result<String, String> {
+    let prompt_text = keyboard_interactive_prompt_text(name, instructions, &prompt.prompt);
+    let request = ssh_prompt::secret_input_request(host, port, prompt_text, prompt.echo);
+    let Some(responder_rx) = ssh_prompt::request_ssh_prompt(request) else {
+        return Err(
+            "SSH keyboard-interactive authentication requires user input, but no prompt UI is available".to_string()
+        );
+    };
+
+    match tokio::time::timeout(KEYBOARD_INTERACTIVE_PROMPT_TIMEOUT, responder_rx).await {
+        Ok(Ok(ssh_prompt::SshPromptAnswer::Secret(secret))) => Ok(secret),
+        Ok(Ok(ssh_prompt::SshPromptAnswer::Reject)) => {
+            Err("SSH keyboard-interactive authentication was cancelled".to_string())
+        }
+        Ok(Ok(ssh_prompt::SshPromptAnswer::Accept { .. })) => {
+            Err("SSH keyboard-interactive authentication received an invalid response".to_string())
+        }
+        Ok(Err(_)) => Err("SSH keyboard-interactive authentication prompt was dismissed".to_string()),
+        Err(_) => Err("SSH keyboard-interactive authentication prompt timed out".to_string()),
+    }
+}
+
+async fn authenticate_keyboard_interactive(
+    session: &mut Handle<SshClient>,
+    ssh_user: &str,
+    host: &str,
+    port: u16,
+    connect_timeout: Duration,
+    connect_timeout_secs: u64,
+) -> Result<(), String> {
+    let mut response = tokio::time::timeout(
+        connect_timeout,
+        session.authenticate_keyboard_interactive_start(ssh_user, None::<String>),
+    )
+    .await
+    .map_err(|_| format!("SSH keyboard-interactive auth timed out ({connect_timeout_secs}s)"))?
+    .map_err(|e| format!("SSH keyboard-interactive auth failed: {e}"))?;
+
+    loop {
+        match response {
+            KeyboardInteractiveAuthResponse::Success => return Ok(()),
+            KeyboardInteractiveAuthResponse::Failure { remaining_methods, partial_success } => {
+                return Err(format!(
+                    "SSH keyboard-interactive authentication failed \
+                     (remaining_methods={remaining_methods:?}, partial_success={partial_success})"
+                ));
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
+                let mut answers = Vec::with_capacity(prompts.len());
+                for prompt in &prompts {
+                    answers.push(request_keyboard_interactive_answer(host, port, &name, &instructions, prompt).await?);
+                }
+
+                response =
+                    tokio::time::timeout(connect_timeout, session.authenticate_keyboard_interactive_respond(answers))
+                        .await
+                        .map_err(|_| format!("SSH keyboard-interactive auth timed out ({connect_timeout_secs}s)"))?
+                        .map_err(|e| format!("SSH keyboard-interactive auth failed: {e}"))?;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn connect_and_authenticate(
     connect_host: &str,
@@ -277,6 +368,18 @@ async fn connect_and_authenticate(
             match auth_res {
                 AuthResult::Success => return Ok(session),
                 AuthResult::Failure { remaining_methods, partial_success } => {
+                    if server_offers_keyboard_interactive(&remaining_methods) {
+                        authenticate_keyboard_interactive(
+                            &mut session,
+                            ssh_user,
+                            host_key_host,
+                            host_key_port,
+                            connect_timeout,
+                            connect_timeout_secs,
+                        )
+                        .await?;
+                        return Ok(session);
+                    }
                     // Only fall back to password when the server still offers it.
                     // This prevents sending the password to a server that never
                     // advertised password auth — the MITM credential-harvest
@@ -301,7 +404,19 @@ async fn connect_and_authenticate(
                 .map_err(|e| format!("SSH password auth failed: {e}"))?;
             match auth_res {
                 AuthResult::Success => return Ok(session),
-                AuthResult::Failure { partial_success, .. } => {
+                AuthResult::Failure { remaining_methods, partial_success } => {
+                    if server_offers_keyboard_interactive(&remaining_methods) {
+                        authenticate_keyboard_interactive(
+                            &mut session,
+                            ssh_user,
+                            host_key_host,
+                            host_key_port,
+                            connect_timeout,
+                            connect_timeout_secs,
+                        )
+                        .await?;
+                        return Ok(session);
+                    }
                     return Err(format!("SSH password authentication failed (partial_success={partial_success})"));
                 }
             }
@@ -336,7 +451,17 @@ async fn connect_and_authenticate(
         .await
         .map_err(|_| format!("SSH key auth timed out ({connect_timeout_secs}s)"))?
         .map_err(|e| format!("SSH key auth failed: {e}"))?;
-        if !auth_res.success() {
+        if auth_result_offers_keyboard_interactive(&auth_res) {
+            authenticate_keyboard_interactive(
+                &mut session,
+                ssh_user,
+                host_key_host,
+                host_key_port,
+                connect_timeout,
+                connect_timeout_secs,
+            )
+            .await?;
+        } else if !auth_res.success() {
             return Err("SSH public key authentication failed".to_string());
         }
     } else if try_password {
@@ -344,14 +469,45 @@ async fn connect_and_authenticate(
             .await
             .map_err(|_| format!("SSH password auth timed out ({connect_timeout_secs}s)"))?
             .map_err(|e| format!("SSH password auth failed: {e}"))?;
-        if !auth_res.success() {
+        if auth_result_offers_keyboard_interactive(&auth_res) {
+            authenticate_keyboard_interactive(
+                &mut session,
+                ssh_user,
+                host_key_host,
+                host_key_port,
+                connect_timeout,
+                connect_timeout_secs,
+            )
+            .await?;
+        } else if !auth_res.success() {
             return Err("SSH password authentication failed".to_string());
         }
     } else if try_agent {
         match try_authenticate_with_agent(&mut session, ssh_user, ssh_agent_sock_path, &connect_timeout).await {
-            Ok(()) => {}
+            Ok(AgentAuthenticationOutcome::Success) => {}
+            Ok(AgentAuthenticationOutcome::KeyboardInteractiveRequired) => {
+                authenticate_keyboard_interactive(
+                    &mut session,
+                    ssh_user,
+                    host_key_host,
+                    host_key_port,
+                    connect_timeout,
+                    connect_timeout_secs,
+                )
+                .await?;
+            }
             Err(agent_err) => return Err(agent_err),
         }
+    } else if auth_result_offers_keyboard_interactive(&none_res) {
+        authenticate_keyboard_interactive(
+            &mut session,
+            ssh_user,
+            host_key_host,
+            host_key_port,
+            connect_timeout,
+            connect_timeout_secs,
+        )
+        .await?;
     } else {
         return Err(
             "SSH authentication failed: \"none\" was rejected and no password, key, or ssh-agent is configured"
@@ -362,14 +518,20 @@ async fn connect_and_authenticate(
     Ok(session)
 }
 
-/// Try to authenticate using ssh-agent identities. Returns `Ok(())` on success,
-/// or an error describing why agent auth failed (unavailable, no identities, all rejected).
+enum AgentAuthenticationOutcome {
+    Success,
+    KeyboardInteractiveRequired,
+}
+
+/// Try to authenticate using ssh-agent identities. A key may be only the first
+/// successful factor, so preserve a server request to continue with
+/// keyboard-interactive instead of discarding it and trying the next identity.
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
     #[cfg_attr(not(unix), allow(unused_variables))] ssh_agent_sock_path: &str,
     connect_timeout: &Duration,
-) -> Result<(), String> {
+) -> Result<AgentAuthenticationOutcome, String> {
     #[cfg(unix)]
     let mut agent = if ssh_agent_sock_path.is_empty() {
         match AgentClient::connect_env().await {
@@ -422,7 +584,10 @@ async fn try_authenticate_with_agent(
             };
 
             match result {
-                Ok(auth_res) if auth_res.success() => return Ok(()),
+                Ok(auth_res) if auth_res.success() => return Ok(AgentAuthenticationOutcome::Success),
+                Ok(auth_res) if auth_result_offers_keyboard_interactive(&auth_res) => {
+                    return Ok(AgentAuthenticationOutcome::KeyboardInteractiveRequired)
+                }
                 Ok(_) => continue,
                 Err(e) => {
                     log::debug!("SSH agent identity ({}) auth failed: {e}", identity.comment());
@@ -435,7 +600,7 @@ async fn try_authenticate_with_agent(
     .await;
 
     match auth_result {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(outcome)) => Ok(outcome),
         Ok(Err(e)) => Err(e),
         Err(_) => Err("No SSH password or key provided, and ssh-agent auth timed out".to_string()),
     }
@@ -577,9 +742,27 @@ fn read_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, String> {
     Ok(u32::from_be_bytes(value.try_into().map_err(|_| "OpenSSH key field length is invalid".to_string())?))
 }
 
+/// Build a POSIX-shell-safe netcat command for SSH servers (notably
+/// JumpServer/Koko) that reject `direct-tcpip` but allow an exec channel on the
+/// selected asset. The target is single-quoted because it originates in the
+/// connection configuration and is ultimately passed through a remote shell.
+fn netcat_proxy_command(remote_host: &str, remote_port: u16) -> Result<String, String> {
+    if remote_host.is_empty() || remote_host.contains('\0') || remote_host.chars().any(char::is_control) {
+        return Err("SSH tunnel target host is invalid".to_string());
+    }
+    let quoted_host = remote_host.replace('\'', "'\\''");
+    Ok(format!("exec nc '{quoted_host}' {remote_port}"))
+}
+
 /// Accept connections on the local listener and forward them through the SSH session.
 /// Returns when the SSH session dies (listener error or session.is_closed()).
-async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remote_host: &str, remote_port: u16) {
+async fn forward_loop(
+    session: &Handle<SshClient>,
+    listener: &TcpListener,
+    remote_host: &str,
+    remote_port: u16,
+    allow_exec_channel_proxy: bool,
+) {
     let mut idle_check = tokio::time::interval(IDLE_SESSION_CHECK_INTERVAL);
     idle_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -619,7 +802,7 @@ async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remot
             break;
         }
 
-        let mut channel = match session
+        let channel = match session
             .channel_open_direct_tcpip(
                 remote_host,
                 remote_port.into(),
@@ -629,6 +812,37 @@ async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remot
             .await
         {
             Ok(c) => c,
+            Err(russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited))
+                if allow_exec_channel_proxy =>
+            {
+                // JumpServer/Koko deliberately disables SSH direct-tcpip even
+                // for a directly selected asset. An exec channel is still
+                // proxied to that asset, so use netcat there as a byte stream.
+                let command = match netcat_proxy_command(remote_host, remote_port) {
+                    Ok(command) => command,
+                    Err(e) => {
+                        log::error!("SSH netcat fallback rejected the target: {e}");
+                        continue;
+                    }
+                };
+                let channel = match session.channel_open_session().await {
+                    Ok(channel) => channel,
+                    Err(e) => {
+                        log::error!("SSH netcat fallback could not open a session channel: {e}");
+                        continue;
+                    }
+                };
+                if let Err(e) = channel.exec(true, command).await {
+                    log::error!("SSH netcat fallback could not start nc: {e}");
+                    continue;
+                }
+                log::info!("SSH direct-tcpip is disabled; forwarding through a remote nc session");
+                channel
+            }
+            Err(russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited)) => {
+                log::warn!("SSH direct-tcpip was administratively prohibited; exec-channel proxy fallback is disabled");
+                break;
+            }
             Err(e) => {
                 log::error!("SSH direct-tcpip failed: {e}");
                 break;
@@ -636,37 +850,9 @@ async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remot
         };
 
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            let mut stream_closed = false;
-
-            loop {
-                tokio::select! {
-                    r = stream.read(&mut buf), if !stream_closed => {
-                        match r {
-                            Ok(0) => {
-                                stream_closed = true;
-                                let _ = channel.eof().await;
-                            }
-                            Ok(n) => {
-                                if channel.data(&buf[..n]).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    msg = channel.wait() => {
-                        match msg {
-                            Some(ChannelMsg::Data { ref data }) => {
-                                if stream.write_all(data).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Some(ChannelMsg::Eof) | None => break,
-                            _ => {}
-                        }
-                    }
-                }
+            let mut channel_stream = channel.into_stream();
+            if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut channel_stream).await {
+                log::debug!("SSH tunnel stream ended with an I/O error: {e}");
             }
         });
     }
@@ -696,11 +882,12 @@ async fn tunnel_reconnect_loop(
     listener: TcpListener,
     remote_host: String,
     remote_port: u16,
+    allow_exec_channel_proxy: bool,
 ) {
     loop {
         log::info!("SSH tunnel active: {}:{} -> {}:{}", connect_host, connect_port, remote_host, remote_port);
 
-        forward_loop(&session, &listener, &remote_host, remote_port).await;
+        forward_loop(&session, &listener, &remote_host, remote_port, allow_exec_channel_proxy).await;
 
         log::warn!("SSH tunnel connection lost ({}:{}), reconnecting...", connect_host, connect_port);
 
@@ -824,6 +1011,7 @@ impl TunnelManager {
         remote_host: &str,
         remote_port: u16,
         expose_to_lan: bool,
+        allow_exec_channel_proxy: bool,
     ) -> Result<u16, String> {
         {
             let mut tunnels = self.tunnels.lock().await;
@@ -859,6 +1047,7 @@ impl TunnelManager {
             remote_host,
             remote_port,
             expose_to_lan,
+            allow_exec_channel_proxy,
         )
         .await?;
 
@@ -933,6 +1122,7 @@ impl TunnelManager {
                 &target_host,
                 target_port,
                 is_last && hop.expose_lan,
+                hop.allow_exec_channel_proxy,
             )
             .await
             .map_err(|err| format!("SSH hop {} failed: {err}", index + 1))?;
@@ -1008,6 +1198,7 @@ async fn spawn_tunnel(
     remote_host: &str,
     remote_port: u16,
     expose_to_lan: bool,
+    allow_exec_channel_proxy: bool,
 ) -> Result<(JoinHandle<()>, u16), String> {
     let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
 
@@ -1051,6 +1242,7 @@ async fn spawn_tunnel(
         listener,
         remote_host.to_string(),
         remote_port,
+        allow_exec_channel_proxy,
     ));
 
     Ok((handle, local_port))
@@ -1108,9 +1300,9 @@ mod tests {
     use super::SshClient;
     use super::PROMPT_TEST_LOCK;
     use super::{
-        connect_and_authenticate, effective_hop_timeout, openssh_padding_len, plan_chain, read_ssh_string,
-        sanitize_unencrypted_openssh_comment_bytes, server_offers_password, ssh_client_config, HostKeyState,
-        HostKeyVerifier, PlannedTunnel, TunnelManager,
+        connect_and_authenticate, effective_hop_timeout, netcat_proxy_command, openssh_padding_len, plan_chain,
+        read_ssh_string, sanitize_unencrypted_openssh_comment_bytes, server_offers_keyboard_interactive,
+        server_offers_password, ssh_client_config, HostKeyState, HostKeyVerifier, PlannedTunnel, TunnelManager,
     };
     use crate::db::ssh_prompt;
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
@@ -1118,12 +1310,16 @@ mod tests {
     use russh::client::Handler;
     use russh::keys::decode_secret_key;
     use russh::keys::ssh_key::PublicKey;
-    use russh::server::{self, Auth, Server};
+    use russh::server::{self, Auth, Response, Server};
     use russh::MethodKind;
     use russh::MethodSet;
+    use russh::{Channel, ChannelId};
+    use std::borrow::Cow;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
     use tokio::sync::mpsc;
 
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
@@ -1175,6 +1371,7 @@ mod tests {
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
+            allow_exec_channel_proxy: false,
         }
     }
 
@@ -1465,6 +1662,22 @@ mod tests {
         assert!(!server_offers_password(&empty));
     }
 
+    #[test]
+    fn detects_keyboard_interactive_auth_method() {
+        let keyboard_interactive = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
+        assert!(server_offers_keyboard_interactive(&keyboard_interactive));
+
+        let password_only = MethodSet::from(&[MethodKind::Password][..]);
+        assert!(!server_offers_keyboard_interactive(&password_only));
+    }
+
+    #[test]
+    fn netcat_fallback_quotes_the_target_for_the_remote_shell() {
+        assert_eq!(netcat_proxy_command("10.0.0.5", 5432).unwrap(), "exec nc '10.0.0.5' 5432");
+        assert_eq!(netcat_proxy_command("db'prod.internal", 3306).unwrap(), "exec nc 'db'\\''prod.internal' 3306");
+        assert!(netcat_proxy_command("db.internal\nmalicious-command", 5432).is_err());
+    }
+
     // --- MITM hardening: a changed/unknown host never receives the password ---
 
     const TEST_SERVER_KEY_PEM: &str = r#"-----BEGIN OPENSSH PRIVATE KEY-----
@@ -1474,6 +1687,172 @@ vAAAAAtzc2gtZWQyNTUxOQAAACAVDlhwKBk+QMZN+WNAUKL6qLr3hf3S5p1TdSK4hMhLxw
 AAAEDxqdMQX37UdhziSi5Br3kyRM/Xrpo9ZcXoguYkeogq0hUOWHAoGT5Axk35Y0BQovqo
 uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 -----END OPENSSH PRIVATE KEY-----"#;
+
+    struct PasswordThenTotpServer;
+
+    impl server::Server for PasswordThenTotpServer {
+        type Handler = PasswordThenTotpHandler;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> PasswordThenTotpHandler {
+            PasswordThenTotpHandler
+        }
+    }
+
+    struct PasswordThenTotpHandler;
+
+    impl server::Handler for PasswordThenTotpHandler {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> {
+            if password == "secret" {
+                Ok(Auth::Reject {
+                    proceed_with_methods: Some(MethodSet::from(&[MethodKind::KeyboardInteractive][..])),
+                    partial_success: true,
+                })
+            } else {
+                Ok(Auth::reject())
+            }
+        }
+
+        async fn auth_publickey(
+            &mut self,
+            _user: &str,
+            _public_key: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<Auth, Self::Error> {
+            Ok(Auth::Reject {
+                proceed_with_methods: Some(MethodSet::from(&[MethodKind::KeyboardInteractive][..])),
+                partial_success: true,
+            })
+        }
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            _user: &str,
+            _submethods: &str,
+            mut response: Option<Response<'a>>,
+        ) -> Result<Auth, Self::Error> {
+            let Some(ref mut answers) = response else {
+                return Ok(Auth::Partial {
+                    name: Cow::Borrowed("JumpServer"),
+                    instructions: Cow::Borrowed("Multi-factor authentication"),
+                    prompts: Cow::Owned(vec![(Cow::Borrowed("OTP Code: "), false)]),
+                });
+            };
+
+            if answers.next().as_deref() == Some(b"123456") {
+                Ok(Auth::Accept)
+            } else {
+                Ok(Auth::reject())
+            }
+        }
+    }
+
+    async fn start_password_then_totp_server() -> (u16, tokio::task::JoinHandle<()>) {
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config {
+            keys: vec![server_key],
+            methods: MethodSet::from(
+                &[MethodKind::Password, MethodKind::PublicKey, MethodKind::KeyboardInteractive][..],
+            ),
+            auth_rejection_time: std::time::Duration::ZERO,
+            auth_rejection_time_initial: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        };
+        let port = portpicker::pick_unused_port().expect("no free port");
+        let mut server = PasswordThenTotpServer;
+        let task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", port)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        (port, task)
+    }
+
+    #[tokio::test]
+    async fn password_auth_continues_with_keyboard_interactive_totp() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (port, server_task) = start_password_then_totp_server().await;
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        HostKeyVerifier::new(known_hosts_path.clone()).learn("127.0.0.1", port, &test_server_public_key()).unwrap();
+
+        let (gateway_tx, mut gateway_rx) = mpsc::channel::<ssh_prompt::SshPromptEnvelope>(1);
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let envelope = gateway_rx.recv().await.expect("TOTP prompt");
+            let _ = observed_tx.send((envelope.request.kind, envelope.request.prompt.clone(), envelope.request.echo));
+            let _ = envelope.responder.send(ssh_prompt::SshPromptAnswer::Secret("123456".to_string()));
+        });
+        ssh_prompt::install_ssh_prompt_gateway(gateway_tx);
+
+        let session = connect_and_authenticate(
+            "127.0.0.1",
+            port,
+            "127.0.0.1",
+            port,
+            "user",
+            "secret",
+            "",
+            "",
+            false,
+            "",
+            "password",
+            5,
+            &known_hosts_path,
+        )
+        .await
+        .expect("password + TOTP authentication should succeed");
+
+        let (kind, prompt, echo) = observed_rx.await.unwrap();
+        assert_eq!(kind, ssh_prompt::SshPromptKind::SecretInput);
+        assert!(prompt.unwrap().contains("OTP Code"));
+        assert!(!echo, "TOTP response should not be echoed");
+
+        drop(session);
+        ssh_prompt::clear_ssh_prompt_gateway();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn public_key_auth_continues_with_keyboard_interactive_totp() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (port, server_task) = start_password_then_totp_server().await;
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        let key_path = dir.path().join("id_ed25519");
+        std::fs::write(&key_path, TEST_SERVER_KEY_PEM).unwrap();
+        HostKeyVerifier::new(known_hosts_path.clone()).learn("127.0.0.1", port, &test_server_public_key()).unwrap();
+
+        let (gateway_tx, mut gateway_rx) = mpsc::channel::<ssh_prompt::SshPromptEnvelope>(1);
+        tokio::spawn(async move {
+            let envelope = gateway_rx.recv().await.expect("TOTP prompt");
+            let _ = envelope.responder.send(ssh_prompt::SshPromptAnswer::Secret("123456".to_string()));
+        });
+        ssh_prompt::install_ssh_prompt_gateway(gateway_tx);
+
+        let session = connect_and_authenticate(
+            "127.0.0.1",
+            port,
+            "127.0.0.1",
+            port,
+            "user",
+            "",
+            key_path.to_str().unwrap(),
+            "",
+            false,
+            "",
+            "key",
+            5,
+            &known_hosts_path,
+        )
+        .await
+        .expect("public key + TOTP authentication should succeed");
+
+        drop(session);
+        ssh_prompt::clear_ssh_prompt_gateway();
+        server_task.abort();
+    }
 
     struct AcceptNoneServer;
 
@@ -1505,6 +1884,176 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         (port, task)
+    }
+
+    struct NetcatFallbackServer {
+        command: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl server::Server for NetcatFallbackServer {
+        type Handler = NetcatFallbackHandler;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> NetcatFallbackHandler {
+            NetcatFallbackHandler { command: self.command.clone() }
+        }
+    }
+
+    struct NetcatFallbackHandler {
+        command: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl server::Handler for NetcatFallbackHandler {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+            Ok(Auth::Accept)
+        }
+
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            _channel: Channel<server::Msg>,
+            _host_to_connect: &str,
+            _port_to_connect: u32,
+            _originator_address: &str,
+            _originator_port: u32,
+            _session: &mut server::Session,
+        ) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: Channel<server::Msg>,
+            _session: &mut server::Session,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            *self.command.lock().unwrap() = data.to_vec();
+            session.channel_success(channel)?;
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            session.data(channel, data.to_vec())?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_falls_back_to_netcat_when_direct_tcpip_is_prohibited() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config { keys: vec![server_key], ..Default::default() };
+        let port = portpicker::pick_unused_port().expect("no free port");
+        let command = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut server = NetcatFallbackServer { command: command.clone() };
+        let server_task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", port)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        HostKeyVerifier::new(known_hosts_path.clone()).learn("127.0.0.1", port, &test_server_public_key()).unwrap();
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let local_port = manager
+            .start_tunnel(
+                "netcat-fallback",
+                "127.0.0.1",
+                port,
+                "127.0.0.1",
+                port,
+                "user",
+                "",
+                "",
+                "",
+                false,
+                "",
+                "none",
+                5,
+                "db.internal",
+                5432,
+                false,
+                true,
+            )
+            .await
+            .expect("start fallback tunnel");
+
+        let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut echoed = [0_u8; 4];
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.read_exact(&mut echoed))
+            .await
+            .expect("fallback echo timeout")
+            .expect("fallback echo read");
+        assert_eq!(&echoed, b"ping");
+        assert_eq!(&*command.lock().unwrap(), b"exec nc 'db.internal' 5432");
+
+        manager.stop_tunnel("netcat-fallback").await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn prohibited_direct_tcpip_does_not_run_netcat_by_default() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config { keys: vec![server_key], ..Default::default() };
+        let port = portpicker::pick_unused_port().expect("no free port");
+        let command = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut server = NetcatFallbackServer { command: command.clone() };
+        let server_task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", port)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        HostKeyVerifier::new(known_hosts_path.clone()).learn("127.0.0.1", port, &test_server_public_key()).unwrap();
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let local_port = manager
+            .start_tunnel(
+                "netcat-disabled-by-default",
+                "127.0.0.1",
+                port,
+                "127.0.0.1",
+                port,
+                "user",
+                "",
+                "",
+                "",
+                false,
+                "",
+                "none",
+                5,
+                "db.internal",
+                5432,
+                false,
+                false,
+            )
+            .await
+            .expect("start tunnel");
+
+        let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
+        let _ = client.write_all(b"ping").await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(command.lock().unwrap().is_empty(), "generic SSH server must not receive an nc command by default");
+
+        manager.stop_tunnel("netcat-disabled-by-default").await;
+        server_task.abort();
     }
 
     #[tokio::test]
@@ -1587,6 +2136,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "db.internal",
             5432,
             false,
+            false,
         );
         let second = manager.start_tunnel(
             "shared-layer",
@@ -1604,6 +2154,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             "db.internal",
             5432,
+            false,
             false,
         );
         let (first_port, second_port) = tokio::join!(first, second);

@@ -103,6 +103,7 @@ const assetIcons: Record<string, string> = {
   zookeeper: "zookeeper",
   oscar: "oscar.png",
   jdbcx: "jdbcx",
+  mqtt: "mqtt",
 };
 
 const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+/g, "_"));

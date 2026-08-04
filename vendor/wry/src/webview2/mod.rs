@@ -1861,10 +1861,16 @@ pub fn platform_webview_version() -> Result<String> {
 
 fn configured_browser_executable_folder() -> Option<HSTRING> {
   let folder = std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
-  browser_executable_folder_from(folder.as_deref())
+  browser_executable_folder_from(folder.as_deref(), cfg!(target_vendor = "win7"))
 }
 
-fn browser_executable_folder_from(folder: Option<&OsStr>) -> Option<HSTRING> {
+fn browser_executable_folder_from(
+  folder: Option<&OsStr>,
+  fixed_runtime_enabled: bool,
+) -> Option<HSTRING> {
+  if !fixed_runtime_enabled {
+    return None;
+  }
   let folder = folder.filter(|folder| !folder.is_empty())?;
   Some(HSTRING::from_wide(
     &folder.encode_wide().collect::<Vec<_>>(),
@@ -1877,14 +1883,19 @@ mod tests {
 
   #[test]
   fn missing_or_empty_browser_folder_uses_system_runtime() {
-    assert!(browser_executable_folder_from(None).is_none());
-    assert!(browser_executable_folder_from(Some(OsStr::new(""))).is_none());
+    assert!(browser_executable_folder_from(None, true).is_none());
+    assert!(browser_executable_folder_from(Some(OsStr::new("")), true).is_none());
+  }
+
+  #[test]
+  fn non_win7_targets_ignore_configured_browser_folder() {
+    assert!(browser_executable_folder_from(Some(OsStr::new(r"C:\\runtime")), false).is_none());
   }
 
   #[test]
   fn browser_folder_preserves_unicode_windows_paths() {
     let folder = OsStr::new(r"C:\\DBX 测试\\webview2-fixed-runtime");
-    let value = browser_executable_folder_from(Some(folder)).unwrap();
+    let value = browser_executable_folder_from(Some(folder), true).unwrap();
 
     assert_eq!(value.to_string_lossy(), folder.to_string_lossy());
   }

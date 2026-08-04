@@ -9,12 +9,12 @@ use log::debug;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-use windows::Win32::Foundation::ERROR_PIPE_BUSY;
-use windows::Win32::Security::Authentication::Identity::{GetUserNameExA, NameUserPrincipal};
-use windows::Win32::Security::Cryptography::{
+use crate::windows::Win32::Foundation::ERROR_PIPE_BUSY;
+use crate::windows::Win32::Security::Authentication::Identity::{GetUserNameExA, NameUserPrincipal};
+use crate::windows::Win32::Security::Cryptography::{
     CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_CROSS_PROCESS, CryptProtectMemory,
 };
-use windows::core::PSTR;
+use crate::windows::core::PSTR;
 
 use crate::Error;
 

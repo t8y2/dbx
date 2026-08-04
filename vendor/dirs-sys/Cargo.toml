@@ -38,10 +38,19 @@ default-features = false
 [target."cfg(unix)".dependencies.libc]
 version = "0.2"
 
-[target."cfg(windows)".dependencies.windows-sys]
+[target.'cfg(all(windows, target_vendor = "win7"))'.dependencies.windows-sys]
 version = "=0.61.2"
 features = [
     "Win32_UI_Shell",
     "Win32_Foundation",
     "Win32_Globalization",
+]
+
+[target.'cfg(all(windows, not(target_vendor = "win7")))'.dependencies.windows-sys]
+version = "=0.61.2"
+features = [
+    "Win32_UI_Shell",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_Com",
 ]

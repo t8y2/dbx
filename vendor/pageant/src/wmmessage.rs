@@ -8,19 +8,19 @@ use bytes::BytesMut;
 use delegate::delegate;
 use log::debug;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, WPARAM};
-use windows::Win32::Security::{
+use crate::windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, WPARAM};
+use crate::windows::Win32::Security::{
     GetTokenInformation, InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows::Win32::System::DataExchange::COPYDATASTRUCT;
-use windows::Win32::System::Memory::{
+use crate::windows::Win32::System::DataExchange::COPYDATASTRUCT;
+use crate::windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
     UnmapViewOfFile,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SendMessageA, WM_COPYDATA};
-use windows::core::PCWSTR;
+use crate::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use crate::windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SendMessageA, WM_COPYDATA};
+use crate::windows::core::PCWSTR;
 
 use crate::Error;
 

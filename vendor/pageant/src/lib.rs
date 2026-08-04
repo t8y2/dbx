@@ -11,6 +11,11 @@
     clippy::panic
 )]
 
+#[cfg(all(windows, target_vendor = "win7"))]
+pub(crate) use windows_win7 as windows;
+#[cfg(all(windows, not(target_vendor = "win7")))]
+pub(crate) use windows_modern as windows;
+
 mod error;
 pub use error::*;
 

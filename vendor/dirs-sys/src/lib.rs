@@ -147,6 +147,7 @@ use std::slice;
 
 use super::windows::Win32::UI::Shell;
 
+#[cfg(target_vendor = "win7")]
 #[link(name = "ole32")]
 extern "system" {
     fn CoTaskMemFree(pv: *const c_void);
@@ -165,10 +166,16 @@ pub fn known_folder(folder_id: windows::core::GUID) -> Option<PathBuf> {
             let len = windows::Win32::Globalization::lstrlenW(path_ptr) as usize;
             let path = slice::from_raw_parts(path_ptr, len);
             let ostr: OsString = OsStringExt::from_wide(path);
+            #[cfg(target_vendor = "win7")]
             CoTaskMemFree(path_ptr as *const c_void);
+            #[cfg(not(target_vendor = "win7"))]
+            windows::Win32::System::Com::CoTaskMemFree(path_ptr as *const c_void);
             Some(PathBuf::from(ostr))
         } else {
+            #[cfg(target_vendor = "win7")]
             CoTaskMemFree(path_ptr as *const c_void);
+            #[cfg(not(target_vendor = "win7"))]
+            windows::Win32::System::Com::CoTaskMemFree(path_ptr as *const c_void);
             None
         }
     }

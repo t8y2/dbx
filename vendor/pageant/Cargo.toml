@@ -37,16 +37,10 @@ namedpipes = [
     "tokio/net",
     "tokio/time",
     "dep:sha2",
-    "windows/Win32_Security_Authentication_Identity",
-    "windows/Win32_Security_Cryptography",
 ]
 wmmessage = [
     "tokio/rt",
     "tokio/io-util",
-    "windows/Win32_UI_WindowsAndMessaging",
-    "windows/Win32_System_Memory",
-    "windows/Win32_System_Threading",
-    "windows/Win32_System_DataExchange",
 ]
 
 [lib]
@@ -87,6 +81,28 @@ optional = true
 [target."cfg(windows)".dependencies.tokio]
 version = "1.17.0"
 
-[target."cfg(windows)".dependencies.windows]
+[target.'cfg(all(windows, target_vendor = "win7"))'.dependencies.windows-win7]
 version = "=0.61.3"
-features = ["Win32_Security"]
+features = [
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Cryptography",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_DataExchange",
+]
+package = "windows"
+
+[target.'cfg(all(windows, not(target_vendor = "win7")))'.dependencies.windows-modern]
+version = "0.62"
+features = [
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Cryptography",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_DataExchange",
+]
+package = "windows"

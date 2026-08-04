@@ -35,6 +35,7 @@ function redactConnectionHost(host: string): string {
   if (!normalizedHost) return "";
 
   // Multi-host format: host1:port1,host2:port2 — redact each host separately
+  // and replace each embedded port with the redacted marker.
   if (normalizedHost.includes(",")) {
     return normalizedHost
       .split(",")
@@ -42,7 +43,7 @@ function redactConnectionHost(host: string): string {
         const trimmed = part.trim();
         const colonIdx = trimmed.lastIndexOf(":");
         if (colonIdx > 0) {
-          return `${redactSingleHost(trimmed.slice(0, colonIdx))}:${trimmed.slice(colonIdx + 1)}`;
+          return `${redactSingleHost(trimmed.slice(0, colonIdx))}:${REDACTED_PORT}`;
         }
         return redactSingleHost(trimmed);
       })

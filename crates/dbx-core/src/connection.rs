@@ -4646,22 +4646,42 @@ pub async fn probe_connection_endpoint(config: &ConnectionConfig, host: &str, po
         return Ok(());
     }
     let timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
-    // For multi-host connections (host1:port1,host2:port2), probe the first host only
-    let (probe_host, probe_port) = if host.contains(',') {
+
+    // Parse host entries structurally
+    let entries: Vec<(&str, u16)> = if host.contains(',') {
         host.split(',')
-            .next()
-            .and_then(|part| {
+            .filter_map(|part| {
                 let trimmed = part.trim();
-                let colon_idx = trimmed.rfind(':')?;
-                let h = trimmed[..colon_idx].trim();
-                let p: u16 = trimmed[colon_idx + 1..].trim().parse().ok()?;
-                Some((h.to_string(), p))
+                if trimmed.is_empty() {
+                    return None;
+                }
+                if let Some(colon_idx) = trimmed.rfind(':') {
+                    let h = trimmed[..colon_idx].trim();
+                    let p: u16 = trimmed[colon_idx + 1..].trim().parse().ok()?;
+                    Some((h, p))
+                } else {
+                    Some((trimmed, port))
+                }
             })
-            .unwrap_or_else(|| (host.to_string(), port))
+            .collect()
     } else {
-        (host.to_string(), port)
+        vec![(host, port)]
     };
-    db::probe_tcp_endpoint(&format!("{:?}", config.db_type), &probe_host, probe_port, timeout).await
+
+    if entries.is_empty() {
+        return Err("no host entries to probe".to_string());
+    }
+
+    // Probe each node sequentially; return success on the first reachable node.
+    // This matches the failover semantics of the real connection path.
+    let mut last_error = String::new();
+    for (entry_host, entry_port) in &entries {
+        match db::probe_tcp_endpoint(&format!("{:?}", config.db_type), entry_host, *entry_port, timeout).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
 }
 
 fn validate_h2_file_connection(config: &ConnectionConfig) -> Result<(), String> {

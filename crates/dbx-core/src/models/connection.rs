@@ -983,7 +983,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                if raw_host.contains(',') {
+                if is_multi_host(raw_host) {
                     format!("postgres://{raw_host}{db_part}{suffix}")
                 } else {
                     format!("postgres://{host}:{port}{db_part}{suffix}")
@@ -1034,7 +1034,7 @@ impl ConnectionConfig {
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => {
-                if raw_host.contains(',') {
+                if is_multi_host(raw_host) {
                     format!("gaussdb://{raw_host}{db_part}")
                 } else {
                     format!("gaussdb://{host}:{port}{db_part}")
@@ -1134,7 +1134,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                if raw_host.contains(',') {
+                if is_multi_host(raw_host) {
                     // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
                     format!("postgres://{}:{}@{raw_host}{db_part}{suffix}", username, password)
                 } else {
@@ -1207,7 +1207,7 @@ impl ConnectionConfig {
                 format!("goldendb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Gaussdb => {
-                if raw_host.contains(',') {
+                if is_multi_host(raw_host) {
                     // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
                     format!("gaussdb://{}:{}@{raw_host}{db_part}", username, password)
                 } else {
@@ -2162,6 +2162,16 @@ fn bracket_ipv6(host: &str) -> String {
     } else {
         host.to_string()
     }
+}
+
+/// Returns `true` when `host` contains two or more comma-separated entries
+/// where each entry already embeds its own `:port` suffix.
+///
+/// A single entry such as `db.example.com:5432` is **not** multi-host —
+/// the scalar `port` parameter must be appended separately.
+fn is_multi_host(host: &str) -> bool {
+    let count = host.split(',').count();
+    count >= 2
 }
 
 #[cfg(test)]

@@ -378,6 +378,12 @@ const SQLSERVER_MESSAGE_COLUMN: &str = "Message";
 // update this guard together with the pinned driver when Tiberius is upgraded.
 const TIBERIUS_INFO_TOKEN_EVENT_LINE: u32 = 194;
 
+#[derive(Debug, Clone)]
+pub(crate) struct SqlServerBatchResult {
+    pub result: QueryResult,
+    pub server_message: bool,
+}
+
 #[derive(Clone, Default)]
 struct SqlServerMessageLayer {
     messages: StdArc<StdMutex<Vec<String>>>,
@@ -432,23 +438,27 @@ where
     (output, messages)
 }
 
-fn query_result_with_server_messages(mut result: QueryResult, messages: Vec<String>) -> QueryResult {
+fn query_result_with_server_messages(result: QueryResult, messages: Vec<String>) -> QueryResult {
+    query_result_with_server_messages_metadata(result, messages).result
+}
+
+fn query_result_with_server_messages_metadata(mut result: QueryResult, messages: Vec<String>) -> SqlServerBatchResult {
     if messages.is_empty() || !result.columns.is_empty() || !result.rows.is_empty() {
-        return result;
+        return SqlServerBatchResult { result, server_message: false };
     }
 
     result.columns = vec![SQLSERVER_MESSAGE_COLUMN.to_string()];
     result.column_types = vec!["nvarchar".to_string()];
     result.rows = messages.into_iter().map(|message| vec![serde_json::Value::String(message)]).collect();
-    result
+    SqlServerBatchResult { result, server_message: true }
 }
 
-fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option<QueryResult> {
+fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option<SqlServerBatchResult> {
     if messages.is_empty() {
         return None;
     }
 
-    Some(query_result_with_server_messages(
+    Some(query_result_with_server_messages_metadata(
         QueryResult {
             columns: vec![],
             column_types: vec![],
@@ -2556,12 +2566,22 @@ pub async fn execute_batch_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<Vec<QueryResult>, String> {
+    execute_batch_with_max_rows_metadata(client, sql, max_rows)
+        .await
+        .map(|results| results.into_iter().map(|result| result.result).collect())
+}
+
+pub(crate) async fn execute_batch_with_max_rows_metadata(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<Vec<SqlServerBatchResult>, String> {
     let start = Instant::now();
     let result_offset = crate::query_result_sql::sqlserver_result_offset(sql);
     if sqlserver_batch_can_use_execute(sql) {
         let (result, messages) = capture_sqlserver_messages(sqlserver_driver_result(client.execute(sql, &[]))).await;
         let result = result?;
-        return Ok(vec![query_result_with_server_messages(
+        return Ok(vec![query_result_with_server_messages_metadata(
             QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
@@ -2596,8 +2616,8 @@ pub async fn execute_batch_with_max_rows(
                 })
                 .await;
                 return result.map(|result| {
-                    let mut result = query_result_with_server_messages(result, messages);
-                    strip_dbx_sqlserver_row_number_column(&mut result, sql);
+                    let mut result = query_result_with_server_messages_metadata(result, messages);
+                    strip_dbx_sqlserver_row_number_column(&mut result.result, sql);
                     vec![result]
                 });
             }
@@ -2605,7 +2625,7 @@ pub async fn execute_batch_with_max_rows(
             Ok(None) | Err(_) => {}
         }
     }
-    execute_simple_batch_with_max_rows(client, sql, max_rows).await
+    execute_simple_batch_with_max_rows_metadata(client, sql, max_rows).await
 }
 
 /// Execute a SQL Server batch directly through TDS simple-query mode.
@@ -2618,6 +2638,16 @@ pub async fn execute_simple_batch_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<Vec<QueryResult>, String> {
+    execute_simple_batch_with_max_rows_metadata(client, sql, max_rows)
+        .await
+        .map(|results| results.into_iter().map(|result| result.result).collect())
+}
+
+pub(crate) async fn execute_simple_batch_with_max_rows_metadata(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<Vec<SqlServerBatchResult>, String> {
     let start = Instant::now();
     let result_offset = crate::query_result_sql::sqlserver_result_offset(sql);
     let (results, messages) = capture_sqlserver_messages(async {
@@ -2625,27 +2655,33 @@ pub async fn execute_simple_batch_with_max_rows(
         sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows, result_offset)).await
     })
     .await;
-    let mut results = results?;
-    for result in &mut results {
-        strip_dbx_sqlserver_row_number_column(result, sql);
-    }
+    let mut results: Vec<SqlServerBatchResult> = results?
+        .into_iter()
+        .map(|mut result| {
+            strip_dbx_sqlserver_row_number_column(&mut result, sql);
+            SqlServerBatchResult { result, server_message: false }
+        })
+        .collect();
 
     if let Some(message_result) = server_messages_query_result(messages, start) {
         results.push(message_result);
     } else if results.is_empty() {
-        results.push(QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            spatial_columns: vec![],
-            spatial_values: vec![],
-            rows: vec![],
-            affected_rows: 0,
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-            elasticsearch_raw_body: None,
+        results.push(SqlServerBatchResult {
+            result: QueryResult {
+                columns: vec![],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
+                rows: vec![],
+                affected_rows: 0,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+                elasticsearch_raw_body: None,
+            },
+            server_message: false,
         });
     }
 
@@ -2906,17 +2942,17 @@ mod tests {
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, completion_context_from_query_result,
         decode_sqlserver_spatial_values, format_sqlserver_numeric, is_blocking_sqlserver_unsafe_probe_error,
         is_sqlserver_spatial_column, is_sqlserver_variant_column, query_result_with_server_messages,
-        requires_simple_query_batch, restore_sqlserver_legacy_probe_output_names,
-        restore_sqlserver_spatial_column_types, sqlserver_batch_can_use_execute, sqlserver_bulk_token_row,
-        sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
-        sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error, sqlserver_hidden_schema_names,
-        sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
-        sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
-        sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
-        sqlserver_supports_session_database_switch, sqlserver_table_comment_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerResultSet, SqlServerSpatialColumn, SQLSERVER_COMPLETION_CONTEXT_SQL,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        query_result_with_server_messages_metadata, requires_simple_query_batch,
+        restore_sqlserver_legacy_probe_output_names, restore_sqlserver_spatial_column_types,
+        sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
+        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error,
+        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
+        sqlserver_legacy_probe_with_nonce, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
+        sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate,
+        sqlserver_spatial_marker, sqlserver_supports_session_database_switch, sqlserver_table_comment_sql,
+        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerResultSet, SqlServerSpatialColumn,
+        SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -2966,6 +3002,25 @@ mod tests {
         assert_eq!(result.columns, vec!["Message"]);
         assert_eq!(result.rows, vec![vec![serde_json::json!("DBCC execution completed")]]);
 
+        let message = query_result_with_server_messages_metadata(
+            QueryResult {
+                columns: vec![],
+                column_types: vec![],
+                column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
+                rows: vec![],
+                affected_rows: 0,
+                execution_time_ms: 1,
+                truncated: false,
+                session_id: None,
+                has_more: false,
+                elasticsearch_raw_body: None,
+            },
+            vec!["PRINT output".to_string()],
+        );
+        assert!(message.server_message);
+
         let select = QueryResult {
             columns: vec!["id".to_string()],
             column_types: vec!["int".to_string()],
@@ -2980,9 +3035,10 @@ mod tests {
             has_more: false,
             elasticsearch_raw_body: None,
         };
-        let result = query_result_with_server_messages(select, vec!["informational".to_string()]);
-        assert_eq!(result.columns, vec!["id"]);
-        assert_eq!(result.rows, vec![vec![serde_json::json!(1)]]);
+        let result = query_result_with_server_messages_metadata(select, vec!["informational".to_string()]);
+        assert!(!result.server_message);
+        assert_eq!(result.result.columns, vec!["id"]);
+        assert_eq!(result.result.rows, vec![vec![serde_json::json!(1)]]);
     }
 
     #[test]

@@ -185,7 +185,7 @@ GO`;
     const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
     const queryStore = useQueryStore();
     vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
-      if (activeTab.value) activeTab.value.result = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1 };
+      if (activeTab.value) activeTab.value.result = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1, server_message: true };
     });
     vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
 
@@ -199,6 +199,31 @@ GO`;
     await execution.tryExecute();
 
     expect(activeOutputView.value).toBe("result");
+    expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+  });
+
+  it("keeps the summary for ordinary SQL Server data aliased as Message", async () => {
+    const sql = `DECLARE @value nvarchar(1) = N'x';
+SELECT @value AS Message;`;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("summary");
     expect(activeTab.value?.result?.rows).toEqual([["x"]]);
   });
 

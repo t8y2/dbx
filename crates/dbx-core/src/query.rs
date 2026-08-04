@@ -144,6 +144,7 @@ fn query_error_with_omitted_sql_context(error: &str, _sql: &str) -> String {
 /// `execution_error` is emitted for synthesized per-statement errors so clients
 /// can distinguish them from a successful result column named `Error`.
 /// `statement_index` is emitted only after a concrete statement starts running.
+/// `server_message` is emitted only for SQL Server TDS informational messages.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecuteMultiResult {
     #[serde(flatten)]
@@ -154,6 +155,8 @@ pub struct ExecuteMultiResult {
     pub statement_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::backend_error::BackendError>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub server_message: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,12 +196,12 @@ fn report_execute_multi_progress(
 impl ExecuteMultiResult {
     fn execution_error(result: db::QueryResult) -> Self {
         let error = error_from_query_result(&result);
-        Self { result, execution_error: true, statement_index: None, error }
+        Self { result, execution_error: true, statement_index: None, error, server_message: false }
     }
 
     fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
         let error = error_from_query_result(&result);
-        Self { result, execution_error: true, statement_index: Some(statement_index), error }
+        Self { result, execution_error: true, statement_index: Some(statement_index), error, server_message: false }
     }
 
     fn execution_error_with_backend(
@@ -206,11 +209,17 @@ impl ExecuteMultiResult {
         statement_index: Option<usize>,
         error: crate::backend_error::BackendError,
     ) -> Self {
-        Self { result, execution_error: true, statement_index, error: Some(error) }
+        Self { result, execution_error: true, statement_index, error: Some(error), server_message: false }
     }
 
     fn success_with_index(result: db::QueryResult, statement_index: usize) -> Self {
-        Self { result, execution_error: false, statement_index: Some(statement_index), error: None }
+        Self {
+            result,
+            execution_error: false,
+            statement_index: Some(statement_index),
+            error: None,
+            server_message: false,
+        }
     }
 
     pub fn without_error_detail(mut self) -> Self {
@@ -225,7 +234,19 @@ impl ExecuteMultiResult {
 
 impl From<db::QueryResult> for ExecuteMultiResult {
     fn from(result: db::QueryResult) -> Self {
-        Self { result, execution_error: false, statement_index: None, error: None }
+        Self { result, execution_error: false, statement_index: None, error: None, server_message: false }
+    }
+}
+
+impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
+    fn from(result: db::sqlserver::SqlServerBatchResult) -> Self {
+        Self {
+            result: result.result,
+            execution_error: false,
+            statement_index: None,
+            error: None,
+            server_message: result.server_message,
+        }
     }
 }
 
@@ -2431,7 +2452,7 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
     }
 }
 
-fn sqlserver_batch_results(results: Vec<db::QueryResult>) -> Vec<ExecuteMultiResult> {
+fn sqlserver_batch_results(results: Vec<db::sqlserver::SqlServerBatchResult>) -> Vec<ExecuteMultiResult> {
     results.into_iter().map(ExecuteMultiResult::from).collect()
 }
 
@@ -2494,9 +2515,9 @@ async fn execute_multi_sqlserver(
 
         let execution = async {
             if execution_mode == QueryExecutionMode::Simple {
-                db::sqlserver::execute_simple_batch_with_max_rows(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_simple_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
             } else {
-                db::sqlserver::execute_batch_with_max_rows(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
             }
         };
         let result = wait_for_result_opt(cancel_token.clone(), query_timeout, execution).await;
@@ -4954,6 +4975,7 @@ for line in sys.stdin:
         let success = serde_json::to_value(ExecuteMultiResult::from(empty_query_result(0))).unwrap();
         assert!(success.get("execution_error").is_none());
         assert!(success.get("statement_index").is_none());
+        assert!(success.get("server_message").is_none());
 
         let mut error_column = empty_query_result(0);
         error_column.columns = vec!["Error".to_string()];
@@ -4987,9 +5009,17 @@ for line in sys.stdin:
     fn sqlserver_batch_results_do_not_claim_statement_indexes() {
         assert_eq!(split_sql_batches("SELECT 1; SELECT 2;").len(), 1);
 
-        let results = sqlserver_batch_results(vec![empty_query_result(1), empty_query_result(2)]);
+        let results = sqlserver_batch_results(vec![
+            db::sqlserver::SqlServerBatchResult { result: empty_query_result(1), server_message: false },
+            db::sqlserver::SqlServerBatchResult { result: empty_query_result(2), server_message: true },
+        ]);
 
         assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![None, None]);
+        assert!(!results[0].server_message);
+        assert!(results[1].server_message);
+
+        let serialized = serde_json::to_value(&results[1]).unwrap();
+        assert_eq!(serialized.get("server_message"), Some(&serde_json::Value::Bool(true)));
     }
 
     #[test]

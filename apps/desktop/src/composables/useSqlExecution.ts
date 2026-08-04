@@ -228,7 +228,7 @@ export function useSqlExecution(deps: {
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
     });
     if (producedResult === false) return;
-    if (executionDatabaseType === "sqlserver" && tab.result?.columns.length === 1 && tab.result.columns[0] === "Message" && tab.result.rows.length > 0) {
+    if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
       deps.activeOutputView.value = "result";
     } else if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";

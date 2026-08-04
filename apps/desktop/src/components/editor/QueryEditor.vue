@@ -94,6 +94,8 @@ import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
+import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
+import { analyzeIntentionActions, prepareExpandWildcardContext, buildExpandWildcardReplacement } from "@/lib/editor/sqlIntentionActions";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
@@ -328,6 +330,120 @@ function applyDelimitedListResult(result: string) {
   if (!currentView || props.readOnly) return;
   if (!replaceSelectedEditorText(currentView, result)) return;
   focusEditor();
+}
+
+// ==================== Intention Popup ====================
+
+interface IntentionPopupState {
+  visible: boolean;
+  actions: Array<{ kind: string; span: { start: number; end: number }; replacement: string }>;
+  position: { x: number; y: number };
+  selectedIndex: number;
+}
+
+const intentionPopup = ref<IntentionPopupState | null>(null);
+
+function getIntentionActionLabel(kind: string): string {
+  switch (kind) {
+    case "expand_wildcard":
+      return t("intentionExpandWildcard");
+    case "qualify_identifier":
+      return t("intentionQualifyIdentifier");
+    case "unqualify_identifier":
+      return t("intentionUnqualifyIdentifier");
+    case "batch_qualify_identifiers":
+      return t("intentionBatchQualifyIdentifiers");
+    default:
+      return kind;
+  }
+}
+
+function closeIntentionPopup() {
+  document.removeEventListener("keydown", onIntentionPopupKey);
+  intentionPopup.value = null;
+  focusEditor();
+}
+
+function onIntentionPopupKey(e: KeyboardEvent) {
+  if (!intentionPopup.value?.visible) return;
+  switch (e.key) {
+    case "Escape":
+      e.preventDefault();
+      closeIntentionPopup();
+      break;
+    case "ArrowDown":
+      e.preventDefault();
+      intentionPopup.value.selectedIndex = Math.min(intentionPopup.value.selectedIndex + 1, intentionPopup.value.actions.length - 1);
+      break;
+    case "ArrowUp":
+      e.preventDefault();
+      intentionPopup.value.selectedIndex = Math.max(intentionPopup.value.selectedIndex - 1, 0);
+      break;
+    case "Enter":
+      e.preventDefault();
+      executeIntentionAction(intentionPopup.value.actions[intentionPopup.value.selectedIndex]);
+      break;
+  }
+}
+
+function executeIntentionAction(action: IntentionPopupState["actions"][number]) {
+  if (!intentionPopup.value) return;
+  closeIntentionPopup();
+
+  const currentView = view.value;
+  if (!currentView) return;
+
+  switch (action.kind) {
+    case "expand_wildcard": {
+      const sql = currentView.state.doc.toString();
+      const cursor = currentView.state.selection.main.head;
+      void (async () => {
+        try {
+          const ctx = prepareExpandWildcardContext(sql, cursor, props.databaseType, props.syntaxDialect ?? props.dialect);
+          if (!ctx) return;
+
+          const replacement = await buildExpandWildcardReplacement(props.databaseType, ctx.rowSources, async (source) => {
+            const schema = source.metadataTarget?.schema;
+            const tableName = source.metadataTarget?.table ?? source.name;
+            if (!tableName) return [];
+            const result = await loadTableMetadata({
+              connectionId: props.connectionId ?? "",
+              database: props.database ?? "",
+              schema,
+              tableName,
+              databaseType: props.databaseType ?? "mysql",
+              force: false,
+            });
+            return result.metadata.columns.map((c) => c.name);
+          });
+          const v = view.value;
+          if (!v || v.state.doc.toString() !== sql) return;
+          v.dispatch({ changes: { from: ctx.starSpan.start, to: ctx.starSpan.end, insert: replacement } });
+        } catch {
+          // metadata load failed
+        }
+      })();
+      break;
+    }
+    case "qualify_identifier":
+    case "unqualify_identifier":
+      currentView.dispatch({
+        changes: { from: action.span.start, to: action.span.end, insert: action.replacement },
+      });
+      break;
+
+    case "batch_qualify_identifiers": {
+      // 按从后往前的顺序逐一替换，避免 offset 漂移
+      const reps = action.replacements ?? [];
+      for (let i = reps.length - 1; i >= 0; i--) {
+        const r = reps[i];
+        currentView.dispatch({
+          changes: { from: r.span.start, to: r.span.end, insert: r.replacement },
+        });
+      }
+      break;
+    }
+  }
 }
 
 const executeContextMenuLabel = computed(() => t(hasSelectedSql.value ? "editor.contextMenu.executeSelection" : "editor.contextMenu.executeCurrent"));
@@ -1401,6 +1517,40 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
   ];
 });
 
+function handleSqlIntentionActions(currentView: EditorViewType): boolean {
+  if (props.readOnly) return false;
+  try {
+    const sql = currentView.state.doc.toString();
+    const sel = currentView.state.selection.main;
+
+    const actions = analyzeIntentionActions({
+      sql,
+      cursor: sel.head,
+      databaseType: props.databaseType,
+      dialect: props.syntaxDialect ?? props.dialect,
+      selection: sel.from !== sel.to ? { from: sel.from, to: sel.to } : undefined,
+    });
+
+    if (actions.length === 0) return false;
+
+    // 计算光标视口坐标，用于定位弹出菜单
+    const coords = currentView.coordsAtPos(sel.head);
+    if (!coords) return false;
+
+    // 显示弹出菜单（参考 DataGrip Alt+Enter 意图操作弹出菜单）
+    intentionPopup.value = {
+      visible: true,
+      actions,
+      position: { x: coords.right + 8, y: coords.bottom + 4 },
+      selectedIndex: 0,
+    };
+    document.addEventListener("keydown", onIntentionPopupKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
@@ -1455,6 +1605,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           if (sql.trim()) emit("sendSelectionToAi", sql);
           return true;
         }),
+        ...binding(shortcuts.sqlIntentionActions, handleSqlIntentionActions),
         ...createQueryEditorSearchKeymap({
           openSearch,
           openReplace,
@@ -4841,6 +4992,17 @@ defineExpose({
     <EditorSearchPanel ref="searchPanelRef" :view="view" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
+    <!-- SQL 意图操作弹出菜单（参考 DataGrip Alt+Enter） -->
+    <Teleport to="body">
+      <div v-if="intentionPopup?.visible" class="intention-popup-overlay" @click.self="closeIntentionPopup">
+        <div class="intention-popup" :style="{ left: intentionPopup.position.x + 'px', top: intentionPopup.position.y + 'px' }">
+          <div v-for="(action, i) in intentionPopup.actions" :key="action.kind" class="intention-popup-item" :class="{ 'intention-popup-item--active': i === intentionPopup.selectedIndex }" @click="executeIntentionAction(action)" @mouseenter="intentionPopup.selectedIndex = i">
+            <span class="intention-popup-item__icon">💡</span>
+            <span class="intention-popup-item__label">{{ getIntentionActionLabel(action.kind) }}</span>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -5066,5 +5228,56 @@ defineExpose({
   display: block;
   width: 16px;
   height: 16px;
+}
+</style>
+
+<style>
+.intention-popup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: transparent;
+}
+
+.intention-popup {
+  position: fixed;
+  z-index: 10000;
+  min-width: 220px;
+  max-width: 360px;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  padding: 4px 0;
+  overflow: hidden;
+}
+
+.intention-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  transition: background 0.1s;
+}
+
+.intention-popup-item:hover,
+.intention-popup-item--active {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.intention-popup-item__icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.intention-popup-item__label {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
 }
 </style>

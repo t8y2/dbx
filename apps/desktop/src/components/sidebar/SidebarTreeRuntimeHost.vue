@@ -125,7 +125,8 @@ import {
   type TableChildObjectType,
 } from "@/lib/database/dbAdminSql";
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
-import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -1602,14 +1603,29 @@ function openObjectSourceDialog(initialEditing: boolean) {
       .then(async () => {
         connectionStore.activeConnectionId = connectionId;
         const schema = node.schema || database;
-        const result = await api.getObjectSource(connectionId, database, schema, node.objectName || node.label, objectType as any, node.signature);
-        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, result.source, node.catalog, { forceNew: true });
-        const sourceIsEditable = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(objectType);
+        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
+        if (!databaseType) throw new Error("Connection type is unavailable.");
+        const objectName = node.objectName || node.label;
+        const {
+          raw,
+          editableSource,
+          objectType: resolvedType,
+        } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
+          connectionId,
+          database,
+          schema,
+          name: objectName,
+          objectType: objectType as any,
+          databaseType,
+          signature: node.signature,
+        });
+        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true });
+        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
         if (sourceIsEditable) {
           queryStore.setObjectSource(tabId, {
             schema,
-            name: node.objectName || node.label,
-            objectType,
+            name: objectName,
+            objectType: resolvedType,
             signature: node.signature,
           });
         }

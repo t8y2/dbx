@@ -43,8 +43,9 @@ import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
-import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
-import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
+import { isSqlObjectNavigationRoutineType, sqlObjectNavigationSourceKind, sqlObjectNavigationSourceName, sqlObjectNavigationSourceSchema, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
+import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
 import { resolveHistorySqlRestoreTarget } from "@/lib/history/historyRestoreTarget";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
@@ -215,7 +216,16 @@ const compressSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
 const queryEditorDdlTarget = ref<{ connectionId: string; database: string; catalog?: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
-const queryEditorObjectSourceTarget = ref<{ connectionId: string; database: string; schema?: string; name: string; objectType: ObjectSourceKind; initialEditing: boolean } | null>(null);
+const queryEditorObjectSourceTarget = ref<{
+  connectionId: string;
+  database: string;
+  schema?: string;
+  name: string;
+  objectType: ObjectSourceKind;
+  initialEditing: boolean;
+  signature?: string;
+  relationName?: string;
+} | null>(null);
 const showSaveSqlDialog = ref(false);
 const saveSqlName = ref("");
 const ROOT_SAVED_SQL_FOLDER = "__root__";
@@ -1455,6 +1465,11 @@ function tableTargetFromActiveTab(table: string | SqlObjectNavigationTarget) {
 }
 
 async function onClickTable(table: SqlObjectNavigationTarget) {
+  // Procedures/functions/packages open source (same as sidebar view-source), not table data/DDL.
+  if (isSqlObjectNavigationRoutineType(table.type)) {
+    await onOpenObjectSource(table, false);
+    return;
+  }
   const target = tableTargetFromActiveTab(table);
   if (!target) return;
   const objectType = sqlObjectNavigationSourceKind(table);
@@ -1503,10 +1518,54 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
   const target = tableTargetFromActiveTab(table);
   const objectType = sqlObjectNavigationSourceKind(table);
   if (!target || !objectType) return;
+  const sourceName = sqlObjectNavigationSourceName(table);
+  const sourceSchema = sqlObjectNavigationSourceSchema(table, target.schema || target.database);
   try {
     await connectionStore.ensureConnected(target.connectionId);
     connectionStore.activeConnectionId = target.connectionId;
-    queryEditorObjectSourceTarget.value = { connectionId: target.connectionId, database: target.database, schema: target.schema, name: target.tableName, objectType, initialEditing };
+    // Align Ctrl/Cmd+click with sidebar "view source" (dialog vs data tab).
+    if (settingsStore.editorSettings.routineSourceOpenMode === "query-tab") {
+      try {
+        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
+        if (!databaseType) throw new Error("Connection type is unavailable.");
+        // Wrap Oracle bare ALL_SOURCE (`procedure name is ...`) as CREATE OR REPLACE for the editor.
+        const {
+          raw,
+          editableSource,
+          objectType: resolvedType,
+        } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
+          connectionId: target.connectionId,
+          database: target.database,
+          schema: sourceSchema || target.database,
+          name: sourceName,
+          objectType,
+          databaseType,
+          signature: table.signature,
+        });
+        const tabId = queryStore.createTab(target.connectionId, target.database, `Source - ${sourceName}`, "query", sourceSchema, editableSource, target.catalog, { forceNew: true });
+        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
+        if (sourceIsEditable) {
+          queryStore.setObjectSource(tabId, {
+            schema: sourceSchema || target.database,
+            name: sourceName,
+            objectType: resolvedType,
+            signature: table.signature,
+          });
+        }
+      } catch (e: any) {
+        toast(e?.message || String(e), 5000);
+      }
+      return;
+    }
+    queryEditorObjectSourceTarget.value = {
+      connectionId: target.connectionId,
+      database: target.database,
+      schema: sourceSchema,
+      name: sourceName,
+      objectType,
+      initialEditing,
+      signature: table.signature,
+    };
     showQueryEditorObjectSourceDialog.value = true;
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1828,14 +1887,25 @@ async function handleQuickOpenSelect(item: any) {
 
     const schema = item.schema || item.database;
     try {
-      const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType, item.signature);
-      const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${item.objectName || item.tableName}`);
-      queryStore.updateSql(tabId, result.source);
+      const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(item.connectionId));
+      if (!databaseType) throw new Error("Connection type is unavailable.");
+      const objectName = item.objectName || item.tableName;
+      const { editableSource, objectType: resolvedType } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
+        connectionId: item.connectionId,
+        database: item.database,
+        schema,
+        name: objectName,
+        objectType,
+        databaseType,
+        signature: item.signature,
+      });
+      const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${objectName}`);
+      queryStore.updateSql(tabId, editableSource);
       if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "type" && item.type !== "type-body") {
         queryStore.setObjectSource(tabId, {
           schema,
-          name: item.objectName || item.tableName,
-          objectType,
+          name: objectName,
+          objectType: resolvedType,
           signature: item.signature,
         });
       }
@@ -2618,6 +2688,8 @@ onUnmounted(() => {
         :database="queryEditorObjectSourceTarget.database"
         :schema="queryEditorObjectSourceTarget.schema"
         :name="queryEditorObjectSourceTarget.name"
+        :signature="queryEditorObjectSourceTarget.signature"
+        :relation-name="queryEditorObjectSourceTarget.relationName"
         :object-type="queryEditorObjectSourceTarget.objectType"
         :initial-editing="queryEditorObjectSourceTarget.initialEditing"
         :database-type="queryEditorObjectSourceDatabaseType"

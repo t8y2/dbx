@@ -135,13 +135,18 @@ export interface ExtractedSqlIdentifierPart {
   quoted: boolean;
 }
 
-export type SqlObjectNavigationType = "table" | "view" | "materialized_view";
+export type SqlObjectNavigationType = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "trigger";
 
 export interface SqlObjectNavigationTarget {
   name: string;
   database?: string;
   schema?: string;
   type?: SqlObjectNavigationType;
+  /** Overload signature used by Postgres/SQL Server routines. */
+  signature?: string;
+  /** Owning package/type name for Oracle package members (or trigger parent table). */
+  parentName?: string;
+  parentSchema?: string;
 }
 
 export function sqlObjectNavigationTarget(table: SqlObjectNavigationTarget): SqlObjectNavigationTarget {
@@ -150,11 +155,22 @@ export function sqlObjectNavigationTarget(table: SqlObjectNavigationTarget): Sql
     ...(table.database ? { database: table.database } : {}),
     ...(table.schema ? { schema: table.schema } : {}),
     ...(table.type ? { type: table.type } : {}),
+    ...(table.signature ? { signature: table.signature } : {}),
+    ...(table.parentName ? { parentName: table.parentName } : {}),
+    ...(table.parentSchema ? { parentSchema: table.parentSchema } : {}),
   };
 }
 
+export function isSqlObjectNavigationRoutineType(type?: SqlObjectNavigationType): boolean {
+  return type === "procedure" || type === "function" || type === "package" || type === "trigger";
+}
+
 export function sqlObjectHoverDetail(table: SqlObjectNavigationTarget): string {
-  const objectType = table.type === "materialized_view" ? "materialized view" : table.type === "view" ? "view" : "table";
+  const objectType = table.type === "materialized_view" ? "materialized view" : table.type === "view" ? "view" : table.type === "procedure" ? "procedure" : table.type === "function" ? "function" : table.type === "package" ? "package" : table.type === "trigger" ? "trigger" : "table";
+  if (table.parentName) {
+    const owner = table.parentSchema ? `${table.parentSchema}.${table.parentName}` : table.parentName;
+    return `${objectType} in ${owner}`;
+  }
   return table.schema ? `${objectType} in ${table.schema}` : objectType;
 }
 
@@ -163,9 +179,48 @@ export function sqlObjectNavigationTableType(table: SqlObjectNavigationTarget): 
   return table.type === "view" ? "VIEW" : "TABLE";
 }
 
+/**
+ * Maps a navigation target to an object-source kind.
+ *
+ * Package members (procedure/function with parentName) resolve to PACKAGE_BODY so Oracle
+ * ALL_SOURCE can load the owning package body rather than a missing standalone routine.
+ */
 export function sqlObjectNavigationSourceKind(table: SqlObjectNavigationTarget): ObjectSourceKind | undefined {
-  const type = sqlObjectNavigationTableType(table);
-  return type === "TABLE" ? undefined : type;
+  if (table.parentName && (table.type === "procedure" || table.type === "function")) {
+    return "PACKAGE_BODY";
+  }
+  switch (table.type) {
+    case "view":
+      return "VIEW";
+    case "materialized_view":
+      return "MATERIALIZED_VIEW";
+    case "procedure":
+      return "PROCEDURE";
+    case "function":
+      return "FUNCTION";
+    case "package":
+      return "PACKAGE";
+    case "trigger":
+      return "TRIGGER";
+    default:
+      return undefined;
+  }
+}
+
+/** Object name to pass to getObjectSource (package body uses the package name). */
+export function sqlObjectNavigationSourceName(table: SqlObjectNavigationTarget): string {
+  if (table.parentName && (table.type === "procedure" || table.type === "function")) {
+    return table.parentName;
+  }
+  return table.name;
+}
+
+/** Schema/owner for getObjectSource. */
+export function sqlObjectNavigationSourceSchema(table: SqlObjectNavigationTarget, fallbackSchema?: string): string | undefined {
+  if (table.parentName && (table.type === "procedure" || table.type === "function")) {
+    return table.parentSchema || table.schema || fallbackSchema;
+  }
+  return table.schema || fallbackSchema;
 }
 
 export function sqlObjectNavigationTypeFromTableType(tableType: string | null | undefined): SqlObjectNavigationType {
@@ -175,12 +230,33 @@ export function sqlObjectNavigationTypeFromTableType(tableType: string | null | 
     .replace(/[\s-]+/g, "_");
   if (normalized === "MATERIALIZED_VIEW") return "materialized_view";
   if (normalized === "VIEW") return "view";
+  if (normalized === "PROCEDURE") return "procedure";
+  if (normalized === "FUNCTION") return "function";
+  if (normalized === "PACKAGE" || normalized === "PACKAGE_BODY") return "package";
+  if (normalized === "TRIGGER") return "trigger";
   return "table";
+}
+
+export function sqlObjectNavigationTypeFromCompletionObjectType(type: string | null | undefined): SqlObjectNavigationType | undefined {
+  switch (type) {
+    case "procedure":
+      return "procedure";
+    case "function":
+      return "function";
+    case "package":
+      return "package";
+    case "trigger":
+      return "trigger";
+    default:
+      return undefined;
+  }
 }
 
 export function mergeSqlObjectNavigationType(left?: SqlObjectNavigationType, right?: SqlObjectNavigationType): SqlObjectNavigationType | undefined {
   if (left === "materialized_view" || right === "materialized_view") return "materialized_view";
   if (left === "view" || right === "view") return "view";
+  if (isSqlObjectNavigationRoutineType(left)) return left;
+  if (isSqlObjectNavigationRoutineType(right)) return right;
   return left ?? right;
 }
 
@@ -285,6 +361,79 @@ export function extractIdentifierAt(doc: string, pos: number): string | null {
   return extractIdentifierDetailsAt(doc, pos)?.identifier ?? null;
 }
 
+/**
+ * True when the identifier at `pos` is immediately followed by `(` (after optional whitespace),
+ * which is the common CALL / PL/SQL invocation shape for procedures and functions.
+ */
+export function isSqlCallSiteIdentifierAt(doc: string, pos: number): boolean {
+  if (pos < 0 || pos > doc.length) return false;
+  const clickPos = pos === doc.length ? pos - 1 : pos;
+  if (clickPos < 0) return false;
+
+  const bounds = identifierSearchBounds(doc, clickPos);
+  let index = bounds.start;
+  while (index < bounds.end) {
+    const parsed = parseQualifiedIdentifier(doc, index);
+    if (parsed) {
+      if (clickPos >= parsed.start && clickPos < parsed.end) {
+        let cursor = parsed.end;
+        while (cursor < doc.length && /\s/.test(doc[cursor] ?? "")) cursor += 1;
+        return doc[cursor] === "(";
+      }
+      index = Math.max(parsed.end, index + 1);
+      continue;
+    }
+    index += 1;
+  }
+  return false;
+}
+
+/**
+ * Build a best-effort navigation target from a qualified identifier without waiting for metadata.
+ * Used as a fast path for Ctrl/Cmd+click on call sites like `SCHEMA.PROC(...)`.
+ */
+export function sqlObjectNavigationTargetFromIdentifier(
+  identifier: string,
+  options?: {
+    fallbackSchema?: string;
+    /** Prefer procedure for bare call sites; package when the last part is the package itself. */
+    preferType?: SqlObjectNavigationType;
+  },
+): SqlObjectNavigationTarget | null {
+  const parts = splitQualifiedIdentifier(identifier);
+  if (parts.length === 0) return null;
+  const name = parts[parts.length - 1];
+  if (!name) return null;
+
+  const preferType = options?.preferType ?? "procedure";
+
+  if (parts.length >= 3) {
+    // schema.package.member
+    return sqlObjectNavigationTarget({
+      name,
+      schema: parts[parts.length - 3],
+      parentName: parts[parts.length - 2],
+      parentSchema: parts[parts.length - 3],
+      type: preferType === "function" ? "function" : "procedure",
+    });
+  }
+
+  if (parts.length === 2) {
+    // schema.object OR package.member — prefer schema.standalone procedure for the fast path.
+    return sqlObjectNavigationTarget({
+      name,
+      schema: parts[0],
+      type: preferType,
+    });
+  }
+
+  return sqlObjectNavigationTarget({
+    name,
+    ...(options?.fallbackSchema ? { schema: options.fallbackSchema } : {}),
+    type: preferType,
+  });
+}
+
 /** Check whether the identifier is a SQL keyword (not a table/column name). */
 export function isSqlKeyword(identifier: string): boolean {
   return SQL_KEYWORDS_SET.has(identifier.toLowerCase());
@@ -317,4 +466,53 @@ export function matchTable<T extends { name: string; database?: string; schema?:
   }
 
   return null;
+}
+
+type MatchableSqlObject = {
+  name: string;
+  schema?: string;
+  parentName?: string;
+  parentSchema?: string;
+};
+
+/**
+ * Match identifier against completion routines (procedure / function / package / trigger).
+ *
+ * Supports:
+ * - `proc`
+ * - `schema.proc`
+ * - `package.proc` (package member)
+ * - `schema.package.proc`
+ */
+export function matchSqlObject<T extends MatchableSqlObject>(identifier: string, objects: readonly T[]): T | null {
+  const parts = splitQualifiedIdentifier(identifier);
+  if (parts.length === 0) return null;
+
+  const name = parts[parts.length - 1].toLowerCase();
+  const same = (left: string | undefined, right: string | undefined) => (left || "").toLowerCase() === (right || "").toLowerCase();
+
+  if (parts.length === 1) {
+    // Prefer standalone routines over package members when the identifier is unqualified.
+    return objects.find((object) => object.name.toLowerCase() === name && !object.parentName) ?? objects.find((object) => object.name.toLowerCase() === name) ?? null;
+  }
+
+  if (parts.length === 2) {
+    const qualifier = parts[0].toLowerCase();
+    // schema.object (standalone)
+    const bySchema = objects.find((object) => object.name.toLowerCase() === name && !object.parentName && object.schema?.toLowerCase() === qualifier) ?? objects.find((object) => object.name.toLowerCase() === name && object.schema?.toLowerCase() === qualifier && !object.parentName);
+    if (bySchema) return bySchema;
+    // package.member
+    const byPackage = objects.find((object) => object.name.toLowerCase() === name && object.parentName?.toLowerCase() === qualifier);
+    if (byPackage) return byPackage;
+    return null;
+  }
+
+  // schema.package.member or catalog.schema.object — use the last three parts.
+  const owner = parts[parts.length - 3].toLowerCase();
+  const middle = parts[parts.length - 2].toLowerCase();
+  const packageMember = objects.find((object) => object.name.toLowerCase() === name && object.parentName?.toLowerCase() === middle && same(object.parentSchema || object.schema, owner));
+  if (packageMember) return packageMember;
+
+  // Fallback: schema.object ignoring extra leading catalog parts.
+  return objects.find((object) => object.name.toLowerCase() === name && !object.parentName && object.schema?.toLowerCase() === middle) ?? null;
 }

@@ -59,7 +59,21 @@ import {
   type SqlCompletionScope,
 } from "@/lib/sql/sqlCompletionLookupTarget";
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
-import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationSourceKind, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import {
+  extractIdentifierDetailsAt,
+  isSqlCallSiteIdentifierAt,
+  isSqlKeyword,
+  matchSqlObject,
+  matchTable,
+  mergeSqlObjectNavigationType,
+  splitQualifiedIdentifier,
+  sqlObjectHoverDetail,
+  sqlObjectNavigationSourceKind,
+  sqlObjectNavigationTarget,
+  sqlObjectNavigationTargetFromIdentifier,
+  sqlObjectNavigationTypeFromCompletionObjectType,
+  type SqlObjectNavigationTarget,
+} from "@/lib/sql/sqlNavigation";
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
@@ -4287,20 +4301,81 @@ onMounted(async () => {
             try {
               const identifierParts = splitQualifiedIdentifier(identifier);
               const tableLookupFilter = identifierParts[identifierParts.length - 1] ?? identifier;
+              // CALL / PL/SQL invocation shape: NAME( → skip expensive table metadata, open source fast.
+              const looksLikeCall = isSqlCallSiteIdentifierAt(doc, pos);
 
-              // Ensure table cache is populated
+              // 1. Local table cache first (sync) — never block navigation on a full remote table scan.
               if (cachedTables.length === 0) {
-                // Some metadata providers only accept table-name masks, not schema.table masks.
-                cachedTables = usesLocalOnlyCompletionMetadata()
-                  ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, props.catalog)
-                  : await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, false, props.schema, props.catalog);
+                cachedTables = connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, props.catalog);
               }
 
-              // 1. Check if it's a table name
-              const matchedTable = matchTable(identifier, cachedTables);
+              let matchedTable = matchTable(identifier, cachedTables);
               if (matchedTable) {
                 emit("clickTable", sqlObjectNavigationTarget(matchedTable));
                 return;
+              }
+
+              // 1b. Routines: local cache → small schema-scoped lookup → optimistic call-site open.
+              // Avoids Oracle global ALL_OBJECTS scans (was multi-second before source even started loading).
+              const objectNameFilter = tableLookupFilter;
+              const objectParentHint = identifierParts.length >= 3 ? identifierParts[identifierParts.length - 2] : undefined;
+              const objectSchemaHint = identifierParts.length >= 3 ? identifierParts[identifierParts.length - 3] : identifierParts.length === 2 ? identifierParts[0] : props.schema;
+
+              const openMatchedObject = (matchedObject: { name: string; schema?: string; type: string; signature?: string; parentName?: string; parentSchema?: string }) => {
+                const navigationType = sqlObjectNavigationTypeFromCompletionObjectType(matchedObject.type);
+                if (!navigationType) return false;
+                emit(
+                  "openObjectSource",
+                  sqlObjectNavigationTarget({
+                    name: matchedObject.name,
+                    schema: matchedObject.schema,
+                    type: navigationType,
+                    signature: matchedObject.signature,
+                    parentName: matchedObject.parentName,
+                    parentSchema: matchedObject.parentSchema,
+                  }),
+                  false,
+                );
+                return true;
+              };
+
+              const localObjects = connectionStore.lookupLocalCompletionObjects(props.connectionId!, props.database!, objectNameFilter, MAX_COMPLETION_TABLES, props.schema);
+              let matchedObject = matchSqlObject(identifier, localObjects);
+              if (matchedObject && openMatchedObject(matchedObject)) return;
+
+              // Call sites like PROC_NAME(...): open immediately. Do not wait on completion metadata —
+              // Oracle ALL_OBJECTS / assistant prefix scans were multi-second before source loading began.
+              if (looksLikeCall) {
+                const optimistic = sqlObjectNavigationTargetFromIdentifier(identifier, {
+                  fallbackSchema: props.schema,
+                  preferType: "procedure",
+                });
+                if (optimistic) {
+                  emit("openObjectSource", optimistic, false);
+                  return;
+                }
+              }
+
+              if (!usesLocalOnlyCompletionMetadata()) {
+                // Non-call identifiers: small schema-scoped routine lookup (no global ALL_OBJECTS scan).
+                const scopedObjects = await connectionStore.listCompletionObjects(props.connectionId!, props.database!, objectNameFilter, 20, objectSchemaHint, objectParentHint, false, props.schema, ["routine"]);
+                matchedObject = matchSqlObject(identifier, scopedObjects);
+                if (matchedObject && openMatchedObject(matchedObject)) return;
+
+                // Two-part package.member: qualifier may be package name rather than schema.
+                if (!matchedObject && identifierParts.length === 2) {
+                  const packageObjects = await connectionStore.listCompletionObjects(props.connectionId!, props.database!, objectNameFilter, 20, props.schema, identifierParts[0], false, props.schema, ["routine"]);
+                  matchedObject = matchSqlObject(identifier, packageObjects);
+                  if (matchedObject && openMatchedObject(matchedObject)) return;
+                }
+
+                // Remote table metadata only when it is not a call site.
+                cachedTables = await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, false, props.schema, props.catalog);
+                matchedTable = matchTable(identifier, cachedTables);
+                if (matchedTable) {
+                  emit("clickTable", sqlObjectNavigationTarget(matchedTable));
+                  return;
+                }
               }
 
               // 2. Parse SQL at click position to get referenced tables

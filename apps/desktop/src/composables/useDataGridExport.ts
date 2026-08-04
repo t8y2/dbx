@@ -363,6 +363,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return item && !item.isDraft ? [item] : [];
   }
 
+  const canCopyRow = computed(() => targetedRows().length > 0);
+
   function selectionInsertData(): CopyInsertData | null {
     const matrix = selectedCellMatrix.value;
     if (!matrix) return null;
@@ -1308,6 +1310,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyText,
     copyCell,
     copyRow,
+    canCopyRow,
     copyAll,
     copyWithExtractor,
     previewWithExtractor,

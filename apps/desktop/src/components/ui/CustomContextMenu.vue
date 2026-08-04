@@ -86,7 +86,8 @@ function onScroll(e: Event) {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape") close();
+  if (["Alt", "Control", "Meta", "Shift"].includes(e.key)) return;
+  close();
 }
 
 function onResize() {
@@ -97,12 +98,12 @@ watch(show, (val) => {
   contextMenuRegistration?.setOpen(val);
   if (val) {
     document.addEventListener("pointerdown", onPointerDownOutside, true);
-    document.addEventListener("keydown", onKeydown);
+    document.addEventListener("keydown", onKeydown, true);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onResize);
   } else {
     document.removeEventListener("pointerdown", onPointerDownOutside, true);
-    document.removeEventListener("keydown", onKeydown);
+    document.removeEventListener("keydown", onKeydown, true);
     document.removeEventListener("scroll", onScroll, true);
     window.removeEventListener("resize", onResize);
   }

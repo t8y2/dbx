@@ -97,6 +97,41 @@ describe("CustomContextMenu lifecycle", () => {
     app.unmount();
   });
 
+  it("closes the menu when an application shortcut is pressed", async () => {
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            CustomContextMenu,
+            { items: [{ label: "Refresh row" }] },
+            {
+              default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "context-target", onContextmenu: onContextMenu, onKeydown: (event: KeyboardEvent) => event.stopPropagation() }, "Target"),
+            },
+          );
+      },
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    const target = container.querySelector("#context-target");
+    target?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).toContain("Refresh row");
+
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).toContain("Refresh row");
+
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key: "r", metaKey: true, bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).not.toContain("Refresh row");
+
+    app.unmount();
+  });
+
   it("renders checked state after the menu label", async () => {
     const root = defineComponent({
       setup() {

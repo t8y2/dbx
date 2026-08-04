@@ -5532,6 +5532,7 @@ const {
   copyText,
   copyCell,
   copyRow,
+  canCopyRow,
   copyAll,
   copyWithExtractor,
   previewWithExtractor,
@@ -8296,7 +8297,11 @@ function copySubmenu(): ContextMenuItem {
   if (contextColumn.value) {
     items.push({ label: t("grid.copyCell"), action: copyCell });
   }
-  items.push({ label: isMultiRow.value ? t("grid.copyRows", { count: multiRowCount.value }) : t("grid.copyRow"), action: copyRow });
+  items.push({
+    label: isMultiRow.value ? t("grid.copyRows", { count: multiRowCount.value }) : t("grid.copyRow"),
+    action: copyRow,
+    disabled: () => !canCopyRow.value,
+  });
   items.push({ label: "", separator: true });
   items.push(...buildExtractorContextItems());
   items.push({ label: "", separator: true });

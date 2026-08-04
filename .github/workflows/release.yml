@@ -382,6 +382,14 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/prepare-webview2-win7-loader.ps1
 
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
@@ -429,14 +437,6 @@ jobs:
       - name: Audit Windows 7 PE imports
         shell: pwsh
         run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
-
-      - name: Prepare WebView2 109 fixed runtime
-        shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
-
-      - name: Probe WebView2 109 fixed runtime
-        shell: pwsh
-        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
 
       - name: Bundle and upload Windows 7 fixed-runtime installer
         shell: pwsh

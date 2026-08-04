@@ -143,6 +143,8 @@ import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { buildSidebarDdlTemplateSql } from "@/lib/sidebar/sidebarDdlTemplate";
+import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
@@ -1373,32 +1375,47 @@ async function newDeleteTemplate() {
 }
 
 async function generateDdlTemplate() {
-  const node = activeNode.value;
-  if (!node.connectionId || !hasTreeNodeDatabaseContext(node)) return;
-  if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return;
+  const targets = selectedDdlTargets();
+  if (!targets.length) return;
+  const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
   try {
-    await connectionStore.ensureConnected(node.connectionId);
-    connectionStore.activeConnectionId = node.connectionId;
-    const schema = node.schema || node.database;
-    let ddl: string;
-    if (node.type === "table") {
-      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
-    } else if (node.type === "materialized_view") {
-      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
-    } else {
-      const result = await api.getObjectSource(node.connectionId, node.database, schema, node.label, "VIEW");
-      ddl = await buildViewDdl({
-        databaseType: currentDatabaseType(),
-        schema,
-        name: node.label,
-        source: result.source,
-      });
-    }
-    const formatted = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(currentDatabaseType()), settingsStore.editorSettings.sqlFormatter);
-    openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, formatted, `DDL - ${node.label}`);
+    const sql = await buildSidebarDdlTemplateSql(
+      targets,
+      async (target) => {
+        await connectionStore.ensureConnected(target.connectionId);
+        const schema = target.schema || target.database;
+        if (target.type === "table") return api.getTableDisplayDdl(target.connectionId, target.database, schema, target.label, undefined, target.catalog);
+        if (target.type === "materialized_view") return api.getTableDisplayDdl(target.connectionId, target.database, schema, target.label, "MATERIALIZED_VIEW", target.catalog);
+        const result = await api.getObjectSource(target.connectionId, target.database, schema, target.label, "VIEW");
+        return buildViewDdl({
+          databaseType: databaseTypeForNode(target),
+          schema,
+          name: target.label,
+          source: result.source,
+        });
+      },
+      (ddl, target) => formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseTypeForNode(target)), settingsStore.editorSettings.sqlFormatter),
+    );
+    connectionStore.activeConnectionId = tabTarget.connectionId;
+    const title = `DDL - ${targets.map((target) => target.label).join(", ")}`;
+    openSqlTemplateTab(tabTarget.connectionId, tabTarget.database, tabTarget.schema, tabTarget.catalog, sql, title);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }
+}
+
+function selectedDdlTargets() {
+  return sidebarStructureExportTargets(activeNode.value, connectionStore.treeNodes, acceptedSelectionIds ?? connectionStore.selectedTreeNodeIds);
+}
+
+async function openDdl() {
+  const targets = selectedDdlTargets();
+  if (!targets.length) return;
+  if (targets.length > 1) {
+    await exportStructure();
+    return;
+  }
+  emit("open-ddl", targets[0]!);
 }
 
 async function refresh() {
@@ -4328,7 +4345,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (node.type === "table") {
       items.push({
         label: t("contextMenu.viewDdl"),
-        action: () => emit("open-ddl", node),
+        action: openDdl,
         icon: FileCode,
       });
     }
@@ -4337,7 +4354,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       items.push({
         label: t("contextMenu.viewDdl"),
-        action: () => emit("open-ddl", node),
+        action: openDdl,
         icon: FileCode,
       });
       items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });

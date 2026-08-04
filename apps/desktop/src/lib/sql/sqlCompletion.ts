@@ -10,6 +10,7 @@ import { findActiveSqlStatementSpan, tokenizeSqlSemantic } from "@/lib/sql/seman
 import type { SqlSemanticBuildOptions, SqlSemanticSpan } from "@/lib/sql/semantic/types";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 import { requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -4289,6 +4290,8 @@ function matchesPrefix(candidate: string, prefix: string): boolean {
  * Scoring tiers:
  *   Exact match:    3000 - len
  *   Initials match: 2400 + exactInitialsBonus - len
+ *   Pinyin initials: 2300 + exactInitialsBonus - len  (ASCII query vs Han candidate, e.g. "zzj" → 总租金)
+ *   Pinyin subsequence: 1600 - penalties - len  (ordered initials, e.g. "zj" → 总租金)
  *   Prefix match:   2000 - len
  *   Substring:      900 + boundaryBonus - len
  *   Tight fuzzy:    1500 - gapPenalty + earlyMatchBonus - len  (gaps < prefix length)
@@ -4309,6 +4312,21 @@ function computeMatchScore(candidate: string, prefix: string): number {
   if (initials && initials.startsWith(p)) {
     const exactInitialsBonus = initials === p ? 400 : 0;
     return 2400 + exactInitialsBonus - c.length;
+  }
+
+  // DataGrip-style pinyin initials: an ASCII query matches the first pinyin
+  // letters of Han characters — as a prefix ("zz" → 总租金) or as an ordered
+  // subsequence ("zj" → 总租金, "j" → 总租金).
+  if (/^[a-z0-9]+$/.test(p) && containsHan(c)) {
+    const pinyinInitials = pinyinFirstLetters(c);
+    if (pinyinInitials.startsWith(p)) {
+      const exactInitialsBonus = pinyinInitials === p ? 300 : 0;
+      return 2300 + exactInitialsBonus - c.length;
+    }
+    const subsequence = orderedSubsequenceSpan(pinyinInitials, p);
+    if (subsequence) {
+      return 1600 - subsequence.first * 30 - (subsequence.span - p.length) * 10 - c.length;
+    }
   }
 
   const substringIndex = c.indexOf(p);

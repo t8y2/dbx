@@ -164,6 +164,9 @@ importers:
       pinia:
         specifier: ^3.0.0
         version: 3.0.4(typescript@6.0.3)(vue@3.5.35(typescript@6.0.3))
+      pinyin-pro:
+        specifier: ^3.28.2
+        version: 3.28.2
       proj4:
         specifier: ^2.20.9
         version: 2.20.9
@@ -3278,6 +3281,9 @@ packages:
     peerDependenciesMeta:
       typescript:
         optional: true
+
+  pinyin-pro@3.28.2:
+    resolution: {integrity: sha512-jV38yxXHLfidirMC4hrXasLDozLCSq/4DfX88GnHcSEJ2+GpSedG6I9VOiEXJu6iQ5dbJC/RjmzyMuS5h/wH5A==}
 
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
@@ -6863,6 +6869,8 @@ snapshots:
       vue: 3.5.35(typescript@6.0.3)
     optionalDependencies:
       typescript: 6.0.3
+
+  pinyin-pro@3.28.2: {}
 
   pkce-challenge@5.0.1: {}
 

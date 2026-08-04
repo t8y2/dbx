@@ -11,6 +11,7 @@ import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
+import { completionMatchRanges } from "@/lib/common/completionMatch";
 import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
@@ -2506,14 +2507,29 @@ function consumeSqlCompletionAutoStartSuppression() {
   return true;
 }
 
-function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp) {
+function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp, prefix?: string) {
   if (items.length === 0) return null;
+  const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
   return {
     from,
     // Keep CodeMirror's live filtering enabled so an already-open menu follows the typed prefix.
     options: items.map((item) => completionOptionForItem(item)),
     validFor,
+    // When bypassing CodeMirror's matcher, supply our own highlight ranges so
+    // the matched characters (Han substring or pinyin initials) stay marked.
+    // Ranges must target the rendered text, which is displayLabel when set.
+    ...(bypassFilter && prefix ? { filter: false as const, getMatch: (option: { label: string; displayLabel?: string }) => completionMatchRanges(option.displayLabel ?? option.label, prefix) } : {}),
   };
+}
+
+// CodeMirror's built-in matcher only matches single-character queries against
+// the label start, and cannot match pinyin initials against Han labels. Our
+// provider already filters and ranks items itself (substring + pinyin), so
+// skip the second-stage filter exactly in the cases it would break.
+function shouldBypassCompletionFilter(prefix: string, items: QueryCompletionItem[]): boolean {
+  if (!prefix) return false;
+  if ([...prefix].length === 1) return true;
+  return /^[a-z0-9]+$/i.test(prefix) && items.some((item) => /\p{Script=Han}/u.test(item.label));
 }
 
 function localCompletionDatabaseNames(completionContext: ReturnType<typeof getSqlCompletionContext>): string[] {
@@ -2761,7 +2777,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         supportsSessionDatabaseSwitch: sqlServerContext.supports_session_database_switch,
       });
       const items = buildSqlServerUseDatabaseCompletionItems(databaseNames, useDatabaseCompletion);
-      return buildCompletionResult(items, useDatabaseCompletion.from);
+      return buildCompletionResult(items, useDatabaseCompletion.from, undefined, useDatabaseCompletion.prefix);
     }
 
     const legacyCompletionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
@@ -2783,7 +2799,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
     }
 
     const useDatabase = props.databaseType === "sqlserver" ? sqlServerUseDatabaseBeforeCursor(fullDoc, position) : undefined;
@@ -2843,7 +2859,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
     }
 
     const tableNameCompletion = isTableNameCompletionContext(completionContext);
@@ -3060,7 +3076,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
 }
 
 function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
@@ -3520,7 +3536,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
 }
 
 function isReferencedTableQualifier(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {

@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
+import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { ref, computed, watch, markRaw } from "vue";
 import type {
   ColumnInfo,
@@ -5649,6 +5650,15 @@ export const useConnectionStore = defineStore("connection", () => {
     const acronym = completionNameAcronym(table.name);
     if (acronym === normalized) return score + 7_100 - text.length;
     if (acronym.startsWith(normalized)) return score + 6_900 - text.length;
+    // DataGrip-style pinyin initials for Han names, e.g. "zzj" → 总租金,
+    // including ordered subsequences like "zj" → 总租金.
+    if (/^[a-z0-9]+$/.test(normalized) && containsHan(text)) {
+      const pinyinInitials = pinyinFirstLetters(text);
+      if (pinyinInitials === normalized) return score + 7_050 - text.length;
+      if (pinyinInitials.startsWith(normalized)) return score + 6_850 - text.length;
+      const subsequence = orderedSubsequenceSpan(pinyinInitials, normalized);
+      if (subsequence) return score + 5_000 - subsequence.first * 30 - subsequence.span * 10 - text.length;
+    }
     if (normalized.length <= segments.length && segments.every((segment, index) => segment.startsWith(normalized[index] ?? ""))) return score + 6_700 - text.length;
     if (text.includes(normalized)) return score + 4_000 - text.length;
     const subsequenceScore = orderedSubsequenceScore(text, normalized);
@@ -6119,6 +6129,11 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!filter) return true;
     const text = value.toLowerCase();
     if (text.includes(filter)) return true;
+    // Pinyin initials, e.g. "zzj" or "zj" matches 总租金.
+    if (/^[a-z0-9]+$/.test(filter) && containsHan(text)) {
+      const pinyinInitials = pinyinFirstLetters(text);
+      if (pinyinInitials.startsWith(filter) || orderedSubsequenceSpan(pinyinInitials, filter)) return true;
+    }
     let index = 0;
     for (const ch of filter) {
       index = text.indexOf(ch, index);

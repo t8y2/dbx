@@ -119,14 +119,17 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup Rust for standard Windows
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Check standard Windows dependency path
+        run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
+
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
-
-      - name: Check standard Windows dependency path
-        run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh

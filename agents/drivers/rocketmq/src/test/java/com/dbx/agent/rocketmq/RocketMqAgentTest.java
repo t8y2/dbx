@@ -10,6 +10,8 @@ import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
+import org.apache.rocketmq.remoting.protocol.admin.ConsumeStats;
+import org.apache.rocketmq.remoting.protocol.admin.OffsetWrapper;
 import org.apache.rocketmq.remoting.protocol.admin.TopicStatsTable;
 import org.apache.rocketmq.remoting.protocol.admin.TopicOffset;
 import org.apache.rocketmq.remoting.protocol.body.ProducerInfo;
@@ -23,6 +25,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -574,5 +577,52 @@ class RocketMqAgentTest {
 
         assertTrue(RocketMqAgent.connectionMatches(base, same));
         assertFalse(RocketMqAgent.connectionMatches(base, differentNamesrv));
+    }
+
+    @Test
+    void buildConsumerLagResultIncludesBrokerClientAndTimestamp() {
+        MessageQueue mq0 = new MessageQueue("TX_TOPIC", "broker-a", 0);
+        MessageQueue mq1 = new MessageQueue("TX_TOPIC", "broker-a", 1);
+        OffsetWrapper offset0 = new OffsetWrapper();
+        offset0.setBrokerOffset(100);
+        offset0.setConsumerOffset(90);
+        offset0.setLastTimestamp(1_725_000_000_000L);
+        OffsetWrapper offset1 = new OffsetWrapper();
+        offset1.setBrokerOffset(50);
+        offset1.setConsumerOffset(50);
+        offset1.setLastTimestamp(0L);
+
+        ConsumeStats stats = new ConsumeStats();
+        stats.getOffsetTable().put(mq0, offset0);
+        stats.getOffsetTable().put(mq1, offset1);
+
+        Map<MessageQueue, String> clients = new HashMap<>();
+        clients.put(mq0, "172.18.2.212@7#1");
+
+        Map<String, Object> result = RocketMqAgent.buildConsumerLagResult(stats, clients);
+        assertEquals(10L, result.get("totalLag"));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> partitions = (List<Map<String, Object>>) result.get("partitions");
+        assertEquals(2, partitions.size());
+        assertEquals("broker-a", partitions.get(0).get("brokerName"));
+        assertEquals(0, partitions.get(0).get("partition"));
+        assertEquals(90L, partitions.get(0).get("currentOffset"));
+        assertEquals(100L, partitions.get(0).get("endOffset"));
+        assertEquals(10L, partitions.get(0).get("lag"));
+        assertEquals(1_725_000_000_000L, partitions.get(0).get("lastTimestamp"));
+        assertEquals("172.18.2.212@7#1", partitions.get(0).get("consumerClient"));
+        // Missing client mapping still returns offsets with empty consumerClient.
+        assertEquals("", partitions.get(1).get("consumerClient"));
+        assertEquals(0L, partitions.get(1).get("lastTimestamp"));
+    }
+
+    @Test
+    void buildConsumerLagResultHandlesNullStatsAndEmptyClientMap() {
+        Map<String, Object> empty = RocketMqAgent.buildConsumerLagResult(null, null);
+        assertEquals(0L, empty.get("totalLag"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> partitions = (List<Map<String, Object>>) empty.get("partitions");
+        assertTrue(partitions.isEmpty());
     }
 }

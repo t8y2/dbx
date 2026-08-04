@@ -253,6 +253,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+@import "../shared/mqPanel.css";
+
 .rabbitmq-monitoring-panel {
   display: flex;
   flex-direction: column;
@@ -413,21 +415,6 @@ td {
 .status-badge.stopped {
   background: var(--color-error-alpha);
   color: var(--color-error);
-}
-
-.btn-secondary {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: var(--color-hover);
 }
 
 button:disabled {

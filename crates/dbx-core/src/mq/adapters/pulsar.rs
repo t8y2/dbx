@@ -16,8 +16,6 @@ use crate::mq::port::MessageQueueAdmin;
 use crate::mq::types::*;
 use crate::mq::util::truncate;
 
-/// How long to wait for a single admin REST call.
-const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// How long to wait for the initial version-probe during construction.
 const PROBE_TIMEOUT_SECS: u64 = 8;
 const DETAIL_REQUEST_CONCURRENCY: usize = 8;
@@ -39,7 +37,12 @@ impl PulsarAdmin {
     /// the API profile. Probe failure degrades gracefully to the 3.1.x baseline.
     pub async fn new(cfg: MqAdminConfig) -> Result<Self, String> {
         let base = normalize_base(&cfg.admin_url);
-        let http = build_http_client(cfg.tls_skip_verify, cfg.connect_override.as_ref(), &cfg.admin_url)?;
+        // Unlimited query timeout still needs a finite HTTP client timeout; mirror
+        // request_timeout_ms (1h) so Advanced "0 = unlimited" is not silently clamped to 30s.
+        let request_timeout =
+            cfg.rpc_timeout().unwrap_or_else(|| std::time::Duration::from_millis(cfg.request_timeout_ms()));
+        let http =
+            build_http_client(cfg.tls_skip_verify, cfg.connect_override.as_ref(), &cfg.admin_url, request_timeout)?;
         let auth = cfg.auth.clone();
         let token_cache = TokenCache::default();
 
@@ -807,9 +810,9 @@ fn build_http_client(
     tls_skip_verify: bool,
     connect_override: Option<&MqConnectOverride>,
     admin_url: &str,
+    request_timeout: std::time::Duration,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = crate::db::http_client_builder(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    let mut builder = crate::db::http_client_builder(request_timeout).timeout(request_timeout);
     if tls_skip_verify {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -1074,7 +1077,7 @@ fn backlog_stats_from_topic_stats(profile: &PulsarApiProfile, stats: &TopicStats
         None => subs.into_iter().fold(0_i64, |total, sub| total.saturating_add(sub.msg_backlog)),
     };
 
-    BacklogStats { msg_backlog, backlog_size: stats.backlog_size }
+    BacklogStats { msg_backlog, backlog_size: stats.backlog_size, partitions: Vec::new() }
 }
 
 #[cfg(test)]
@@ -1151,6 +1154,8 @@ mod tests {
                 token_signing: None,
                 connect_override: None,
                 management_connect_override: None,
+                query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
+                connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
                 extra: serde_json::Value::Null,
             })
             .await

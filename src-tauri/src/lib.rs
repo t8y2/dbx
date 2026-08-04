@@ -1872,6 +1872,8 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_subscriptions,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_enrich_subscriptions,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_subscription,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_delete_subscription,

@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { BacklogQuota, DispatchRate, PolicyScope, PublishRate, RetentionPolicy, SubscribeRate, TopicInfo } from "@/types/mq";
 import { mqGetEffectivePolicies, mqSetBacklogQuota, mqSetDispatchRate, mqSetPublishRate, mqSetRetention, mqSetSubscribeRate } from "@/lib/backend/api";
 import { defaultMqPolicyForms, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
   connectionId: string;
@@ -20,6 +21,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const policies = ref<unknown>();
 const loading = ref(false);
@@ -70,13 +72,13 @@ const scopeLabel = computed(() => {
 
 const formattedPolicies = computed(() => JSON.stringify(policies.value ?? {}, null, 2));
 
-function guardWritable() {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = readOnlyMessage.value;
     notice.value = undefined;
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadPolicies() {
@@ -100,7 +102,7 @@ async function loadPolicies() {
 }
 
 async function applyPolicy(kind: string, action: (current: PolicyScope) => Promise<void>) {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(kind))) return;
   const current = scope.value;
   if (!current) {
     error.value = scopePlaceholderMessage.value;
@@ -279,6 +281,8 @@ watch(
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .policies-panel {
   height: 100%;
   display: flex;
@@ -402,23 +406,6 @@ pre {
 .readonly-hint {
   background: var(--color-warning-alpha);
   color: var(--color-warning);
-}
-
-.btn-primary,
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: white;
 }
 
 button:disabled {

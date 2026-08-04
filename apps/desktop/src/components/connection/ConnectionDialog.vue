@@ -2798,12 +2798,13 @@ const productionDatabaseSummary = computed(() => {
   return t("production.databasesSelectedCount", { selected, total: productionDatabaseNames.value.length });
 });
 const productionScope = computed<ProductionScope>({
-  get: () => (isSingleDatabase(form.value.db_type) || form.value.is_production ? "connection" : "databases"),
+  get: () => (isSingleDatabase(form.value.db_type) || form.value.db_type === "mq" || form.value.db_type === "mqtt" || form.value.is_production ? "connection" : "databases"),
   set: (scope) => {
-    form.value.is_production = isSingleDatabase(form.value.db_type) || scope === "connection";
+    form.value.is_production = isSingleDatabase(form.value.db_type) || form.value.db_type === "mq" || form.value.db_type === "mqtt" || scope === "connection";
   },
 });
-const canSelectProductionDatabases = computed(() => !isSingleDatabase(form.value.db_type));
+// MQ/MQTT have no database list — production protection is always connection-scoped.
+const canSelectProductionDatabases = computed(() => !isSingleDatabase(form.value.db_type) && form.value.db_type !== "mq" && form.value.db_type !== "mqtt");
 
 function setProductionProtectionEnabled(enabled: boolean) {
   productionProtectionEnabled.value = enabled;
@@ -3309,8 +3310,8 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
-  if (isSingleDatabase(config.db_type) && config.production_databases?.length) {
-    // Single-database drivers expose schemas or internal names, not independently selectable databases.
+  if ((isSingleDatabase(config.db_type) || config.db_type === "mq" || config.db_type === "mqtt") && config.production_databases?.length) {
+    // Single-database / MQ drivers expose no independently selectable database list for PROD scope.
     config.is_production = true;
     config.production_databases = [];
   }

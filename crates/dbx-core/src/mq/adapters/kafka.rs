@@ -63,12 +63,13 @@ impl KafkaAdmin {
         let mut client = AgentDriverClient::spawn(launch).await?;
 
         // Handshake
-        let _: serde_json::Value = client.call("handshake", serde_json::json!({})).await?;
+        let _: serde_json::Value =
+            client.call_with_timeout("handshake", serde_json::json!({}), cfg.rpc_timeout()).await?;
 
         // Build the connection params from MqAdminConfig
         let conn_params = build_connection_params(&cfg);
         let connect_params = serde_json::json!({ "connection": conn_params });
-        let _: serde_json::Value = client.call("connect", connect_params).await?;
+        let _: serde_json::Value = client.call_with_timeout("connect", connect_params, cfg.rpc_timeout()).await?;
 
         log::info!("Kafka admin connected via agent (bootstrap servers: {})", bootstrap_servers(&cfg));
 
@@ -82,7 +83,7 @@ impl KafkaAdmin {
         params: serde_json::Value,
     ) -> Result<T, String> {
         let mut client = self.client.lock().await;
-        client.call(method, params).await
+        client.call_with_timeout(method, params, self.config.rpc_timeout()).await
     }
 
     /// The Kafka agent bounds message browsing with its configured request timeout.
@@ -538,8 +539,7 @@ impl MessageQueueAdmin for KafkaAdmin {
             )
             .await?;
 
-        let total_lag = result.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0);
-        Ok(BacklogStats { msg_backlog: total_lag, backlog_size: 0 })
+        Ok(backlog_stats_from_consumer_lag(&result))
     }
 
     async fn get_cluster_info(&self) -> Result<ClusterInfo, String> {
@@ -655,6 +655,7 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
             "skip_verify": cfg.tls_skip_verify,
         },
         "properties": properties,
+        "request_timeout_ms": cfg.request_timeout_ms(),
     })
 }
 
@@ -802,6 +803,8 @@ mod tests {
             token_signing: None,
             connect_override: None,
             management_connect_override: None,
+            query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
+            connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
             extra,
         }
     }

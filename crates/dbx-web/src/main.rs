@@ -134,6 +134,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/messages/query-by-topic", post(routes::mq::query_messages_by_topic))
         .route("/mq/messages/trace", post(routes::mq::query_message_trace))
         .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
+        .route("/mq/subscriptions/enrich", post(routes::mq::enrich_subscriptions))
         .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
         .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
         .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))

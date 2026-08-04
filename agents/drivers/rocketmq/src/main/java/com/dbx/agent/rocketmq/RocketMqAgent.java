@@ -20,11 +20,13 @@ import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.remoting.RPCHook;
 import org.apache.rocketmq.remoting.protocol.admin.ConsumeStats;
+import org.apache.rocketmq.remoting.protocol.admin.OffsetWrapper;
 import org.apache.rocketmq.remoting.protocol.admin.TopicStatsTable;
 import org.apache.rocketmq.remoting.protocol.body.AclInfo;
 import org.apache.rocketmq.remoting.protocol.body.ClusterInfo;
 import org.apache.rocketmq.remoting.protocol.body.Connection;
 import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
+import org.apache.rocketmq.remoting.protocol.body.ConsumerRunningInfo;
 import org.apache.rocketmq.remoting.protocol.body.GroupList;
 import org.apache.rocketmq.remoting.protocol.body.ProducerConnection;
 import org.apache.rocketmq.remoting.protocol.body.ProducerInfo;
@@ -61,6 +63,13 @@ public final class RocketMqAgent {
     private static final int DEFAULT_LIST_LIMIT = 200;
     private static final int CONSUMER_GROUP_ENRICH_CONCURRENCY = 8;
     private static final long CONSUMER_GROUP_ENRICH_BUDGET_MS = 8_000;
+    /** Wall-clock budget for parallel getAllSubscriptionGroup across masters. */
+    private static final long CONSUMER_GROUP_COLLECT_BUDGET_MS = 12_000;
+    /** Per-broker timeout when collecting subscription groups (shorter than full RPC). */
+    private static final long CONSUMER_GROUP_COLLECT_PER_BROKER_MS = 5_000;
+    private static final int CONSUMER_GROUP_COLLECT_CONCURRENCY = 8;
+    private static final long CONSUMER_LAG_BUDGET_MS = 10_000;
+    private static final int CONSUMER_LAG_CONCURRENCY = 8;
     /** Nameserver route enrichment for listTopics fallback when bulk broker config is unavailable. */
     private static final int TOPIC_LIST_ROUTE_CONCURRENCY = 8;
     private static final long TOPIC_LIST_ROUTE_BUDGET_MS = 8_000;
@@ -1109,19 +1118,73 @@ public final class RocketMqAgent {
 
     private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigs(
         DefaultMQAdminExt admin, JsonObject conn) throws Exception {
+        return collectConsumerGroupConfigs(
+            admin,
+            conn,
+            CONSUMER_GROUP_COLLECT_CONCURRENCY,
+            CONSUMER_GROUP_COLLECT_BUDGET_MS,
+            CONSUMER_GROUP_COLLECT_PER_BROKER_MS
+        );
+    }
+
+    /**
+     * Parallel subscription-group dump with a total budget. Slow/unreachable brokers are
+     * skipped so a large cluster does not burn the entire Agent RPC window.
+     */
+    static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigs(
+        DefaultMQAdminExt admin,
+        JsonObject conn,
+        int concurrency,
+        long budgetMs,
+        long perBrokerTimeoutMs
+    ) throws Exception {
+        List<String> brokers = resolveMasterBrokerAddrs(admin, conn);
         Map<String, SubscriptionGroupConfig> configs = new TreeMap<>();
-        for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
-            try {
-                SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS);
-                if (wrapper == null || wrapper.getSubscriptionGroupTable() == null) {
+        if (brokers.isEmpty()) {
+            return configs;
+        }
+        int workers = Math.max(1, Math.min(concurrency, brokers.size()));
+        ExecutorService executor = Executors.newFixedThreadPool(workers, runnable -> {
+            Thread thread = new Thread(runnable, "dbx-rocketmq-consumer-collect");
+            thread.setDaemon(true);
+            return thread;
+        });
+        List<Callable<Map<String, SubscriptionGroupConfig>>> tasks = new ArrayList<>(brokers.size());
+        long brokerTimeout = Math.max(1_000, perBrokerTimeoutMs);
+        for (String brokerAddr : brokers) {
+            tasks.add(() -> {
+                Map<String, SubscriptionGroupConfig> partial = new HashMap<>();
+                try {
+                    SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, brokerTimeout);
+                    if (wrapper != null && wrapper.getSubscriptionGroupTable() != null) {
+                        partial.putAll(wrapper.getSubscriptionGroupTable());
+                    }
+                } catch (Exception ignored) {
+                    // Skip unreachable brokers; return whatever others collected.
+                }
+                return partial;
+            });
+        }
+        try {
+            List<Future<Map<String, SubscriptionGroupConfig>>> futures =
+                executor.invokeAll(tasks, Math.max(1, budgetMs), TimeUnit.MILLISECONDS);
+            for (Future<Map<String, SubscriptionGroupConfig>> future : futures) {
+                if (future.isCancelled()) {
                     continue;
                 }
-                for (Map.Entry<String, SubscriptionGroupConfig> entry : wrapper.getSubscriptionGroupTable().entrySet()) {
-                    configs.putIfAbsent(entry.getKey(), entry.getValue());
+                try {
+                    Map<String, SubscriptionGroupConfig> partial = future.get();
+                    if (partial != null) {
+                        for (Map.Entry<String, SubscriptionGroupConfig> entry : partial.entrySet()) {
+                            configs.putIfAbsent(entry.getKey(), entry.getValue());
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Partial page is better than failing the whole list.
                 }
-            } catch (Exception ignored) {
-                // Try next broker.
             }
+        } finally {
+            executor.shutdownNow();
         }
         return configs;
     }
@@ -1289,12 +1352,17 @@ public final class RocketMqAgent {
         if (limit <= 0) {
             limit = DEFAULT_LIST_LIMIT;
         }
+        boolean includeLag = boolOrDefault(params, "includeLag", false);
 
-        Map<String, SubscriptionGroupConfig> configs = collectConsumerGroupConfigs(admin, conn);
+        Map<String, SubscriptionGroupConfig> configs;
         Set<String> groups = new TreeSet<>();
         if (!topicFilter.isBlank()) {
+            // Dashboard-style: discover groups via topic; skip full-cluster subscription dump.
             groups.addAll(queryTopicConsumeByWhoRemapped(admin, conn, topicFilter));
+            // groupType falls back to name-based classification when config is absent.
+            configs = Collections.emptyMap();
         } else {
+            configs = collectConsumerGroupConfigs(admin, conn);
             groups.addAll(configs.keySet());
         }
 
@@ -1322,6 +1390,9 @@ public final class RocketMqAgent {
         if (boolOrDefault(params, "enrich", false)) {
             enrichConsumerGroupRows(admin, conn, page);
         }
+        if (includeLag && !topicFilter.isBlank()) {
+            attachConsumerLags(admin, conn, page, topicFilter);
+        }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("groups", page);
@@ -1329,6 +1400,65 @@ public final class RocketMqAgent {
         result.put("offset", offset);
         result.put("limit", limit);
         return result;
+    }
+
+    /** Concurrent lag lookup for the current page; budget-capped like enrich. */
+    private static void attachConsumerLags(
+        DefaultMQAdminExt admin,
+        JsonObject conn,
+        List<Map<String, Object>> page,
+        String topic
+    ) {
+        if (page.isEmpty() || topic == null || topic.isBlank()) {
+            return;
+        }
+        int workers = Math.max(1, Math.min(CONSUMER_LAG_CONCURRENCY, page.size()));
+        ExecutorService executor = Executors.newFixedThreadPool(workers, runnable -> {
+            Thread thread = new Thread(runnable, "dbx-rocketmq-consumer-lag");
+            thread.setDaemon(true);
+            return thread;
+        });
+        List<Callable<Long>> tasks = new ArrayList<>(page.size());
+        for (Map<String, Object> row : page) {
+            String groupId = String.valueOf(row.get("groupId"));
+            tasks.add(() -> {
+                try {
+                    ConsumeStats stats = examineConsumeStatsRemapped(admin, conn, groupId, topic);
+                    long totalLag = 0;
+                    if (stats.getOffsetTable() != null) {
+                        for (var entry : stats.getOffsetTable().entrySet()) {
+                            totalLag += Math.max(0, entry.getValue().getBrokerOffset() - entry.getValue().getConsumerOffset());
+                        }
+                    }
+                    return totalLag;
+                } catch (Exception e) {
+                    return 0L;
+                }
+            });
+        }
+        try {
+            List<Future<Long>> results =
+                executor.invokeAll(tasks, Math.max(1, CONSUMER_LAG_BUDGET_MS), TimeUnit.MILLISECONDS);
+            for (int i = 0; i < page.size(); i++) {
+                long lag = 0L;
+                Future<Long> future = i < results.size() ? results.get(i) : null;
+                if (future != null && !future.isCancelled()) {
+                    try {
+                        lag = future.get();
+                    } catch (Exception ignored) {
+                        lag = 0L;
+                    }
+                }
+                page.get(i).put("totalLag", lag);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            for (Map<String, Object> row : page) {
+                row.putIfAbsent("totalLag", 0L);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @FunctionalInterface
@@ -1566,30 +1696,86 @@ public final class RocketMqAgent {
         String groupId = requireString(params, "groupId");
         String topic = requireString(params, "topic");
         ConsumeStats stats = examineConsumeStatsRemapped(admin, conn, groupId, topic);
+        // Best-effort queue→client mapping (Dashboard getClientConnection); failures must not hide offsets.
+        Map<MessageQueue, String> queueClientMap = resolveQueueClientMap(admin, conn, groupId);
+        return buildConsumerLagResult(stats, queueClientMap);
+    }
 
+    /**
+     * Build lag payload from ConsumeStats. Keeps Kafka-compatible field names
+     * ({@code currentOffset}/{@code endOffset}/{@code lag}) and adds Dashboard fields
+     * ({@code brokerName}/{@code lastTimestamp}/{@code consumerClient}).
+     */
+    static Map<String, Object> buildConsumerLagResult(
+        ConsumeStats stats, Map<MessageQueue, String> queueClientMap) {
         long totalLag = 0;
         List<Map<String, Object>> partitions = new ArrayList<>();
-        if (stats.getOffsetTable() != null) {
+        if (stats != null && stats.getOffsetTable() != null) {
             for (var entry : stats.getOffsetTable().entrySet()) {
-                long consumerOffset = entry.getValue().getConsumerOffset();
-                long brokerOffset = entry.getValue().getBrokerOffset();
+                MessageQueue mq = entry.getKey();
+                OffsetWrapper offset = entry.getValue();
+                long consumerOffset = offset.getConsumerOffset();
+                long brokerOffset = offset.getBrokerOffset();
                 long lag = Math.max(0, brokerOffset - consumerOffset);
                 totalLag += lag;
 
                 Map<String, Object> partition = new LinkedHashMap<>();
-                partition.put("partition", entry.getKey().getQueueId());
+                partition.put("partition", mq.getQueueId());
                 partition.put("currentOffset", consumerOffset);
                 partition.put("endOffset", brokerOffset);
                 partition.put("lag", lag);
+                // Dashboard-compatible consume-detail columns.
+                partition.put("brokerName", mq.getBrokerName() != null ? mq.getBrokerName() : "");
+                partition.put("lastTimestamp", offset.getLastTimestamp());
+                String clientId = queueClientMap != null ? queueClientMap.get(mq) : null;
+                partition.put("consumerClient", clientId != null ? clientId : "");
                 partitions.add(partition);
             }
         }
-        partitions.sort(Comparator.comparingInt(a -> (int) a.get("partition")));
+        // Sort by broker then queue so multi-broker topics stay readable.
+        partitions.sort(Comparator
+            .comparing((Map<String, Object> a) -> String.valueOf(a.get("brokerName")))
+            .thenComparingInt(a -> (int) a.get("partition")));
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("partitions", partitions);
         result.put("totalLag", totalLag);
         return result;
+    }
+
+    /**
+     * Map MessageQueue → online consumer clientId via ConsumerRunningInfo.mqTable.
+     * Mirrors RocketMQ Dashboard ConsumerServiceImpl#getClientConnection; swallows errors.
+     */
+    static Map<MessageQueue, String> resolveQueueClientMap(
+        DefaultMQAdminExt admin, JsonObject conn, String groupId) {
+        Map<MessageQueue, String> results = new HashMap<>();
+        try {
+            ConsumerConnection connection = examineConsumerConnectionInfoRemapped(admin, conn, groupId);
+            if (connection.getConnectionSet() == null || connection.getConnectionSet().isEmpty()) {
+                return results;
+            }
+            for (Connection clientConn : connection.getConnectionSet()) {
+                String clientId = clientConn.getClientId();
+                if (clientId == null || clientId.isBlank()) {
+                    continue;
+                }
+                try {
+                    ConsumerRunningInfo runningInfo = admin.getConsumerRunningInfo(groupId, clientId, false);
+                    if (runningInfo == null || runningInfo.getMqTable() == null) {
+                        continue;
+                    }
+                    for (MessageQueue mq : runningInfo.getMqTable().keySet()) {
+                        results.put(mq, clientId);
+                    }
+                } catch (Exception ignored) {
+                    // Offline/unreachable client: keep offsets without client assignment.
+                }
+            }
+        } catch (Exception ignored) {
+            // Connection lookup failed; return empty map.
+        }
+        return results;
     }
 
     private static Object listProducers(JsonObject params) throws Exception {
@@ -1910,9 +2096,10 @@ public final class RocketMqAgent {
     static DefaultMQAdminExt buildAdminClient(JsonObject conn) throws Exception {
         long timeoutMs = intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS);
         RPCHook rpcHook = buildRpcHook(conn);
+        // Always pass timeout — DefaultMQAdminExt() ignores request_timeout_ms.
         DefaultMQAdminExt admin = rpcHook != null
             ? new DefaultMQAdminExt(rpcHook, timeoutMs)
-            : new DefaultMQAdminExt();
+            : new DefaultMQAdminExt(timeoutMs);
         admin.setNamesrvAddr(namesrvAddr(conn));
         admin.setAdminExtGroup("_DBX_ROCKETMQ_ADMIN_" + UUID.randomUUID());
         admin.setInstanceName("DBX_" + UUID.randomUUID());

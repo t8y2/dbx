@@ -9,11 +9,15 @@
 //! 3. Delegate all `MessageQueueAdmin` trait methods to JSON-RPC calls
 
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
 use crate::mq::auth::MqAuth;
@@ -95,15 +99,22 @@ fn cluster_info_from_agent_result(result: &serde_json::Value) -> MqClusterInfo {
 impl RocketMqAdmin {
     /// Spawn the RocketMQ Java agent, perform handshake, and connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
+        // Fail fast on unreachable NameServer before paying for JVM agent startup.
+        // Use only a fraction of connect_timeout — the outer build_adapter_with_connect_timeout
+        // wraps the whole new() call, so a full-budget probe would leave no time for agent spawn.
+        let probe_budget = (cfg.connect_timeout() / 3).max(Duration::from_millis(500));
+        probe_namesrv_tcp(&namesrv_addr(&cfg), probe_budget).await?;
+
         let mut client = AgentDriverClient::spawn(launch).await?;
 
         // Handshake
-        let _: serde_json::Value = client.call("handshake", serde_json::json!({})).await?;
+        let _: serde_json::Value =
+            client.call_with_timeout("handshake", serde_json::json!({}), cfg.rpc_timeout()).await?;
 
         // Build the connection params from MqAdminConfig
         let conn_params = build_connection_params(&cfg);
         let connect_params = serde_json::json!({ "connection": conn_params });
-        let _: serde_json::Value = client.call("connect", connect_params).await?;
+        let _: serde_json::Value = client.call_with_timeout("connect", connect_params, cfg.rpc_timeout()).await?;
 
         log::info!("RocketMQ admin connected via agent (namesrv: {})", namesrv_addr(&cfg));
 
@@ -117,7 +128,7 @@ impl RocketMqAdmin {
         params: serde_json::Value,
     ) -> Result<T, String> {
         let mut client = self.client.lock().await;
-        client.call(method, params).await
+        client.call_with_timeout(method, params, self.config.rpc_timeout()).await
     }
 
     /// Send a JSON-RPC call that returns `{ok: true}` on success.
@@ -355,13 +366,14 @@ impl MessageQueueAdmin for RocketMqAdmin {
 
     async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
         if topic.topic.is_empty() {
+            // Fast path: names/types only. UI enrichs online members/topics in a second pass.
             let result: serde_json::Value = self
                 .call(
                     "mq_list_consumer_groups",
                     serde_json::json!({
                         "limit": 500,
                         "offset": 0,
-                        "enrich": true,
+                        "enrich": false,
                     }),
                 )
                 .await?;
@@ -369,8 +381,7 @@ impl MessageQueueAdmin for RocketMqAdmin {
             return Ok(groups.iter().map(rocketmq_subscription_from_group).collect());
         }
 
-        // Agent uses queryTopicConsumeByWho (Dashboard queryTopicConsumerInfo); include all
-        // returned groups even when consumers are offline and offsets are zero.
+        // Topic path: skip list enrich; batch lag in one agent RPC (no N+1).
         let result: serde_json::Value = self
             .call(
                 "mq_list_consumer_groups",
@@ -378,34 +389,30 @@ impl MessageQueueAdmin for RocketMqAdmin {
                     "topic": topic.topic,
                     "limit": 200,
                     "offset": 0,
-                    "enrich": true,
+                    "enrich": false,
+                    "includeLag": true,
                 }),
             )
             .await?;
         let groups = result.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        Ok(groups.iter().map(rocketmq_subscription_from_group).collect())
+    }
 
-        let mut subs = Vec::new();
-        for group in groups {
-            let group_id = group.get("groupId").and_then(|v| v.as_str()).unwrap_or_default();
-            if group_id.is_empty() {
-                continue;
-            }
-            let mut sub = rocketmq_subscription_from_group(&group);
-            if let Ok(lag) = self
-                .call::<serde_json::Value>(
-                    "mq_get_consumer_lag",
-                    serde_json::json!({
-                        "groupId": group_id,
-                        "topic": topic.topic,
-                    }),
-                )
-                .await
-            {
-                sub.msg_backlog = lag.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0);
-            }
-            subs.push(sub);
+    async fn enrich_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
+        // Cluster-wide second pass fills memberCount/topics after the fast list paint.
+        let mut params = serde_json::json!({
+            "limit": 500,
+            "offset": 0,
+            "enrich": true,
+        });
+        if !topic.topic.is_empty() {
+            params["topic"] = serde_json::json!(topic.topic);
+            params["limit"] = serde_json::json!(200);
+            params["includeLag"] = serde_json::json!(true);
         }
-        Ok(subs)
+        let result: serde_json::Value = self.call("mq_list_consumer_groups", params).await?;
+        let groups = result.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        Ok(groups.iter().map(rocketmq_subscription_from_group).collect())
     }
 
     async fn create_subscription(&self, _topic: &TopicRef, _sub: &str, _pos: ResetPosition) -> Result<(), String> {
@@ -673,8 +680,7 @@ impl MessageQueueAdmin for RocketMqAdmin {
             )
             .await?;
 
-        let total_lag = result.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0);
-        Ok(BacklogStats { msg_backlog: total_lag, backlog_size: 0 })
+        Ok(backlog_stats_from_consumer_lag(&result))
     }
 
     async fn get_cluster_info(&self) -> Result<ClusterInfo, String> {
@@ -831,6 +837,7 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
         "access_key": access_key,
         "secret_key": secret_key,
         "tls_skip_verify": cfg.tls_skip_verify,
+        "request_timeout_ms": cfg.request_timeout_ms(),
     })
 }
 
@@ -917,7 +924,7 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
     SubscriptionInfo {
         name: group_id.to_string(),
         sub_type: group_type.clone(),
-        msg_backlog: 0,
+        msg_backlog: group.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0),
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
         consumers: Vec::new(),
@@ -926,6 +933,70 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
         consumer_group_type: Some(group_type),
         message_model,
     }
+}
+
+/// Probe NameServer addresses so connect fails before spawning the JVM agent.
+/// Tries each `;`-separated host (and each resolved IP) within the shared budget,
+/// matching RocketMQ client HA behavior instead of failing on the first dead node.
+async fn probe_namesrv_tcp(namesrv: &str, budget: Duration) -> Result<(), String> {
+    let hosts: Vec<String> =
+        namesrv.split(';').map(str::trim).filter(|part| !part.is_empty()).map(str::to_string).collect();
+    if hosts.is_empty() {
+        return Err("RocketMQ namesrv_addr is empty".to_string());
+    }
+
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut last_error = String::new();
+    for host in &hosts {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        // DNS resolution is blocking; keep it off the async runtime.
+        let host_for_resolve = host.clone();
+        let addrs = match tokio::task::spawn_blocking(move || {
+            host_for_resolve
+                .to_socket_addrs()
+                .map(|iter| iter.collect::<Vec<_>>())
+                .map_err(|e| format!("RocketMQ NameServer address '{host_for_resolve}' is invalid: {e}"))
+        })
+        .await
+        {
+            Ok(Ok(addrs)) => addrs,
+            Ok(Err(e)) => {
+                last_error = e;
+                continue;
+            }
+            Err(e) => {
+                last_error = format!("RocketMQ NameServer resolve task failed: {e}");
+                continue;
+            }
+        };
+        if addrs.is_empty() {
+            last_error = format!("RocketMQ NameServer address '{host}' did not resolve");
+            continue;
+        }
+        for addr in addrs {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match timeout(remaining, TcpStream::connect(addr)).await {
+                Ok(Ok(_stream)) => return Ok(()),
+                Ok(Err(e)) => {
+                    last_error = format!("Cannot reach RocketMQ NameServer {host}: {e}");
+                }
+                Err(_) => {
+                    last_error = format!("RocketMQ NameServer {host} connect timed out after {}s", budget.as_secs());
+                }
+            }
+        }
+    }
+    Err(if last_error.is_empty() {
+        format!("RocketMQ NameServer connect timed out after {}s", budget.as_secs())
+    } else {
+        last_error
+    })
 }
 
 fn peeked_message_from_agent_json(idx: usize, message: &serde_json::Value) -> PeekedMessage {
@@ -975,8 +1046,16 @@ mod tests {
             token_signing: None,
             connect_override: None,
             management_connect_override: None,
+            query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
+            connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
             extra,
         }
+    }
+
+    #[tokio::test]
+    async fn probe_namesrv_rejects_empty_address_list() {
+        let err = probe_namesrv_tcp(" ; ; ", Duration::from_millis(200)).await.expect_err("empty");
+        assert!(err.contains("empty"), "{err}");
     }
 
     #[test]
@@ -995,6 +1074,7 @@ mod tests {
         assert_eq!(params.get("cluster_name").and_then(|v| v.as_str()), Some("DefaultCluster"));
         assert_eq!(params.get("access_key").and_then(|v| v.as_str()), Some("rocket"));
         assert_eq!(params.get("secret_key").and_then(|v| v.as_str()), Some("secret"));
+        assert_eq!(params.get("request_timeout_ms").and_then(|v| v.as_u64()), Some(30_000));
     }
 
     #[test]

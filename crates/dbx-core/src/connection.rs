@@ -1291,6 +1291,12 @@ impl AppState {
         if wait_for_drain {
             self.wait_for_pool_drain(&pool_key).await;
         }
+        #[cfg(feature = "mq-admin")]
+        let mq_keepalive_adapter = if matches!(&pool, PoolKind::MessageQueue) {
+            self.mq_registry.get_cached_adapter(&config.id).await
+        } else {
+            None
+        };
         let routing = self.pool_routing_control();
         let previous = loop {
             let mut connections = self.connections.write().await;
@@ -1308,7 +1314,13 @@ impl AppState {
             // candidate never reaches this point, so the existing route keeps its state.
             routing.stop_keepalive(&pool_key);
             activity.insert(pool_key.clone(), PoolActivity::now());
-            self.start_keepalive_task(&pool_key, &pool, config);
+            self.start_keepalive_task(
+                &pool_key,
+                &pool,
+                config,
+                #[cfg(feature = "mq-admin")]
+                mq_keepalive_adapter.clone(),
+            );
             break Ok(connections.insert(pool_key.clone(), pool));
         };
         let previous = match previous {
@@ -1429,9 +1441,21 @@ impl AppState {
         self.pool_routing_control().close_pool_with_timeout(pool_key, pool).await;
     }
 
-    fn start_keepalive_task(&self, pool_key: &str, pool: &PoolKind, config: &ConnectionConfig) {
+    fn start_keepalive_task(
+        &self,
+        pool_key: &str,
+        pool: &PoolKind,
+        config: &ConnectionConfig,
+        #[cfg(feature = "mq-admin")] mq_adapter: Option<std::sync::Arc<dyn crate::mq::port::MessageQueueAdmin>>,
+    ) {
         let interval_secs = config.keepalive_interval_secs;
         let mut target = keepalive_target_from_pool(pool, config);
+        #[cfg(feature = "mq-admin")]
+        if target.is_none() {
+            if let Some(adapter) = mq_adapter {
+                target = Some(KeepaliveTarget::MessageQueue(adapter));
+            }
+        }
         if interval_secs == 0 {
             return;
         }
@@ -1448,6 +1472,12 @@ impl AppState {
         let routing = self.pool_routing_control();
         let connections = self.connections.clone();
         let running_queries = self.running_queries.clone();
+        // MQ pool markers are empty; close_pool_kind is a no-op, so keepalive must
+        // drop the registry adapter or reconnect would reuse a dead agent.
+        #[cfg(feature = "mq-admin")]
+        let mq_registry = self.mq_registry.clone();
+        #[cfg(feature = "mq-admin")]
+        let mq_connection_id = config.id.clone();
         self.task_supervisor.spawn_replace(format!("keepalive:{pool_key}"), move |shutdown| async move {
             loop {
                 tokio::select! {
@@ -1467,6 +1497,8 @@ impl AppState {
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
                             let replace_runtime =
                                 err.recovery_decision().is_some_and(RecoveryDecision::replaces_runtime);
+                            #[cfg(feature = "mq-admin")]
+                            let drop_mq = matches!(target, KeepaliveTarget::MessageQueue(_));
                             if !detach_keepalive_target_if_current(
                                 &routing,
                                 &connections,
@@ -1477,6 +1509,11 @@ impl AppState {
                             .await
                             {
                                 log::debug!("Skipping stale keepalive result for replaced pool '{key}'");
+                            } else {
+                                #[cfg(feature = "mq-admin")]
+                                if drop_mq {
+                                    mq_registry.drop_connection(&mq_connection_id).await;
+                                }
                             }
                             break;
                         }
@@ -1485,8 +1522,15 @@ impl AppState {
                                 "Connection keepalive timed out for '{key}' after {}s; invalidating pool",
                                 timeout.as_secs()
                             );
+                            #[cfg(feature = "mq-admin")]
+                            let drop_mq = matches!(target, KeepaliveTarget::MessageQueue(_));
                             if !detach_keepalive_target_if_current(&routing, &connections, &key, target, false).await {
                                 log::debug!("Skipping stale keepalive timeout for replaced pool '{key}'");
+                            } else {
+                                #[cfg(feature = "mq-admin")]
+                                if drop_mq {
+                                    mq_registry.drop_connection(&mq_connection_id).await;
+                                }
                             }
                             break;
                         }
@@ -3347,7 +3391,13 @@ impl AppState {
             }
         };
         if let (Some(config), Some(client)) = (config, client) {
-            self.start_keepalive_task(pool_key, &PoolKind::Agent(client), &config);
+            self.start_keepalive_task(
+                pool_key,
+                &PoolKind::Agent(client),
+                &config,
+                #[cfg(feature = "mq-admin")]
+                None,
+            );
         }
     }
 
@@ -4052,7 +4102,10 @@ enum KeepaliveTarget {
     Postgres(deadpool_postgres::Pool),
     Rqlite(db::rqlite_driver::RqliteClient),
     Turso(db::turso_driver::TursoClient),
-    MongoDb { client: mongodb::Client, database: Option<String> },
+    MongoDb {
+        client: mongodb::Client,
+        database: Option<String>,
+    },
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
@@ -4061,6 +4114,8 @@ enum KeepaliveTarget {
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
+    #[cfg(feature = "mq-admin")]
+    MessageQueue(Arc<dyn crate::mq::port::MessageQueueAdmin>),
 }
 
 #[derive(Debug)]
@@ -4098,6 +4153,10 @@ impl KeepaliveTarget {
         match (self, pool) {
             (Self::Agent(expected), PoolKind::Agent(current)) => Arc::ptr_eq(expected, current),
             (Self::SqlServer(expected), PoolKind::SqlServer(current)) => Arc::ptr_eq(expected, current),
+            #[cfg(feature = "mq-admin")]
+            (Self::MessageQueue(_), PoolKind::MessageQueue) => true,
+            #[cfg(feature = "mq-admin")]
+            (Self::MessageQueue(_), _) | (_, PoolKind::MessageQueue) => false,
             (Self::Agent(_), _) | (_, PoolKind::Agent(_)) | (Self::SqlServer(_), _) | (_, PoolKind::SqlServer(_)) => {
                 false
             }
@@ -4208,6 +4267,10 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
                 Err(error) if is_agent_validate_connection_unsupported(&error.to_string()) => Ok(()),
                 Err(error) => Err(KeepaliveError::Agent(error)),
             }
+        }
+        #[cfg(feature = "mq-admin")]
+        KeepaliveTarget::MessageQueue(adapter) => {
+            adapter.test_connection().await.map(|_| ()).map_err(KeepaliveError::from)
         }
     }
 }
@@ -6460,7 +6523,13 @@ for line in sys.stdin:
             .await
             .insert(pool_key.to_string(), super::PoolActivity::idle_for(std::time::Duration::from_secs(10)));
         let pool = super::clone_pool_kind(state.connections.read().await.get(pool_key).unwrap());
-        state.start_keepalive_task(pool_key, &pool, &config);
+        state.start_keepalive_task(
+            pool_key,
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 

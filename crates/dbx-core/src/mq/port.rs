@@ -149,6 +149,13 @@ pub trait MessageQueueAdmin: Send + Sync {
 
     // ---- Subscriptions ----
     async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String>;
+
+    /// Second-pass enrichment for subscription rows (e.g. RocketMQ online members/topics).
+    /// Default reuses [`list_subscriptions`]; RocketMQ overrides with `enrich: true`.
+    async fn enrich_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
+        self.list_subscriptions(topic).await
+    }
+
     async fn create_subscription(&self, topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<(), String>;
     async fn delete_subscription(&self, topic: &TopicRef, sub: &str, force: bool) -> Result<(), String>;
     async fn skip_messages(&self, topic: &TopicRef, sub: &str, count: SkipCount) -> Result<(), String>;

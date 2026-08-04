@@ -4,11 +4,18 @@
 //! `ConnectionConfig` rather than adding top-level fields, keeping the 50+
 //! database-type connection model untouched.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::ConnectionConfig;
 use crate::mq::auth::MqAuth;
 use crate::mq::types::{MqSystemKind, MqTokenSigningConfig};
+
+/// Default query timeout when constructing test configs without a ConnectionConfig.
+pub const DEFAULT_MQ_QUERY_TIMEOUT_SECS: u64 = 30;
+/// Default connect timeout when constructing test configs without a ConnectionConfig.
+pub const DEFAULT_MQ_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// Runtime TCP endpoint override for an MQ transport.
 ///
@@ -53,6 +60,12 @@ pub struct MqAdminConfig {
     /// its Management HTTP API listens on an independently configured port.
     #[serde(skip)]
     pub management_connect_override: Option<MqConnectOverride>,
+    /// Runtime-only: from `ConnectionConfig.query_timeout_secs` (`0` = unlimited).
+    #[serde(skip)]
+    pub query_timeout_secs: u64,
+    /// Runtime-only: from `ConnectionConfig.effective_connect_timeout_secs()`.
+    #[serde(skip)]
+    pub connect_timeout_secs: u64,
     /// System-specific extension fields (e.g. Kafka bootstrap servers).
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub extra: serde_json::Value,
@@ -76,7 +89,33 @@ impl MqAdminConfig {
         {
             return Err("Message queue admin URL is empty".to_string());
         }
+        // Advanced connection timeouts live on ConnectionConfig, not external_config.
+        parsed.query_timeout_secs = cfg.effective_query_timeout_secs();
+        parsed.connect_timeout_secs = cfg.effective_connect_timeout_secs();
         Ok(parsed)
+    }
+
+    /// Agent / HTTP RPC wall-clock timeout. `None` disables the client-side timeout.
+    pub fn rpc_timeout(&self) -> Option<Duration> {
+        if self.query_timeout_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.query_timeout_secs.max(1)))
+        }
+    }
+
+    /// Milliseconds for agent `request_timeout_ms`. Unlimited query timeout maps to a
+    /// large but finite admin request budget so Java/Go clients still make progress.
+    pub fn request_timeout_ms(&self) -> u64 {
+        match self.query_timeout_secs {
+            0 => 3_600_000,
+            secs => secs.saturating_mul(1000).max(1_000),
+        }
+    }
+
+    /// Budget for establishing the MQ adapter (agent spawn + handshake/connect).
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_secs(self.connect_timeout_secs.max(1))
     }
 
     pub fn token_signing_configured(&self) -> bool {
@@ -228,6 +267,25 @@ mod tests {
         assert_eq!(mqc.system_kind, MqSystemKind::RocketMq);
         assert_eq!(mqc.admin_url, "");
         assert_eq!(mqc.extra.get("namesrvAddr").and_then(|v| v.as_str()), Some("127.0.0.1:9876"));
+        assert_eq!(mqc.query_timeout_secs, 30);
+        assert_eq!(mqc.connect_timeout_secs, 5);
+        assert_eq!(mqc.request_timeout_ms(), 30_000);
+    }
+
+    #[test]
+    fn copies_advanced_timeouts_from_connection_config() {
+        let mut cfg = connection_with_external(serde_json::json!({
+            "systemKind": "rocketmq",
+            "adminUrl": "",
+            "extra": { "namesrvAddr": "127.0.0.1:9876" }
+        }));
+        cfg.query_timeout_secs = 120;
+        cfg.connect_timeout_secs = 15;
+        let mqc = MqAdminConfig::from_connection(&cfg).expect("parse");
+        assert_eq!(mqc.query_timeout_secs, 120);
+        assert_eq!(mqc.connect_timeout_secs, 15);
+        assert_eq!(mqc.request_timeout_ms(), 120_000);
+        assert_eq!(mqc.rpc_timeout(), Some(std::time::Duration::from_secs(120)));
     }
 
     #[test]

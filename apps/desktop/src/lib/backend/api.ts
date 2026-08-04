@@ -488,6 +488,7 @@ export const mqListClientConnections = forward("mqListClientConnections");
 export const mqListClientChannels = forward("mqListClientChannels");
 export const mqCloseClientConnection = forward("mqCloseClientConnection");
 export const mqListSubscriptions = forward("mqListSubscriptions");
+export const mqEnrichSubscriptions = forward("mqEnrichSubscriptions");
 export const mqCreateSubscription = forward("mqCreateSubscription");
 export const mqDeleteSubscription = forward("mqDeleteSubscription");
 export const mqSkipMessages = forward("mqSkipMessages");

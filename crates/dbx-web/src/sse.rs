@@ -67,6 +67,13 @@ impl TransferProgressChannel {
         let _ = self.tx.send(data);
     }
 
+    /// The most recently sent progress payload, if any. Used by tests to wait
+    /// for a terminal event without subscribing to the live stream.
+    #[cfg(test)]
+    pub fn latest(&self) -> Option<String> {
+        self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest.clone()
+    }
+
     fn subscribe(&self) -> (Vec<String>, usize, broadcast::Receiver<String>) {
         // Subscribe while holding the history lock so an event is either in the
         // replay snapshot or in the live receiver, with no gap between them.

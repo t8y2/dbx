@@ -5,6 +5,13 @@ import { isProxy } from "vue";
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults and bounds the regular expression match limit", () => {
+    expect(normalizeEditorSettings({}).regexMaxMatchCount).toBe(1000);
+    expect(normalizeEditorSettings({ regexMaxMatchCount: 2500 }).regexMaxMatchCount).toBe(2500);
+    expect(normalizeEditorSettings({ regexMaxMatchCount: 99 }).regexMaxMatchCount).toBe(1000);
+    expect(normalizeEditorSettings({ regexMaxMatchCount: Number.POSITIVE_INFINITY }).regexMaxMatchCount).toBe(1000);
+    expect(normalizeEditorSettings({ regexMaxMatchCount: Number.NaN }).regexMaxMatchCount).toBe(1000);
+  });
   it("uses aligned comments by default and preserves legacy comment visibility", () => {
     expect(normalizeEditorSettings({}).sidebarObjectInfoMode).toBe("comment-aligned");
     expect(normalizeEditorSettings({ sidebarObjectInfoMode: "comment-aligned" }).sidebarObjectInfoMode).toBe("comment-aligned");
@@ -440,6 +447,25 @@ describe("settingsStore sidebar connection sort persistence", () => {
     expect(store.editorSettings.resultRunDisplayMode).toBe("list");
     expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ resultRunDisplayMode: "list" }));
     expect(isProxy(saveEditorSettings.mock.calls[0][0])).toBe(false);
+  });
+});
+
+describe("settingsStore regular expression match limit persistence", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("normalizes and persists the configured match limit", async () => {
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.updateEditorSettings({ regexMaxMatchCount: 2500.4 });
+
+    expect(store.editorSettings.regexMaxMatchCount).toBe(2500);
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ regexMaxMatchCount: 2500 }));
   });
 });
 

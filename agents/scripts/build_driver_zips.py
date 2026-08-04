@@ -81,7 +81,10 @@ def build_driver_zips(release_dir: Path) -> list[Path]:
             package_driver["jar"] = packaged_artifact(jar_artifact, source)
             package_registry = {"jres": {}, "drivers": {driver_name: package_driver}}
             output = release_dir / f"dbx-agent-{driver_name}-{version}.tar.zst"
-            write_driver_tar_zstd(output, package_registry, source, executable=False)
+            if not output.exists():
+                write_driver_tar_zstd(output, package_registry, source, executable=False)
+            elif not output.is_file():
+                raise FileExistsError(f"Reusable Java agent package is not a file: {output}")
             update_release_artifact(jar_artifact, output)
             outputs.append(output)
 
@@ -96,7 +99,10 @@ def build_driver_zips(release_dir: Path) -> list[Path]:
             package_driver["native"] = {platform: packaged_artifact(artifact, source)}
             package_registry = {"jres": {}, "drivers": {driver_name: package_driver}}
             output = release_dir / f"dbx-agent-{driver_name}-{version}-{platform}.tar.zst"
-            write_driver_tar_zstd(output, package_registry, source, executable=True)
+            if not output.exists():
+                write_driver_tar_zstd(output, package_registry, source, executable=True)
+            elif not output.is_file():
+                raise FileExistsError(f"Reusable native agent package is not a file: {output}")
             update_release_artifact(artifact, output)
             outputs.append(output)
 
@@ -121,7 +127,7 @@ def main() -> None:
     args = parser.parse_args()
 
     for path in build_driver_zips(args.release_dir):
-        print(f"Created {path.name} ({path.stat().st_size} bytes)")
+        print(f"Prepared {path.name} ({path.stat().st_size} bytes)")
     if args.cleanup_sources:
         for path in remove_raw_driver_artifacts(args.release_dir):
             print(f"Removed intermediate {path.name}")

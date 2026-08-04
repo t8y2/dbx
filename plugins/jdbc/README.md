@@ -5,9 +5,8 @@ This is an optional sidecar plugin for DBX. It is not bundled with the main DBX 
 ## Build
 
 ```sh
-mvn -q -DskipTests package
-mkdir -p lib
-cp target/dbx-jdbc-plugin-*-all.jar lib/dbx-jdbc-plugin.jar
+./gradlew shadowJar
+cp build/libs/dbx-jdbc-plugin-all.jar lib/dbx-jdbc-plugin.jar
 ```
 
 ## Package for release
@@ -16,7 +15,7 @@ cp target/dbx-jdbc-plugin-*-all.jar lib/dbx-jdbc-plugin.jar
 ./package.sh
 ```
 
-The package version follows the JDBC plugin version in `pom.xml` and `manifest.json`.
+The package version follows the JDBC plugin version in `build.gradle` and `manifest.json`.
 The package script writes both `dbx-jdbc-plugin-<version>.zip` and `dbx-jdbc-plugin-latest.zip`.
 
 ## Install for local DBX

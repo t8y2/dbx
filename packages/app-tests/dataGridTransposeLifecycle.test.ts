@@ -5,12 +5,14 @@ import { useDataGridCanvasRuntime, type DataGridAnimationFrameDriver } from "../
 import { useDataGridScrollbars } from "../../apps/desktop/src/composables/useDataGridScrollbars.ts";
 import { restoreDataGridAfterTranspose, transposeRecordIndexesForMode } from "../../apps/desktop/src/lib/dataGrid/dataGridTranspose.ts";
 
-type TestScroller = HTMLElement & { clientHeight: number };
+type TestScroller = HTMLElement & { clientHeight: number; scrollHeight: number };
 
-function createScroller(scrollWidth: number, clientWidth: number, clientHeight: number): TestScroller {
+function createScroller(scrollWidth: number, clientWidth: number, clientHeight: number, scrollHeight = 1200): TestScroller {
   return {
     children: [],
+    scrollTop: 0,
     scrollLeft: 0,
+    scrollHeight,
     scrollWidth,
     clientWidth,
     clientHeight,
@@ -132,6 +134,30 @@ test("restores a wide canvas grid after single-row and multi-row transpose remou
 
   canvasRuntime.dispose();
   scrollbarsRuntime.dispose();
+});
+
+test("restores the vertical grid position after a keyboard transpose round trip", () => {
+  const viewport = createScroller(600, 600, 320, 2600);
+
+  restoreDataGridAfterTranspose({
+    scroller: viewport,
+    scrollLeftBeforeTranspose: 0,
+    scrollTopBeforeTranspose: 1300,
+    attachCanvasResizeObserver() {},
+    refreshGridScrollerMetrics() {},
+  });
+
+  assert.equal(viewport.scrollTop, 1300);
+
+  restoreDataGridAfterTranspose({
+    scroller: viewport,
+    scrollLeftBeforeTranspose: 0,
+    scrollTopBeforeTranspose: 2500,
+    attachCanvasResizeObserver() {},
+    refreshGridScrollerMetrics() {},
+  });
+
+  assert.equal(viewport.scrollTop, 2280, "restored position should stay within the remounted grid bounds");
 });
 
 test("error result recovery participates in canvas observer remounts", () => {

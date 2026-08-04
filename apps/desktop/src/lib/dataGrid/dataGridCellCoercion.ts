@@ -1,5 +1,6 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
+import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
 
 export interface CoerceDataGridCellValueOptions {
   value: string;
@@ -14,12 +15,17 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   if (value === "" && oldValue === null && !options.preserveEmptyString) return null;
   const postgresArrayValue = coercePostgresArrayValue(options);
   if (postgresArrayValue !== undefined) return postgresArrayValue;
+  // Excel-pasted values often carry thousands separators (10,000.00) that make
+  // Number() return NaN and the literal fail to convert on the server. Strip
+  // only unambiguous groupings and keep the normalized text for the precision
+  // checks below, so exact values survive as text.
+  const numericText = normalizeGroupedNumberText(value, options.columnInfo);
   if (typeof oldValue === "number") {
-    const num = Number(value);
+    const num = Number(numericText);
     if (!Number.isNaN(num)) {
-      if (shouldPreserveNumericText(options, num)) {
+      if (shouldPreserveNumericText(options, num, numericText)) {
         // Keep precision-sensitive numeric edits as text; JS Number rounds 64-bit integers.
-        const text = value.trim();
+        const text = numericText.trim();
         if (text === String(oldValue)) return oldValue;
         return text;
       }
@@ -27,9 +33,9 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
     }
   }
   if (typeof oldValue === "boolean") {
-    return value === "true" || value === "1";
+    return numericText === "true" || numericText === "1";
   }
-  return normalizeSmartQuotedJsonInput(value);
+  return normalizeSmartQuotedJsonInput(numericText);
 }
 
 export function dataGridCellEditorText(options: { value: GridCellValue | undefined; databaseType: DatabaseType | undefined; columnInfo: Pick<ColumnInfo, "data_type"> | undefined }): string {
@@ -92,10 +98,27 @@ function isPostgresArrayColumn(columnInfo: Pick<ColumnInfo, "data_type"> | undef
   return dataType === "array" || dataType.endsWith("[]") || dataType.startsWith("_");
 }
 
-function shouldPreserveNumericText(options: CoerceDataGridCellValueOptions, parsedNumber: number): boolean {
-  const text = options.value.trim();
+function shouldPreserveNumericText(options: CoerceDataGridCellValueOptions, parsedNumber: number, text: string): boolean {
   if (!isNumericLiteralText(text)) return false;
   return shouldPreserveNumericTextForType(options.columnInfo?.data_type, text, parsedNumber);
+}
+
+function normalizeGroupedNumberText(value: string, columnInfo: Pick<ColumnInfo, "data_type"> | undefined): string {
+  if (!isNumericColumnType(columnInfo?.data_type)) return value;
+  return stripUnambiguousThousandSeparators(value);
+}
+
+function stripUnambiguousThousandSeparators(value: string): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^([+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?)([eE][+-]?\d+)?$/);
+  if (!match) return value;
+  const mantissa = match[1];
+  const exponent = match[2] ?? "";
+  // A lone "1,000" (one comma group, no decimal point) is ambiguous: in
+  // comma-decimal locales it reads as 1.000. Only strip when a decimal point
+  // is present (1,234.56) or there are multiple comma groups (1,234,567).
+  if (/^[+-]?\d{1,3},\d{3}$/.test(mantissa)) return value;
+  return `${mantissa.replace(/,/g, "")}${exponent}`;
 }
 
 function postgresArrayElementDataType(dataType: string | undefined): string {

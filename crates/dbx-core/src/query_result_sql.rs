@@ -439,8 +439,11 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
         return (offset == 0).then(|| statement.to_string());
     }
     if has_top_level_select_top(statement) {
-        return sql_server_derived_table_projection_safe(statement)
-            .then(|| add_sql_server_existing_top_pagination(statement, limit, offset));
+        return if sql_server_derived_table_projection_safe(statement) {
+            Some(add_sql_server_existing_top_pagination(statement, limit, offset))
+        } else {
+            (offset > 0).then(|| add_sql_server_rowcount_pagination(statement, limit, offset))
+        };
     }
 
     let order_by_index = find_top_level_trailing_order_by(statement);
@@ -454,7 +457,7 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
 
     let statement_without_order = order_by_index.map(|index| statement[..index].trim_end()).unwrap_or(statement);
     if !sql_server_derived_table_projection_safe(statement_without_order) {
-        return None;
+        return Some(add_sql_server_rowcount_pagination(statement, limit, offset));
     }
 
     let row_number_order = order_by_index
@@ -464,6 +467,33 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
     Some(format!(
         "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({statement_without_order}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
     ))
+}
+
+const SQLSERVER_RESULT_OFFSET_PREFIX: &str = "/*__dbx_result_offset=";
+const SQLSERVER_RESULT_OFFSET_SUFFIX: &str = "__*/";
+
+fn add_sql_server_rowcount_pagination(statement: &str, limit: usize, offset: usize) -> String {
+    let row_count = offset.saturating_add(limit);
+    let escaped_statement = statement.replace('\'', "''");
+    // Keep duplicate result-column names intact while bounding the server response
+    // on every SQL Server version supported by DBX. The dynamic batch scopes
+    // SET ROWCOUNT to this execution instead of leaking it into the tab session.
+    format!(
+        "EXEC sys.sp_executesql N'SET ROWCOUNT {row_count}; {escaped_statement}'; {SQLSERVER_RESULT_OFFSET_PREFIX}{offset}{SQLSERVER_RESULT_OFFSET_SUFFIX}"
+    )
+}
+
+pub(crate) fn sqlserver_result_offset(sql: &str) -> usize {
+    let sql = sql.trim_end();
+    if !sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT ") || !sql.ends_with(SQLSERVER_RESULT_OFFSET_SUFFIX) {
+        return 0;
+    }
+    let Some(marker_index) = sql.rfind(SQLSERVER_RESULT_OFFSET_PREFIX) else {
+        return 0;
+    };
+    let value_start = marker_index + SQLSERVER_RESULT_OFFSET_PREFIX.len();
+    let value_end = sql.len() - SQLSERVER_RESULT_OFFSET_SUFFIX.len();
+    sql[value_start..value_end].parse().unwrap_or(0)
 }
 
 fn add_sql_server_existing_top_pagination(statement: &str, limit: usize, offset: usize) -> String {
@@ -1472,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_sqlserver_unnamed_expression_for_later_pages() {
+    fn paginates_sqlserver_unnamed_expression_with_rowcount() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id + 1 FROM TicketInfo".to_string(),
             database_type: Some(DatabaseType::SqlServer),
@@ -1480,7 +1510,9 @@ mod tests {
             offset: 100,
         });
 
-        assert_eq!(result, err("unsupported"));
+        let sql = result.sql.expect("build unnamed expression page");
+        assert!(sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; SELECT id + 1 FROM TicketInfo'"));
+        assert_eq!(sqlserver_result_offset(&sql), 100);
     }
 
     #[test]
@@ -1591,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_unsafe_projections_execute_original_sql_without_wrappers() {
+    fn sqlserver_unsafe_top_projections_use_rowcount_for_later_pages() {
         let queries = [
             "SELECT TOP 100 AAA, * FROM BBB",
             "SELECT TOP 100 AAA, bbb AS aaa FROM BBB",
@@ -1602,22 +1634,32 @@ mod tests {
         ];
 
         for sql in queries {
-            for offset in [0, 100] {
-                let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
-                    sql: sql.to_string(),
-                    query_base_sql: sql.to_string(),
-                    database_type: Some(DatabaseType::SqlServer),
-                    pagination: QueryPagination { limit: 100, offset, session_id: None },
-                    use_agent_cursor: false,
-                    first_page_uses_actual_sql: false,
-                });
+            let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+                pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+            });
+            assert_eq!(first_page.sql_to_execute, sql);
+            assert!(first_page.page_sql.is_none());
+            assert!(first_page.count_sql.is_none());
 
-                assert_eq!(plan.sql_to_execute, sql);
-                assert!(plan.page_sql.is_none());
-                assert!(plan.count_sql.is_none());
-                assert_eq!(plan.page_limit, None);
-                assert_eq!(plan.page_offset, None);
-            }
+            let later_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+                pagination: QueryPagination { limit: 100, offset: 100, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+            });
+            assert!(later_page.sql_to_execute.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; "));
+            assert_eq!(sqlserver_result_offset(&later_page.sql_to_execute), 100);
+            assert_eq!(later_page.page_sql, Some(later_page.sql_to_execute.clone()));
+            assert!(later_page.count_sql.is_none());
+            assert_eq!(later_page.page_limit, Some(100));
+            assert_eq!(later_page.page_offset, Some(100));
         }
     }
 
@@ -1632,15 +1674,42 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_unsafe_projection_is_not_paginated_directly() {
+    fn sqlserver_join_wildcard_uses_bounded_rowcount_pagination() {
+        let sql = "SELECT * FROM WZ_CKGL_WZLLDSQ_DETAIL d LEFT JOIN WZ_CKGL_WZLLDSQ_MAIN AS m ON m.ID = d.ParentID";
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
-            original_sql: "SELECT TOP 100 AAA, * FROM BBB".to_string(),
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 500,
+            offset: 500,
+        });
+
+        assert!(result.ok);
+        let sql = result.sql.unwrap();
+        assert_eq!(
+            sql,
+            "EXEC sys.sp_executesql N'SET ROWCOUNT 1000; SELECT * FROM WZ_CKGL_WZLLDSQ_DETAIL d LEFT JOIN WZ_CKGL_WZLLDSQ_MAIN AS m ON m.ID = d.ParentID'; /*__dbx_result_offset=500__*/"
+        );
+        assert_eq!(sqlserver_result_offset(&sql), 500);
+    }
+
+    #[test]
+    fn sqlserver_result_offset_ignores_user_sql_markers() {
+        assert_eq!(sqlserver_result_offset("SELECT 1 /*__dbx_result_offset=500__*/"), 0);
+    }
+
+    #[test]
+    fn sqlserver_rowcount_pagination_escapes_string_literals() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM detail d JOIN parent p ON p.id = d.parent_id WHERE p.label = N'O''Brien'"
+                .to_string(),
             database_type: Some(DatabaseType::SqlServer),
             limit: 100,
             offset: 100,
         });
 
-        assert_eq!(result, err("unsupported"));
+        let sql = result.sql.expect("build rowcount pagination SQL");
+        assert!(sql.contains("WHERE p.label = N''O''''Brien''"));
+        assert_eq!(sqlserver_result_offset(&sql), 100);
     }
 
     #[test]
@@ -1998,7 +2067,7 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn rejects_sqlserver_wildcard_later_pages_to_avoid_duplicate_columns() {
+    fn paginates_sqlserver_wildcard_later_pages_without_derived_tables() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql:
                 "SELECT b.ProjectType,* FROM VesselBusinessOpportunity a LEFT JOIN JDDR_sys_BasicConfig_ProjectInfo_Data b ON a.ProjectID = b.ID"
@@ -2008,7 +2077,9 @@ WHERE u.id = picked.id;
             offset: 100,
         });
 
-        assert_eq!(result, err("unsupported"));
+        let sql = result.sql.expect("build wildcard page");
+        assert!(sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; SELECT b.ProjectType,*"));
+        assert_eq!(sqlserver_result_offset(&sql), 100);
     }
 
     #[test]

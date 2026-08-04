@@ -1033,7 +1033,7 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
-  if (settingsStore.editorSettings.sidebarActivation === "double") return;
+  if (settingsStore.editorSettings.sidebarActivation === "double" && props.node.type !== "load-more") return;
   treeRuntime.handleRowClick(props.node, event.detail);
 }
 

@@ -143,6 +143,37 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
+  it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
+    const { value, input } = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
+    input.focus();
+    input.value = "na";
+    input.setSelectionRange(2, 2);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    const firstOption = document.querySelector('[role="option"]') as HTMLElement;
+    firstOption.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
+    expect(firstOption.className).not.toContain("bg-gray-200");
+    expect(firstOption.className).not.toContain("bg-accent");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("na");
+
+    const secondEditor = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
+    secondEditor.input.focus();
+    secondEditor.input.value = "na";
+    secondEditor.input.setSelectionRange(2, 2);
+    secondEditor.input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    const nextFirstOption = document.querySelector('[role="option"]') as HTMLElement;
+    nextFirstOption.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
+  });
+
   it("keeps expanded input first-line indent and wraps long tokens", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;

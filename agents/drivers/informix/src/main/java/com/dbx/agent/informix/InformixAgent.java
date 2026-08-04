@@ -27,8 +27,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.TreeSet;
 
 public final class InformixAgent extends AbstractJdbcAgent {
+    private String loginOwner = "";
+
     @Override
     protected String driverClass() {
         return "com.informix.jdbc.IfxDriver";
@@ -37,6 +40,16 @@ public final class InformixAgent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return jdbcUrl(params);
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        loginOwner = normalizeOwner(params.getUsername());
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        loginOwner = "";
     }
 
     public static String jdbcUrl(ConnectParams params) {
@@ -163,28 +176,61 @@ public final class InformixAgent extends AbstractJdbcAgent {
 
     @Override
     public List<String> listSchemas() {
-        List<String> result = new ArrayList<>();
-        for (DatabaseInfo database : listDatabases()) {
-            result.add(database.getName());
+        return unchecked(() -> {
+            List<String> catalogOwners = new ArrayList<>();
+            try (java.sql.Statement stmt = requireConnected().createStatement();
+                 ResultSet rs = stmt.executeQuery(schemaCatalogSql())) {
+                while (rs.next()) {
+                    String owner = normalizeOwner(rs.getString(1));
+                    if (!owner.isEmpty()) {
+                        catalogOwners.add(owner);
+                    }
+                }
+            }
+            return mergeSchemaOwners(catalogOwners, loginOwner);
+        });
+    }
+
+    static String schemaCatalogSql() {
+        // Informix JDBC catalogs are databases; schemas are the object owners in the current database.
+        return "SELECT owner FROM systables WHERE tabid >= 100 AND owner IS NOT NULL "
+                + "UNION SELECT owner FROM sysprocedures WHERE owner IS NOT NULL ORDER BY owner";
+    }
+
+    static List<String> mergeSchemaOwners(List<String> catalogOwners, String loginOwner) {
+        Set<String> owners = new TreeSet<>();
+        for (String owner : catalogOwners) {
+            String normalized = normalizeOwner(owner);
+            if (!normalized.isEmpty()) {
+                owners.add(normalized);
+            }
         }
-        return result;
+        String normalizedLoginOwner = normalizeOwner(loginOwner);
+        if (!normalizedLoginOwner.isEmpty()) {
+            owners.add(normalizedLoginOwner);
+        }
+        return new ArrayList<>(owners);
     }
 
     @Override
     public List<TableInfo> listTables(String schema) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            String sql = """
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("""
                 SELECT tabname,
                     CASE tabtype WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE tabtype END
                 FROM systables
                 WHERE tabid >= 100
-                ORDER BY tabname
-                """;
-            try (java.sql.Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery(sql.stripIndent().trim())) {
-                while (rs.next()) {
-                    result.add(new TableInfo(rs.getString(1).trim(), rs.getString(2).trim(), null));
+                """.stripIndent().trim());
+            appendOwnerPredicate(sql, args, "owner", schema);
+            sql.append(" ORDER BY tabname");
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(rs.getString(1).trim(), rs.getString(2).trim(), null));
+                    }
                 }
             }
             return result;
@@ -201,13 +247,13 @@ public final class InformixAgent extends AbstractJdbcAgent {
             return List.of();
         }
         try {
-            return queryConstrainedTables(normalized);
+            return queryConstrainedTables(schema, normalized);
         } catch (RuntimeException e) {
             return normalized.filterTables(listTables(schema));
         }
     }
 
-    private List<TableInfo> queryConstrainedTables(MetadataListConstraints constraints) {
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
             List<Object> args = new ArrayList<>();
@@ -216,6 +262,7 @@ public final class InformixAgent extends AbstractJdbcAgent {
             sql.append("tabname, CASE tabtype WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE tabtype END ")
                 .append("FROM systables WHERE tabid >= 100");
             appendInformixTableTypePredicate(sql, constraints);
+            appendOwnerPredicate(sql, args, "owner", schema);
             MetadataSqlSupport.appendNameFilter(sql, args, "tabname", constraints);
             sql.append(" ORDER BY tabname");
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
@@ -238,23 +285,8 @@ public final class InformixAgent extends AbstractJdbcAgent {
                 result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
             }
 
-            try (java.sql.Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery(
-                     "SELECT procname FROM sysprocedures WHERE owner != 'informix' AND isproc = 'f' ORDER BY procname"
-                 )) {
-                while (rs.next()) {
-                    result.add(new ObjectInfo(rs.getString(1).trim(), "FUNCTION", schema, null));
-                }
-            }
-
-            try (java.sql.Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery(
-                     "SELECT procname FROM sysprocedures WHERE owner != 'informix' AND isproc = 't' ORDER BY procname"
-                 )) {
-                while (rs.next()) {
-                    result.add(new ObjectInfo(rs.getString(1).trim(), "PROCEDURE", schema, null));
-                }
-            }
+            appendRoutineObjects(result, schema, "f", "FUNCTION");
+            appendRoutineObjects(result, schema, "t", "PROCEDURE");
             return result;
         });
     }
@@ -283,16 +315,19 @@ public final class InformixAgent extends AbstractJdbcAgent {
             if (constraints.includesTableLikeTypes()) {
                 StringBuilder tableSql = new StringBuilder("SELECT tabname AS object_name, CASE tabtype WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE tabtype END AS object_type, 0 AS object_order FROM systables WHERE tabid >= 100");
                 appendInformixTableTypePredicate(tableSql, constraints);
+                appendOwnerPredicate(tableSql, args, "owner", schema);
                 MetadataSqlSupport.appendNameFilter(tableSql, args, "tabname", constraints);
                 branches.add(tableSql.toString());
             }
             if (constraints.objectTypeAllowed("FUNCTION")) {
-                StringBuilder functionSql = new StringBuilder("SELECT procname AS object_name, 'FUNCTION' AS object_type, 1 AS object_order FROM sysprocedures WHERE owner != 'informix' AND isproc = 'f'");
+                StringBuilder functionSql = new StringBuilder("SELECT procname AS object_name, 'FUNCTION' AS object_type, 1 AS object_order FROM sysprocedures WHERE isproc = 'f'");
+                appendRoutineOwnerPredicate(functionSql, args, schema);
                 MetadataSqlSupport.appendNameFilter(functionSql, args, "procname", constraints);
                 branches.add(functionSql.toString());
             }
             if (constraints.objectTypeAllowed("PROCEDURE")) {
-                StringBuilder procedureSql = new StringBuilder("SELECT procname AS object_name, 'PROCEDURE' AS object_type, 2 AS object_order FROM sysprocedures WHERE owner != 'informix' AND isproc = 't'");
+                StringBuilder procedureSql = new StringBuilder("SELECT procname AS object_name, 'PROCEDURE' AS object_type, 2 AS object_order FROM sysprocedures WHERE isproc = 't'");
+                appendRoutineOwnerPredicate(procedureSql, args, schema);
                 MetadataSqlSupport.appendNameFilter(procedureSql, args, "procname", constraints);
                 branches.add(procedureSql.toString());
             }
@@ -319,15 +354,18 @@ public final class InformixAgent extends AbstractJdbcAgent {
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
-            String sql = """
+            List<Object> args = new ArrayList<>();
+            args.add(name);
+            StringBuilder sql = new StringBuilder("""
                 SELECT b.data FROM sysprocbody b
                 JOIN sysprocedures p ON b.procid = p.procid
                 WHERE p.procname = ? AND b.datakey = 'T'
-                ORDER BY b.seqno
-                """;
+                """.stripIndent().trim());
+            appendOwnerPredicate(sql, args, "p.owner", schema);
+            sql.append(" ORDER BY b.seqno");
             StringBuilder sb = new StringBuilder();
-            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(sql.stripIndent().trim())) {
-                stmt.setString(1, name);
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String value = rs.getString(1);
@@ -343,16 +381,20 @@ public final class InformixAgent extends AbstractJdbcAgent {
     public List<ColumnInfo> getColumns(String schema, String table) {
         return unchecked(() -> {
             Connection conn = requireConnected();
-            Set<Integer> primaryKeyColumns = getPrimaryKeyColumnNumbers(conn, table);
+            Set<Integer> primaryKeyColumns = getPrimaryKeyColumnNumbers(conn, schema, table);
             List<ColumnInfo> result = new ArrayList<>();
-            String sql = """
+            List<Object> args = new ArrayList<>();
+            args.add(table);
+            StringBuilder sql = new StringBuilder("""
                 SELECT c.colname, c.coltype, c.colno
                 FROM syscolumns c
-                WHERE c.tabid = (SELECT tabid FROM systables WHERE tabname = ?)
-                ORDER BY c.colno
-                """;
-            try (java.sql.PreparedStatement stmt = conn.prepareStatement(sql.stripIndent().trim())) {
-                stmt.setString(1, table);
+                JOIN systables t ON t.tabid = c.tabid
+                WHERE t.tabname = ?
+                """.stripIndent().trim());
+            appendOwnerPredicate(sql, args, "t.owner", schema);
+            sql.append(" ORDER BY c.colno");
+            try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String colname = rs.getString(1).trim();
@@ -376,18 +418,21 @@ public final class InformixAgent extends AbstractJdbcAgent {
         });
     }
 
-    private Set<Integer> getPrimaryKeyColumnNumbers(Connection conn, String table) throws SQLException {
-        String sql = """
+    private Set<Integer> getPrimaryKeyColumnNumbers(Connection conn, String schema, String table) throws Exception {
+        List<Object> args = new ArrayList<>();
+        args.add(table);
+        StringBuilder sql = new StringBuilder("""
             SELECT i.part1, i.part2, i.part3, i.part4, i.part5, i.part6, i.part7, i.part8,
                    i.part9, i.part10, i.part11, i.part12, i.part13, i.part14, i.part15, i.part16
             FROM sysconstraints c
             JOIN sysindexes i ON i.idxname = c.idxname AND i.tabid = c.tabid
             JOIN systables t ON t.tabid = c.tabid
             WHERE t.tabname = ? AND c.constrtype = 'P'
-            """;
+            """.stripIndent().trim());
+        appendOwnerPredicate(sql, args, "t.owner", schema);
 
-        try (java.sql.PreparedStatement stmt = conn.prepareStatement(sql.stripIndent().trim())) {
-            stmt.setString(1, table);
+        try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+            MetadataSqlSupport.bind(stmt, args);
             try (ResultSet rs = stmt.executeQuery()) {
                 if (!rs.next()) {
                     return Collections.emptySet();
@@ -416,14 +461,17 @@ public final class InformixAgent extends AbstractJdbcAgent {
     public List<TriggerInfo> listTriggers(String schema, String table) {
         return unchecked(() -> {
             List<TriggerInfo> result = new ArrayList<>();
-            String sql = """
+            List<Object> args = new ArrayList<>();
+            args.add(table);
+            StringBuilder sql = new StringBuilder("""
                 SELECT t.trigname, t.event, 'TRIGGER'
                 FROM systriggers t
                 JOIN systables s ON t.tabid = s.tabid
                 WHERE s.tabname = ?
-                """;
-            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(sql.stripIndent().trim())) {
-                stmt.setString(1, table);
+                """.stripIndent().trim());
+            appendOwnerPredicate(sql, args, "s.owner", schema);
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         result.add(new TriggerInfo(rs.getString(1).trim(), rs.getString(2).trim(), rs.getString(3).trim()));
@@ -475,6 +523,51 @@ public final class InformixAgent extends AbstractJdbcAgent {
         return constraints.includesTableLikeTypes()
             || constraints.objectTypeAllowed("PROCEDURE")
             || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private void appendRoutineObjects(List<ObjectInfo> result, String schema, String routineKind, String objectType)
+        throws Exception {
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("SELECT procname FROM sysprocedures WHERE isproc = ?");
+        args.add(routineKind);
+        appendRoutineOwnerPredicate(sql, args, schema);
+        sql.append(" ORDER BY procname");
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+            MetadataSqlSupport.bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new ObjectInfo(rs.getString(1).trim(), objectType, schema, null));
+                }
+            }
+        }
+    }
+
+    private void appendOwnerPredicate(StringBuilder sql, List<Object> args, String ownerColumn, String schema) {
+        String owner = metadataOwner(schema);
+        sql.append(" AND ").append(ownerColumn).append(" = ?");
+        args.add(owner);
+    }
+
+    private void appendRoutineOwnerPredicate(StringBuilder sql, List<Object> args, String schema) {
+        String owner = metadataOwner(schema);
+        sql.append(" AND owner = ?");
+        args.add(owner);
+    }
+
+    private String metadataOwner(String schema) {
+        String owner = normalizeOwner(schema);
+        if (!owner.isEmpty()) {
+            return owner;
+        }
+        owner = normalizeOwner(loginOwner);
+        if (!owner.isEmpty()) {
+            return owner;
+        }
+        throw new IllegalStateException("Informix metadata owner is unavailable for an unqualified request");
+    }
+
+    private static String normalizeOwner(String schema) {
+        return schema == null ? "" : schema.trim();
     }
 
     private static void appendInformixTableTypePredicate(StringBuilder sql, MetadataListConstraints constraints) {

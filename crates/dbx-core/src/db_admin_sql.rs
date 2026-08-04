@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{is_schema_aware, qualified_table_name, quote_table_identifier};
+use crate::sql_dialect::{is_schema_aware, profile_for, qualified_table_name, quote_table_identifier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -190,6 +190,8 @@ pub struct CopyTableDataSqlOptions {
     pub postgres_overriding_system_value: bool,
     #[serde(default)]
     pub sqlserver_identity_insert: bool,
+    #[serde(default)]
+    pub normalize_new_target_name: bool,
 }
 
 const MYSQL_COMPATIBLE_PROFILES: &[&str] = &["mysql", "mariadb", "tidb", "oceanbase", "custom_mysql"];
@@ -599,7 +601,8 @@ pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
 
 pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOptions) -> String {
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
-    let target = qualified_name(options.database_type, options.schema.as_deref(), &options.target_name);
+    let target =
+        qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
     let structure_sql = if options.database_type == Some(DatabaseType::Mysql) {
         format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
@@ -642,7 +645,11 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
 
 pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
-    let target = qualified_name(options.database_type, options.schema.as_deref(), &options.target_name);
+    let target = if options.normalize_new_target_name {
+        qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name)
+    } else {
+        qualified_name(options.database_type, options.schema.as_deref(), &options.target_name)
+    };
     let Some(columns) = options.columns.filter(|columns| !columns.is_empty()) else {
         return format!("INSERT INTO {target} SELECT * FROM {source};");
     };
@@ -818,6 +825,18 @@ fn qualified_name(database_type: Option<DatabaseType>, schema: Option<&str>, nam
         )
     } else {
         quote_rename_identifier(database_type, name)
+    }
+}
+
+fn qualified_duplicate_target_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
+    if database_type != Some(DatabaseType::Dameng) {
+        return qualified_name(database_type, schema, name);
+    }
+    let target = profile_for(DatabaseType::Dameng).quote_ident(name);
+    if schema.is_some_and(|schema| !schema.is_empty()) {
+        format!("{}.{}", quote_rename_identifier(database_type, schema.unwrap()), target)
+    } else {
+        target
     }
 }
 
@@ -1604,7 +1623,7 @@ mod tests {
             database_type: Some(DatabaseType::Dameng),
             schema: Some("APP".to_string()),
             source_name: "USERS".to_string(),
-            target_name: "USERS_COPY".to_string(),
+            target_name: "users_copy".to_string(),
             table_comment: None,
             column_comments: vec![
                 DuplicateTableColumnComment {
@@ -1617,16 +1636,26 @@ mod tests {
         });
         assert_eq!(
             dameng_sql,
-            "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  ';"
+            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  ';"
         );
         assert_eq!(
             crate::sql::split_sql_statements_for_database(&dameng_sql, DatabaseType::Dameng),
             vec![
-                "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
-                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'"
-                    .to_string(),
-                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  '".to_string(),
+                "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
+                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'".to_string(),
+                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  '".to_string(),
             ]
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                schema: Some("APP".to_string()),
+                source_name: "USERS".to_string(),
+                target_name: "UsersCopy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+            }),
+            "CREATE TABLE \"APP\".\"UsersCopy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0"
         );
         for database_type in [
             DatabaseType::Postgres,
@@ -1692,6 +1721,7 @@ mod tests {
                 columns: None,
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
             }),
             "INSERT INTO \"users_copy\" SELECT * FROM \"users\";"
         );
@@ -1704,6 +1734,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
             }),
             "INSERT INTO `users_copy` (`id`, `name`) SELECT `id`, `name` FROM `users`;"
         );
@@ -1716,6 +1747,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: true,
                 sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
             }),
             "INSERT INTO \"public\".\"users_copy\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE SELECT \"id\", \"name\" FROM \"public\".\"users\";"
         );
@@ -1728,8 +1760,35 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: true,
+                normalize_new_target_name: false,
             }),
             "SET IDENTITY_INSERT [dbo].[users_copy] ON;\nINSERT INTO [dbo].[users_copy] ([id], [name]) SELECT [id], [name] FROM [dbo].[users];\nSET IDENTITY_INSERT [dbo].[users_copy] OFF;"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                schema: Some("APP".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: None,
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                normalize_new_target_name: true,
+            }),
+            "INSERT INTO \"APP\".USERS_COPY SELECT * FROM \"APP\".\"users\";"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                schema: Some("APP".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: None,
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
+            }),
+            "INSERT INTO \"APP\".\"users_copy\" SELECT * FROM \"APP\".\"users\";"
         );
     }
 

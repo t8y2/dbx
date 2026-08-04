@@ -379,6 +379,8 @@ pub struct DriverInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactInfo {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ArtifactFormat>,

@@ -1094,7 +1094,7 @@ func TestColumnDDLDefinitionRestoresMySQLCompatibilityTypeModifiers(t *testing.T
 
 func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-		if !strings.Contains(query, "c.column_type") {
+		if !strings.Contains(query, "c.column_type") || !strings.Contains(query, "THEN c.udt_name") {
 			return nil, errors.New("full column type was not requested")
 		}
 		return &valueRows{
@@ -1130,7 +1130,117 @@ func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
 	}
 }
 
-func TestInformationSchemaColumnsFallsBackOnlyForMissingColumnType(t *testing.T) {
+func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.column_type") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.column_type does not exist"}
+		}
+		if !strings.Contains(query, "THEN c.udt_name") {
+			return nil, errors.New("user-defined type name was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	columns, err := server.informationSchemaColumns("public", "orders", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 1 || columns[0].FullDataType != "datetime" {
+		t.Fatalf("unexpected user-defined metadata columns: %#v", columns)
+	}
+	if ddl := renderTableDDL("public", "orders", columns, nil); !strings.Contains(ddl, `"created_at" datetime`) || strings.Contains(ddl, "USER-DEFINED") {
+		t.Fatalf("unexpected user-defined type DDL:\n%s", ddl)
+	}
+
+	if _, err := server.informationSchemaColumns("public", "events", map[string]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 3 || strings.Contains(queries[2], "c.column_type") {
+		t.Fatalf("missing column_type capability must be cached: %v", queries)
+	}
+}
+
+func TestInformationSchemaColumnsPreserveColumnTypeWithoutUdtName(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.udt_name") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "kb: column c.udt_name does not exist"}
+		}
+		if !strings.Contains(query, "c.column_type") {
+			return nil, errors.New("column type fallback was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for _, table := range []string{"orders", "events"} {
+		columns, err := server.informationSchemaColumns("public", table, map[string]bool{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columns[0].FullDataType != "enum('new','done')" {
+			t.Fatalf("unexpected metadata columns: %#v", columns)
+		}
+		if ddl := renderTableDDL("public", table, columns, nil); !strings.Contains(ddl, `"status" enum('new','done')`) {
+			t.Fatalf("unexpected table DDL:\n%s", ddl)
+		}
+	}
+	state.mu.Lock()
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 3 || !strings.Contains(queries[0], "c.udt_name") || strings.Contains(queries[1], "c.udt_name") || strings.Contains(queries[2], "c.udt_name") {
+		t.Fatalf("missing udt_name capability must be detected once and cached: %v", queries)
+	}
+}
+
+func TestInformationSchemaColumnsFallbackWithoutExtendedTypeColumns(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.column_type") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.column_type does not exist"}
+		}
+		if strings.Contains(query, "c.udt_name") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.udt_name does not exist"}
+		}
+		if !strings.Contains(query, "NULL AS column_type") {
+			return nil, errors.New("base type fallback was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for _, table := range []string{"orders", "events"} {
+		columns, err := server.informationSchemaColumns("public", table, map[string]bool{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columnDDLDefinition(columns[0]) != `"label" varchar(64)` {
+			t.Fatalf("unexpected fallback columns: %#v", columns)
+		}
+	}
+	state.mu.Lock()
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 4 || !strings.Contains(queries[2], "NULL AS column_type") || !strings.Contains(queries[3], "NULL AS column_type") {
+		t.Fatalf("missing extended type capabilities must be detected once and cached: %v", queries)
+	}
+}
+
+func TestInformationSchemaColumnsRetriesOnlyForMissingTypeMetadataColumns(t *testing.T) {
 	tests := []struct {
 		name         string
 		firstError   error
@@ -1147,7 +1257,7 @@ func TestInformationSchemaColumnsFallsBackOnlyForMissingColumnType(t *testing.T)
 				if strings.Contains(query, "c.column_type") {
 					return nil, test.firstError
 				}
-				if !strings.Contains(query, "NULL AS column_type") {
+				if !strings.Contains(query, "THEN c.udt_name") || !strings.Contains(query, "END AS column_type") {
 					return nil, errors.New("unexpected fallback query: " + query)
 				}
 				return &valueRows{
@@ -1181,6 +1291,19 @@ func TestInformationSchemaColumnsFallsBackOnlyForMissingColumnType(t *testing.T)
 				t.Fatalf("unexpected query count: got %d, want %d: %v", len(queries), wantQueries, queries)
 			}
 		})
+	}
+}
+
+func TestDisconnectResetsInformationSchemaCapabilityCache(t *testing.T) {
+	server := newServer()
+	server.infoColumnTypeUnsupported = true
+	server.infoUdtNameUnsupported = true
+
+	if err := server.disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if server.infoColumnTypeUnsupported || server.infoUdtNameUnsupported {
+		t.Fatal("disconnect must reset cached information_schema capabilities")
 	}
 }
 

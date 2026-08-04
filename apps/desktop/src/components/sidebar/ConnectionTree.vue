@@ -10,7 +10,8 @@ import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeTy
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards, reuseLiveSidebarTreeNodes } from "@/lib/sidebar/sidebarSearchTree";
 import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
-import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
+import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
@@ -1264,6 +1265,14 @@ function openSidebarDdl(node: TreeNode) {
   sidebarDdlOpen.value = true;
 }
 
+function openSidebarDdlForSelection(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
+  if (!node || !sidebarNodeSupportsDdlView(node)) return false;
+  openSidebarDdl(node);
+  return true;
+}
+
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
   if (!node.connectionId || !node.database || !objectSourceKindForTreeNode(node.type)) return;
   const target = createSidebarActionTarget(node);
@@ -1525,6 +1534,13 @@ function onWindowKeydown(event: KeyboardEvent) {
     }
     if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isPasteSidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts)) {
       if (requestSelectedSidebarPaste()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isViewTableDdlShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (openSidebarDdlForSelection()) {
         event.preventDefault();
         event.stopPropagation();
       }

@@ -340,7 +340,7 @@ agents/drivers/<驱动模块名>/build/libs/
 #### `agents/versions.json` 什么时候修改
 
 <Callout type="warn">
-  修改已有驱动时，不要手动修改 `agents/versions.json`。Agent 发布工作流会对比上一个 `agents-v*` 标签，自动为发生变化的模块增加 patch 版本。
+  修改已有驱动时，不要手动修改 `agents/versions.json`。Agent 发布工作流会以上一个 `agents-v*` 标签对比运行时代码，并使用该版本发布后的版本同步提交作为有效版本基线，自动为发生变化的模块增加 patch 版本；未变化模块会复用上一不可变 Release 中经过校验的产物。
 </Callout>
 
 - 修改 `agents/drivers/<module>/`：发布时自动 bump 该模块版本

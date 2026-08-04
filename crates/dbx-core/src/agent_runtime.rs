@@ -2,10 +2,9 @@ use serde::de::DeserializeOwned;
 use std::time::Duration;
 
 use crate::agent_manager::{AgentManager, DEFAULT_JRE_KEY};
+use crate::agent_recovery::{RecoveryPolicy, RecoveryScope};
 use crate::database_capabilities;
-use crate::db::agent_driver::{
-    agent_session_disposition, AgentDriverClient, AgentMethod, AgentRuntimeClient, AgentSessionDisposition,
-};
+use crate::db::agent_driver::{AgentCallError, AgentDriverClient, AgentMethod, AgentRuntimeClient};
 use crate::models::connection::DatabaseType;
 
 pub struct SharedConnectionOpenError {
@@ -113,7 +112,7 @@ pub async fn spawn_shared_connection_client(
         }
     };
     if let Err(err) = runtime
-        .call::<serde_json::Value>(AgentMethod::OpenSession.as_str(), session_params, Some(connect_timeout), None)
+        .call_typed::<serde_json::Value>(AgentMethod::OpenSession.as_str(), session_params, Some(connect_timeout), None)
         .await
     {
         let open_error = shared_connection_open_error(err, runtime.clone());
@@ -124,12 +123,11 @@ pub async fn spawn_shared_connection_client(
 }
 
 fn shared_connection_open_error(
-    message: String,
+    error: AgentCallError,
     runtime: std::sync::Arc<AgentRuntimeClient>,
 ) -> SharedConnectionOpenError {
-    let runtime =
-        (agent_session_disposition(&message) == Some(AgentSessionDisposition::ReplaceRuntime)).then_some(runtime);
-    SharedConnectionOpenError { message, runtime }
+    let runtime = RecoveryPolicy::decide(&error, RecoveryScope::ConnectionOpen).replaces_runtime().then_some(runtime);
+    SharedConnectionOpenError { message: error.into_legacy_string(), runtime }
 }
 
 async fn forget_unused_runtime_after_failed_open(
@@ -412,9 +410,17 @@ for line in sys.stdin:
     #[tokio::test]
     async fn replace_runtime_open_error_reports_runtime_without_killing_it_directly() {
         let (manager, _cell, runtime, script_path) = test_shared_runtime("replace-runtime-open-error").await;
-        let error = "Agent RPC error (-1): capacity exhausted\nDBX_AGENT_ERROR_DATA:{\"category\":\"resource\",\"sessionDisposition\":\"replace_runtime\"}";
+        let error = AgentCallError::Legacy {
+            rpc_code: Some(-1),
+            message: "capacity exhausted".to_string(),
+            hints: crate::db::agent_driver::LegacyAgentHints {
+                category: Some(crate::db::agent_driver::AgentErrorCategory::Resource),
+                session_disposition: Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime),
+                ..Default::default()
+            },
+        };
 
-        let open_error = shared_connection_open_error(error.to_string(), runtime.clone());
+        let open_error = shared_connection_open_error(error, runtime.clone());
 
         assert!(open_error.runtime.as_ref().is_some_and(|failed| std::sync::Arc::ptr_eq(failed, &runtime)));
         assert!(!runtime.is_failed());

@@ -54,10 +54,19 @@ async fn find_documents_returns_type_preserving_copy_documents() {
         .await
         .unwrap();
 
-    let result =
-        mongo_driver::find_documents(&client, database, &collection, 0, 10, Some("{}"), Some(r#"{"_id":0}"#), None)
-            .await
-            .unwrap();
+    let result = mongo_driver::find_documents(
+        &client,
+        database,
+        &collection,
+        0,
+        10,
+        Some("{}"),
+        Some(r#"{"_id":0}"#),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(result.documents[0]["lastUpdatedDate"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
     let extended = result.extended_documents.expect("extended documents");
@@ -65,4 +74,42 @@ async fn find_documents_returns_type_preserving_copy_documents() {
     assert_eq!(extended[0]["dateText"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
 
     mongo_driver::drop_collection(&client, database, &collection).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MONGODB_URL pointing at a writable MongoDB database"]
+async fn find_documents_applies_collation_to_results_total_and_pagination() {
+    let url = std::env::var("DBX_LIVE_MONGODB_URL").expect("DBX_LIVE_MONGODB_URL");
+    let client = mongo_driver::connect(&url, Duration::from_secs(10), Duration::from_secs(60)).await.unwrap();
+    let database = std::env::var("DBX_LIVE_MONGODB_DATABASE").unwrap_or_else(|_| "dbx_live_find_one".to_string());
+    let collection = format!("collation_{}", std::process::id());
+
+    mongo_driver::insert_documents(
+        &client,
+        &database,
+        &collection,
+        r#"[{"name":"xxx","rank":1},{"name":"XXX","rank":2},{"name":"yyy","rank":3}]"#,
+    )
+    .await
+    .unwrap();
+
+    let result = mongo_driver::find_documents_extended_json(
+        &client,
+        &database,
+        &collection,
+        1,
+        1,
+        Some(r#"{"name":"xxx"}"#),
+        Some(r#"{"_id":0}"#),
+        Some(r#"{"rank":1}"#),
+        Some(r#"{"locale":"en","strength":1}"#),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.total, 2);
+    assert!(result.total_is_exact);
+    assert_eq!(result.documents, vec![serde_json::json!({ "name": "XXX", "rank": 2 })]);
+
+    mongo_driver::drop_collection(&client, &database, &collection).await.unwrap();
 }

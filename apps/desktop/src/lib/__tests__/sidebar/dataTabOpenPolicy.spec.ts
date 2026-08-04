@@ -52,11 +52,11 @@ describe("dataTabOpenPolicy", () => {
     const existing = dataTab("users", "users");
     existing.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
 
-    expect(findExistingDataTabCandidate([existing], usersTarget, { openMode: "new-tab", reuseScope: "database" })).toBeUndefined();
+    expect(findExistingDataTabCandidate([existing], usersTarget, { openMode: "new-tab", reuseScope: "same-table" })).toBeUndefined();
     expect(findExistingDataTabCandidate([existing], usersTarget, { openMode: "new-tab", reuseScope: "none" })).toBeUndefined();
   });
 
-  it("applies none, same-table, and database reuse scopes independently", () => {
+  it("only reuses the same table when reuse is enabled", () => {
     const sameTable = dataTab("users", "users");
     sameTable.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
     const otherTable = dataTab("orders", "orders");
@@ -64,7 +64,13 @@ describe("dataTabOpenPolicy", () => {
     expect(findExistingDataTabCandidate([sameTable], usersTarget, { openMode: "default", reuseScope: "none" })).toBeUndefined();
     expect(findExistingDataTabCandidate([sameTable], usersTarget, { openMode: "default", reuseScope: "same-table" })).toEqual({ tab: sameTable, match: "same-table" });
     expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseScope: "same-table" })).toBeUndefined();
-    expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseScope: "database" })).toEqual({ tab: otherTable, match: "database" });
+  });
+
+  it("does not reuse a same-name table from another schema", () => {
+    const archiveUsers = dataTab("archive-users", "users", "archive");
+    archiveUsers.tableMeta = { schema: "archive", tableName: "users", columns: [], primaryKeys: [] };
+
+    expect(findExistingDataTabCandidate([archiveUsers], usersTarget, { openMode: "default", reuseScope: "same-table" })).toBeUndefined();
   });
 
   it("allows metadata to update a tab that still points to the requested table", () => {

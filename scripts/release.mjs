@@ -2,7 +2,13 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { evaluateAgentVersionBump, getAgentVersionChanges, isAgentPublishRelevantFile, parseLegacyStandaloneProjects } from "../.github/scripts/bump-agent-versions.mjs";
+import {
+  evaluateAgentVersionBump,
+  getAgentVersionChanges,
+  isAgentPublishRelevantFile,
+  parseLegacyStandaloneProjects,
+  resolveAgentReleaseBaseline,
+} from "../.github/scripts/bump-agent-versions.mjs";
 
 const REPO = "t8y2/dbx";
 const PACKAGES_WORKFLOW = "mcp-release.yml";
@@ -47,6 +53,7 @@ const AGENT_RELEASE_PATHS = [
   "agents/common/build.gradle",
   "agents/common/src/main/",
   "agents/drivers/",
+  ".github/workflows/agents-release.yml",
 ];
 
 const args = process.argv.slice(2);
@@ -180,7 +187,7 @@ async function releaseAgents(bump) {
   console.log(kv("Release target", "Agents", bold));
   console.log(kv("Current agent tag", `${latest.tag}${latest.source ? ` (${latest.source})` : ""}`, yellow));
   printReleaseStatus(status);
-  printAgentVersionChanges(latest.tag, status.changedFiles);
+  printAgentVersionChanges(status);
   if (!status.needed && !force) {
     console.log(yellow("No agents release needed; publish-relevant agent runtime files have not changed."));
     console.log(dim("Use --force to create the tag anyway."));
@@ -453,11 +460,18 @@ function getAgentReleaseStatus(latest = getLatestAgentTag()) {
     };
   }
 
-  const changedFiles = getChangedFilesSince(latest.tag, AGENT_RELEASE_PATHS).filter(isAgentPublishRelevantFile);
+  const effectiveBaseline = resolveAgentReleaseBaseline({ prevTag: latest.tag });
+  const changedFiles = effectiveBaseline.changedFiles
+    .filter((file) => AGENT_RELEASE_PATHS.some((path) => file === path || file.startsWith(path)))
+    .filter(isAgentPublishRelevantFile);
   return {
     needed: changedFiles.length > 0,
     baseline: latest.tag,
     changedFiles,
+    previousVersions: effectiveBaseline.versions,
+    versionBaseline: effectiveBaseline.syncCommit
+      ? `${effectiveBaseline.syncCommit.slice(0, 10)} (post-release version sync)`
+      : latest.tag,
   };
 }
 
@@ -478,6 +492,9 @@ function getChangedFilesSince(ref, paths) {
 function printReleaseStatus(status) {
   console.log(kv("Release needed", status.needed ? "yes" : "no", status.needed ? yellow : green));
   console.log(kv("Compared against", status.baseline, dim));
+  if (status.versionBaseline && status.versionBaseline !== status.baseline) {
+    console.log(kv("Version baseline", status.versionBaseline, dim));
+  }
   if (status.reason) {
     console.log(kv("Reason", status.reason, dim));
   }
@@ -492,20 +509,19 @@ function printReleaseStatus(status) {
   }
 }
 
-function printAgentVersionChanges(baselineTag, changedFiles) {
-  if (changedFiles.length === 0 || !refExists(`refs/tags/${baselineTag}`)) return;
+function printAgentVersionChanges(status) {
+  if (status.changedFiles.length === 0 || !status.previousVersions) return;
 
   const currentVersions = JSON.parse(readFileSync("agents/versions.json", "utf8"));
-  const previousVersions = JSON.parse(run("git", ["show", `${baselineTag}:agents/versions.json`]).stdout);
   const legacyStandaloneModules = parseLegacyStandaloneProjects(readFileSync("agents/build.gradle", "utf8"));
   const result = evaluateAgentVersionBump({
     versions: currentVersions,
-    prevVersions: previousVersions,
-    changedFiles,
+    prevVersions: status.previousVersions,
+    changedFiles: status.changedFiles,
     legacyStandaloneModules,
-    manualVersionsChanged: changedFiles.includes("agents/versions.json"),
+    manualVersionsChanged: status.changedFiles.includes("agents/versions.json"),
   });
-  const changes = getAgentVersionChanges(previousVersions, result.versions)
+  const changes = getAgentVersionChanges(status.previousVersions, result.versions)
     .map(({ moduleName, previousVersion, nextVersion }) => `${moduleName}: ${previousVersion ?? "new"} -> ${nextVersion}`);
 
   if (changes.length === 0) {

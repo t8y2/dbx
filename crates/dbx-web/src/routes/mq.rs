@@ -850,7 +850,7 @@ pub async fn peek_messages(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Json(req): Json<PeekMessagesReq>,
-) -> Result<Json<Vec<dbx_core::mq::PeekedMessage>>, AppError> {
+) -> Result<Json<dbx_core::mq::PeekMessagesResult>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
     let result = dbx_core::mq::service::mq_peek_messages_core(
         &state.app,

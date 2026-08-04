@@ -203,6 +203,7 @@ pub(crate) fn uses_connection_identifier_quote(
     identifier_quote: Option<&str>,
 ) -> bool {
     database_type == Some(DatabaseType::Kingbase)
+        || (database_type == Some(DatabaseType::Informix) && identifier_quote.is_some())
         || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
             && identifier_quote.is_some())
 }

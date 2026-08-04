@@ -71,7 +71,7 @@ import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibili
 import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
-import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
+import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
@@ -85,6 +85,7 @@ const props = defineProps<{
   database: string;
   collection: string;
   databaseType?: DatabaseType;
+  tableMeta?: NonNullable<QueryTab["tableMeta"]>;
 }>();
 
 type JsonRecord = Record<string, unknown>;
@@ -903,7 +904,7 @@ async function load(options: { page?: number } = {}) {
     }
     const sort = currentDocumentSortJson(sortInput.value);
     const skip = requestPage * pageSize.value;
-    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, executionId);
+    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, undefined, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
@@ -1667,6 +1668,7 @@ defineExpose({ focusSearch });
       :result="gridResult"
       :connection-id="props.connectionId"
       :database="props.database"
+      :table-meta="props.tableMeta"
       :column-layout-scope-key="documentColumnLayoutScopeKey"
       context="results"
       :database-type="props.databaseType"

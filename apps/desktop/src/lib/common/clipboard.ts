@@ -58,6 +58,7 @@ interface NativeClipboardSelectionEnvironment {
 
 const EDITABLE_CLIPBOARD_TARGET_SELECTOR = "input, textarea, [contenteditable='true'], [role='textbox']";
 const NATIVE_CLIPBOARD_REGION_SELECTOR = "[data-native-clipboard]";
+const DATA_GRID_ROOT_SELECTOR = "[data-grid-root]";
 let clipboardWriteRevision = 0;
 
 export function getClipboardWriteRevision(): number {
@@ -84,6 +85,10 @@ function selectionNodeElement(node: Node | null): Element | null {
 
 export function isPlainClipboardShortcut(event: ClipboardShortcutEvent, key: string): boolean {
   return !!(event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === key;
+}
+
+export function shouldBlockAppNativeSelectAll(event: ClipboardShortcutEvent): boolean {
+  return isPlainClipboardShortcut(event, "a") && !eventTargetUsesNativeClipboard(event) && !closestElement(event.target, DATA_GRID_ROOT_SELECTOR);
 }
 
 export function hasNativeClipboardSelection(env: NativeClipboardSelectionEnvironment = globalThis as unknown as NativeClipboardSelectionEnvironment): boolean {

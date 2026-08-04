@@ -114,8 +114,14 @@ function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   };
 }
 
+function localDateKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
 });
 
 describe("DataGridSearchBar", () => {
@@ -461,28 +467,107 @@ describe("DataGridFilterBuilder", () => {
     expect(columnSelects[1].props.open).toBe(true);
   });
 
-  it("adds a rule instead of applying when shift-enter is pressed in a value editor", () => {
+  it("shows the value editor shortcut hint from the second rule twice per day for up to three days and adds a rule on shift-enter", async () => {
     const onAdd = vi.fn();
     const onApply = vi.fn();
-    const mounted = mountComponent(DataGridFilterBuilder, {
-      rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }],
-      columns: ["id"],
-      filteredColumns: ["id"],
-      modeOptions: [{ value: "equals", labelKey: "equals" }],
-      columnSearch: "",
-      onAdd,
-      onApply,
-    });
-    const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
+    const mountFilterBuilder = () =>
+      mountComponent(DataGridFilterBuilder, {
+        rules: [
+          { id: "r1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" },
+          { id: "r2", columnName: "name", mode: "equals", rawValue: "n", rawEndValue: "", conjunction: "AND" },
+        ],
+        columns: ["id"],
+        filteredColumns: ["id"],
+        modeOptions: [{ value: "equals", labelKey: "equals" }],
+        columnSearch: "",
+        onAdd,
+        onApply,
+      });
+    const mounted = mountFilterBuilder();
+    const valueEditors = findAll(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
+    const valueEditor = valueEditors[0];
+    const secondValueEditor = valueEditors[1];
 
-    const shiftEnter = dispatch(valueEditor, "keydown", { key: "Enter", shiftKey: true, repeat: false });
+    expect(hostText(mounted.root)).not.toContain("grid.filterBuilderValueShortcutHint");
+    dispatch(valueEditor, "focus");
+    await nextTick();
+    expect(hostText(mounted.root)).not.toContain("grid.filterBuilderValueShortcutHint");
+
+    dispatch(secondValueEditor, "focus");
+    await nextTick();
+    expect(hostText(mounted.root)).toContain("grid.filterBuilderValueShortcutHint");
+    dispatch(secondValueEditor, "blur");
+    await nextTick();
+    expect(hostText(mounted.root)).not.toContain("grid.filterBuilderValueShortcutHint");
+    expect(JSON.parse(localStorage.getItem("dbx-filter-builder-value-shortcut-hint-days") ?? "[]")).toEqual([{ date: localDateKey(), count: 1 }]);
+
+    dispatch(secondValueEditor, "focus");
+    await nextTick();
+    expect(hostText(mounted.root)).toContain("grid.filterBuilderValueShortcutHint");
+    expect(JSON.parse(localStorage.getItem("dbx-filter-builder-value-shortcut-hint-days") ?? "[]")).toEqual([{ date: localDateKey(), count: 2 }]);
+    dispatch(secondValueEditor, "blur");
+    dispatch(secondValueEditor, "focus");
+    await nextTick();
+    expect(hostText(mounted.root)).not.toContain("grid.filterBuilderValueShortcutHint");
+
+    localStorage.setItem(
+      "dbx-filter-builder-value-shortcut-hint-days",
+      JSON.stringify([
+        { date: "2026-01-01", count: 2 },
+        { date: "2026-01-02", count: 2 },
+      ]),
+    );
+    const thirdDayMounted = mountFilterBuilder();
+    const thirdDaySecondValueEditor = findAll(thirdDayMounted.root, (node) => node.props["data-filter-value-editor"] === "")[1];
+    dispatch(thirdDaySecondValueEditor, "focus");
+    await nextTick();
+    expect(hostText(thirdDayMounted.root)).toContain("grid.filterBuilderValueShortcutHint");
+    expect(JSON.parse(localStorage.getItem("dbx-filter-builder-value-shortcut-hint-days") ?? "[]")).toHaveLength(3);
+
+    localStorage.setItem(
+      "dbx-filter-builder-value-shortcut-hint-days",
+      JSON.stringify([
+        { date: "2026-01-01", count: 2 },
+        { date: "2026-01-02", count: 2 },
+        { date: "2026-01-03", count: 2 },
+      ]),
+    );
+    const exhaustedMounted = mountFilterBuilder();
+    const exhaustedSecondValueEditor = findAll(exhaustedMounted.root, (node) => node.props["data-filter-value-editor"] === "")[1];
+    dispatch(exhaustedSecondValueEditor, "focus");
+    await nextTick();
+    expect(hostText(exhaustedMounted.root)).not.toContain("grid.filterBuilderValueShortcutHint");
+
+    const shiftEnter = dispatch(secondValueEditor, "keydown", { key: "Enter", shiftKey: true, repeat: false });
     expect(shiftEnter.defaultPrevented).toBe(true);
     expect(shiftEnter.propagationStopped).toBe(true);
     expect(onAdd).toHaveBeenCalledOnce();
     expect(onApply).not.toHaveBeenCalled();
 
-    dispatch(valueEditor, "keydown", { key: "Enter", shiftKey: false });
+    dispatch(secondValueEditor, "keydown", { key: "Enter", shiftKey: false });
     expect(onApply).toHaveBeenCalledOnce();
+  });
+
+  it("does not show the value editor shortcut hint for list value editors", async () => {
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [
+        { id: "r1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "name", mode: "in", rawValue: "n", rawEndValue: "", conjunction: "AND" },
+      ],
+      columns: ["id"],
+      filteredColumns: ["id"],
+      modeOptions: [
+        { value: "equals", labelKey: "equals" },
+        { value: "in", labelKey: "in" },
+      ],
+      columnSearch: "",
+    });
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "textarea"),
+      "focus",
+    );
+    await nextTick();
+    expect(hostText(mounted.root)).not.toContain("grid.filterBuilderValueShortcutHint");
   });
 });
 
@@ -518,6 +603,7 @@ describe("DataGridQueryControls", () => {
   });
 
   it("keeps filter actions available in the popover", () => {
+    const addRule = vi.fn();
     const clearFilters = vi.fn();
     const applyFilters = vi.fn();
     const resetFilters = vi.fn();
@@ -543,6 +629,7 @@ describe("DataGridQueryControls", () => {
       applyWhere: vi.fn(),
       applyOrderBy: vi.fn(),
       clearOrderBy: vi.fn(),
+      onAddRule: addRule,
       onClearFilters: clearFilters,
       onApplyFilters: applyFilters,
       onResetFilters: resetFilters,
@@ -550,6 +637,10 @@ describe("DataGridQueryControls", () => {
 
     dispatch(
       findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearFilter"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.filterBuilderAddRule"),
       "click",
     );
     dispatch(
@@ -566,6 +657,7 @@ describe("DataGridQueryControls", () => {
     const whereButtons = findAll(whereControl!, (node) => node.type === "button");
     dispatch(whereButtons[whereButtons.length - 1], "click");
 
+    expect(addRule).toHaveBeenCalledOnce();
     expect(clearFilters).toHaveBeenCalledTimes(2);
     expect(resetFilters).toHaveBeenCalledOnce();
     expect(applyFilters).toHaveBeenCalledOnce();

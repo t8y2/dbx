@@ -1,8 +1,9 @@
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-use super::{http_client_builder, with_connection_timeout};
+use super::{binary_value_to_json, http_client_builder, with_connection_timeout};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, QueryResult, TableInfo,
@@ -120,6 +121,8 @@ struct TursoValue {
     value_type: String,
     #[serde(default)]
     value: Option<serde_json::Value>,
+    #[serde(default)]
+    base64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -519,38 +522,33 @@ fn extract_result(result_set: TursoResultSet) -> TursoExtractedResult {
 }
 
 fn turso_value_to_json(v: TursoValue) -> serde_json::Value {
-    match v.value {
-        Some(val) => match v.value_type.as_str() {
-            "integer" => val
-                .as_str()
-                .and_then(|s| s.parse::<i64>().ok())
-                .map(serde_json::Value::from)
-                .unwrap_or(serde_json::Value::Null),
-            "float" => val
-                .as_str()
-                .and_then(|s| s.parse::<f64>().ok())
-                .map(|f| serde_json::json!(f))
-                .unwrap_or(serde_json::Value::Null),
-            "text" => serde_json::Value::String(val.as_str().unwrap_or("").to_string()),
-            "null" => serde_json::Value::Null,
-            "blob" => {
-                // Blobs in Turso are base64-encoded strings
-                let hex = val.as_str().map(base64_to_hex).unwrap_or_else(|| val.to_string());
-                serde_json::Value::String(format!("0x{}", hex))
-            }
-            _ => {
-                // Fallback: try to use the raw value
-                val
-            }
-        },
-        None => serde_json::Value::Null,
+    match v.value_type.as_str() {
+        "integer" => v
+            .value
+            .and_then(|val| val.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| val.as_i64()))
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+        "float" => v
+            .value
+            .and_then(|val| val.as_f64().or_else(|| val.as_str().and_then(|s| s.parse::<f64>().ok())))
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        "text" => v
+            .value
+            .map(|val| serde_json::Value::String(val.as_str().unwrap_or("").to_string()))
+            .unwrap_or(serde_json::Value::Null),
+        "blob" => v.base64.as_deref().map(hrana_blob_to_json).unwrap_or(serde_json::Value::Null),
+        "null" => serde_json::Value::Null,
+        _ => v.value.unwrap_or(serde_json::Value::Null),
     }
 }
 
-fn base64_to_hex(_b64: &str) -> String {
-    // For blob values, we pass through as-is if not parseable
-    // A full base64→hex implementation can be added later
-    _b64.to_string()
+fn hrana_blob_to_json(encoded: &str) -> serde_json::Value {
+    STANDARD_NO_PAD
+        .decode(encoded.trim_end_matches('='))
+        .map(|bytes| binary_value_to_json(&bytes))
+        .unwrap_or_else(|_| serde_json::Value::String(encoded.to_string()))
 }
 
 fn query_result_from_turso_result(
@@ -673,27 +671,81 @@ mod tests {
 
     #[test]
     fn turso_value_integer_parsed() {
-        let v = TursoValue { value_type: "integer".to_string(), value: Some(serde_json::json!("42")) };
+        let v = TursoValue { value_type: "integer".to_string(), value: Some(serde_json::json!("42")), base64: None };
         assert_eq!(turso_value_to_json(v), serde_json::json!(42));
     }
 
     #[test]
     fn turso_value_text_parsed() {
-        let v = TursoValue { value_type: "text".to_string(), value: Some(serde_json::json!("hello")) };
+        let v = TursoValue { value_type: "text".to_string(), value: Some(serde_json::json!("hello")), base64: None };
         assert_eq!(turso_value_to_json(v), serde_json::json!("hello"));
     }
 
     #[test]
     fn turso_value_null_parsed() {
-        let v = TursoValue { value_type: "null".to_string(), value: None };
+        let v = TursoValue { value_type: "null".to_string(), value: None, base64: None };
         assert_eq!(turso_value_to_json(v), serde_json::Value::Null);
     }
 
     #[test]
     #[allow(clippy::approx_constant)]
     fn turso_value_float_parsed() {
-        let v = TursoValue { value_type: "float".to_string(), value: Some(serde_json::json!("3.14")) };
+        let v = TursoValue { value_type: "float".to_string(), value: Some(serde_json::json!("3.14")), base64: None };
         assert_eq!(turso_value_to_json(v), serde_json::json!(3.14));
+    }
+
+    #[test]
+    fn turso_pipeline_response_decodes_hrana_value_shapes() {
+        let response: TursoPipelineResponse = serde_json::from_value(serde_json::json!({
+            "results": [{
+                "type": "ok",
+                "response": {
+                    "type": "execute",
+                    "result": {
+                        "cols": [
+                            { "name": "real_val" },
+                            { "name": "int_val" },
+                            { "name": "text_val" },
+                            { "name": "blob_val" },
+                            { "name": "null_val" }
+                        ],
+                        "rows": [[
+                            { "type": "float", "value": 1.5 },
+                            { "type": "integer", "value": "42" },
+                            { "type": "text", "value": "abc" },
+                            { "type": "blob", "base64": "yv4" },
+                            { "type": "null" }
+                        ]]
+                    }
+                }
+            }]
+        }))
+        .expect("Hrana pipeline response should deserialize");
+        let result_set = response
+            .results
+            .into_iter()
+            .next()
+            .and_then(|result| result.response)
+            .and_then(|response| response.result)
+            .expect("Hrana pipeline response should contain a result set");
+        let result = extract_result(result_set);
+
+        assert_eq!(
+            result.values,
+            vec![vec![
+                serde_json::json!(1.5),
+                serde_json::json!(42),
+                serde_json::json!("abc"),
+                serde_json::json!("0xcafe"),
+                serde_json::Value::Null,
+            ]]
+        );
+    }
+
+    #[test]
+    fn turso_blob_decoder_handles_padding_and_invalid_input() {
+        assert_eq!(hrana_blob_to_json("yv4="), serde_json::json!("0xcafe"));
+        assert_eq!(hrana_blob_to_json("not base64"), serde_json::json!("not base64"));
     }
 
     #[test]
@@ -704,8 +756,8 @@ mod tests {
                 TursoColumn { name: "name".to_string(), decltype: None },
             ],
             rows: vec![vec![
-                TursoValue { value_type: "integer".to_string(), value: Some(serde_json::json!("1")) },
-                TursoValue { value_type: "text".to_string(), value: Some(serde_json::json!("Ada")) },
+                TursoValue { value_type: "integer".to_string(), value: Some(serde_json::json!("1")), base64: None },
+                TursoValue { value_type: "text".to_string(), value: Some(serde_json::json!("Ada")), base64: None },
             ]],
             rows_read: Some(1),
             rows_written: Some(0),

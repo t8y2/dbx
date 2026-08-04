@@ -20,8 +20,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.rowset.serial.SerialBlob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcExecutorTest {
     @Test
@@ -143,6 +145,87 @@ class JdbcExecutorTest {
         assertEquals(Collections.emptyList(), result.getColumns());
         assertEquals(Collections.emptyList(), result.getRows());
         assertEquals(3L, result.getAffected_rows());
+    }
+
+    @Test
+    void executeReturnsDriverMessagesForNoResultStatementsAndHonorsMaxRows() {
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, -1, null, new AtomicInteger(), null, null),
+            "CALL LOG_ONLY_PROCEDURE()",
+            "",
+            schema -> "",
+            () -> "",
+            2,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            statement -> Arrays.asList("first", "second", "third")
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList("first"), Arrays.asList("second")), result.getRows());
+        assertTrue(result.getTruncated());
+    }
+
+    @Test
+    void executeLimitsCombinedWarningsAndDriverMessages() {
+        SQLWarning first = new SQLWarning("first warning");
+        first.setNextWarning(new SQLWarning("second warning"));
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, -1, first, new AtomicInteger(), null, null),
+            "CALL LOG_ONLY_PROCEDURE()",
+            "",
+            schema -> "",
+            () -> "",
+            1,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            statement -> Arrays.asList("driver message")
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList("first warning")), result.getRows());
+        assertTrue(result.getTruncated());
+    }
+
+    @Test
+    void executePageReturnsDriverMessagesForNoResultStatements() {
+        QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
+            executionConnection(false, -1, null, new AtomicInteger(), null, null),
+            "CALL LOG_ONLY_PROCEDURE()",
+            "",
+            schema -> "",
+            new QueryPageOptions(100, null, 100),
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            statement -> Arrays.asList("first", "second")
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList("first"), Arrays.asList("second")), result.getRows());
+        assertFalse(result.getHas_more());
+    }
+
+    @Test
+    void executePageKeepsWarningsHiddenWithoutADriverMessageReader() {
+        QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
+            executionConnection(
+                false,
+                -1,
+                new SQLWarning("existing paged warning"),
+                new AtomicInteger(),
+                null,
+                null
+            ),
+            "CALL EXISTING_PROCEDURE()",
+            "",
+            schema -> "",
+            new QueryPageOptions()
+        );
+
+        assertEquals(Collections.emptyList(), result.getColumns());
+        assertEquals(Collections.emptyList(), result.getRows());
     }
 
     @Test

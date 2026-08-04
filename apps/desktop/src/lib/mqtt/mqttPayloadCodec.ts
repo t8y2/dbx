@@ -85,9 +85,8 @@ export function encodePayload(input: string, encoding: PayloadEncoding): string 
       }
 
       case "base64":
-        /* 直接使用用户输入的 base64，验证格式 */
-        base64ToBytes(input);
-        return input;
+        /* 浏览器 atob 接受缺失 padding 和空白；规范化后再交给 Rust 严格解码 */
+        return bytesToBase64(base64ToBytes(input));
 
       case "hex": {
         const cleaned = input.replace(/\s/g, "");

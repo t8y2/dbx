@@ -158,7 +158,7 @@ export function sqlReferenceAnalysisDialectFor(options: { databaseType?: Databas
   return options.fallbackDialect;
 }
 
-export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" }): SqlSemanticDialectAdapter {
+export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" }): SqlSemanticDialectAdapter {
   if (options.databaseType === "clickhouse") return SQL_SEMANTIC_DIALECTS.clickhouse;
   if (options.dialect && SQL_SEMANTIC_DIALECTS[options.dialect]) return SQL_SEMANTIC_DIALECTS[options.dialect];
   switch (options.databaseType) {

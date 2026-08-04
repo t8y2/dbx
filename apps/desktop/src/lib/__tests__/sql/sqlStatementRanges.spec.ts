@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { executionCandidateForMode } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
 
 function indexOf(sql: string, needle: string, occurrence = 1): number {
@@ -346,6 +347,24 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
   });
 
+  it("splits large Dameng package bodies without repeated prefix parsing", () => {
+    const body = Array.from({ length: 3000 }, (_, index) => `    v_value := v_value + ${index % 10};`).join("\n");
+    const packageBody = `CREATE OR REPLACE PACKAGE BODY app.big_pkg AS
+  PROCEDURE run IS
+    v_value NUMBER := 0;
+  BEGIN
+${body}
+  END run;
+END big_pkg;`;
+    const sql = `${packageBody}\n/\nSELECT 1;`;
+    const startedAt = performance.now();
+    const ranges = splitSqlStatementRanges(sql, "dameng");
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(rangeSqlTexts(ranges)).toEqual([packageBody, "SELECT 1"]);
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
   it("keeps nested GaussDB procedure blocks together", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbNestedProcedure, "gaussdb"))).toEqual([gaussDbNestedProcedure]);
   });
@@ -511,6 +530,22 @@ GET /_cat/indices`;
     const gapPos = sql.indexOf(";") + 1;
     const range = statementRangeAtCursor(sql, gapPos);
     expect(range?.sql.trim()).toBe("SELECT *\nFROM system_dept");
+  });
+
+  it("keeps a standalone next-line semicolon cursor on the current multi-line statement", () => {
+    const sql = "SELECT *\nFROM system_dept\n;\n\nSELECT * FROM sys;";
+    const delimiterPos = sql.indexOf(";");
+
+    expect(statementRangeAtCursor(sql, delimiterPos)?.sql.trim()).toBe("SELECT *\nFROM system_dept");
+    expect(statementRangeAtCursor(sql, delimiterPos + 1)?.sql.trim()).toBe("SELECT *\nFROM system_dept");
+  });
+
+  it("assigns a standalone trailing semicolon to the final soft statement", () => {
+    const sql = "SELECT * FROM `t_0001`\nSELECT * FROM `t_0001` LIMIT 1\n;";
+    const delimiterPos = sql.lastIndexOf(";");
+
+    expect(statementRangeAtCursor(sql, delimiterPos, "mysql")?.sql).toBe("SELECT * FROM `t_0001` LIMIT 1");
+    expect(statementRangeAtCursor(sql, delimiterPos + 1, "mysql")?.sql).toBe("SELECT * FROM `t_0001` LIMIT 1");
   });
 
   it("returns the next same-line statement when the cursor is inside it", () => {
@@ -1018,10 +1053,11 @@ describe("currentExecutableStatementRange", () => {
     expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "redis")).toBeNull();
   });
 
-  it("does not expose current statement framing for MongoDB", () => {
-    const sql = "db.users.find({})";
+  it("uses the current MongoDB command range", () => {
+    const sql = 'db.users.find({})\n\ndb.getCollection("audit.logs").countDocuments({})';
 
-    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")).toBeNull();
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")?.sql).toBe("db.users.find({})");
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "audit.logs"), "mongodb")?.sql).toBe('db.getCollection("audit.logs").countDocuments({})');
   });
 });
 
@@ -1094,6 +1130,20 @@ describe("buildExecutionCandidates", () => {
     expect(candidateLabels(candidates)).toEqual(["currentStatement", "allStatements"]);
   });
 
+  it("keeps a MySQL FORCE INDEX query current when its semicolon is on the next line", () => {
+    const firstStatement = `SELECT count(*)
+FROM cus_loan_status_copy1 t2
+LEFT JOIN case_allocation_details_copy1 t4 FORCE INDEX(idx_debt_case_number)
+  ON t2.caseno = t4.debt_case_number
+WHERE t2.product_name = '12345'
+;`;
+    const sql = `${firstStatement}\n\nSELECT count(*) FROM cus_loan_status_copy1;`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "12345"), "mysql");
+
+    expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
+    expect(executionCandidateForMode(candidates, "current")?.sql.trim()).toBe(firstStatement.replace(/\n;$/, ""));
+  });
+
   it("uses the current statement when the cursor is immediately after its semicolon before a blank line", () => {
     const sql = "select 1;\n\nselect 2;";
     const cursorAfterFirstSemicolon = sql.indexOf(";") + 1;
@@ -1107,6 +1157,13 @@ describe("buildExecutionCandidates", () => {
     expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nSELECT 2"]);
   });
 
+  it("uses the final soft statement when the cursor is on a standalone trailing semicolon", () => {
+    const sql = "SELECT * FROM `t_0001`\nSELECT * FROM `t_0001` LIMIT 1\n;";
+    const candidates = buildExecutionCandidates(sql, sql.lastIndexOf(";"), "mysql");
+
+    expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT * FROM `t_0001` LIMIT 1", "all:SELECT * FROM `t_0001`\nSELECT * FROM `t_0001` LIMIT 1\n;"]);
+  });
+
   it("dedupes when the cursor statement equals the full document", () => {
     const sql = "SELECT 1;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "1"));
@@ -1118,6 +1175,16 @@ describe("buildExecutionCandidates", () => {
     const sql = "SELECT 1;\n\nSELECT 2;";
     const candidates = buildExecutionCandidates(sql, sql.indexOf("\n") + 1);
     expect(candidateKinds(candidates)).toEqual(["all"]);
+    expect(candidates[0].supportedKinds).toEqual(["all"]);
+    expect(executionCandidateForMode(candidates, "current")).toBeNull();
+    expect(executionCandidateForMode(candidates, "all")).toBe(candidates[0]);
+  });
+
+  it("marks a deduplicated single-statement candidate as both current and all", () => {
+    const sql = "SELECT 1;";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "1"));
+
+    expect(candidates[0].supportedKinds).toEqual(["cursor", "all"]);
   });
 
   it("returns no candidates for an empty document", () => {

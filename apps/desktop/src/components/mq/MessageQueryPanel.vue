@@ -151,27 +151,33 @@ async function runQuery() {
       } else {
         const group = consumerGroup.value.trim() || "__dbx_rocketmq_dlq__";
         const peeked = await mqPeekMessages(props.connectionId, topic, group, 64);
-        queryMessages.value = peeked.map((msg) => rocketMqDisplayFromPeeked(msg, topic.topic));
+        const messages = Array.isArray(peeked) ? peeked : peeked.messages;
+        queryMessages.value = messages.map((msg) => rocketMqDisplayFromPeeked(msg, topic.topic));
       }
     } else if (activeQueryMode.value === "msgId") {
       const id = queryMsgId.value.trim();
       if (!id) throw new Error(t("mqMessages.msgIdRequired"));
       const result = await mqViewMessage(props.connectionId, topic, id);
       queryMessages.value = parseRocketMqMessagesFromResult(result);
+    } else if (activeQueryMode.value === "key") {
+      const key = queryKey.value.trim();
+      if (!key) throw new Error(t("mqMessages.queryKeyRequired"));
+      // Dashboard key query only needs topic + key; broker returns up to 64 recent matches.
+      // Do not validate hidden Topic-mode time fields — Key uses a fixed 0..now window.
+      const result = await mqQueryMessagesByKey(props.connectionId, topic, key, 0, Date.now(), 64);
+      queryMessages.value = parseRocketMqMessagesFromResult(result);
     } else {
-      const begin = queryBeginTime.value ? Date.parse(queryBeginTime.value) : 0;
-      const end = queryEndTime.value ? Date.parse(queryEndTime.value) : Date.now();
-      const maxNum = Math.max(1, Math.min(200, Number(queryMaxNum.value) || 32));
-      if (activeQueryMode.value === "key") {
-        const key = queryKey.value.trim();
-        if (!key) throw new Error(t("mqMessages.queryKeyRequired"));
-        // Dashboard key query only needs topic + key; broker returns up to 64 recent matches.
-        const result = await mqQueryMessagesByKey(props.connectionId, topic, key, 0, Date.now(), 64);
-        queryMessages.value = parseRocketMqMessagesFromResult(result);
-      } else {
-        const result = await mqQueryMessagesByTopic(props.connectionId, topic, begin, end, maxNum);
-        queryMessages.value = parseRocketMqMessagesFromResult(result);
+      const begin = queryBeginTime.value ? Date.parse(queryBeginTime.value) : Date.parse(defaultTimeRange().begin);
+      const end = queryEndTime.value ? Date.parse(queryEndTime.value) : Date.parse(defaultTimeRange().end);
+      if (!Number.isFinite(begin) || !Number.isFinite(end)) {
+        throw new Error(t("mqMessages.invalidTimeRange"));
       }
+      if (begin >= end) {
+        throw new Error(t("mqMessages.endTimeMustBeAfterBegin"));
+      }
+      const maxNum = Math.max(1, Math.min(200, Number(queryMaxNum.value) || 32));
+      const result = await mqQueryMessagesByTopic(props.connectionId, topic, begin, end, maxNum);
+      queryMessages.value = parseRocketMqMessagesFromResult(result);
     }
   } catch (e: unknown) {
     queryError.value = formatError(e);
@@ -401,20 +407,22 @@ watch(topicName, () => {
           <input v-model="queryKey" type="text" :placeholder="t('mqMessages.queryKeyPlaceholder')" :disabled="queryLoading" />
         </label>
 
-        <label v-else-if="activeQueryMode === 'topic'" class="filter-field">
-          <span>{{ t("mqMessages.beginTime") }}</span>
-          <input v-model="queryBeginTime" type="datetime-local" :disabled="queryLoading" />
-        </label>
+        <template v-else-if="activeQueryMode === 'topic'">
+          <label class="filter-field">
+            <span>{{ t("mqMessages.beginTime") }}</span>
+            <input v-model="queryBeginTime" type="datetime-local" :disabled="queryLoading" />
+          </label>
 
-        <label v-else-if="activeQueryMode === 'topic'" class="filter-field">
-          <span>{{ t("mqMessages.endTime") }}</span>
-          <input v-model="queryEndTime" type="datetime-local" :disabled="queryLoading" />
-        </label>
+          <label class="filter-field">
+            <span>{{ t("mqMessages.endTime") }}</span>
+            <input v-model="queryEndTime" type="datetime-local" :disabled="queryLoading" />
+          </label>
 
-        <label v-else-if="activeQueryMode === 'topic'" class="filter-field filter-narrow">
-          <span>{{ t("mqMessages.maxNum") }}</span>
-          <input v-model.number="queryMaxNum" type="number" min="1" max="200" :disabled="queryLoading" />
-        </label>
+          <label class="filter-field filter-narrow">
+            <span>{{ t("mqMessages.maxNum") }}</span>
+            <input v-model.number="queryMaxNum" type="number" min="1" max="200" :disabled="queryLoading" />
+          </label>
+        </template>
 
         <div class="filter-actions">
           <button type="button" class="btn-primary" :disabled="queryLoading || !selectedTopicRef" @click="runQuery">

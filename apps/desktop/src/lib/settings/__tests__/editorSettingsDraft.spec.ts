@@ -41,6 +41,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes the saved SQL open target mode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("savedSqlOpenTargetMode");
   });
+
+  it("includes the regular expression match limit", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("regexMaxMatchCount");
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {

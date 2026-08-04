@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
-use dbx_core::db::ssh_prompt::SshPromptAnswer;
+use dbx_core::db::ssh_prompt::{SshPromptAnswer, SshPromptRequest};
 use futures::Stream;
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -52,6 +52,13 @@ pub async fn resolve_ssh_prompt(
 
     state.ssh_prompts.resolve(&request.id, answer).map_err(AppError::bad_request)?;
     Ok(Json(()))
+}
+
+/// Returns all currently-pending host-key prompts. The frontend polls this as a
+/// fallback to the SSE stream so a prompt that fired before the EventSource was
+/// open is still recovered (see the SSH host-key first-connect regression).
+pub async fn list_pending_ssh_prompts(State(state): State<Arc<WebState>>) -> Json<Vec<SshPromptRequest>> {
+    Json(state.ssh_prompts.pending_requests())
 }
 
 fn ssh_prompt_event(event: SshPromptEvent) -> Event {

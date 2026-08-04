@@ -4,7 +4,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, FileArchive } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -29,9 +29,11 @@ import { computeDisplayTtl, computeTtlCountdownTick, computeTtlCountdownValue, c
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
+  decodeRedisBlob,
   formatRedisMemberDetail,
   getRedisMemberSelectionKey,
   isRedisBlob,
+  parseRedisJsonDetail,
   preferredRedisValueFormat,
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
   redisBlobText,
@@ -47,6 +49,7 @@ import {
   type RedisCollectionItem,
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
+import { decompressRedisValue, isGzipMagic, type RedisDecompressAlgorithm } from "@/lib/redis/redisCompression";
 import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import { formatJsonSource } from "@/lib/common/safeJsonFormat";
@@ -163,6 +166,70 @@ const stringValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<JsonHighlighter>();
+
+// Decompressed view state. Decompression yields to the event loop so the
+// loading state paints before the synchronous bounded inflate runs; the result
+// intentionally lives outside the synchronous format pipeline built by
+// formatRedisMemberDetail, and the request id guards against stale results when
+// the user switches values or formats mid-flight.
+type RedisDecompressedState = { status: "idle" } | { status: "loading" } | { status: "success"; text: string; algorithm: RedisDecompressAlgorithm } | { status: "error"; reason: "corrupt" | "limit" };
+const decompressedState = ref<RedisDecompressedState>({ status: "idle" });
+let decompressRequestId = 0;
+
+async function runDecompress(bytes: Uint8Array, algorithm?: RedisDecompressAlgorithm) {
+  const requestId = ++decompressRequestId;
+  decompressedState.value = { status: "loading" };
+  const result = await decompressRedisValue(bytes, algorithm ? { algorithm } : {});
+  if (requestId !== decompressRequestId) return;
+  if (result.ok) decompressedState.value = { status: "success", text: result.text, algorithm: result.algorithm };
+  else decompressedState.value = { status: "error", reason: result.reason };
+}
+
+/** Bytes of whichever decompressed view is active (string value or member), or null when there is nothing to decode. */
+function currentDecompressTargetBytes(): Uint8Array | null {
+  if (stringValueView.value === "decompressed") {
+    const blob = stringBlob.value;
+    return blob ? decodeRedisBlob(blob) : null;
+  }
+  if (memberValueView.value === "decompressed") {
+    const raw = selectedMemberRaw.value;
+    if (raw == null) return null;
+    // Plain-string members (not blobs) still attempt decompression so the user
+    // gets the non-blocking "not compressed" notice instead of silence.
+    return isRedisBlob(raw) ? decodeRedisBlob(raw) : new TextEncoder().encode(typeof raw === "string" ? raw : formatRedisMemberDetail(raw).rawText);
+  }
+  return null;
+}
+
+function refreshDecompressedView(algorithm?: RedisDecompressAlgorithm) {
+  const bytes = currentDecompressTargetBytes();
+  if (bytes) void runDecompress(bytes, algorithm);
+  else decompressedState.value = { status: "idle" };
+}
+
+/** Last-resort explicit decode for values that are raw RFC 1951 DEFLATE (never auto-detected). */
+function retryDecompressAsDeflate() {
+  refreshDecompressedView("deflate");
+}
+
+const decompressedJsonDetail = computed(() => {
+  const state = decompressedState.value;
+  return state.status === "success" ? parseRedisJsonDetail(state.text) : null;
+});
+
+const decompressedFailureMessage = computed(() => {
+  const state = decompressedState.value;
+  if (state.status !== "error") return "";
+  if (state.reason === "limit") return t("redis.decompressedLimitExceeded");
+  return t("redis.decompressedFailed");
+});
+
+/** Format label shows the algorithm that actually succeeded, e.g. "Decompressed (zlib)". */
+const decompressedLabel = computed(() => {
+  const state = decompressedState.value;
+  const base = t("redis.decompressedView");
+  return state.status === "success" ? `${base} (${state.algorithm})` : base;
+});
 
 // Auto-refresh keeps the displayed TTL moving locally and periodically reloads
 // the complete key detail. The full reload updates changed values as well as
@@ -333,6 +400,42 @@ const stringBlob = computed<RedisBlob | null>(() => {
 });
 const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: true }) : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
+
+// The Decompressed view depends on the value/format refs above, so these
+// watchers and computeds live here rather than next to the state declarations.
+watch([stringValueView, stringBlob], ([view]) => {
+  if (view !== "decompressed") return;
+  refreshDecompressedView();
+});
+
+watch([memberValueView, selectedMemberRaw], ([view]) => {
+  if (view !== "decompressed") return;
+  refreshDecompressedView();
+});
+
+const stringGzipBadge = computed(() => (stringBlob.value ? isGzipMagic(decodeRedisBlob(stringBlob.value)) : false));
+const memberGzipBadge = computed(() => (isRedisBlob(selectedMemberRaw.value) ? isGzipMagic(decodeRedisBlob(selectedMemberRaw.value)) : false));
+
+/** Raw fallback shown while Decompressed fails: keep the original content visible, never an error string in its place. */
+const decompressedRawFallbackText = computed(() => {
+  if (stringValueView.value === "decompressed" && stringValueDetail.value) {
+    return detailTextForFormat(stringValueDetail.value, stringValueDetail.value.defaultFormat);
+  }
+  if (memberValueView.value === "decompressed" && selectedMemberDetail.value) {
+    return detailTextForFormat(selectedMemberDetail.value, selectedMemberDetail.value.defaultFormat);
+  }
+  return "";
+});
+
+/** Copy targets the decompressed text while the Decompressed view is showing it. */
+const memberCopyText = computed(() => {
+  if (memberValueView.value === "decompressed") {
+    const state = decompressedState.value;
+    if (state.status === "success") return state.text;
+  }
+  return detailTextForFormat(selectedMemberDetail.value, memberValueView.value);
+});
+
 const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
@@ -462,10 +565,18 @@ const valueSearchSupported = computed(() => showMemberDetail.value || isStringLi
 const contentSearchText = computed(() => {
   if (showMemberDetail.value) {
     if (isEditingMember.value || isEditingHashJson.value) return memberEditValue.value;
+    if (memberValueView.value === "decompressed") {
+      const state = decompressedState.value;
+      return state.status === "success" ? state.text : "";
+    }
     return detailTextForFormat(selectedMemberDetail.value, memberValueView.value);
   }
   if (redisKind.value === "json") return editValue.value;
   if (!isStringLikeKind.value || !stringValueDetail.value) return "";
+  if (stringValueView.value === "decompressed") {
+    const state = decompressedState.value;
+    return state.status === "success" ? state.text : "";
+  }
   if (stringValueView.value === "json" && stringValueDetail.value.json) return editValue.value;
   if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value) return editValue.value;
   return detailTextForFormat(stringValueDetail.value, stringValueView.value);
@@ -946,7 +1057,8 @@ function setStringValueFormat(format: RedisValueFormat) {
       // Keep a dirty JSON draft marked as json so save still compact-writes after a tab switch.
       if (!(stringDraftFormat.value === "json" && isStringDraftDirty("json"))) stringDraftFormat.value = "utf8";
     }
-    rememberRedisValueFormat(format);
+    // Decompressed is a per-value view, never a persisted preference.
+    if (format !== "decompressed") rememberRedisValueFormat(format);
   }
 }
 
@@ -968,7 +1080,8 @@ function setMemberValueFormat(format: RedisValueFormat) {
         memberDraftFormat.value = "utf8";
       }
     }
-    rememberRedisValueFormat(format);
+    // Decompressed is a per-value view, never a persisted preference.
+    if (format !== "decompressed") rememberRedisValueFormat(format);
   }
 }
 
@@ -988,13 +1101,15 @@ function redisFormatLabel(format: RedisValueFormat, rawLabel?: string): string {
       return t("grid.hexViewerHex");
     case "base64":
       return "Base64";
+    case "decompressed":
+      return decompressedLabel.value;
     default:
       return rawLabel || t("redis.rawContent");
   }
 }
 
 function isTextRedisFormat(format: RedisValueFormat): boolean {
-  return format === "utf8" || format === "ascii" || format === "binary" || format === "json";
+  return format === "utf8" || format === "ascii" || format === "binary" || format === "json" || format === "decompressed";
 }
 
 function highlightRedisJson(json: string): string {
@@ -1216,6 +1331,14 @@ function requestDeleteKey() {
 
 async function copyValue() {
   if (!data.value) return;
+  // Copy the decompressed text while the Decompressed view is showing it.
+  if (stringValueView.value === "decompressed") {
+    const state = decompressedState.value;
+    if (state.status === "success") {
+      await copyText(state.text);
+      return;
+    }
+  }
   const value = data.value.data.kind === "stream" ? { ...data.value, data: { ...data.value.data, entries: streamEntries.value } } : data.value;
   const text = redisValueCopyText(value, collectionItems.value);
   try {
@@ -2115,6 +2238,10 @@ defineExpose({ focusSearch });
               {{ redisFormatLabel(format, stringValueDetail.rawLabel) }}
             </Button>
           </div>
+          <Button v-if="stringGzipBadge" variant="outline" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" @click="setStringValueFormat('decompressed')">
+            <FileArchive class="h-3.5 w-3.5 mr-1" />
+            Gzip
+          </Button>
           <span class="flex-1" />
           <label v-if="isTextRedisFormat(stringValueView)" class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
@@ -2147,6 +2274,35 @@ defineExpose({ focusSearch });
         </div>
         <pre v-else-if="stringValueView === 'base64' && canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
         <pre v-else-if="stringValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all">{{ stringValueDetail.base64Text }}</pre>
+        <div v-else-if="stringValueView === 'decompressed'" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+          <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
+            <Loader2 class="h-4 w-4 animate-spin" />
+            {{ t("redis.decompressedLoading") }}
+          </div>
+          <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
+            <div v-if="decompressedJsonDetail" class="p-4">
+              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            </div>
+            <pre v-else class="w-full min-w-0 max-w-full p-4 text-sm leading-6" :class="detailTextClass('decompressed')">{{ decompressedState.text }}</pre>
+          </div>
+          <template v-else>
+            <pre class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass('decompressed')">{{ decompressedRawFallbackText }}</pre>
+            <div v-if="decompressedFailureMessage" class="flex shrink-0 flex-wrap items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+              <span>{{ decompressedFailureMessage }}</span>
+              <Button
+                v-if="decompressedState.status === 'error' && decompressedState.reason !== 'limit'"
+                variant="outline"
+                size="sm"
+                class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+                :title="t('redis.decompressedRetryAsDeflate')"
+                :aria-label="t('redis.decompressedRetryAsDeflate')"
+                @click="retryDecompressAsDeflate"
+              >
+                {{ t("redis.decompressedRetryAsDeflate") }}
+              </Button>
+            </div>
+          </template>
+        </div>
         <textarea
           v-else-if="stringValueView === 'utf8' && canEditCurrentStringFormat"
           ref="stringTextareaRef"
@@ -2706,6 +2862,10 @@ defineExpose({ focusSearch });
           <DialogTitle class="flex items-center gap-2">
             <span class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ redisFormatLabel(memberValueView, selectedMemberDetail.rawLabel) }}</Badge>
+            <Badge v-if="memberGzipBadge" variant="outline" class="shrink-0 cursor-pointer text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" @click="setMemberValueFormat('decompressed')">
+              <FileArchive class="h-3 w-3 mr-1" />
+              Gzip
+            </Badge>
           </DialogTitle>
         </DialogHeader>
         <template v-if="isEditingMember">
@@ -2752,6 +2912,35 @@ defineExpose({ focusSearch });
           </div>
           <pre v-else-if="memberValueView === 'base64' && canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
           <pre v-else-if="memberValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all">{{ selectedMemberDetail.base64Text }}</pre>
+          <div v-else-if="memberValueView === 'decompressed'" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+            <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("redis.decompressedLoading") }}
+            </div>
+            <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
+              <div v-if="decompressedJsonDetail" class="p-5">
+                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+              </div>
+              <pre v-else class="w-full min-w-0 max-w-full p-5 text-[13px] leading-6" :class="detailTextClass('decompressed')">{{ decompressedState.text }}</pre>
+            </div>
+            <template v-else>
+              <pre class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass('decompressed')">{{ decompressedRawFallbackText }}</pre>
+              <div v-if="decompressedFailureMessage" class="flex shrink-0 flex-wrap items-center gap-2 border-t px-5 py-2 text-xs text-muted-foreground">
+                <span>{{ decompressedFailureMessage }}</span>
+                <Button
+                  v-if="decompressedState.status === 'error' && decompressedState.reason !== 'limit'"
+                  variant="outline"
+                  size="sm"
+                  class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+                  :title="t('redis.decompressedRetryAsDeflate')"
+                  :aria-label="t('redis.decompressedRetryAsDeflate')"
+                  @click="retryDecompressAsDeflate"
+                >
+                  {{ t("redis.decompressedRetryAsDeflate") }}
+                </Button>
+              </div>
+            </template>
+          </div>
           <pre v-else-if="canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)" v-html="contentSearchHighlightedHtml" />
           <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)">{{ detailTextForFormat(selectedMemberDetail, memberValueView) }}</pre>
         </template>
@@ -2780,7 +2969,7 @@ defineExpose({ focusSearch });
             <Pencil class="h-4 w-4" />
             {{ t("redis.editMember") }}
           </Button>
-          <Button variant="outline" @click="copyText(redisClipboardSafeText(detailTextForFormat(selectedMemberDetail, memberValueView)))">
+          <Button variant="outline" @click="copyText(redisClipboardSafeText(memberCopyText))">
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>

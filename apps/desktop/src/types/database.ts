@@ -1,3 +1,5 @@
+import type { BackendError } from "@/lib/backend/errorUtils";
+
 export type DatabaseType =
   | "mysql"
   | "postgres"
@@ -442,6 +444,7 @@ export interface ColumnInfo {
   is_nullable: boolean;
   column_default: string | null;
   is_primary_key: boolean;
+  is_unique?: boolean;
   extra: string | null;
   comment?: string | null;
   numeric_precision?: number | null;
@@ -575,6 +578,8 @@ export interface QueryResult {
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Structured backend error; authoritative when execution_error is true. */
+  error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
   statement_index?: number;
   /** Internal row identifiers appended to editable query results. */
@@ -631,6 +636,7 @@ export interface BatchStatementExecutionItem {
   executionTimeMs?: number;
   affectedRows?: number;
   error?: string;
+  errorDetails?: BackendError;
 }
 
 export interface BatchSqlExecution {
@@ -897,6 +903,7 @@ export interface TableStructureEditorDraft {
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
+  loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   initialized: boolean;
 }

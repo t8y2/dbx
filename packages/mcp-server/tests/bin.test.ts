@@ -19,7 +19,14 @@ type InitializeResponse = {
   };
 };
 
-test("responds to initialize when invoked through an npm-style symlink", async () => {
+type ErrorResponse = {
+  id: number;
+  error: {
+    code: number;
+  };
+};
+
+test("falls back from server discovery when invoked through an npm-style symlink", async () => {
   const bin = await symlinkedMcpServer();
   let child: ChildProcessWithoutNullStreams | undefined;
   try {
@@ -32,11 +39,25 @@ test("responds to initialize when invoked through an npm-style symlink", async (
       },
     });
 
-    const responsePromise = readJsonRpcResponse(child, 5000);
+    const discoveryPromise = readJsonRpcResponse<ErrorResponse>(child, 5000);
     child.stdin.write(
       encodeMessage({
         jsonrpc: "2.0",
         id: 1,
+        method: "server/discover",
+        params: {},
+      }),
+    );
+
+    const discovery = await discoveryPromise;
+    assert.equal(discovery.id, 1);
+    assert.equal(discovery.error.code, -32601);
+
+    const responsePromise = readJsonRpcResponse<InitializeResponse>(child, 5000);
+    child.stdin.write(
+      encodeMessage({
+        jsonrpc: "2.0",
+        id: 2,
         method: "initialize",
         params: {
           protocolVersion: "2024-11-05",
@@ -48,7 +69,7 @@ test("responds to initialize when invoked through an npm-style symlink", async (
 
     const response = await responsePromise;
 
-    assert.equal(response.id, 1);
+    assert.equal(response.id, 2);
     assert.equal(response.result.serverInfo.name, "dbx");
   } finally {
     child?.kill();
@@ -67,7 +88,7 @@ function encodeMessage(payload: unknown): string {
   return `${JSON.stringify(payload)}\n`;
 }
 
-function readJsonRpcResponse(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<InitializeResponse> {
+function readJsonRpcResponse<T>(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";

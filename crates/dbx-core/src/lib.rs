@@ -5,6 +5,7 @@ pub mod agent_explain;
 pub mod agent_kv;
 pub mod agent_loop;
 pub mod agent_manager;
+pub mod agent_recovery;
 pub mod agent_runtime;
 pub mod agent_service;
 pub mod agent_tools;
@@ -15,6 +16,7 @@ pub mod ai_codex_cli;
 pub mod ai_effort;
 mod ai_model_filter;
 pub mod ai_pi_agent_cli;
+pub mod backend_error;
 pub mod changelog;
 pub mod cloud_sync;
 pub mod config;
@@ -107,7 +109,6 @@ impl DownloadSource {
         match self {
             Self::Official => Ok(download_candidate_urls(github_url, r2_path)),
             Self::Cnb => Ok(mirror_download_candidate_urls(
-                github_url,
                 r2_path,
                 rewrite_github_release_url(github_url, CNB_RELEASE_DOWNLOAD_PREFIX)?,
             )),
@@ -115,14 +116,9 @@ impl DownloadSource {
     }
 }
 
-fn mirror_download_candidate_urls(github_url: &str, r2_path: &str, mirror_url: String) -> Vec<String> {
+fn mirror_download_candidate_urls(r2_path: &str, mirror_url: String) -> Vec<String> {
     let r2_url = format!("{R2_CDN_BASE}{r2_path}");
-    // Mutable mirror aliases can lag even when versioned release assets are healthy.
-    if github_url.ends_with("/agents-latest/agent-registry.json") {
-        vec![r2_url, mirror_url]
-    } else {
-        vec![mirror_url, r2_url]
-    }
+    vec![mirror_url, r2_url]
 }
 
 fn rewrite_github_release_url(url: &str, target_prefix: &str) -> Result<String, String> {
@@ -203,13 +199,13 @@ mod tests {
     }
 
     #[test]
-    fn mirror_download_candidates_prefer_stable_registry_metadata() {
+    fn mirror_download_candidates_prefer_selected_source() {
         let github_url = "https://github.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json";
         assert_eq!(
             DownloadSource::Cnb.download_candidate_urls(github_url, "agents/agent-registry.json").unwrap(),
             vec![
-                "https://dl.dbxio.com/agents/agent-registry.json",
                 "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json",
+                "https://dl.dbxio.com/agents/agent-registry.json",
             ]
         );
     }

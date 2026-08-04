@@ -8,7 +8,10 @@ import {
   DATABASE_BACKUP_CONFIG_CHANGED_EVENT,
   DATABASE_BACKUP_RUNS_STORAGE_KEY,
   DATABASE_BACKUP_SCHEDULES_STORAGE_KEY,
+  DatabaseBackupConnectionQueue,
+  databaseBackupAggregateExportStatus,
   databaseBackupFilePath,
+  databaseBackupProgressPercent,
   databaseBackupRunsToPrune,
   databaseBackupScheduleIsDue,
   databaseBackupTableNamesAreCaseSensitive,
@@ -30,6 +33,7 @@ import {
 import { useExportTracker } from "@/composables/useExportTracker";
 
 const SCHEDULER_INTERVAL_MS = 30_000;
+const databaseBackupConnectionQueue = new DatabaseBackupConnectionQueue();
 
 const schedules = ref<DatabaseBackupSchedule[]>(readDatabaseBackupSchedules());
 const runs = ref<DatabaseBackupRun[]>(readDatabaseBackupRuns());
@@ -55,16 +59,16 @@ function persistRuns() {
   writeDatabaseBackupRuns(runs.value);
 }
 
-function replaceRun(run: DatabaseBackupRun) {
+function replaceRun(run: DatabaseBackupRun, persist = true) {
   runs.value = [run, ...runs.value.filter((existing) => existing.id !== run.id)];
-  persistRuns();
+  if (persist) persistRuns();
 }
 
-function updateRun(runId: string, patch: Partial<DatabaseBackupRun>): DatabaseBackupRun | null {
+function updateRun(runId: string, patch: Partial<DatabaseBackupRun>, persist = true): DatabaseBackupRun | null {
   const existing = runs.value.find((run) => run.id === runId);
   if (!existing) return null;
   const updated = { ...existing, ...patch };
-  replaceRun(updated);
+  replaceRun(updated, persist);
   return updated;
 }
 
@@ -125,6 +129,14 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     persistRuns();
   }
 
+  function renameRun(runId: string, displayName: string): boolean {
+    const run = runs.value.find((item) => item.id === runId);
+    if (!run || activeRunIds.has(runId)) return false;
+    const normalizedName = displayName.trim();
+    updateRun(runId, { displayName: normalizedName && normalizedName !== run.scheduleName ? normalizedName : undefined });
+    return true;
+  }
+
   async function pruneScheduleRuns(schedule: DatabaseBackupSchedule) {
     const staleRuns = databaseBackupRunsToPrune(runs.value, schedule.id, schedule.retentionCount);
     if (staleRuns.length === 0) return;
@@ -164,6 +176,7 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
       status: "running",
       startedAt: startedAt.toISOString(),
       files: [],
+      progressPercent: 0,
     };
     replaceRun(run);
     activeScheduleIds.add(schedule.id);
@@ -175,179 +188,205 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     let finalStatus: Exclude<DatabaseBackupRunStatus, "running"> = "success";
     let finalError = "";
     let finishedRun: DatabaseBackupRun | null = null;
+    let lastProgressPercent = 0;
     const generatedPaths: string[] = [];
-    try {
-      if (!connection || !supportsScheduledDatabaseBackup(connection.db_type)) throw new Error("The backup connection is unavailable or unsupported.");
-      await connectionStore.ensureConnected(schedule.connectionId);
-      const availableDatabases = (await api.listDatabases(schedule.connectionId)).map((database) => database.name);
-      const selectedDatabases = resolveScheduledDatabaseBackupTargets(schedule.databases, availableDatabases, connection.db_type);
-      if (selectedDatabases.length === 0) throw new Error("No databases are available for this backup schedule.");
-
-      let tableNamesCaseSensitive = true;
-      if (connection.db_type === "mysql" && schedule.tableFilterMode !== "all") {
-        try {
-          const result = await api.executeQuery(schedule.connectionId, "", "SHOW VARIABLES LIKE 'lower_case_table_names'", undefined, undefined, { maxRows: 1 });
-          tableNamesCaseSensitive = databaseBackupTableNamesAreCaseSensitive(connection.db_type, result.rows[0]?.[1] ?? result.rows[0]?.[0]);
-        } catch (error) {
-          appendDebugLog("warn", "[DBX][database-backup:table-name-case-detection-error]", error);
-        }
-      }
-
-      let exportIndex = 0;
-      let totalExports = 0;
-      let includedTableCount = 0;
-      for (const database of selectedDatabases) {
+    await databaseBackupConnectionQueue.run(schedule.connectionId, async () => {
+      try {
         if (cancellationRequested.has(runId)) {
           finalStatus = "cancelled";
-          break;
+          return;
         }
-        const snapshot = await api.beginDatabaseBackupSnapshot(schedule.connectionId, database);
-        let snapshotCompleted = false;
-        try {
-          const databasePlan = buildAllDatabaseExportPlan({
-            databases: [database],
-            schemaAware: connection.db_type === "postgres",
-            schemasByDatabase: { [database]: snapshot.schemas },
-          });
-          if (databasePlan.length === 0) throw new Error(`Database ${database} did not resolve to any schemas.`);
-          const scopedDatabasePlan: Array<(typeof databasePlan)[number] & { selectedTables?: string[]; excludedTables?: string[] }> = [];
-          for (const item of databasePlan) {
-            if (schedule.tableFilterMode === "all") {
-              scopedDatabasePlan.push(item);
-              continue;
-            }
-            const availableTables = (await api.listTables(schedule.connectionId, item.database, item.schema)).map((table) => table.name);
-            const scope = resolveScheduledDatabaseBackupTableScope(schedule.tableFilterMode, schedule.tablePatterns, availableTables, item.database, item.schema, tableNamesCaseSensitive);
-            includedTableCount += scope.includedTables.length;
-            if (scope.includedTables.length === 0) continue;
-            scopedDatabasePlan.push({ ...item, selectedTables: scope.selectedTables, excludedTables: scope.excludedTables });
-          }
-          totalExports += scopedDatabasePlan.length;
+        if (!connection || !supportsScheduledDatabaseBackup(connection.db_type)) throw new Error("The backup connection is unavailable or unsupported.");
+        await connectionStore.ensureConnected(schedule.connectionId);
+        const availableDatabases = (await api.listDatabases(schedule.connectionId)).map((database) => database.name);
+        const selectedDatabases = resolveScheduledDatabaseBackupTargets(schedule.databases, availableDatabases, connection.db_type);
+        if (selectedDatabases.length === 0) throw new Error("No databases are available for this backup schedule.");
 
-          for (const item of scopedDatabasePlan) {
-            if (cancellationRequested.has(runId)) {
-              finalStatus = "cancelled";
-              break;
+        let tableNamesCaseSensitive = true;
+        if (connection.db_type === "mysql" && schedule.tableFilterMode !== "all") {
+          try {
+            const result = await api.executeQuery(schedule.connectionId, "", "SHOW VARIABLES LIKE 'lower_case_table_names'", undefined, undefined, { maxRows: 1 });
+            tableNamesCaseSensitive = databaseBackupTableNamesAreCaseSensitive(connection.db_type, result.rows[0]?.[1] ?? result.rows[0]?.[0]);
+          } catch (error) {
+            appendDebugLog("warn", "[DBX][database-backup:table-name-case-detection-error]", error);
+          }
+        }
+
+        let exportIndex = 0;
+        let includedTableCount = 0;
+        for (const [databaseIndex, database] of selectedDatabases.entries()) {
+          if (cancellationRequested.has(runId)) {
+            finalStatus = "cancelled";
+            break;
+          }
+          const snapshot = await api.beginDatabaseBackupSnapshot(schedule.connectionId, database);
+          let snapshotCompleted = false;
+          try {
+            const databasePlan = buildAllDatabaseExportPlan({
+              databases: [database],
+              schemaAware: connection.db_type === "postgres",
+              schemasByDatabase: { [database]: snapshot.schemas },
+            });
+            if (databasePlan.length === 0) throw new Error(`Database ${database} did not resolve to any schemas.`);
+            const scopedDatabasePlan: Array<(typeof databasePlan)[number] & { selectedTables?: string[]; excludedTables?: string[] }> = [];
+            for (const item of databasePlan) {
+              if (schedule.tableFilterMode === "all") {
+                scopedDatabasePlan.push(item);
+                continue;
+              }
+              const availableTables = (await api.listTables(schedule.connectionId, item.database, item.schema)).map((table) => table.name);
+              const scope = resolveScheduledDatabaseBackupTableScope(schedule.tableFilterMode, schedule.tablePatterns, availableTables, item.database, item.schema, tableNamesCaseSensitive);
+              includedTableCount += scope.includedTables.length;
+              if (scope.includedTables.length === 0) continue;
+              scopedDatabasePlan.push({ ...item, selectedTables: scope.selectedTables, excludedTables: scope.excludedTables });
             }
-            exportIndex += 1;
-            const childExportId = `${runId}-${exportIndex}`;
-            activeExportIds.set(runId, childExportId);
-            const filePath = databaseBackupFilePath(schedule.destinationDirectory, schedule.name, item.fileStem, startedAt, runId);
-            generatedPaths.push(filePath);
-            const terminal = await runDatabaseExportUntilTerminal(
-              {
-                exportId: childExportId,
-                connectionId: schedule.connectionId,
+            for (const [planIndex, item] of scopedDatabasePlan.entries()) {
+              if (cancellationRequested.has(runId)) {
+                finalStatus = "cancelled";
+                break;
+              }
+              exportIndex += 1;
+              const childExportId = `${runId}-${exportIndex}`;
+              activeExportIds.set(runId, childExportId);
+              const filePath = databaseBackupFilePath(schedule.destinationDirectory, schedule.name, item.fileStem, startedAt, runId);
+              generatedPaths.push(filePath);
+              const terminal = await runDatabaseExportUntilTerminal(
+                {
+                  exportId: childExportId,
+                  connectionId: schedule.connectionId,
+                  database: item.database,
+                  schema: item.schema,
+                  filePath,
+                  selectedTables: item.selectedTables,
+                  excludedTables: item.excludedTables,
+                  includeStructure: schedule.includeStructure,
+                  includeData: schedule.includeData,
+                  includeObjects: schedule.includeObjects,
+                  dropTableIfExists: schedule.dropTableIfExists,
+                  failOnError: true,
+                  snapshotSessionId: snapshot.sessionId,
+                  batchSize: 1000,
+                },
+                (progress) => {
+                  const progressPercent = databaseBackupProgressPercent({
+                    completedDatabases: databaseIndex,
+                    totalDatabases: selectedDatabases.length,
+                    completedExports: planIndex,
+                    totalExports: scopedDatabasePlan.length,
+                    currentObjectIndex: progress.objectIndex,
+                    currentTotalObjects: progress.totalObjects,
+                    currentExportComplete: progress.status === "Done",
+                  });
+                  if (progressPercent !== lastProgressPercent) {
+                    lastProgressPercent = progressPercent;
+                    updateRun(runId, { progressPercent }, false);
+                  }
+                  updateDatabaseExportTask(runId, {
+                    ...progress,
+                    exportId: runId,
+                    currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`,
+                    status: databaseBackupAggregateExportStatus(progress.status, false),
+                    overallPercent: progressPercent,
+                  });
+                },
+              );
+              activeExportIds.delete(runId);
+              if (terminal.status === "Cancelled" || cancellationRequested.has(runId)) {
+                finalStatus = "cancelled";
+                break;
+              }
+
+              const file: DatabaseBackupFile = {
                 database: item.database,
                 schema: item.schema,
+                displayName: item.displayName,
                 filePath,
-                selectedTables: item.selectedTables,
-                excludedTables: item.excludedTables,
-                includeStructure: schedule.includeStructure,
-                includeData: schedule.includeData,
-                includeObjects: schedule.includeObjects,
-                dropTableIfExists: schedule.dropTableIfExists,
-                failOnError: true,
-                snapshotSessionId: snapshot.sessionId,
-                batchSize: 1000,
-              },
-              (progress) => {
-                updateDatabaseExportTask(runId, {
-                  ...progress,
-                  exportId: runId,
-                  currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`,
-                  objectIndex: exportIndex - 1,
-                  totalObjects: totalExports,
-                });
-              },
-            );
-            activeExportIds.delete(runId);
-            if (terminal.status === "Cancelled" || cancellationRequested.has(runId)) {
-              finalStatus = "cancelled";
-              break;
+              };
+              run.files.push(file);
+              updateRun(runId, { files: [...run.files] });
             }
-
-            const file: DatabaseBackupFile = {
-              database: item.database,
-              schema: item.schema,
-              displayName: item.displayName,
-              filePath,
-            };
-            run.files.push(file);
-            updateRun(runId, { files: [...run.files] });
+            snapshotCompleted = finalStatus === "success";
+          } finally {
+            await api.rollbackManualTransaction(snapshot.sessionId).catch((error) => {
+              if (snapshotCompleted) throw error;
+            });
           }
-          snapshotCompleted = finalStatus === "success";
-        } finally {
-          await api.rollbackManualTransaction(snapshot.sessionId).catch((error) => {
-            if (snapshotCompleted) throw error;
+          if (finalStatus !== "success") break;
+          lastProgressPercent = databaseBackupProgressPercent({
+            completedDatabases: databaseIndex + 1,
+            totalDatabases: selectedDatabases.length,
+            completedExports: 0,
+            totalExports: 0,
           });
+          updateRun(runId, { progressPercent: lastProgressPercent }, false);
         }
-        if (finalStatus !== "success") break;
-      }
-      if (schedule.tableFilterMode !== "all" && includedTableCount === 0) {
-        throw new Error(`No tables matched the configured ${schedule.tableFilterMode} backup rules.`);
-      }
-    } catch (error: any) {
-      finalStatus = cancellationRequested.has(runId) ? "cancelled" : "failed";
-      finalError = error?.message || String(error);
-    } finally {
-      if (finalStatus !== "success" && generatedPaths.length > 0) {
-        try {
-          await api.deleteDatabaseBackupFiles(generatedPaths);
-          run.files = [];
-        } catch (error: any) {
-          appendDebugLog("error", "[DBX][database-backup:partial-cleanup-error]", error);
-          const cleanupError = error?.message || String(error);
-          finalError = finalError ? `${finalError}; failed to remove partial backup files: ${cleanupError}` : cleanupError;
+        if (schedule.tableFilterMode !== "all" && includedTableCount === 0) {
+          throw new Error(`No tables matched the configured ${schedule.tableFilterMode} backup rules.`);
         }
+      } catch (error: any) {
+        finalStatus = cancellationRequested.has(runId) ? "cancelled" : "failed";
+        finalError = error?.message || String(error);
+      } finally {
+        if (finalStatus !== "success" && generatedPaths.length > 0) {
+          try {
+            await api.deleteDatabaseBackupFiles(generatedPaths);
+            run.files = [];
+          } catch (error: any) {
+            appendDebugLog("error", "[DBX][database-backup:partial-cleanup-error]", error);
+            const cleanupError = error?.message || String(error);
+            finalError = finalError ? `${finalError}; failed to remove partial backup files: ${cleanupError}` : cleanupError;
+          }
+        }
+        const completedAt = new Date();
+        activeExportIds.delete(runId);
+        cancellationRequested.delete(runId);
+        activeScheduleIds.delete(schedule.id);
+        activeRunIds.delete(runId);
+        unregisterTaskCancelHandler(runId);
+
+        finishedRun = updateRun(runId, {
+          status: finalStatus,
+          completedAt: completedAt.toISOString(),
+          files: [...run.files],
+          progressPercent: finalStatus === "success" ? 100 : lastProgressPercent,
+          error: finalError || undefined,
+        });
+        updateDatabaseExportTask(runId, {
+          exportId: runId,
+          currentObject: schedule.name,
+          objectIndex: finalStatus === "success" ? run.files.length : 0,
+          totalObjects: run.files.length,
+          rowsExported: 0,
+          totalRows: null,
+          status: databaseBackupAggregateExportStatus(finalStatus === "success" ? "Done" : finalStatus === "cancelled" ? "Cancelled" : "Error", true),
+          error: finalError || null,
+          overallPercent: finalStatus === "success" ? 100 : lastProgressPercent,
+        });
+
+        const latestSchedule = schedules.value.find((item) => item.id === schedule.id);
+        if (latestSchedule) {
+          schedules.value = schedules.value.map((item) =>
+            item.id === schedule.id
+              ? {
+                  ...item,
+                  lastRunAt: completedAt.toISOString(),
+                  lastRunStatus: finalStatus,
+                  nextRunAt: trigger === "scheduled" || Date.parse(item.nextRunAt) <= completedAt.getTime() ? nextDatabaseBackupRunAt(item, completedAt).toISOString() : item.nextRunAt,
+                }
+              : item,
+          );
+          persistSchedules();
+          if (finalStatus === "success") await pruneScheduleRuns(latestSchedule);
+        }
+
+        appendDebugLog(finalStatus === "success" ? "info" : "error", `[DBX][database-backup:${finalStatus}]`, {
+          scheduleId: schedule.id,
+          runId,
+          files: run.files.length,
+          error: finalError || undefined,
+        });
       }
-      const completedAt = new Date();
-      activeExportIds.delete(runId);
-      cancellationRequested.delete(runId);
-      activeScheduleIds.delete(schedule.id);
-      activeRunIds.delete(runId);
-      unregisterTaskCancelHandler(runId);
-
-      finishedRun = updateRun(runId, {
-        status: finalStatus,
-        completedAt: completedAt.toISOString(),
-        files: [...run.files],
-        error: finalError || undefined,
-      });
-      updateDatabaseExportTask(runId, {
-        exportId: runId,
-        currentObject: schedule.name,
-        objectIndex: finalStatus === "success" ? run.files.length : 0,
-        totalObjects: run.files.length,
-        rowsExported: 0,
-        totalRows: null,
-        status: finalStatus === "success" ? "Done" : finalStatus === "cancelled" ? "Cancelled" : "Error",
-        error: finalError || null,
-      });
-
-      const latestSchedule = schedules.value.find((item) => item.id === schedule.id);
-      if (latestSchedule) {
-        schedules.value = schedules.value.map((item) =>
-          item.id === schedule.id
-            ? {
-                ...item,
-                lastRunAt: completedAt.toISOString(),
-                lastRunStatus: finalStatus,
-                nextRunAt: trigger === "scheduled" || Date.parse(item.nextRunAt) <= completedAt.getTime() ? nextDatabaseBackupRunAt(item, completedAt).toISOString() : item.nextRunAt,
-              }
-            : item,
-        );
-        persistSchedules();
-        if (finalStatus === "success") await pruneScheduleRuns(latestSchedule);
-      }
-
-      appendDebugLog(finalStatus === "success" ? "info" : "error", `[DBX][database-backup:${finalStatus}]`, {
-        scheduleId: schedule.id,
-        runId,
-        files: run.files.length,
-        error: finalError || undefined,
-      });
-    }
+    });
     return finishedRun;
   }
 
@@ -410,6 +449,7 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     setScheduleEnabled,
     deleteSchedule,
     deleteRun,
+    renameRun,
     runSchedule,
     cancelRun,
     processDueSchedules,

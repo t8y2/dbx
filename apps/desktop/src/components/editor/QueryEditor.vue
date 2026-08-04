@@ -11,13 +11,14 @@ import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
-import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
+import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
-import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
+import { currentStatementFrameRangeTo, shouldRebuildCurrentStatementFrame, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlText, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
@@ -86,8 +87,9 @@ import { createInsertValueHintsExtension, requestInsertValueHintsRefresh } from 
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
-import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
+import { startsQueryEditorRectangularSelection, usesQueryEditorObjectNavigationModifier } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
+import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -642,12 +644,12 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
   const doc = currentView.state.doc.toString();
   const parameterOptions = sqlStatementParameterOptions();
   const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType, parameterOptions);
-  if (candidates.length === 0) return false;
+  if (candidates.length === 0) return true;
   // The execution shortcut keeps executing the configured target (cursor/all) directly:
   // it stays keyboard-driven and never pops the picker, which is reserved for click entry points.
   if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType, parameterOptions)) {
-    const preferredKind = settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all";
-    const candidate = candidates.find((item) => item.kind === preferredKind) ?? candidates[0];
+    const candidate = executionCandidateForMode(candidates, settingsStore.editorSettings.executeMode);
+    if (!candidate) return true;
     emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, candidate), options.openInNewResultTab);
     return true;
   }
@@ -844,7 +846,7 @@ function tableNavigationIdentifierAt(currentView: EditorViewType, event: MouseEv
 }
 
 function updateTableNavigationHover(currentView: EditorViewType, event: MouseEvent) {
-  if (!event.metaKey && !event.ctrlKey) {
+  if (!usesQueryEditorObjectNavigationModifier(event)) {
     clearTableNavigationHover();
     return false;
   }
@@ -854,7 +856,7 @@ function updateTableNavigationHover(currentView: EditorViewType, event: MouseEve
 }
 
 function clearTableNavigationHoverOnModifierRelease(event: KeyboardEvent) {
-  if (!event.metaKey && !event.ctrlKey) clearTableNavigationHover();
+  if (!usesQueryEditorObjectNavigationModifier(event)) clearTableNavigationHover();
 }
 
 function isEditorScrollbarPointerEvent(currentView: EditorViewType, event: MouseEvent) {
@@ -1127,7 +1129,7 @@ async function pasteClipboardAsSqlInCondition(): Promise<boolean> {
     }
   }
 
-  const result = buildSqlInConditionFromPasteSource(source);
+  const result = buildSqlInConditionFromPasteSource(source, settingsStore.editorSettings.sqlFormatter.keywordCase);
   if (!result.ok) {
     const key = result.reason === "too-large" ? "editor.exPasteTooLarge" : result.reason === "too-many-values" ? "editor.exPasteTooManyValues" : result.reason === "not-list" ? "editor.exPasteNotList" : "editor.exPasteNoValues";
     toast(t(key, { limit: result.limit ?? 0 }), 5000);
@@ -1277,7 +1279,7 @@ function executableStatementRangeStartingAt(currentView: EditorViewType, lineFro
 }
 
 function currentExecutableStatementRange(currentView: EditorViewType): SqlTextRange | null {
-  if (!supportsExecutionTargetPicker(props.databaseType)) return null;
+  if (!supportsExecutionTargetPicker(props.databaseType) && props.databaseType !== "mongodb") return null;
   executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
   return executableStatementRangeAtCursor(executableStatementRangeCache, currentView.state.selection.main.head);
 }
@@ -1438,6 +1440,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.undo, (view) => codeMirrorUndo?.(view) ?? false),
         ...binding(shortcuts.redo, (view) => codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorSelectAll?.(view) ?? false),
+        ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.uppercaseSelection, () => convertSelectedSqlCase("upper")),
         ...binding(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
         ...binding(shortcuts.toggleLineComment, (view) => codeMirrorToggleLineComment?.(view) ?? false),
@@ -1466,6 +1469,16 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       })),
     ),
   ];
+}
+
+function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
+  const databaseType = props.databaseType;
+  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" ? "text" : "sql";
+  return extendQueryEditorSelection(currentView, {
+    databaseType,
+    dialect: props.syntaxDialect ?? props.dialect,
+    language,
+  });
 }
 
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
@@ -2346,7 +2359,25 @@ async function formatCurrentSql() {
   if (!source.trim()) return;
 
   try {
-    const formatted = props.databaseType === "mongodb" ? formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter) : await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+    let formatted: string;
+    if (props.databaseType === "mongodb") {
+      formatted = formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter);
+    } else {
+      const structured = detectAndFormatStructured(source, {
+        indentSize: settingsStore.editorSettings.sqlFormatter.tabWidth,
+        useTabs: settingsStore.editorSettings.sqlFormatter.useTabs,
+      });
+      if (structured.kind === "json" || structured.kind === "xml") {
+        formatted = structured.formatted;
+      } else if (structured.kind === "unsupported") {
+        // Keep invalid structured text untouched — the SQL formatter would
+        // silently corrupt XML-looking content.
+        toast(t("toolbar.formatAutoDetectFailed"), 3000);
+        return;
+      } else {
+        formatted = await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+      }
+    }
     if (view.value !== currentView || currentView.state !== originalState || currentView.state.sliceDoc(from, to) !== source) {
       return;
     }
@@ -2532,14 +2563,21 @@ function completionOptionForItem(item: QueryCompletionItem) {
       apply(view: EditorViewType, completionItem: unknown, from: number, to: number) {
         record();
         markCompletionAccepted(item);
+        const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
         if (typeof originalApply === "function") {
-          originalApply(view, completionItem as never, from, to);
+          originalApply(view, completionItem as never, from, replaceTo);
         } else {
           const insert = String(originalApply ?? item.label);
           view.dispatch({
-            changes: { from, to, insert },
+            changes: { from, to: replaceTo, insert },
             selection: { anchor: from + insert.length },
           });
+        }
+        if (props.databaseType === "mongodb") {
+          const position = view.state.selection.main.head;
+          if (getMongoCompletionContext(view.state.doc.toString(), position).mode === "collectionRef") {
+            scheduleSqlCompletionStart(view, 50);
+          }
         }
       },
     };
@@ -2553,16 +2591,17 @@ function completionOptionForItem(item: QueryCompletionItem) {
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
       markCompletionAccepted(item);
+      const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
       const insert = appendSqlCompletionSpace(item.apply ?? item.label, {
         enabled: shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion,
         itemType: item.type,
-        nextCharacter: view.state.sliceDoc(to, to + 1),
+        nextCharacter: view.state.sliceDoc(replaceTo, replaceTo + 1),
       });
       if (codeMirrorInsertCompletionText) {
-        view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
+        view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, replaceTo));
       } else {
         view.dispatch({
-          changes: { from, to, insert },
+          changes: { from, to: replaceTo, insert },
           selection: { anchor: from + insert.length },
         });
       }
@@ -2741,6 +2780,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         databaseType: snippetDatabaseType.value,
         currentSchema: props.schema,
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
+        functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
@@ -2800,6 +2840,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         databaseType: snippetDatabaseType.value,
         currentSchema: props.schema,
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
+        functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
@@ -2855,12 +2896,12 @@ function isEditorComposing(currentView: EditorViewType): boolean {
   return imeCompositionActive || currentView.compositionStarted || currentView.composing;
 }
 
-function scheduleSqlCompletionStart(currentView: EditorViewType) {
+function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
   window.setTimeout(() => {
     if (!codeMirrorStartCompletion || isEditorComposing(currentView)) return;
     markTypedCompletionActivation();
     codeMirrorStartCompletion(currentView);
-  }, 0);
+  }, delayMs);
 }
 
 function flushImeComposition() {
@@ -2886,6 +2927,9 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   const position = currentView.state.selection.main.head;
   const fullDoc = currentView.state.doc.toString();
   if (resolveSqlServerUseDatabaseCompletion({ sql: fullDoc, cursor: position, databaseType: props.databaseType })) return true;
+  if (props.databaseType === "mongodb") {
+    return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
+  }
   if (!insertedText && removedText) {
     const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
     return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
@@ -3012,6 +3056,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     databaseType: snippetDatabaseType.value,
     currentSchema: scope.schema,
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
+    functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
@@ -3471,6 +3516,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     databaseType: snippetDatabaseType.value,
     currentSchema: scope.schema,
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
+    functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
@@ -3898,11 +3944,19 @@ onMounted(async () => {
   const currentStatementFrameHighlighter = ViewPlugin.fromClass(
     class {
       decorations: import("@codemirror/view").DecorationSet;
+      private configuration: string;
       constructor(view: import("@codemirror/view").EditorView) {
+        this.configuration = this.currentConfiguration();
         this.decorations = this.getDeco(view);
       }
       update(update: import("@codemirror/view").ViewUpdate) {
+        const configuration = this.currentConfiguration();
+        if (!shouldRebuildCurrentStatementFrame({ docChanged: update.docChanged, selectionSet: update.selectionSet, configurationChanged: configuration !== this.configuration })) return;
+        this.configuration = configuration;
         this.decorations = this.getDeco(update.view);
+      }
+      currentConfiguration() {
+        return `${settingsStore.editorSettings.showCurrentStatementFrame}:${settingsStore.editorSettings.showInsertValueHints}:${props.databaseType ?? ""}`;
       }
       getDeco(view: import("@codemirror/view").EditorView) {
         if (!settingsStore.editorSettings.showCurrentStatementFrame) return Decoration.none;
@@ -3916,10 +3970,13 @@ onMounted(async () => {
         let insertValueHints: Array<{ from: number; column: string }> = [];
         try {
           if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch") {
-            insertValueHints = parseInsertValueHints(view.state.doc.sliceString(range.from, range.to), { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
-              ...hint,
-              from: hint.from + range.from,
-            }));
+            const statementSql = view.state.doc.sliceString(range.from, range.to);
+            if (/\binsert\b/i.test(statementSql)) {
+              insertValueHints = parseInsertValueHints(statementSql, { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
+                ...hint,
+                from: hint.from + range.from,
+              }));
+            }
           }
         } catch {
           insertValueHints = [];
@@ -3954,8 +4011,7 @@ onMounted(async () => {
   );
 
   function currentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
-    const nextChar = range.to < view.state.doc.length ? view.state.doc.sliceString(range.to, range.to + 1) : "";
-    return currentStatementFrameRangeTo(nextChar, range);
+    return currentStatementFrameRangeTo(view.state.doc, range);
   }
 
   const activeLineHighlighter = ViewPlugin.fromClass(
@@ -4085,6 +4141,14 @@ onMounted(async () => {
         ]),
       ),
       runKeymapComp.of(runKeymapExtension(keymap)),
+      Prec.highest(
+        EditorView.domEventHandlers({
+          keydown(event, currentView) {
+            const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+            return runQueryEditorAltExtendSelection(event, shortcuts.extendSelection, currentView, extendQueryEditorSelectionForView);
+          },
+        }),
+      ),
       wordWrapComp.of(props.forceWordWrap || initialSettings.wordWrap ? EditorView.lineWrapping : []),
       readOnlyComp.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
       indentComp.of(indentExtension()),
@@ -4185,14 +4249,15 @@ onMounted(async () => {
           if (currentView && startEditorSelectionDrag(currentView, event)) {
             return true;
           }
-          // Click without modifier -> close column panel
-          if (!event.metaKey && !event.ctrlKey) {
-            if (event.button === 0) {
+          // Alt belongs to CodeMirror's rectangular and multi-cursor gestures,
+          // even when Cmd/Ctrl is held at the same time.
+          if (!usesQueryEditorObjectNavigationModifier(event)) {
+            // Click without modifier -> close column panel
+            if (!event.metaKey && !event.ctrlKey && event.button === 0) {
               emit("closeColumnPanel");
             }
             return false;
           }
-          // Only handle Ctrl/Cmd + left click
           if (event.button !== 0) return false;
 
           if (!currentView || !props.connectionId || props.database == null) {

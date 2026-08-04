@@ -23,6 +23,8 @@ export interface MongoCompletionItem {
   detail?: string;
   info?: string;
   apply?: string;
+  filterText?: string;
+  replaceClosingQuote?: '"' | "'";
   boost: number;
 }
 
@@ -30,6 +32,8 @@ export interface MongoCompletionContext {
   mode: MongoCompletionMode;
   prefix: string;
   from: number;
+  /** The selected collection name should consume the existing closing quote. */
+  replaceClosingQuote?: '"' | "'";
   /** Collection the cursor's command targets, used to load field metadata. */
   collection?: string;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
@@ -68,9 +72,36 @@ const COLLECTION_METHODS = [
   { label: "drop", detail: "Drop the collection", apply: "drop()" },
 ] as const;
 
+const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label"], number> = {
+  find: 240,
+  findOne: 230,
+  aggregate: 220,
+  countDocuments: 210,
+  distinct: 200,
+  insertOne: 180,
+  insertMany: 170,
+  updateOne: 160,
+  updateMany: 150,
+  deleteOne: 140,
+  deleteMany: 130,
+  findOneAndUpdate: 120,
+  findOneAndReplace: 115,
+  findOneAndDelete: 110,
+  getIndexes: 100,
+  stats: 95,
+  createIndex: 90,
+  count: 80,
+  dataSize: 75,
+  storageSize: 70,
+  totalIndexSize: 65,
+  dropIndex: 50,
+  dropIndexes: 45,
+  drop: 30,
+};
+
 /** Database-level helpers, offered next to the collection names after `db.`. */
 const DATABASE_METHODS = [
-  { label: "getCollection", detail: "Reference a collection by name", apply: 'getCollection("${collection}")' },
+  { label: "getCollection", detail: "Reference a collection by name", apply: 'getCollection("${}")' },
   { label: "version", detail: "Show the MongoDB server version", apply: "version()" },
 ] as const;
 
@@ -89,10 +120,18 @@ const CURSOR_COUNT_METHOD = { label: "count", detail: "Count the documents match
 const ROOT_SNIPPETS = [
   { label: "db.collection.find", detail: "Find documents", apply: "db.${collection}.find({})" },
   { label: "db.collection.aggregate", detail: "Aggregation pipeline", apply: "db.${collection}.aggregate([\n  { $match: {} }\n])" },
-  { label: "db.getCollection", detail: "Reference a collection by name", apply: 'db.getCollection("${collection}")' },
+  { label: "db.getCollection", detail: "Reference a collection by name", apply: 'db.getCollection("${}")' },
   { label: "use", detail: "Switch the active database", apply: "use ${database}" },
   { label: "db.version", detail: "Show the MongoDB server version", apply: "db.version()" },
 ] as const;
+
+const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number> = {
+  "db.collection.find": 350,
+  "db.collection.aggregate": 340,
+  "db.getCollection": 330,
+  use: 320,
+  "db.version": 310,
+};
 
 /** Role of each positional argument, by collection helper. Drives cursor classification. */
 type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
@@ -144,14 +183,23 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const beforeCursor = text.slice(0, safeCursor);
   const collection = extractActiveCollection(text, safeCursor);
   const { prefix, from } = readPropertyPrefix(text, safeCursor);
-  const at = (mode: MongoCompletionMode, stage?: string): MongoCompletionContext => ({ mode, prefix, from, collection, stage });
+  const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
+  const at = (mode: MongoCompletionMode, stage?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage });
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
   if (beforeCursor.endsWith("db.")) return { mode: "collection", prefix: "", from: safeCursor, collection };
 
   const getCollectionPrefix = matchGetCollectionPrefix(beforeCursor);
-  if (getCollectionPrefix) return { mode: "collectionRef", prefix: getCollectionPrefix.prefix, from: getCollectionPrefix.from, collection };
+  if (getCollectionPrefix) {
+    return {
+      mode: "collectionRef",
+      prefix: getCollectionPrefix.prefix,
+      from: getCollectionPrefix.from,
+      replaceClosingQuote: closingQuoteAtCursor(getCollectionPrefix.prefix, text, safeCursor),
+      collection,
+    };
+  }
 
   const collectionPrefix = matchDbCollectionPrefix(beforeCursor);
   if (collectionPrefix) {
@@ -193,46 +241,66 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
   const collections = input.collections ?? [];
   const fields = input.fields ?? [];
 
+  let items: MongoCompletionItem[];
   switch (mode) {
     case "none":
-      return [];
+      items = [];
+      break;
     case "root":
-      return rootItems(prefix);
+      items = rootItems(prefix);
+      break;
     case "collection":
-      return collectionItems(prefix, collections);
+      items = collectionItems(prefix, collections);
+      break;
     case "collectionOrMethod":
-      return collectionOrMethodItems(prefix, collections);
+      items = collectionOrMethodItems(prefix, collections);
+      break;
     case "collectionRef":
-      return collectionRefItems(prefix, collections);
+      items = collectionRefItems(prefix, collections);
+      break;
     case "method":
-      return methodItems(prefix);
+      items = methodItems(prefix);
+      break;
     case "cursorMethod":
-      return cursorMethodItems(prefix, context.stage === "countable");
+      items = cursorMethodItems(prefix, context.stage === "countable");
+      break;
     case "field":
-      return fieldItems(prefix, fields);
+      items = fieldItems(prefix, fields);
+      break;
     case "fieldPath":
-      return fieldPathItems(prefix, fields);
+      items = fieldPathItems(prefix, fields);
+      break;
     case "fieldRef":
-      return fieldRefItems(prefix, fields);
+      items = fieldRefItems(prefix, fields);
+      break;
     case "value":
-      return specItems(VALUE_SNIPPETS, prefix, "value", 100);
+      items = specItems(VALUE_SNIPPETS, prefix, "value", 100);
+      break;
     case "queryOperator":
-      return specItems(QUERY_OPERATORS, prefix, "query operator", 100);
+      items = specItems(QUERY_OPERATORS, prefix, "query operator", 100);
+      break;
     case "updateOperator":
-      return specItems(UPDATE_OPERATORS, prefix, "update operator", 100);
+      items = specItems(UPDATE_OPERATORS, prefix, "update operator", 100);
+      break;
     case "pushModifier":
-      return specItems(PUSH_MODIFIERS, prefix, "array update modifier", 100);
+      items = specItems(PUSH_MODIFIERS, prefix, "array update modifier", 100);
+      break;
     case "expression":
-      return [...specItems(EXPRESSION_OPERATORS, prefix, "aggregation expression", 100), ...fieldRefItems(prefix, fields, 80)];
+      items = [...specItems(EXPRESSION_OPERATORS, prefix, "aggregation expression", 100), ...fieldRefItems(prefix, fields, 80)];
+      break;
     case "accumulator":
-      return specItems(ACCUMULATORS, prefix, "accumulator", 100);
+      items = specItems(ACCUMULATORS, prefix, "accumulator", 100);
+      break;
     case "stage":
-      return specItems(PIPELINE_STAGES, prefix, "aggregation stage", 100);
+      items = specItems(PIPELINE_STAGES, prefix, "aggregation stage", 100);
+      break;
     case "stageOption":
-      return specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
+      items = specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
+      break;
     default:
-      return [];
+      items = [];
   }
+  return finalizeQuotedMongoCompletionItems(context, items);
 }
 
 /** Modes whose items are built from the target collection's sampled fields. */
@@ -562,14 +630,14 @@ function rootItems(prefix: string): MongoCompletionItem[] {
     type: "snippet" as const,
     detail: snippet.detail,
     apply: snippet.apply,
-    boost: 120,
+    boost: ROOT_SNIPPET_BOOST[snippet.label],
   }));
   const methods = COLLECTION_METHODS.filter((method) => matchesFuzzyPrefix(method.label, prefix)).map((method) => ({
     label: method.label,
     type: "function" as const,
     detail: method.detail,
     apply: method.apply,
-    boost: 100,
+    boost: COLLECTION_METHOD_BOOST[method.label],
   }));
   return dedupeAndSort([...snippets, ...methods]);
 }
@@ -603,11 +671,13 @@ function collectionOrMethodItems(prefix: string, collections: string[]): MongoCo
   const dot = prefix.lastIndexOf(".");
   const collection = prefix.slice(0, dot);
   const methodPrefix = prefix.slice(dot + 1);
-  const collectionRef = needsGetCollectionSyntax(collection) && collections.includes(collection) ? `getCollection("${escapeDoubleQuoted(collection)}")` : collection;
+  const hasExactCollection = collections.includes(collection);
+  const hasDottedCollectionCandidate = collections.some((item) => item.startsWith(`${collection}.`));
+  const collectionRef = needsGetCollectionSyntax(collection) && hasExactCollection ? `getCollection("${escapeDoubleQuoted(collection)}")` : collection;
   const methods = methodItems(methodPrefix).map((item) => ({
     ...item,
     apply: `${collectionRef}.${item.apply}`,
-    boost: Math.min(item.boost, 110),
+    boost: !hasExactCollection && hasDottedCollectionCandidate ? Math.min(item.boost, 110) : item.boost,
   }));
 
   return dedupeAndSort([...collectionNameItems(prefix, collections, 150), ...methods]);
@@ -617,13 +687,16 @@ function collectionRefItems(prefix: string, collections: string[]): MongoComplet
   return collections
     .filter((collection) => matchesFuzzyPrefix(collection, prefix))
     .slice(0, 100)
-    .map((collection) => ({
-      label: collection,
-      type: "table" as const,
-      detail: "collection",
-      apply: quoteMongoString(collection, prefix),
-      boost: startsWithPrefix(collection, prefix) ? 120 : 90,
-    }));
+    .map((collection) => {
+      const apply = quoteMongoString(collection, prefix);
+      return {
+        label: collection,
+        type: "table" as const,
+        detail: "collection",
+        apply,
+        boost: startsWithPrefix(collection, prefix) ? 120 : 90,
+      };
+    });
 }
 
 function methodItems(prefix: string): MongoCompletionItem[] {
@@ -633,7 +706,7 @@ function methodItems(prefix: string): MongoCompletionItem[] {
       type: "function" as const,
       detail: method.detail,
       apply: method.apply,
-      boost: method.label === "find" || method.label === "aggregate" ? 130 : 100,
+      boost: COLLECTION_METHOD_BOOST[method.label],
     })),
   );
 }
@@ -648,7 +721,7 @@ function cursorMethodItems(prefix: string, countable: boolean): MongoCompletionI
         type: "function" as const,
         detail: method.detail,
         apply: method.apply,
-        boost: method.label === "limit" ? 130 : 110,
+        boost: method.label === "limit" ? 150 : method.label === "sort" ? 140 : method.label === "skip" ? 130 : 120,
       })),
   );
 }
@@ -721,6 +794,24 @@ function describeField(field: MongoCompletionField, label: string): string {
   return field.type ? `${label} · ${field.type}` : label;
 }
 
+function finalizeQuotedMongoCompletionItems(context: MongoCompletionContext, items: MongoCompletionItem[]): MongoCompletionItem[] {
+  const quote = context.prefix[0];
+  if (quote !== '"' && quote !== "'") return items;
+
+  return items.map((item) => {
+    let apply = item.apply;
+    if (apply?.startsWith(`${item.label}:`)) {
+      apply = `${quote}${item.label}${quote}${apply.slice(item.label.length)}`;
+    }
+    return {
+      ...item,
+      apply,
+      filterText: apply ?? `${quote}${item.label}${quote}`,
+      replaceClosingQuote: context.replaceClosingQuote,
+    };
+  });
+}
+
 /* ------------------------------------------------------------------ *
  * Text helpers
  * ------------------------------------------------------------------ */
@@ -730,6 +821,11 @@ function readPropertyPrefix(text: string, cursor: number): { prefix: string; fro
   while (from > 0 && /[\w_$.-]/.test(text[from - 1] ?? "")) from--;
   if (text[from - 1] === '"' || text[from - 1] === "'") from--;
   return { prefix: text.slice(from, cursor), from };
+}
+
+function closingQuoteAtCursor(prefix: string, text: string, cursor: number): '"' | "'" | undefined {
+  const quote = prefix[0];
+  return (quote === '"' || quote === "'") && text[cursor] === quote ? quote : undefined;
 }
 
 function readMethodPrefix(beforeCursor: string): { prefix: string; from: number } {

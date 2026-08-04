@@ -462,6 +462,7 @@ export interface EditorSettings {
   tableOpenPageSize: number;
   infiniteScroll: boolean;
   infiniteScrollMaxRows: number;
+  regexMaxMatchCount: number;
   autoCalculateTotalRows: boolean;
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
@@ -639,6 +640,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableOpenPageSize: 100,
   infiniteScroll: false,
   infiniteScrollMaxRows: 5000,
+  regexMaxMatchCount: 1000,
   autoCalculateTotalRows: false,
   mongoViewMode: "document",
   showColumnCommentsInHeader: true,
@@ -947,6 +949,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
     infiniteScroll: settings.infiniteScroll ?? DEFAULT_EDITOR_SETTINGS.infiniteScroll,
     infiniteScrollMaxRows: typeof settings.infiniteScrollMaxRows === "number" && settings.infiniteScrollMaxRows >= 1000 && settings.infiniteScrollMaxRows <= 50000 ? Math.round(settings.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows,
+    regexMaxMatchCount: typeof settings.regexMaxMatchCount === "number" && Number.isFinite(settings.regexMaxMatchCount) && settings.regexMaxMatchCount >= 100 && settings.regexMaxMatchCount <= 10000 ? Math.round(settings.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount,
     autoCalculateTotalRows: settings.autoCalculateTotalRows ?? DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows,
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
@@ -1430,6 +1433,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.infiniteScroll !== undefined) editorSettings.value.infiniteScroll = partial.infiniteScroll;
     if (partial.infiniteScrollMaxRows !== undefined)
       editorSettings.value.infiniteScrollMaxRows = typeof partial.infiniteScrollMaxRows === "number" && partial.infiniteScrollMaxRows >= 1000 && partial.infiniteScrollMaxRows <= 50000 ? Math.round(partial.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
+    if (partial.regexMaxMatchCount !== undefined)
+      editorSettings.value.regexMaxMatchCount =
+        typeof partial.regexMaxMatchCount === "number" && Number.isFinite(partial.regexMaxMatchCount) && partial.regexMaxMatchCount >= 100 && partial.regexMaxMatchCount <= 10000 ? Math.round(partial.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount;
     if (partial.autoCalculateTotalRows !== undefined) editorSettings.value.autoCalculateTotalRows = partial.autoCalculateTotalRows === true;
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;

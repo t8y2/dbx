@@ -383,4 +383,52 @@ describe("TableStructureEditor metadata loading", () => {
     expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(expectedFacets);
     expect(mocks.loadObjectDdl).not.toHaveBeenCalled();
   });
+
+  it("loads index metadata when an initialized column draft opens the indexes tab", async () => {
+    mocks.connection.db_type = "postgres";
+    mocks.connection.name = "postgres";
+    mocks.connection.driver_label = "postgres";
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.listDataTypes.mockResolvedValue([]);
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
+      value:
+        facet === "indexes"
+          ? [
+              {
+                name: "idx_users_id",
+                columns: ["id"],
+                is_unique: false,
+                is_primary: false,
+              },
+            ]
+          : facet === "comment"
+            ? ""
+            : [],
+      cacheStatus: "remote",
+    }));
+
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "users",
+      initialTab: "indexes",
+      draft: {
+        ...draft(),
+        loadedMetadataFacets: ["columns", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await nextTick();
+    await Promise.resolve();
+    await nextTick();
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet).toHaveBeenCalledTimes(1));
+    expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["indexes"]);
+    await vi.waitFor(() => expect(root.querySelector('[data-index-row-index="0"]')).not.toBeNull());
+  });
 });

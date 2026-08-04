@@ -334,6 +334,16 @@ pub async fn get_columns(
 }
 
 #[tauri::command]
+pub async fn get_all_columns(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+) -> Result<Vec<db::TableColumnsResult>, String> {
+    dbx_core::schema::get_all_columns_core(&state, &connection_id, &database, &schema).await
+}
+
+#[tauri::command]
 pub async fn get_sqlserver_column_metadata(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

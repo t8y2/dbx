@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
-import { completeDataGridConditionQuote, useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
+import { completeDataGridConditionQuote, useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestion, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
 import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 
@@ -52,6 +52,7 @@ const expandedRect = ref({ left: 0, top: 0, width: 0, controlsTop: 0, inputTop: 
 const expandedHeight = ref(56);
 const suggestionPosition = ref({ left: 0, top: 0, width: 180 });
 const historyPreview = ref<{ value: string; left: number; top: number; maxWidth: number; arrowTop: number; side: "left" | "right" } | null>(null);
+const pointerMovedSuggestionIndex = ref(-1);
 let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let expandAfterComposition = false;
@@ -393,6 +394,17 @@ function acceptSuggestion(index: number) {
   focusAfterAccept();
 }
 
+function onSuggestionPointerMove(index: number, suggestion: DataGridConditionSuggestion, event: MouseEvent) {
+  pointerMovedSuggestionIndex.value = index;
+  editor.highlightedIndex.value = index;
+  if (suggestion.kind === "history") showHistoryPreview(suggestion.value, event);
+}
+
+function onSuggestionPointerLeave() {
+  pointerMovedSuggestionIndex.value = -1;
+  hideHistoryPreview();
+}
+
 function eventInside(event: Event, element?: HTMLElement) {
   if (!element) return false;
   const path = typeof event.composedPath === "function" ? event.composedPath() : [];
@@ -439,8 +451,15 @@ watch(suggestionPreferredWidth, () => {
   if (editor.dropdownOpen.value) updateSuggestionPosition();
 });
 watch(
+  () => editor.suggestions.value.map((suggestion) => `${suggestion.kind}:${suggestion.value}`).join("\n"),
+  () => {
+    pointerMovedSuggestionIndex.value = -1;
+  },
+);
+watch(
   () => editor.dropdownOpen.value,
   (open) => {
+    pointerMovedSuggestionIndex.value = -1;
     if (open) updateSuggestionPosition();
     else hideHistoryPreview();
   },
@@ -564,13 +583,10 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           role="option"
           :aria-selected="index === editor.highlightedIndex.value"
           class="flex cursor-pointer items-center px-3 py-1.5 text-xs"
-          :class="index === editor.highlightedIndex.value ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
+          :class="index === editor.highlightedIndex.value ? 'bg-accent text-accent-foreground' : pointerMovedSuggestionIndex === index ? 'bg-gray-200 dark:bg-gray-800' : ''"
           @mousedown.prevent="acceptSuggestion(index)"
-          @mouseenter="
-            editor.highlightedIndex.value = index;
-            suggestion.kind === 'history' && showHistoryPreview(suggestion.value, $event);
-          "
-          @mouseleave="hideHistoryPreview"
+          @mousemove="onSuggestionPointerMove(index, suggestion, $event)"
+          @mouseleave="onSuggestionPointerLeave"
         >
           <span data-condition-history-text class="data-grid-condition-suggestion-field min-w-0 truncate" :class="suggestion.comment ? 'max-w-[75%] shrink-0' : 'flex-1'" :title="suggestion.value">
             {{ suggestion.value }}

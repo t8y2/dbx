@@ -66,22 +66,27 @@ pub fn verify_confirmed_target(
     confirmed_write_sql: Option<String>,
     confirmed_connection_id: Option<String>,
     confirmed_database: Option<String>,
+    confirmed_schema: Option<String>,
     actual_connection_id: &str,
     actual_database: &str,
+    actual_schema: Option<&str>,
 ) -> (Option<bool>, Option<String>) {
     let Some(ref confirmed_sql) = confirmed_write_sql else {
         return (allow_write_sql, confirmed_write_sql);
     };
     // Only verify when a write SQL was actually confirmed.
     let target_mismatch = confirmed_connection_id.as_deref() != Some(actual_connection_id)
-        || confirmed_database.as_deref() != Some(actual_database);
+        || confirmed_database.as_deref() != Some(actual_database)
+        || confirmed_schema.as_deref() != actual_schema;
     if target_mismatch {
         log::warn!(
-            "Write-SQL grant voided: confirmed target (conn={:?}, db={:?}) does not match actual (conn={}, db={}).",
+            "Write-SQL grant voided: confirmed target (conn={:?}, db={:?}, schema={:?}) does not match actual (conn={}, db={}, schema={:?}).",
             confirmed_connection_id,
             confirmed_database,
+            confirmed_schema,
             actual_connection_id,
             actual_database,
+            actual_schema,
         );
         // SQL can contain literals or credentials. Keep diagnostic visibility
         // behind the shared debug-only redaction boundary.
@@ -313,21 +318,25 @@ pub async fn execute_tool(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
 ) -> ToolResult {
     let result = match tool_call.name.as_str() {
-        "list_tables" => execute_list_tables(tool_call, state, connection_id, database, db_type).await,
-        "get_columns" => execute_get_columns(tool_call, state, connection_id, database, db_type).await,
+        "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
+        "get_columns" => execute_get_columns(tool_call, state, connection_id, database, default_schema, db_type).await,
         "execute_query" => {
-            execute_execute_query(tool_call, state, connection_id, database, db_type, sql_permissions).await
+            execute_execute_query(tool_call, state, connection_id, database, default_schema, db_type, sql_permissions)
+                .await
         }
-        "get_sample_data" => execute_get_sample_data(tool_call, state, connection_id, database, db_type).await,
+        "get_sample_data" => {
+            execute_get_sample_data(tool_call, state, connection_id, database, default_schema, db_type).await
+        }
         "list_collections" => execute_list_collections(tool_call, state, connection_id, database, db_type).await,
         "browse_collection" => execute_browse_collection(tool_call, state, connection_id, database, db_type).await,
         "explain_query" => {
             let (text_result, explain_data) =
-                execute_explain_query(tool_call, state, connection_id, database, db_type).await;
+                execute_explain_query(tool_call, state, connection_id, database, default_schema, db_type).await;
             match text_result {
                 Ok(content) => {
                     return ToolResult {
@@ -375,9 +384,10 @@ async fn execute_list_tables(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     _db_type: &DatabaseType,
 ) -> Result<String, String> {
-    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let schema = effective_schema(tool_call, default_schema).unwrap_or_default();
 
     // Request one extra to detect whether more tables exist beyond the limit.
     let tables = crate::schema::list_tables_core(
@@ -426,6 +436,7 @@ async fn execute_get_columns(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     _db_type: &DatabaseType,
 ) -> Result<String, String> {
     let table = tool_call
@@ -447,7 +458,7 @@ async fn execute_get_columns(
         return Err(format!("Table name contains invalid characters: '{}'", table));
     }
 
-    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let schema = effective_schema(tool_call, default_schema).unwrap_or_default();
 
     let columns = crate::schema::get_columns_core(state, connection_id, database, &schema, &table)
         .await
@@ -529,6 +540,7 @@ async fn execute_execute_query(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
 ) -> Result<String, String> {
@@ -588,17 +600,26 @@ async fn execute_execute_query(
         client_session_id: client_session_id.map(str::to_string),
         ..Default::default()
     };
-    let result =
-        crate::query::execute_sql_statement_with_options(state, connection_id, database, sql, None, None, options)
-            .await?;
+    let result = crate::query::execute_sql_statement_with_options(
+        state,
+        connection_id,
+        database,
+        sql,
+        default_schema,
+        None,
+        options,
+    )
+    .await?;
 
     format_query_result_as_text(&result, limit)
 }
 
 /// Format a QueryResult as a Markdown table for LLM consumption.
 fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<String, String> {
-    if result.rows.is_empty() {
-        return Ok("Query returned 0 rows.".to_string());
+    // A result without columns is a command result, not an empty result set.
+    // This is how drivers represent DML that does not use RETURNING.
+    if result.columns.is_empty() {
+        return Ok(format!("Query executed. {} row(s) affected.", result.affected_rows));
     }
 
     let mut lines = Vec::new();
@@ -647,6 +668,7 @@ async fn execute_get_sample_data(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
 ) -> Result<String, String> {
     let table =
@@ -659,7 +681,7 @@ async fn execute_get_sample_data(
         return Err(format!("Table name contains invalid characters: '{}'", table));
     }
 
-    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    let schema = effective_schema(tool_call, default_schema);
     let limit = tool_call
         .arguments
         .get("limit")
@@ -669,7 +691,7 @@ async fn execute_get_sample_data(
 
     // Reuse the table-data builder so identifier quoting and row limiting follow
     // the active database instead of assuming PostgreSQL syntax.
-    let sql = build_sample_data_sql(db_type, schema, table, limit);
+    let sql = build_sample_data_sql(db_type, schema.as_deref(), table, limit);
 
     // Delegate to execute_execute_query with a synthetic tool call
     let synthetic_call = ToolCall {
@@ -678,8 +700,16 @@ async fn execute_get_sample_data(
         arguments: serde_json::json!({ "sql": sql, "limit": limit }),
         provider_payload: None,
     };
-    execute_execute_query(&synthetic_call, state, connection_id, database, db_type, AgentSqlPermissions::default())
-        .await
+    execute_execute_query(
+        &synthetic_call,
+        state,
+        connection_id,
+        database,
+        schema.as_deref(),
+        db_type,
+        AgentSqlPermissions::default(),
+    )
+    .await
 }
 
 fn build_sample_data_sql(db_type: &DatabaseType, schema: Option<&str>, table: &str, limit: usize) -> String {
@@ -699,6 +729,7 @@ async fn execute_explain_query(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
 ) -> (Result<String, String>, Option<serde_json::Value>) {
     let sql = match tool_call.arguments.get("sql").and_then(|v| v.as_str()) {
@@ -733,7 +764,7 @@ async fn execute_explain_query(
             state,
             connection_id,
             Some(database),
-            None,
+            default_schema,
             sql,
             Some("explain"),
         )
@@ -745,8 +776,12 @@ async fn execute_explain_query(
     }
 
     // Build the database-specific EXPLAIN SQL
-    let explain_result =
-        build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), format: None, sql: sql.to_string() });
+    let explain_result = build_explain_sql(ExplainSqlOptions {
+        database_type: Some(*db_type),
+        format: None,
+        analyze: None,
+        sql: sql.to_string(),
+    });
 
     let explain_sql = match (explain_result.ok, explain_result.sql) {
         (true, Some(sql)) => sql,
@@ -764,7 +799,7 @@ async fn execute_explain_query(
         connection_id,
         database,
         &explain_sql,
-        None,
+        default_schema,
         None,
         options,
     )
@@ -782,6 +817,20 @@ async fn execute_explain_query(
     };
 
     (Ok(text), explain_data)
+}
+
+/// A selected context schema is authoritative for an Agent run. If none was
+/// selected, keep the existing per-tool schema parameter behavior.
+fn effective_schema(tool_call: &ToolCall, default_schema: Option<&str>) -> Option<String> {
+    default_schema.map(str::trim).filter(|schema| !schema.is_empty()).map(ToOwned::to_owned).or_else(|| {
+        tool_call
+            .arguments
+            .get("schema")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 /// Execute list_collections tool (vector databases).
@@ -933,6 +982,114 @@ async fn resolve_chroma_collection_uuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::connection::PoolKind;
+    #[cfg(unix)]
+    use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
+    #[cfg(unix)]
+    use crate::models::connection::{default_redis_key_separator, ConnectionConfig};
+    #[cfg(unix)]
+    use crate::storage::Storage;
+
+    #[cfg(unix)]
+    async fn spawn_recording_agent(record_path: &std::path::Path) -> (AgentDriverClient, tempfile::NamedTempFile) {
+        use std::io::Write;
+
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            script,
+            r#"import json
+import sys
+
+record_path = sys.argv[1]
+print(json.dumps({{"ready": True}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    with open(record_path, "a", encoding="utf-8") as record:
+        record.write(json.dumps(request) + "\n")
+    result = {{
+        "columns": [],
+        "column_types": [],
+        "column_sortables": [],
+        "rows": [],
+        "affected_rows": 1,
+        "execution_time_ms": 0,
+        "truncated": False,
+        "session_id": None,
+        "has_more": False
+    }}
+    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+"#
+        )
+        .unwrap();
+        script.flush().unwrap();
+
+        let client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new("python3")
+                .with_args([script.path().to_string_lossy().to_string(), record_path.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        (client, script)
+    }
+
+    #[cfg(unix)]
+    fn dameng_test_connection() -> ConnectionConfig {
+        ConnectionConfig {
+            id: "dameng-1".to_string(),
+            name: "Dameng".to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Dameng,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: "localhost".to_string(),
+            port: 5236,
+            username: "APP_USER".to_string(),
+            password: String::new(),
+            database: Some("APPDB".to_string()),
+            visible_databases: None,
+            visible_schemas: None,
+            show_system_schemas: false,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 10,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 30,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+        }
+    }
 
     #[test]
     fn vector_read_only_tools_do_not_include_collection_browsing() {
@@ -984,6 +1141,50 @@ mod tests {
         assert!(names.contains(&"explain_query"));
     }
 
+    fn query_result(columns: Vec<&str>, rows: Vec<Vec<serde_json::Value>>, affected_rows: u64) -> QueryResult {
+        QueryResult {
+            columns: columns.into_iter().map(str::to_string).collect(),
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows,
+            affected_rows,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        }
+    }
+
+    #[test]
+    fn query_result_formatter_reports_dml_affected_rows() {
+        let result = query_result(vec![], vec![], 2);
+
+        assert_eq!(format_query_result_as_text(&result, 50).unwrap(), "Query executed. 2 row(s) affected.");
+    }
+
+    #[test]
+    fn query_result_formatter_distinguishes_zero_row_dml_from_an_empty_result_set() {
+        let dml = query_result(vec![], vec![], 0);
+        let returning = query_result(vec!["id", "name"], vec![], 0);
+
+        assert_eq!(format_query_result_as_text(&dml, 50).unwrap(), "Query executed. 0 row(s) affected.");
+        assert_eq!(format_query_result_as_text(&returning, 50).unwrap(), "| id | name |\n|---|---|\n(0 rows, 1ms)");
+    }
+
+    #[test]
+    fn query_result_formatter_renders_returning_rows() {
+        let result =
+            query_result(vec!["id", "name"], vec![vec![serde_json::json!(5), serde_json::json!("returning")]], 0);
+
+        assert_eq!(
+            format_query_result_as_text(&result, 50).unwrap(),
+            "| id | name |\n|---|---|\n| 5 | returning |\n(1 rows, 1ms)"
+        );
+    }
+
     #[test]
     fn sample_data_sql_uses_database_identifier_and_limit_syntax() {
         assert_eq!(
@@ -1002,6 +1203,83 @@ mod tests {
             build_sample_data_sql(&DatabaseType::Oracle, Some("APP"), "SYS_TENANT", 20),
             "SELECT * FROM (SELECT * FROM \"APP\".\"SYS_TENANT\") WHERE ROWNUM <= 20"
         );
+    }
+
+    #[test]
+    fn selected_schema_overrides_the_tool_schema_argument() {
+        let call = ToolCall {
+            id: "call-1".to_string(),
+            name: "list_tables".to_string(),
+            arguments: serde_json::json!({ "schema": "OTHER" }),
+            provider_payload: None,
+        };
+
+        assert_eq!(effective_schema(&call, Some("REPORTING")).as_deref(), Some("REPORTING"));
+        assert_eq!(effective_schema(&call, None).as_deref(), Some("OTHER"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dameng_agent_queries_and_confirmed_writes_use_selected_schema() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let record_path = temp_dir.path().join("agent-requests.jsonl");
+        let (client, _script) = spawn_recording_agent(&record_path).await;
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let connection = dameng_test_connection();
+        state.configs.write().await.insert(connection.id.clone(), connection);
+        state.connections.write().await.insert("dameng-1:APPDB".to_string(), PoolKind::agent(client));
+
+        let read = ToolCall {
+            id: "read".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "SELECT * FROM orders" }),
+            provider_payload: None,
+        };
+        let read_result = execute_tool(
+            &read,
+            &state,
+            "dameng-1",
+            "APPDB",
+            Some("REPORTING"),
+            &DatabaseType::Dameng,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+        assert!(!read_result.is_error, "{}", read_result.content);
+
+        let confirmed_sql = "DELETE FROM orders WHERE id = 1";
+        let write = ToolCall {
+            id: "write".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": confirmed_sql }),
+            provider_payload: None,
+        };
+        let write_result = execute_tool(
+            &write,
+            &state,
+            "dameng-1",
+            "APPDB",
+            Some("REPORTING"),
+            &DatabaseType::Dameng,
+            confirmed_write_sql_permissions(false, true, Some(confirmed_sql.to_string())),
+        )
+        .await;
+        assert!(!write_result.is_error, "{}", write_result.content);
+
+        let requests = std::fs::read_to_string(&record_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|request| request["method"] == "execute_query")
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["params"]["sql"], "SELECT * FROM orders");
+        assert_eq!(requests[1]["params"]["sql"], confirmed_sql);
+        for request in requests {
+            assert_eq!(request["params"]["database"], "APPDB");
+            assert_eq!(request["params"]["schema"], "REPORTING");
+        }
     }
 
     #[test]

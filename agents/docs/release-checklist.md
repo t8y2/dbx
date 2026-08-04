@@ -166,9 +166,9 @@ git push origin "$RELEASE_TAG"
 
 The release workflow will:
 
-- Bump changed module versions in `versions.json`.
-- Build all agent shadow jars.
-- Build/download JRE `.tar.zst` artifacts.
+- Resolve the effective previous module versions from the post-release version-sync commit after the previous `agents-v*` tag.
+- Bump and build only changed Java or native agent modules.
+- Download unchanged single-driver packages and JRE archives from the previous immutable release, then verify filenames, versions, platform coverage, sizes, and SHA-256 digests before reuse.
 - Generate `agent-registry.json`.
 - Create full offline platform ZIPs from raw staging files.
 - Create one `.tar.zst` package per Java or native driver.

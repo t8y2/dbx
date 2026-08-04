@@ -219,6 +219,16 @@ test("ignores statements that are not INSERT VALUES", () => {
   assert.deepEqual(parseInsertValueHints(sql), []);
 });
 
+test("scans large procedural sources without repeatedly filtering all tokens", () => {
+  const sql = Array.from({ length: 6000 }, (_, index) => `v_value := v_value + ${index % 10};`).join("\n");
+  const startedAt = performance.now();
+  const hints = parseInsertValueHints(sql);
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.deepEqual(hints, []);
+  assert.ok(elapsedMs < 1000, `insert hint scan took ${elapsedMs.toFixed(1)}ms`);
+});
+
 test("buildInsertValueHints skips unresolved tables without metadata", () => {
   const clauses = parseInsertValuesClauses("INSERT INTO mystery VALUES (1, 2)");
   assert.deepEqual(buildInsertValueHints(clauses), []);

@@ -206,21 +206,9 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
 }
 
 async function collectSqlFilesRecursively(dir: string): Promise<string[]> {
-  const { readDir } = await import("@tauri-apps/plugin-fs");
-  const { join } = await import("@tauri-apps/api/path");
+  const collectPaths = (entries: Awaited<ReturnType<typeof api.listSqlFilesInFolder>>): string[] => entries.flatMap((entry) => (entry.is_dir ? collectPaths(entry.children) : [entry.path]));
 
-  const results: string[] = [];
-  for (const entry of await readDir(dir)) {
-    const fullPath = await join(dir, entry.name);
-    if (entry.isDirectory) {
-      results.push(...(await collectSqlFilesRecursively(fullPath)));
-      continue;
-    }
-    if (!entry.isFile) continue;
-    if (!fullPath.toLowerCase().endsWith(".sql")) continue;
-    results.push(fullPath);
-  }
-  return results;
+  return collectPaths(await api.listSqlFilesInFolder(dir));
 }
 
 async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {

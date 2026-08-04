@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { mqttPublish } from "@/lib/backend/api";
 import { Button } from "@/components/ui/button";
 import { PAYLOAD_ENCODINGS, PAYLOAD_ENCODING_LABELS, encodePayload, type PayloadEncoding } from "@/lib/mqtt/mqttPayloadCodec";
@@ -13,6 +14,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   published: [];
 }>();
+const { t } = useI18n();
 
 const topic = ref(props.initialTopic || "");
 const qos = ref<0 | 1 | 2>(0);
@@ -24,27 +26,22 @@ const error = ref<string | null>(null);
 const success = ref(false);
 
 const qosLabels = ["QoS 0", "QoS 1", "QoS 2"];
-const qosHints = ["最多一次", "至少一次", "精确一次"];
+const qosHints = computed(() => [t("connection.mqttQosAtMostOnce"), t("connection.mqttQosAtLeastOnce"), t("connection.mqttQosExactlyOnce")]);
 
 /* 根据编码格式调整输入提示和占位符 */
-const payloadPlaceholder = ref("输入消息内容...");
-watch(encoding, (enc) => {
-  switch (enc) {
+const payloadPlaceholder = computed(() => {
+  switch (encoding.value) {
     case "json":
-      payloadPlaceholder.value = '输入 JSON，例如 {"key": "value"}';
-      break;
+      return t("connection.mqttPayloadPlaceholderJson");
     case "base64":
-      payloadPlaceholder.value = "输入 Base64 编码的数据";
-      break;
+      return t("connection.mqttPayloadPlaceholderBase64");
     case "hex":
-      payloadPlaceholder.value = "输入十六进制数据，例如 48 65 6C 6C 6F";
-      break;
+      return t("connection.mqttPayloadPlaceholderHex");
     case "cbor":
     case "msgpack":
-      payloadPlaceholder.value = "输入 JSON 对象，发送时将自动编码为 " + enc.toUpperCase();
-      break;
+      return t("connection.mqttPayloadPlaceholderStructured", { encoding: encoding.value.toUpperCase() });
     default:
-      payloadPlaceholder.value = "输入消息内容...";
+      return t("connection.mqttPayloadPlaceholderPlaintext");
   }
 });
 
@@ -61,11 +58,11 @@ watch(
 async function publish() {
   const publishTopic = topic.value.trim();
   if (!publishTopic) {
-    error.value = "主题不能为空";
+    error.value = t("connection.mqttPublishTopicRequired");
     return;
   }
   if (publishTopic.includes("#") || publishTopic.includes("+")) {
-    error.value = "发布主题不能包含通配符 # 或 +，请将订阅过滤器改为具体主题后再发送";
+    error.value = t("connection.mqttPublishTopicWildcard");
     return;
   }
   loading.value = true;
@@ -76,7 +73,7 @@ async function publish() {
     await mqttPublish(props.connectionId, {
       topic: publishTopic,
       payloadBase64,
-      payloadText: encoding.value === "plaintext" || encoding.value === "json" ? payloadText.value : null,
+      payloadText: encoding.value === "plaintext" ? payloadText.value : null,
       qos: qos.value === 0 ? "atmostonce" : qos.value === 1 ? "atleastonce" : "exactlyonce",
       retain: retain.value,
     });
@@ -107,15 +104,15 @@ function clearForm() {
 <template>
   <div class="publish-panel">
     <div class="panel-header">
-      <span class="panel-title">发布消息</span>
-      <Button size="sm" variant="ghost" class="h-6 text-xs" @click="clearForm">清空</Button>
+      <span class="panel-title">{{ t("connection.mqttPublish") }}</span>
+      <Button size="sm" variant="ghost" class="h-6 text-xs" @click="clearForm">{{ t("common.clear") }}</Button>
     </div>
 
     <!-- Topic + QoS + Retain 行 -->
     <div class="form-row">
       <div class="form-group flex-1">
-        <label class="form-label">主题 (Topic)</label>
-        <input v-model="topic" class="form-input font-mono text-xs" placeholder="例如 sensors/temperature" @keydown.enter="publish()" />
+        <label class="form-label">{{ t("connection.mqttTopic") }}</label>
+        <input v-model="topic" class="form-input font-mono text-xs" :placeholder="t('connection.mqttTopicExample')" @keydown.enter="publish()" />
       </div>
     </div>
 
@@ -135,13 +132,13 @@ function clearForm() {
         <label class="form-label">&nbsp;</label>
         <label class="checkbox-label">
           <input type="checkbox" :checked="retain" @change="retain = !retain" class="form-checkbox" />
-          <span class="text-xs">保留消息</span>
+          <span class="text-xs">{{ t("connection.mqttRetainMessage") }}</span>
         </label>
       </div>
 
       <!-- 编码格式 -->
       <div class="form-group">
-        <label class="form-label">编码格式</label>
+        <label class="form-label">{{ t("connection.mqttPayloadEncoding") }}</label>
         <select v-model="encoding" class="form-select text-xs">
           <option v-for="enc in PAYLOAD_ENCODINGS" :key="enc" :value="enc">
             {{ PAYLOAD_ENCODING_LABELS[enc] }}
@@ -152,19 +149,19 @@ function clearForm() {
 
     <!-- Payload -->
     <div class="form-group flex-1 flex flex-col min-h-0">
-      <label class="form-label">消息内容 (Payload)</label>
+      <label class="form-label">{{ t("connection.mqttPayload") }}</label>
       <textarea v-model="payloadText" class="form-textarea flex-1 font-mono text-xs" :placeholder="payloadPlaceholder" rows="4" @keydown.ctrl.enter="publish()" />
-      <span class="form-hint">Ctrl+Enter 发送</span>
+      <span class="form-hint">{{ t("connection.mqttPublishShortcut") }}</span>
     </div>
 
     <!-- 状态提示 -->
     <div v-if="error" class="publish-error">{{ error }}</div>
-    <div v-if="success" class="publish-success">✓ 消息已发送</div>
+    <div v-if="success" class="publish-success">✓ {{ t("connection.mqttPublishSuccess") }}</div>
 
     <!-- 操作按钮 -->
     <div class="form-actions">
       <Button size="sm" class="publish-btn" :disabled="loading || !topic.trim()" @click="publish">
-        {{ loading ? "发送中..." : "发送消息" }}
+        {{ loading ? t("connection.mqttPublishing") : t("connection.mqttPublish") }}
       </Button>
     </div>
   </div>

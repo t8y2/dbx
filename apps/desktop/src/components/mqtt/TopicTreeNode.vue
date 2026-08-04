@@ -2,6 +2,7 @@
 import type { MqttTopicNode } from "@/types/mqtt";
 import { ChevronRight, ChevronDown, Trash2 } from "@lucide/vue";
 import { computed, ref } from "vue";
+import { useI18n } from "vue-i18n";
 
 interface Props {
   node: MqttTopicNode;
@@ -11,6 +12,7 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 const emit = defineEmits<{
   select: [topic: string];
   subscribe: [topic: string];
@@ -32,6 +34,7 @@ function collectSubscribedTopics(node: MqttTopicNode): string[] {
 }
 
 const topicsToUnsubscribe = computed(() => collectSubscribedTopics(props.node));
+const unsubscribeLabel = computed(() => (topicsToUnsubscribe.value.length === 1 ? t("connection.mqttUnsubscribeTopic", { topic: topicsToUnsubscribe.value[0] }) : t("connection.mqttUnsubscribeGroup", { count: topicsToUnsubscribe.value.length })));
 
 function toggle() {
   expanded.value = !expanded.value;
@@ -63,8 +66,8 @@ function toggle() {
         v-if="topicsToUnsubscribe.length"
         type="button"
         class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-red-500 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100 focus:opacity-100"
-        :title="topicsToUnsubscribe.length === 1 ? `取消订阅 ${topicsToUnsubscribe[0]}` : `取消此分组下的 ${topicsToUnsubscribe.length} 个订阅`"
-        :aria-label="topicsToUnsubscribe.length === 1 ? `取消订阅 ${topicsToUnsubscribe[0]}` : `取消此分组下的 ${topicsToUnsubscribe.length} 个订阅`"
+        :title="unsubscribeLabel"
+        :aria-label="unsubscribeLabel"
         @click.stop="emit('unsubscribe', topicsToUnsubscribe)"
       >
         <Trash2 class="h-3 w-3" />

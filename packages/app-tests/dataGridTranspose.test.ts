@@ -239,6 +239,10 @@ test("transpose state is preserved and clamped after record refresh", () => {
     showTranspose: true,
     transposeRowIndex: 2,
   });
+  assert.deepEqual(nextTransposeStateForRecordCount(true, 1, 4), {
+    showTranspose: true,
+    transposeRowIndex: 1,
+  });
   assert.deepEqual(nextTransposeStateForRecordCount(true, 1, 0), {
     showTranspose: false,
     transposeRowIndex: null,

@@ -203,7 +203,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
-      if (name && next !== "@" && sql[i - 1] !== "@" && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
+      if (name && next !== "@" && sql[i - 1] !== "@" && !isOracleDatabaseLinkMarker(sql, i, options?.databaseType) && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -228,6 +228,12 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
+  if (databaseType !== "oracle" || index === 0) return false;
+  const previous = sql[index - 1];
+  return PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#" || previous === '"';
 }
 
 function collectDuckDbStructFieldSeparators(sql: string): Set<number> {

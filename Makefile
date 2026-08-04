@@ -16,8 +16,8 @@ export CONFIRM
 node_modules/.modules.yaml: package.json pnpm-lock.yaml
 	$(PNPM) install --frozen-lockfile
 
-docs/node_modules/.modules.yaml: docs/package.json docs/pnpm-lock.yaml
-	cd docs && $(PNPM) install --frozen-lockfile --ignore-workspace
+docs/node_modules/.modules.yaml: docs/package.json docs/pnpm-lock.yaml docs/pnpm-workspace.yaml $(wildcard docs/patches/*.patch)
+	cd docs && $(PNPM) install --frozen-lockfile
 
 help:
 	@printf '%s\n' 'DBX development targets:'
@@ -59,7 +59,7 @@ install:
 	$(PNPM) install --frozen-lockfile
 
 docs-install:
-	cd docs && $(PNPM) install --frozen-lockfile --ignore-workspace
+	cd docs && $(PNPM) install --frozen-lockfile
 
 check-tauri-dev-port:
 	@if lsof -nP -iTCP:$(TAURI_DEV_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \

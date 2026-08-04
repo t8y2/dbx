@@ -3559,6 +3559,69 @@ fn builds_mysql_trigger_changes() {
 }
 
 #[test]
+fn unchanged_postgres_trigger_does_not_block_column_rename() {
+    let mut renamed = column("display_name");
+    renamed.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    let mut existing = trigger("users_audit", "AFTER", "UPDATE", "EXECUTE FUNCTION audit_users()");
+    existing.original = Some(TriggerInfo {
+        name: "users_audit".to_string(),
+        event: "UPDATE".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![renamed],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"users\" RENAME COLUMN \"name\" TO \"display_name\";"]);
+}
+
+#[test]
+fn changed_postgres_trigger_remains_unsupported() {
+    let mut existing = trigger("users_audit", "AFTER", "INSERT", "EXECUTE FUNCTION audit_users()");
+    existing.original = Some(TriggerInfo {
+        name: "users_audit".to_string(),
+        event: "UPDATE".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Editing triggers is not supported for postgres from this editor."]);
+}
+
+#[test]
 fn rejects_editing_existing_oracle_trigger_without_complete_source() {
     let mut existing = trigger(
         "DBX_TRIGGER_4320_AUDIT",

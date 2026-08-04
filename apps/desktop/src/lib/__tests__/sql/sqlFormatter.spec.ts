@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSqlForDisplay, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { formatSqlForDisplay, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
 
 describe("sqlFormatter", () => {
   it("maps PostgreSQL-compatible database types to the postgres formatter dialect", () => {
@@ -55,5 +55,39 @@ describe("sqlFormatter", () => {
 
     await expect(formatSqlText(oversizedSql, "postgres")).rejects.toThrow("SQL is too large to format safely.");
     await expect(formatSqlForDisplay(oversizedSql, "postgres")).resolves.toBe(oversizedSql);
+  });
+
+  it("refuses to format XML-looking input instead of corrupting it (regression: silent rewrite)", async () => {
+    const xml = `<root><item id="1">value</item></root>`;
+
+    // The SQL formatter previously accepted this and rewrote it into corrupted
+    // output (`< root > < item id = "1" > ...`). It must now be refused so no
+    // caller can ever write sql-formatter output back over the user's text.
+    await expect(formatSqlText(xml, "generic")).rejects.toBeInstanceOf(UnsupportedStructuredInputError);
+    await expect(formatSqlText(xml, "postgres")).rejects.toBeInstanceOf(UnsupportedStructuredInputError);
+  });
+
+  it("still formats selected SQL Server bracket-quoted identifiers", async () => {
+    await expect(formatSqlText(`[dbo].[orders]`, "sqlserver")).resolves.toBe(`[dbo].[orders]`);
+  });
+
+  it("still formats selected SQL comparison fragments", async () => {
+    await expect(formatSqlText(`< 10`, "postgres")).resolves.toBe(`< 10`);
+    await expect(formatSqlText(`< 10 AND score > 2`, "postgres")).resolves.toBe(`< 10\nAND score > 2`);
+  });
+
+  it("keeps display formatting lossless for XML/JSON-looking input", async () => {
+    const xml = `<root><item id="1">value</item></root>`;
+    const json = `{"a":1}`;
+
+    await expect(formatSqlForDisplay(xml, "generic")).resolves.toBe(xml);
+    await expect(formatSqlForDisplay(json, "generic")).resolves.toBe(json);
+  });
+
+  it("still formats genuine SQL that starts with a non-structured token", async () => {
+    const formatted = await formatSqlText(`SELECT '{"a":1}'::jsonb AS j FROM t`, "postgres");
+
+    expect(formatted).toContain("SELECT");
+    expect(formatted).toContain("::jsonb");
   });
 });

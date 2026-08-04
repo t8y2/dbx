@@ -110,6 +110,42 @@ describe("queryStore SQL Server explain", () => {
     await vi.waitFor(() => expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("sqlserver-1", "dbx_explain_plan_test", clientSessionId));
   });
 
+  it("switches to STATISTICS XML when the autotrace toggle is on", async () => {
+    const actualPlanSql = `SET STATISTICS XML ON;\nGO\n${sourceSql}\nGO\nSET STATISTICS XML OFF;`;
+    // STATISTICS XML runs the statement, so the row set precedes the plan.
+    const rowsResult: QueryResult = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 3 };
+    mocks.buildExplainSql.mockResolvedValue({ ok: true, sql: actualPlanSql });
+    mocks.executeMulti.mockResolvedValue([rowsResult, planResult]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo");
+
+    await store.explainTabSql(tabId, sourceSql, "sqlserver", "autotrace");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(mocks.buildExplainSql).toHaveBeenCalledWith("sqlserver", sourceSql, "json", true);
+    expect(mocks.executeQuery.mock.calls[0]?.[2]).toBe("SET STATISTICS XML ON;");
+    expect(mocks.executeQuery.mock.calls[1]?.[2]).toBe("SET STATISTICS XML OFF;");
+    expect(mocks.executeQuery.mock.calls[1]?.[5]).toMatchObject({ timeoutSecs: 5, executionMode: "simple" });
+    expect(mocks.executeMulti.mock.calls[0]?.[2]).toBe(sourceSql);
+    expect(mocks.sqlServerExplainResult).toHaveBeenCalledWith([rowsResult, planResult]);
+    expect(tab.explainSql).toBe(actualPlanSql);
+    expect(tab.explainPlan).toEqual(visualPlan);
+    expect(tab.explainError).toBeUndefined();
+  });
+
+  it("keeps SHOWPLAN when the autotrace toggle is off", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo");
+
+    await store.explainTabSql(tabId, sourceSql, "sqlserver", "explain");
+
+    expect(mocks.buildExplainSql).toHaveBeenCalledWith("sqlserver", sourceSql);
+    expect(mocks.executeQuery.mock.calls[0]?.[2]).toBe("SET SHOWPLAN_XML ON;");
+    expect(mocks.executeQuery.mock.calls[1]?.[2]).toBe("SET SHOWPLAN_XML OFF;");
+  });
+
   it("shows an execution error and still closes the SHOWPLAN session", async () => {
     mocks.sqlServerExplainResult.mockReturnValue({ error: "Invalid object name 'missing_table'" });
     const { useQueryStore } = await import("@/stores/queryStore");

@@ -47,6 +47,7 @@ const LABEL_PALETTE = [
 ];
 
 const DRIVER_DATABASE_ALIASES = {
+  "cassandra-go": "cassandra",
   gbase8a: "gbase",
   gbase8s: "gbase",
   "h2-legacy": "h2",
@@ -58,6 +59,7 @@ const DRIVER_DATABASE_ALIASES = {
   rabbitmq: "mq",
   rocketmq: "mq",
   "sqlserver-legacy": "sqlserver",
+  "vastbase-go": "vastbase",
 };
 
 const DIALECT_DATABASE_ALIASES = {

@@ -35,6 +35,7 @@ const assetIcons: Record<string, string> = {
   sqlserver: "sqlserver",
   access: "access.png",
   oceanbase: "oceanbase",
+  oceanbase_oracle: "oceanbase",
   opengauss: "opengauss",
   gaussdb: "gaussdb",
   questdb: "questdb",

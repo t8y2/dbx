@@ -539,16 +539,45 @@ func isUndefinedColumn(err error, columnName string) bool {
 }
 
 func (s *server) informationSchemaColumns(schema, table string, primary map[string]bool) ([]columnInfo, error) {
-	result, err := s.queryInformationSchemaColumns(schema, table, primary, true)
-	if err != nil && isUndefinedColumn(err, "column_type") {
-		return s.queryInformationSchemaColumns(schema, table, primary, false)
+	// Cache the optional information_schema capabilities for this connection so
+	// subsequent table metadata requests do not repeat known failing probes.
+	includeColumnType := !s.infoColumnTypeUnsupported
+	includeUdtName := !s.infoUdtNameUnsupported
+	for {
+		result, err := s.queryInformationSchemaColumns(schema, table, primary, includeColumnType, includeUdtName)
+		if err == nil {
+			return result, nil
+		}
+		switch {
+		case includeColumnType && isUndefinedColumn(err, "column_type"):
+			includeColumnType = false
+			s.infoColumnTypeUnsupported = true
+		case includeUdtName && isUndefinedColumn(err, "udt_name"):
+			includeUdtName = false
+			s.infoUdtNameUnsupported = true
+		default:
+			return nil, err
+		}
 	}
-	return result, err
 }
 
-func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeFullDataType bool) ([]columnInfo, error) {
-	fullDataTypeExpression := "c.column_type"
-	if !includeFullDataType {
+func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeColumnType, includeUdtName bool) ([]columnInfo, error) {
+	var fullDataTypeExpression string
+	switch {
+	case includeColumnType && includeUdtName:
+		fullDataTypeExpression = `CASE
+	WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED')
+		AND UPPER(COALESCE(NULLIF(TRIM(c.column_type), ''), 'USER-DEFINED')) IN ('USER-DEFINED', 'USER_DEFINED')
+	THEN c.udt_name
+	ELSE c.column_type
+	END`
+	case includeColumnType:
+		fullDataTypeExpression = "c.column_type"
+	case includeUdtName:
+		fullDataTypeExpression = `CASE
+		WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED') THEN c.udt_name
+		END AS column_type`
+	default:
 		fullDataTypeExpression = "NULL AS column_type"
 	}
 	query := fmt.Sprintf(`SELECT c.column_name, c.data_type, %s, c.is_nullable, c.column_default,

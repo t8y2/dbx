@@ -37,6 +37,7 @@ fn generate_details(tables: &[TableInfo], columns_per_table: usize) -> Vec<Table
                     is_nullable: j % 2 == 0,
                     column_default: if j == 0 { Some("0".to_string()) } else { None },
                     is_primary_key: j == 0,
+                    is_unique: false,
                     extra: None,
                     comment: None,
                     numeric_precision: if j % 3 == 0 { Some(10) } else { None },

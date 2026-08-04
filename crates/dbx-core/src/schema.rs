@@ -1,3 +1,4 @@
+use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::connection::{
     connection_url_for_endpoint, database_connection_config, gaussdb_uses_m_jdbc_driver, task_client_session_id,
     AppState, MysqlMode, PoolKind,
@@ -793,8 +794,9 @@ async fn list_schemas_once(
                                 .await
                                 .map(|schemas| filter_visible_schema_names(schemas, visible_schema_filter.as_deref()))
                                 .map_err(|fallback_error| {
-                                    format!(
-                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    crate::db::agent_driver::append_legacy_error_context(
+                                        &agent_error,
+                                        &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
                                 });
                         }
@@ -2043,7 +2045,10 @@ async fn list_tables_once(
                                 db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset).await
                             };
                             return result.map_err(|fallback_error| {
-                                format!("{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}")
+                                crate::db::agent_driver::append_legacy_error_context(
+                                    &agent_error,
+                                    &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
+                                )
                             });
                         }
                     }
@@ -3052,7 +3057,10 @@ for line in sys.stdin:
 
         let error = super::get_table_ddl_core(&state, "conn", "analytics", "APP", "EVENTS", None).await.unwrap_err();
 
-        assert_eq!(crate::db::agent_driver::agent_rpc_error_category(&error).as_deref(), Some("timeout"));
+        assert_eq!(
+            crate::db::agent_driver::try_agent_error_from_legacy(&error).and_then(|error| error.category()),
+            Some(crate::db::agent_driver::AgentErrorCategory::Timeout)
+        );
         assert_eq!(std::fs::read_to_string(call_count_path).unwrap(), "1");
         assert!(!state.connections.read().await.contains_key(pool_key));
         runtime.kill();
@@ -4686,8 +4694,9 @@ async fn list_objects_once(
                         {
                             return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list).map_err(
                                 |fallback_error| {
-                                    format!(
-                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    crate::db::agent_driver::append_legacy_error_context(
+                                        &agent_error,
+                                        &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
                                 },
                             );
@@ -4819,8 +4828,9 @@ async fn list_completion_objects_once(
                                 .await
                                 .map(filter_completion_objects)
                                 .map_err(|fallback_error| {
-                                    format!(
-                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    crate::db::agent_driver::append_legacy_error_context(
+                                        &agent_error,
+                                        &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
                                 });
                         }
@@ -4924,19 +4934,16 @@ where
     let mut retried = false;
     loop {
         let result = operation().await;
-        let action = result
-            .as_ref()
-            .err()
-            .map(|error| metadata_error_action(db_type, error, retried))
-            .unwrap_or(MetadataErrorAction::Return);
-        match action {
+        let recovery =
+            result.as_ref().err().map(|error| metadata_recovery(db_type, error, retried)).unwrap_or_default();
+        match recovery.action {
             MetadataErrorAction::ReplaceRuntime => {
                 state
-                    .detach_metadata_pool_after_error(
+                    .detach_metadata_pool_after_recovery(
                         connection_id,
                         database,
                         client_session_id,
-                        result.as_ref().err().expect("replace-runtime action requires an error"),
+                        recovery.agent_session_id.as_deref(),
                         true,
                     )
                     .await;
@@ -4944,11 +4951,11 @@ where
             }
             MetadataErrorAction::Discard => {
                 state
-                    .detach_metadata_pool_after_error(
+                    .detach_metadata_pool_after_recovery(
                         connection_id,
                         database,
                         client_session_id,
-                        result.as_ref().err().expect("discard action requires an error"),
+                        recovery.agent_session_id.as_deref(),
                         false,
                     )
                     .await;
@@ -4959,25 +4966,26 @@ where
                 if let Err(error) =
                     state.reconnect_metadata_pool_for_session(connection_id, database, client_session_id).await
                 {
-                    match metadata_error_action(db_type, &error, true) {
+                    let reconnect_recovery = metadata_recovery(db_type, &error, true);
+                    match reconnect_recovery.action {
                         MetadataErrorAction::ReplaceRuntime => {
                             state
-                                .detach_metadata_pool_after_error(
+                                .detach_metadata_pool_after_recovery(
                                     connection_id,
                                     database,
                                     client_session_id,
-                                    &error,
+                                    reconnect_recovery.agent_session_id.as_deref(),
                                     true,
                                 )
                                 .await;
                         }
                         MetadataErrorAction::Retry | MetadataErrorAction::Discard => {
                             state
-                                .detach_metadata_pool_after_error(
+                                .detach_metadata_pool_after_recovery(
                                     connection_id,
                                     database,
                                     client_session_id,
-                                    &error,
+                                    reconnect_recovery.agent_session_id.as_deref(),
                                     false,
                                 )
                                 .await;
@@ -4992,26 +5000,48 @@ where
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum MetadataErrorAction {
     Retry,
     Discard,
     ReplaceRuntime,
+    #[default]
     Return,
 }
 
+#[derive(Debug, Default)]
+struct MetadataRecovery {
+    action: MetadataErrorAction,
+    agent_session_id: Option<String>,
+}
+
+#[cfg(test)]
 fn metadata_error_action(db_type: Option<DatabaseType>, error: &str, retried: bool) -> MetadataErrorAction {
-    if crate::db::agent_driver::agent_session_disposition(error)
-        == Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
-    {
-        MetadataErrorAction::ReplaceRuntime
-    } else if !retried && is_retryable_metadata_error(error) {
+    metadata_recovery(db_type, error, retried).action
+}
+
+fn metadata_recovery(db_type: Option<DatabaseType>, error: &str, retried: bool) -> MetadataRecovery {
+    if db_type.is_some_and(|db_type| crate::database_capabilities::is_agent_type(&db_type)) {
+        if let Some(error) = crate::db::agent_driver::try_agent_error_from_legacy(error) {
+            let agent_session_id = error.session_id().map(str::to_string);
+            let action = match RecoveryPolicy::decide(&error, RecoveryScope::ReadOnlyMetadata { retried }) {
+                RecoveryDecision::RetryReadOnlyMetadata => MetadataErrorAction::Retry,
+                RecoveryDecision::QuarantineSession => MetadataErrorAction::Discard,
+                RecoveryDecision::ReplaceRuntime => MetadataErrorAction::ReplaceRuntime,
+                RecoveryDecision::KeepSession => MetadataErrorAction::Return,
+            };
+            return MetadataRecovery { action, agent_session_id };
+        }
+    }
+
+    let action = if !retried && is_retryable_metadata_error(error) {
         MetadataErrorAction::Retry
     } else if should_discard_pool_after_error(db_type, error) {
         MetadataErrorAction::Discard
     } else {
         MetadataErrorAction::Return
-    }
+    };
+    MetadataRecovery { action, agent_session_id: None }
 }
 
 #[cfg(test)]
@@ -5025,11 +5055,9 @@ async fn replace_metadata_runtime(
 }
 
 fn is_retryable_metadata_error(error: &str) -> bool {
-    let category = crate::db::agent_driver::agent_rpc_error_category(error);
-    if let Some(category) = category {
-        return category == "connection"
-            && crate::db::agent_driver::agent_session_disposition(error)
-                == Some(crate::db::agent_driver::AgentSessionDisposition::Quarantine);
+    if let Some(error) = crate::db::agent_driver::try_agent_error_from_legacy(error) {
+        return RecoveryPolicy::decide(&error, RecoveryScope::ReadOnlyMetadata { retried: false })
+            == RecoveryDecision::RetryReadOnlyMetadata;
     }
     error == "Pool not found" || crate::query::is_connection_error(error)
 }
@@ -5294,8 +5322,9 @@ async fn get_columns_core_for_session_inner(
                                     .await
                                     .map(deduplicate_column_infos)
                                     .map_err(|fallback_error| {
-                                        format!(
-                                            "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                        crate::db::agent_driver::append_legacy_error_context(
+                                            &agent_error,
+                                            &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                         )
                                     });
                             }
@@ -5386,6 +5415,7 @@ fn deduplicate_column_infos(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo>
     for column in columns {
         if let Some(existing) = result.iter_mut().find(|existing| existing.name == column.name) {
             existing.is_primary_key |= column.is_primary_key;
+            existing.is_unique |= column.is_unique;
             existing.is_nullable &= column.is_nullable;
             merge_optional_string(&mut existing.column_default, column.column_default);
             merge_optional_string(&mut existing.extra, column.extra);
@@ -5407,6 +5437,37 @@ fn deduplicate_column_infos(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo>
         }
     }
     result
+}
+
+pub async fn get_all_columns_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+) -> Result<Vec<db::TableColumnsResult>, String> {
+    let tables = list_tables_core(state, connection_id, database, schema, None, None, None, None, None).await?;
+
+    let mut result: Vec<db::TableColumnsResult> = Vec::with_capacity(tables.len());
+    for table in tables {
+        match get_columns_core(state, connection_id, database, schema, &table.name).await {
+            Ok(columns) => {
+                result.push(db::TableColumnsResult { table_name: table.name, columns, error: None });
+            }
+            Err(e) => {
+                log::warn!(
+                    "[schema][get_all_columns] connection_id={} database={} schema={} table={} error={}",
+                    connection_id,
+                    database,
+                    schema,
+                    table.name,
+                    e
+                );
+                result.push(db::TableColumnsResult { table_name: table.name, columns: Vec::new(), error: Some(e) });
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn merge_optional_string(target: &mut Option<String>, candidate: Option<String>) {
@@ -6599,6 +6660,70 @@ fn first_string_cell(result: db::QueryResult) -> Result<String, String> {
         .ok_or_else(|| "Object source not found".to_string())
 }
 
+fn parse_hex_u32(value: &str, offset: usize) -> Option<u32> {
+    let end = offset.checked_add(8)?;
+    u32::from_str_radix(value.get(offset..end)?, 16).ok()
+}
+
+fn is_sql_routine_definition(source: &str) -> bool {
+    let mut words = source.split_ascii_whitespace();
+    if !words.next().is_some_and(|word| word.eq_ignore_ascii_case("CREATE")) {
+        return false;
+    }
+
+    let Some(next) = words.next() else {
+        return false;
+    };
+    let kind = if next.eq_ignore_ascii_case("OR") {
+        if !words.next().is_some_and(|word| word.eq_ignore_ascii_case("REPLACE")) {
+            return false;
+        }
+        words.next()
+    } else {
+        Some(next)
+    };
+
+    kind.is_some_and(|word| word.eq_ignore_ascii_case("FUNCTION") || word.eq_ignore_ascii_case("PROCEDURE"))
+}
+
+fn decode_opengauss_functiondef_record(source: &str) -> Option<String> {
+    const RECORD_HEADER_HEX_LEN: usize = 48;
+    const INT4_OID: u32 = 23;
+    const TEXT_OID: u32 = 25;
+
+    let hex = source.strip_prefix("0x").or_else(|| source.strip_prefix("0X"))?;
+    if hex.len() < RECORD_HEADER_HEX_LEN || !hex.is_ascii() || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    if parse_hex_u32(hex, 0)? != 2
+        || parse_hex_u32(hex, 8)? != INT4_OID
+        || parse_hex_u32(hex, 16)? != 4
+        || parse_hex_u32(hex, 24).is_none()
+        || parse_hex_u32(hex, 32)? != TEXT_OID
+    {
+        return None;
+    }
+
+    let definition_len = usize::try_from(parse_hex_u32(hex, 40)?).ok()?;
+    let expected_len = RECORD_HEADER_HEX_LEN.checked_add(definition_len.checked_mul(2)?)?;
+    if hex.len() != expected_len {
+        return None;
+    }
+
+    let definition_hex = &hex[RECORD_HEADER_HEX_LEN..];
+    let mut definition = Vec::with_capacity(definition_len);
+    for pair in definition_hex.as_bytes().chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        definition.push(u8::from_str_radix(pair, 16).ok()?);
+    }
+    let definition = String::from_utf8(definition).ok()?;
+    is_sql_routine_definition(&definition).then_some(definition)
+}
+
+fn normalize_routine_object_source(source: String) -> String {
+    decode_opengauss_functiondef_record(&source).unwrap_or(source)
+}
+
 async fn mysql_object_source(
     pool: &db::mysql::MySqlPool,
     database: &str,
@@ -6657,7 +6782,7 @@ pub async fn get_object_source_core(
     signature: Option<&str>,
     relation_name: Option<&str>,
 ) -> Result<db::ObjectSource, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
+    let mut source = retry_metadata_connection(state, connection_id, Some(database), || {
         get_object_source_once(
             state,
             connection_id,
@@ -6669,7 +6794,11 @@ pub async fn get_object_source_core(
             relation_name,
         )
     })
-    .await
+    .await?;
+    if matches!(source.object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) {
+        source.source = normalize_routine_object_source(source.source);
+    }
+    Ok(source)
 }
 
 async fn get_object_source_once(
@@ -7219,6 +7348,18 @@ mod object_source_tests {
     use super::*;
     use crate::types::ObjectSourceKind;
 
+    fn opengauss_functiondef_record_hex(headerlines: u32, definition: &[u8]) -> String {
+        let mut bytes = Vec::with_capacity(24 + definition.len());
+        bytes.extend_from_slice(&2_u32.to_be_bytes());
+        bytes.extend_from_slice(&23_u32.to_be_bytes());
+        bytes.extend_from_slice(&4_u32.to_be_bytes());
+        bytes.extend_from_slice(&headerlines.to_be_bytes());
+        bytes.extend_from_slice(&25_u32.to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(definition.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(definition);
+        format!("0x{}", crate::db::hex_encode(&bytes))
+    }
+
     #[tokio::test]
     async fn reads_sqlite_object_source_from_dotted_attached_schema() {
         let pool = db::sqlite::connect_path(":memory:").await.expect("connect primary database");
@@ -7318,6 +7459,40 @@ mod object_source_tests {
             postgres_function_object_source_sql_without_prokind("public", "recalc_score", true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND NOT p.proisagg AND NOT p.proiswindow ORDER BY p.oid LIMIT 1"
         );
+    }
+
+    #[test]
+    fn decodes_opengauss_binary_function_definition_record() {
+        let definition = "CREATE OR REPLACE FUNCTION pg_catalog.pg_table_size(regclass)\n RETURNS bigint\n LANGUAGE internal\n STRICT NOT FENCED NOT SHIPPABLE\nAS $function$pg_table_size$function$;\n";
+        let encoded = concat!(
+            "0x0000000200000017000000040000000400000019000000a8",
+            "435245415445204f52205245504c4143452046554e4354494f4e2070675f636174616c6f672e70675f7461626c655f73697a6528726567636c617373290a",
+            "2052455455524e5320626967696e740a204c414e475541474520696e7465726e616c0a20535452494354204e4f542046454e434544204e4f5420534849505041424c450a",
+            "4153202466756e6374696f6e2470675f7461626c655f73697a652466756e6374696f6e243b0a"
+        );
+
+        assert_eq!(decode_opengauss_functiondef_record(encoded).as_deref(), Some(definition));
+        assert_eq!(normalize_routine_object_source(encoded.to_string()), definition);
+    }
+
+    #[test]
+    fn preserves_text_and_malformed_opengauss_function_definitions() {
+        let postgres =
+            "CREATE OR REPLACE FUNCTION public.recalc_score() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;";
+        assert_eq!(normalize_routine_object_source(postgres.to_string()), postgres);
+
+        let ordinary_hex = "0x4352454154452046554e4354494f4e";
+        assert_eq!(normalize_routine_object_source(ordinary_hex.to_string()), ordinary_hex);
+
+        let mut truncated = opengauss_functiondef_record_hex(4, postgres.as_bytes());
+        truncated.truncate(truncated.len() - 2);
+        assert_eq!(normalize_routine_object_source(truncated.clone()), truncated);
+
+        let non_routine = opengauss_functiondef_record_hex(4, b"SELECT 1");
+        assert_eq!(normalize_routine_object_source(non_routine.clone()), non_routine);
+
+        let invalid_utf8 = opengauss_functiondef_record_hex(4, &[0xff, 0xfe]);
+        assert_eq!(normalize_routine_object_source(invalid_utf8.clone()), invalid_utf8);
     }
 
     #[test]
@@ -7674,14 +7849,18 @@ mod ddl_tests {
             "HASH ((lower(code)))",
             "RANGE (date_trunc('month'::text, created_at))",
         ] {
-            let ddl = render_postgres_table_ddl_with_partition_key(
+            let ddl = render_postgres_table_ddl_with_partition_info(
                 "public",
                 "events",
                 &[column("created_at", "timestamp without time zone")],
                 &[],
                 &[],
                 None,
-                Some(partition_key),
+                &db::postgres::PostgresTablePartitionInfo {
+                    key: Some(partition_key.to_string()),
+                    ..Default::default()
+                },
+                &db::postgres::PostgresTablePartitionLocalObjects::default(),
             );
 
             assert!(ddl.ends_with(&format!(") PARTITION BY {partition_key};\n")), "ddl: {ddl}");
@@ -7691,18 +7870,101 @@ mod ddl_tests {
 
     #[test]
     fn postgres_table_ddl_keeps_ordinary_table_unchanged() {
-        let ddl = render_postgres_table_ddl_with_partition_key(
+        let ddl = render_postgres_table_ddl_with_partition_info(
             "public",
             "users",
             &[column("id", "integer")],
             &[],
             &[],
             None,
-            None,
+            &db::postgres::PostgresTablePartitionInfo::default(),
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
         );
 
         assert!(ddl.ends_with(");\n"), "ddl: {ddl}");
         assert!(!ddl.contains("PARTITION BY"));
+    }
+
+    #[test]
+    fn postgres_table_ddl_renders_partition_children_and_subpartitions() {
+        let mut id = column("id", "integer");
+        id.is_primary_key = true;
+        let indexes = vec![db::IndexInfo {
+            name: "events_payload_idx".to_string(),
+            columns: vec!["payload".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+        }];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some("events".to_string()),
+            bound: Some("FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')".to_string()),
+            key: Some("HASH (payload)".to_string()),
+        };
+        let partition_local_objects = db::postgres::PostgresTablePartitionLocalObjects {
+            has_primary_key: true,
+            foreign_keys: BTreeSet::new(),
+            indexes: BTreeSet::from(["events_payload_idx".to_string()]),
+        };
+
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "events_2026",
+            &[id, column("payload", "text")],
+            &indexes,
+            &[],
+            None,
+            &partition_info,
+            &partition_local_objects,
+        );
+
+        assert!(ddl.starts_with(
+            "CREATE TABLE \"public\".\"events_2026\" PARTITION OF \"public\".\"events\" (\n  PRIMARY KEY (\"id\")\n)"
+        ));
+        assert!(ddl.contains("FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY HASH (payload);"));
+        assert!(ddl.contains("CREATE INDEX \"events_payload_idx\""));
+        assert!(!ddl.contains("\"payload\" text"));
+    }
+
+    #[test]
+    fn postgres_partition_ddl_skips_inherited_constraints_and_indexes() {
+        let mut id = column("id", "integer");
+        id.is_primary_key = true;
+        let indexes = vec![db::IndexInfo {
+            name: "events_2026_pkey".to_string(),
+            columns: vec!["id".to_string()],
+            is_unique: true,
+            is_primary: true,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+        }];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some("events".to_string()),
+            bound: Some("DEFAULT".to_string()),
+            key: None,
+        };
+
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "events_default",
+            &[id],
+            &indexes,
+            &[],
+            None,
+            &partition_info,
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+
+        assert_eq!(ddl, "CREATE TABLE \"public\".\"events_default\" PARTITION OF \"public\".\"events\" DEFAULT;\n");
     }
 
     #[test]
@@ -7939,24 +8201,30 @@ pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &s
 }
 
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (columns, indexes, fkeys, table_comment, partition_key, trigger_definitions) = tokio::try_join!(
+    let (columns, indexes, fkeys, table_comment, partition_info, trigger_definitions) = tokio::try_join!(
         db::postgres::get_columns(pool, schema, table),
         db::postgres::list_indexes(pool, schema, table),
         db::postgres::list_foreign_keys(pool, schema, table),
         async { db::postgres::get_table_comment(pool, schema, table).await },
-        db::postgres::get_table_partition_key(pool, schema, table),
+        db::postgres::get_table_partition_info(pool, schema, table),
         db::postgres::list_trigger_definitions(pool, schema, table),
     )?;
+    let partition_local_objects = if partition_info.is_partition {
+        db::postgres::get_table_partition_local_objects(pool, schema, table).await?
+    } else {
+        db::postgres::PostgresTablePartitionLocalObjects::default()
+    };
 
     Ok(append_postgres_trigger_definitions(
-        render_postgres_table_ddl_with_partition_key(
+        render_postgres_table_ddl_with_partition_info(
             schema,
             table,
             &columns,
             &indexes,
             &fkeys,
             table_comment.as_deref(),
-            partition_key.as_deref(),
+            &partition_info,
+            &partition_local_objects,
         ),
         &trigger_definitions,
     ))
@@ -8248,68 +8516,110 @@ pub fn render_postgres_table_ddl(
     fkeys: &[db::ForeignKeyInfo],
     table_comment: Option<&str>,
 ) -> String {
-    render_postgres_table_ddl_with_partition_key(schema, table, columns, indexes, fkeys, table_comment, None)
+    render_postgres_table_ddl_with_partition_info(
+        schema,
+        table,
+        columns,
+        indexes,
+        fkeys,
+        table_comment,
+        &db::postgres::PostgresTablePartitionInfo::default(),
+        &db::postgres::PostgresTablePartitionLocalObjects::default(),
+    )
 }
 
-fn render_postgres_table_ddl_with_partition_key(
+fn render_postgres_table_ddl_with_partition_info(
     schema: &str,
     table: &str,
     columns: &[db::ColumnInfo],
     indexes: &[db::IndexInfo],
     fkeys: &[db::ForeignKeyInfo],
     table_comment: Option<&str>,
-    partition_key: Option<&str>,
+    partition_info: &db::postgres::PostgresTablePartitionInfo,
+    partition_local_objects: &db::postgres::PostgresTablePartitionLocalObjects,
 ) -> String {
     let table_name = format!("{}.{}", pg_ident(schema), pg_ident(table));
-    let mut ddl = format!("CREATE TABLE {table_name} (\n");
-    let col_lines: Vec<String> = columns
-        .iter()
-        .map(|c| {
-            let mut line = format!("  {} {}", pg_ident(&c.name), c.data_type);
-            let generated_clause = c
-                .extra
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && value.to_ascii_lowercase().starts_with("generated "));
-            if let Some(extra) = generated_clause {
-                line.push_str(&format!(" {extra}"));
-            }
-            if !c.is_nullable {
-                line.push_str(" NOT NULL");
-            }
-            if generated_clause.is_none() {
-                if let Some(ref def) = c.column_default {
-                    line.push_str(&format!(" DEFAULT {def}"));
-                }
-            }
-            line
+    let partition_parent = partition_info
+        .is_partition
+        .then(|| {
+            Some((
+                partition_info.parent_schema.as_deref()?,
+                partition_info.parent_table.as_deref()?,
+                partition_info.bound.as_deref()?,
+            ))
         })
-        .collect();
-    ddl.push_str(&col_lines.join(",\n"));
+        .flatten();
+    let is_partition = partition_parent.is_some();
+    let mut definition_lines = if is_partition {
+        Vec::new()
+    } else {
+        columns
+            .iter()
+            .map(|c| {
+                let mut line = format!("  {} {}", pg_ident(&c.name), c.data_type);
+                let generated_clause = c
+                    .extra
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty() && value.to_ascii_lowercase().starts_with("generated "));
+                if let Some(extra) = generated_clause {
+                    line.push_str(&format!(" {extra}"));
+                }
+                if !c.is_nullable {
+                    line.push_str(" NOT NULL");
+                }
+                if generated_clause.is_none() {
+                    if let Some(ref def) = c.column_default {
+                        line.push_str(&format!(" DEFAULT {def}"));
+                    }
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+    };
 
-    let pks: Vec<&str> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect();
+    let pks: Vec<&str> = if !is_partition || partition_local_objects.has_primary_key {
+        columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect()
+    } else {
+        Vec::new()
+    };
     if !pks.is_empty() {
-        ddl.push_str(&format!(",\n  PRIMARY KEY ({})", pks.iter().map(|k| pg_ident(k)).collect::<Vec<_>>().join(", ")));
+        definition_lines
+            .push(format!("  PRIMARY KEY ({})", pks.iter().map(|key| pg_ident(key)).collect::<Vec<_>>().join(", ")));
     }
     for fk_group in group_foreign_keys_by_name(fkeys) {
         let Some(first_fk) = fk_group.first() else {
             continue;
         };
+        if is_partition && !partition_local_objects.foreign_keys.contains(&first_fk.name) {
+            continue;
+        }
         let columns = fk_group.iter().map(|fk| pg_ident(&fk.column)).collect::<Vec<_>>().join(", ");
         let ref_columns = fk_group.iter().map(|fk| pg_ident(&fk.ref_column)).collect::<Vec<_>>().join(", ");
-        ddl.push_str(&format!(
-            ",\n  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
+        definition_lines.push(format!(
+            "  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
             pg_ident(&first_fk.name),
             columns,
             pg_ident(&first_fk.ref_table),
             ref_columns
         ));
     }
-    if let Some(partition_key) = partition_key.filter(|key| !key.trim().is_empty()) {
-        ddl.push_str(&format!("\n) PARTITION BY {partition_key};\n"));
+
+    let mut ddl = if let Some((parent_schema, parent_table, bound)) = partition_parent {
+        let parent_name = format!("{}.{}", pg_ident(parent_schema), pg_ident(parent_table));
+        let definitions = if definition_lines.is_empty() {
+            String::new()
+        } else {
+            format!(" (\n{}\n)", definition_lines.join(",\n"))
+        };
+        format!("CREATE TABLE {table_name} PARTITION OF {parent_name}{definitions} {bound}")
     } else {
-        ddl.push_str("\n);\n");
+        format!("CREATE TABLE {table_name} (\n{}\n)", definition_lines.join(",\n"))
+    };
+    if let Some(partition_key) = partition_info.key.as_deref().filter(|key| !key.trim().is_empty()) {
+        ddl.push_str(&format!(" PARTITION BY {partition_key}"));
     }
+    ddl.push_str(";\n");
 
     if let Some(comment) = table_comment.filter(|comment| !comment.trim().is_empty()) {
         ddl.push_str(&format!("\nCOMMENT ON TABLE {table_name} IS {};", sql_string(comment)));
@@ -8327,6 +8637,9 @@ fn render_postgres_table_ddl_with_partition_key(
 
     for idx in indexes {
         if idx.is_primary {
+            continue;
+        }
+        if is_partition && !partition_local_objects.indexes.contains(&idx.name) {
             continue;
         }
         let unique = if idx.is_unique { "UNIQUE " } else { "" };

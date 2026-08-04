@@ -191,6 +191,7 @@ pub async fn get_columns_show_from(
                 is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
+                is_unique: key.eq_ignore_ascii_case("UNI"),
                 extra: get_opt_str(row, "Extra"),
                 comment: get_opt_str(row, "Comment")
                     .map(|s| fix_potential_double_encoding(&s))

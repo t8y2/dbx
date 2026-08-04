@@ -375,6 +375,7 @@ async function mountConfigEditor() {
           },
         }),
         basicSetup,
+        EditorState.allowMultipleSelections.of(true),
         trimmedSelectionLayer(),
         Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: "Mod-h", run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
         keymap.of([...defaultKeymap, ...historyKeymap]),

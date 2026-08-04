@@ -47,6 +47,25 @@
         root.style.colorScheme = dark ? "dark" : "light";
       })();
     </script>
+    <script data-dbx-startup-input-guard>
+      (() => {
+        const readyEvent = "dbx:startup-ready";
+        const preventStartupEscape = (event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        };
+
+        window.addEventListener("keydown", preventStartupEscape, true);
+        window.addEventListener(
+          readyEvent,
+          () => {
+            window.removeEventListener("keydown", preventStartupEscape, true);
+          },
+          { once: true },
+        );
+      })();
+    </script>
   </head>
   <body>
     <div id="root">

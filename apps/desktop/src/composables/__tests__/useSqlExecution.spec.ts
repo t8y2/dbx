@@ -245,6 +245,31 @@ describe("useSqlExecution", () => {
     expect(executeCurrentSql).toHaveBeenCalledWith(resolvedSql, { openInNewResultTab: true });
   });
 
+  it("executes Oracle database-link queries without opening the parameter dialog", async () => {
+    const sql = "SELECT 1 FROM DUAL@WDHIS160;";
+    const activeTab = ref<QueryTab | undefined>(queryTab("ORCL"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("oracle"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["1"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execution.sqlParameterNames.value).toEqual([]);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+  });
+
   it("sends native SET variables without client-side expansion", async () => {
     const activeTab = ref<QueryTab | undefined>(queryTab("app"));
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
@@ -400,14 +425,14 @@ describe("useSqlExecution", () => {
     expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: true, error: undefined }));
   });
 
-  it("continues to record active non-MySQL errors as failures", async () => {
+  it("continues to record explicitly marked non-MySQL errors as failures", async () => {
     const activeTab = ref<QueryTab | undefined>(queryTab("app"));
     const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
     const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
     const queryStore = useQueryStore();
     const historyStore = useHistoryStore();
     vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
-      if (activeTab.value) activeTab.value.result = { columns: ["Error"], rows: [["relation does not exist"]], affected_rows: 0, execution_time_ms: 1 };
+      if (activeTab.value) activeTab.value.result = { columns: ["Error"], rows: [["relation does not exist"]], affected_rows: 0, execution_time_ms: 1, execution_error: true };
     });
     const addHistory = vi.spyOn(historyStore, "add").mockResolvedValue(undefined);
 
@@ -421,6 +446,29 @@ describe("useSqlExecution", () => {
     await execution.tryExecute();
 
     expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: "relation does not exist" }));
+  });
+
+  it("does not treat an unmarked PostgreSQL Error alias as a failure", async () => {
+    const activeTab = ref<QueryTab | undefined>(queryTab("app"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const historyStore = useHistoryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["Error"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    const addHistory = vi.spyOn(historyStore, "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => "SELECT 2 AS Error"),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: true, error: undefined }));
   });
 
   it("keeps the full dangerous script and new-result-tab intent through confirmation", async () => {

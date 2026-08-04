@@ -2,13 +2,13 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-VERSION="$(grep -m1 '<version>' "$ROOT/pom.xml" | sed -E 's/.*<version>([^<]+)<.*/\1/')"
+VERSION="$(sed -nE "s/^version[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" "$ROOT/build.gradle" | head -n 1)"
 PACKAGE_DIR="$ROOT/dist/dbx-jdbc-plugin-$VERSION"
 ZIP_PATH="$ROOT/dist/dbx-jdbc-plugin-$VERSION.zip"
 LATEST_ZIP_PATH="$ROOT/dist/dbx-jdbc-plugin-latest.zip"
 
 cd "$ROOT"
-mvn -q -DskipTests package
+./gradlew -q shadowJar -x test
 
 rm -rf "$PACKAGE_DIR" "$ZIP_PATH" "$LATEST_ZIP_PATH"
 mkdir -p "$PACKAGE_DIR/bin" "$PACKAGE_DIR/lib"
@@ -17,7 +17,7 @@ cp "$ROOT/bin/dbx-jdbc-plugin" "$PACKAGE_DIR/bin/dbx-jdbc-plugin"
 cp "$ROOT/bin/dbx-jdbc-plugin.bat" "$PACKAGE_DIR/bin/dbx-jdbc-plugin.bat"
 cp "$ROOT/bin/dbx-maven-resolver" "$PACKAGE_DIR/bin/dbx-maven-resolver"
 cp "$ROOT/bin/dbx-maven-resolver.bat" "$PACKAGE_DIR/bin/dbx-maven-resolver.bat"
-cp "$ROOT/target/dbx-jdbc-plugin-$VERSION-all.jar" "$PACKAGE_DIR/lib/dbx-jdbc-plugin.jar"
+cp "$ROOT/build/libs/dbx-jdbc-plugin-all.jar" "$PACKAGE_DIR/lib/dbx-jdbc-plugin.jar"
 chmod +x "$PACKAGE_DIR/bin/dbx-jdbc-plugin"
 chmod +x "$PACKAGE_DIR/bin/dbx-maven-resolver"
 

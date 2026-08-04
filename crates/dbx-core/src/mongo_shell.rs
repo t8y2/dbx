@@ -9,7 +9,15 @@ pub enum MongoCommand {
     #[serde(rename = "use")]
     Use { database: String },
     #[serde(rename = "find")]
-    Find { collection: String, filter: String, projection: Option<String>, sort: Option<String>, skip: u64, limit: i64 },
+    Find {
+        collection: String,
+        filter: String,
+        projection: Option<String>,
+        sort: Option<String>,
+        collation: Option<String>,
+        skip: u64,
+        limit: i64,
+    },
     #[serde(rename = "findOne")]
     FindOne { collection: String, filter: String, projection: Option<String>, options: Option<String> },
     #[serde(rename = "countDocuments")]
@@ -339,11 +347,18 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             return Err("MongoDB find() accepts at most filter and projection arguments.".to_string());
         }
         let mut sort = None;
+        let mut collation = None;
         let mut skip = 0;
         let mut limit = 100;
         for (name, call_args) in chained_calls(&tail)? {
             match name.as_str() {
                 "sort" => sort = Some(normalized_json(call_args.first().map(String::as_str).unwrap_or("{}"))?),
+                "collation" => {
+                    if call_args.len() != 1 {
+                        return Err("MongoDB collation() requires one options object.".to_string());
+                    }
+                    collation = Some(normalized_json(&call_args[0])?);
+                }
                 "skip" => skip = parse_integer(&call_args, "skip")? as u64,
                 "limit" => limit = parse_integer(&call_args, "limit")?,
                 "count" if call_args.is_empty() => {
@@ -352,7 +367,7 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
                 _ => return Err(format!("Unsupported MongoDB find() chain: {name}()")),
             }
         }
-        return Ok(MongoCommand::Find { collection, filter, projection, sort, skip, limit });
+        return Ok(MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit });
     }
 
     if let Some((args, tail)) = method_call(source, prefix_end, "findOne") {
@@ -822,8 +837,25 @@ mod tests {
                 filter: r#"{"_id":{"$oid":"507f1f77bcf86cd799439011"}}"#.to_string(),
                 projection: Some(r#"{"title":1,"_id":0}"#.to_string()),
                 sort: Some(r#"{"title":1}"#.to_string()),
+                collation: None,
                 skip: 0,
                 limit: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_find_with_collation_chain() {
+        assert_eq!(
+            parse(r#"db.t_user.find({name: 'xxx'}).collation({ locale: "en", strength: 1 }).limit(20)"#).unwrap(),
+            MongoCommand::Find {
+                collection: "t_user".to_string(),
+                filter: r#"{"name":"xxx"}"#.to_string(),
+                projection: None,
+                sort: None,
+                collation: Some(r#"{"locale":"en","strength":1}"#.to_string()),
+                skip: 0,
+                limit: 20,
             }
         );
     }

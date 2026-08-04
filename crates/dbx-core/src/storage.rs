@@ -32,6 +32,8 @@ const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
+const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
+const SNIPPET_PENDING_CLEANUPS_KEY: &str = "snippet_pending_legacy_cleanups";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -50,6 +52,34 @@ pub enum DataDbImportResult {
     SkippedInvalidTarget,
     SkippedSourceEmpty,
     SkippedTargetHasData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetPendingCleanup {
+    pub snippet_id: String,
+    pub expected_content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnippetSyncState {
+    pub snippet_id: Option<String>,
+    pub pending_cleanup: Option<SnippetPendingCleanup>,
+}
+
+fn required_snippet_state_value<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{label} cannot be empty"));
+    }
+    Ok(value)
+}
+
+fn validate_snippet_pending_cleanup(mut cleanup: SnippetPendingCleanup) -> Result<SnippetPendingCleanup, String> {
+    cleanup.snippet_id = required_snippet_state_value(&cleanup.snippet_id, "legacy snippet id")?.to_string();
+    cleanup.expected_content_hash =
+        required_snippet_state_value(&cleanup.expected_content_hash, "legacy content hash")?.to_string();
+    Ok(cleanup)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1796,6 +1826,113 @@ impl Storage {
         self.save_app_settings_json(&settings).await
     }
 
+    pub async fn save_snippet_sync_id(&self, provider: &str, snippet_id: Option<&str>) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        let mut ids =
+            settings.remove(SNIPPET_SYNC_IDS_KEY).and_then(|value| value.as_object().cloned()).unwrap_or_default();
+        match snippet_id.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) => {
+                ids.insert(provider.to_string(), serde_json::Value::String(id.to_string()));
+            }
+            None => {
+                ids.remove(provider);
+            }
+        }
+        settings.insert(SNIPPET_SYNC_IDS_KEY.to_string(), serde_json::Value::Object(ids));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_snippet_sync_id(&self, provider: &str) -> Result<Option<String>, String> {
+        Ok(self.load_snippet_sync_state(provider).await?.snippet_id)
+    }
+
+    pub async fn save_snippet_migration_state(
+        &self,
+        provider: &str,
+        replacement_snippet_id: &str,
+        legacy_snippet_id: &str,
+        expected_content_hash: &str,
+    ) -> Result<(), String> {
+        let replacement_snippet_id = required_snippet_state_value(replacement_snippet_id, "replacement snippet id")?;
+        let legacy_snippet_id = required_snippet_state_value(legacy_snippet_id, "legacy snippet id")?;
+        let expected_content_hash = required_snippet_state_value(expected_content_hash, "legacy content hash")?;
+        let mut settings = self.load_app_settings_json().await?;
+        let mut ids =
+            settings.remove(SNIPPET_SYNC_IDS_KEY).and_then(|value| value.as_object().cloned()).unwrap_or_default();
+        ids.insert(provider.to_string(), serde_json::Value::String(replacement_snippet_id.to_string()));
+        settings.insert(SNIPPET_SYNC_IDS_KEY.to_string(), serde_json::Value::Object(ids));
+
+        let mut pending_cleanups = settings
+            .remove(SNIPPET_PENDING_CLEANUPS_KEY)
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        pending_cleanups.insert(
+            provider.to_string(),
+            serde_json::to_value(SnippetPendingCleanup {
+                snippet_id: legacy_snippet_id.to_string(),
+                expected_content_hash: expected_content_hash.to_string(),
+            })
+            .map_err(|e| e.to_string())?,
+        );
+        settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_snippet_sync_state(&self, provider: &str) -> Result<SnippetSyncState, String> {
+        let settings = self.load_app_settings_json().await?;
+        let snippet_id = settings
+            .get(SNIPPET_SYNC_IDS_KEY)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|ids| ids.get(provider))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let pending_cleanup = settings
+            .get(SNIPPET_PENDING_CLEANUPS_KEY)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|cleanups| cleanups.get(provider))
+            .cloned()
+            .map(serde_json::from_value::<SnippetPendingCleanup>)
+            .transpose()
+            .map_err(|e| format!("invalid pending snippet cleanup state: {e}"))?
+            .map(validate_snippet_pending_cleanup)
+            .transpose()?;
+        Ok(SnippetSyncState { snippet_id, pending_cleanup })
+    }
+
+    pub async fn clear_snippet_pending_cleanup_if_matches(
+        &self,
+        provider: &str,
+        expected: &SnippetPendingCleanup,
+    ) -> Result<bool, String> {
+        let mut settings = self.load_app_settings_json().await?;
+        let mut pending_cleanups = settings
+            .remove(SNIPPET_PENDING_CLEANUPS_KEY)
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        let Some(current) = pending_cleanups
+            .get(provider)
+            .cloned()
+            .map(serde_json::from_value::<SnippetPendingCleanup>)
+            .transpose()
+            .map_err(|e| format!("invalid pending snippet cleanup state: {e}"))?
+            .map(validate_snippet_pending_cleanup)
+            .transpose()?
+        else {
+            settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+            return Ok(false);
+        };
+        if current != *expected {
+            settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+            return Ok(false);
+        }
+        pending_cleanups.remove(provider);
+        settings.insert(SNIPPET_PENDING_CLEANUPS_KEY.to_string(), serde_json::Value::Object(pending_cleanups));
+        self.save_app_settings_json(&settings).await?;
+        Ok(true)
+    }
+
     pub async fn save_max_agent_turns(&self, max_agent_turns: u32) -> Result<(), String> {
         let mut settings = self.load_app_settings_json().await?;
         settings.insert(
@@ -2063,10 +2200,8 @@ fn ensure_mcp_connection_change_allowed_in_tx(
     Ok(())
 }
 
-fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
-    let config = config.clone().canonicalized();
-    let config_id = config.id.clone();
-    let mut sanitized = config.clone();
+fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
+    let mut sanitized = config.clone().canonicalized();
     sanitized.password = String::new();
     scrub_transport_layer_secrets(&mut sanitized);
     sanitized.redis_sentinel_password = String::new();
@@ -2075,6 +2210,13 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     scrub_mq_auth_secrets(&mut sanitized);
     scrub_mq_token_signing_secret(&mut sanitized);
     scrub_nacos_auth_secrets(&mut sanitized);
+    sanitized
+}
+
+fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
+    let config = config.clone().canonicalized();
+    let config_id = config.id.clone();
+    let sanitized = sanitized_connection_config(&config);
     let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
     tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
@@ -2292,6 +2434,65 @@ impl Storage {
             conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, connection_id])
                 .map(|_| ())
                 .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Update only the persisted driver identity for an existing connection.
+    /// This is used after runtime driver fallback and deliberately leaves all
+    /// other connection metadata and separately stored secrets untouched.
+    pub async fn save_connection_driver_profile(
+        &self,
+        expected_config: &ConnectionConfig,
+        driver_profile: Option<String>,
+        driver_label: Option<String>,
+    ) -> Result<bool, String> {
+        let expected_config = sanitized_connection_config(expected_config);
+        let connection_id = expected_config.id.clone();
+        self.with_conn(move |conn| {
+            let Some(json) = conn
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(false);
+            };
+            let current: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            let mut current_identity = sanitized_connection_config(&current);
+            let mut expected_identity = expected_config.clone();
+            current_identity.note.clear();
+            current_identity.database_info = None;
+            expected_identity.note.clear();
+            expected_identity.database_info = None;
+
+            let identity_matches = current_identity == expected_identity
+                || (current_identity.driver_profile == driver_profile
+                    && current_identity.driver_label == driver_label
+                    && {
+                        current_identity.driver_profile = expected_identity.driver_profile.clone();
+                        current_identity.driver_label = expected_identity.driver_label.clone();
+                        current_identity == expected_identity
+                    });
+            if !identity_matches {
+                return Ok(false);
+            }
+
+            if current.driver_profile == driver_profile && current.driver_label == driver_label {
+                return Ok(true);
+            }
+
+            let mut updated = sanitized_connection_config(&current);
+            updated.driver_profile = driver_profile;
+            updated.driver_label = driver_label;
+            let updated_json = serde_json::to_string(&updated).map_err(|error| error.to_string())?;
+            conn.execute(
+                "UPDATE connections SET config_json = ?1 WHERE id = ?2 AND config_json = ?3",
+                params![updated_json, connection_id, json],
+            )
+            .map(|updated| updated > 0)
+            .map_err(|error| error.to_string())
         })
         .await
     }
@@ -4221,6 +4422,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_connection_driver_profile_updates_only_the_target_metadata() {
+        let path = temp_db_path("connection-driver-profile");
+        let storage = Storage::open(&path).await.unwrap();
+        let target = mq_connection("target", "target-secret");
+        let untouched = mq_connection("untouched", "untouched-secret");
+        storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
+
+        assert!(storage
+            .save_connection_driver_profile(
+                &target,
+                Some("mongodb-legacy".to_string()),
+                Some("MongoDB (Legacy)".to_string()),
+            )
+            .await
+            .unwrap());
+        let mut wrong_type = untouched.clone();
+        wrong_type.db_type = DatabaseType::MongoDb;
+        assert!(!storage
+            .save_connection_driver_profile(&wrong_type, Some("mongodb-legacy".to_string()), None,)
+            .await
+            .unwrap());
+        let mut missing = wrong_type;
+        missing.id = "missing".to_string();
+        assert!(!storage
+            .save_connection_driver_profile(&missing, Some("mongodb-legacy".to_string()), None)
+            .await
+            .unwrap());
+
+        let loaded = storage.load_connections().await.unwrap();
+        let target = loaded.iter().find(|config| config.id == "target").unwrap();
+        assert_eq!(target.driver_profile.as_deref(), Some("mongodb-legacy"));
+        assert_eq!(target.driver_label.as_deref(), Some("MongoDB (Legacy)"));
+        assert_eq!(mq_token(target), Some("target-secret"));
+        assert_eq!(loaded.iter().find(|config| config.id == "untouched"), Some(&untouched));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connection_driver_profile_rejects_a_stale_connection_config() {
+        let path = temp_db_path("connection-driver-profile-stale");
+        let storage = Storage::open(&path).await.unwrap();
+        let original = mq_connection("target", "target-secret");
+        storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
+
+        let mut replacement = original.clone();
+        replacement.host = "replacement.example.com".to_string();
+        replacement.name = "Replacement".to_string();
+        storage.save_connections(std::slice::from_ref(&replacement)).await.unwrap();
+
+        assert!(!storage
+            .save_connection_driver_profile(
+                &original,
+                Some("mongodb-legacy".to_string()),
+                Some("MongoDB (Legacy)".to_string()),
+            )
+            .await
+            .unwrap());
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded, vec![replacement]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn save_connections_moves_mq_auth_token_to_secret_table_and_restores_it() {
         let path = temp_db_path("mq-token-secrets");
         let storage = Storage::open(&path).await.unwrap();
@@ -5619,6 +5886,30 @@ mod tests {
         storage.save_ai_global_custom_instructions("   \n  \t  ").await.unwrap();
         let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
         assert_eq!(loaded, "");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn pending_snippet_cleanup_survives_restart_and_clears_only_when_matched() {
+        let db = temp_db_path("snippet-cleanup-restart");
+        let storage = Storage::open(&db).await.unwrap();
+        storage.save_snippet_migration_state("github", "replacement-id", "legacy-id", "content-hash").await.unwrap();
+        drop(storage);
+
+        let storage = Storage::open(&db).await.unwrap();
+        let state = storage.load_snippet_sync_state("github").await.unwrap();
+        assert_eq!(state.snippet_id.as_deref(), Some("replacement-id"));
+        let pending = state.pending_cleanup.unwrap();
+        assert_eq!(pending.snippet_id, "legacy-id");
+        assert_eq!(pending.expected_content_hash, "content-hash");
+
+        let mut wrong_pending = pending.clone();
+        wrong_pending.expected_content_hash = "newer-content-hash".to_string();
+        assert!(!storage.clear_snippet_pending_cleanup_if_matches("github", &wrong_pending).await.unwrap());
+        assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_some());
+        assert!(storage.clear_snippet_pending_cleanup_if_matches("github", &pending).await.unwrap());
+        assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_none());
 
         std::fs::remove_file(&db).ok();
     }

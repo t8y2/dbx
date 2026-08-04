@@ -74,6 +74,7 @@ export interface CopyTableDataSqlOptions {
   columns?: string[];
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
+  normalizeNewTargetName?: boolean;
 }
 
 export function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {

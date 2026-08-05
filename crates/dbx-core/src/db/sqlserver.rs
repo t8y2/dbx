@@ -374,9 +374,13 @@ fn column_types_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String
 
 const SQLSERVER_MESSAGE_COLUMN: &str = "Message";
 // Tiberius 0.12.3 emits both user-visible INFO tokens and internal ENVCHANGE
-// tokens at the same tracing target/level. Keep only the TokenInfo callsite;
-// update this guard together with the pinned driver when Tiberius is upgraded.
+// tokens at the same tracing target/level. DONE tokens are also consumed before
+// QueryStream yields its next public item. Keep these callsite guards in sync
+// with the pinned driver when Tiberius is upgraded.
 const TIBERIUS_INFO_TOKEN_EVENT_LINE: u32 = 194;
+const TIBERIUS_DONE_TOKEN_EVENT_LINE: u32 = 153;
+const TIBERIUS_DONE_PROC_TOKEN_EVENT_LINE: u32 = 159;
+const TIBERIUS_DONE_IN_PROC_TOKEN_EVENT_LINE: u32 = 165;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SqlServerBatchResult {
@@ -384,30 +388,45 @@ pub(crate) struct SqlServerBatchResult {
     pub server_message: bool,
 }
 
-#[derive(Clone, Default)]
-struct SqlServerMessageLayer {
-    messages: StdArc<StdMutex<Vec<String>>>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SqlServerTdsEvent {
+    Message(String),
+    RowsAffected(u64),
 }
 
-impl<S> Layer<S> for SqlServerMessageLayer
+#[derive(Clone, Default)]
+struct SqlServerTdsEventLayer {
+    events: StdArc<StdMutex<Vec<SqlServerTdsEvent>>>,
+}
+
+impl SqlServerTdsEventLayer {
+    fn take_events(&self) -> Vec<SqlServerTdsEvent> {
+        self.events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default()
+    }
+}
+
+impl<S> Layer<S> for SqlServerTdsEventLayer
 where
     S: Subscriber,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
         let metadata = event.metadata();
-        if metadata.level() != &Level::INFO
-            || metadata.target() != "tiberius::tds::stream::token"
-            || metadata.line() != Some(TIBERIUS_INFO_TOKEN_EVENT_LINE)
-        {
+        if metadata.target() != "tiberius::tds::stream::token" {
             return;
         }
 
         let mut visitor = SqlServerMessageVisitor::default();
         event.record(&mut visitor);
-        if let Some(message) = visitor.message.filter(|message| !message.trim().is_empty()) {
-            if let Ok(mut messages) = self.messages.lock() {
-                messages.push(message);
-            }
+        let Some(message) = visitor.message.filter(|message| !message.trim().is_empty()) else {
+            return;
+        };
+        let captured = match (metadata.level(), metadata.line()) {
+            (&Level::INFO, Some(TIBERIUS_INFO_TOKEN_EVENT_LINE)) => Some(SqlServerTdsEvent::Message(message)),
+            (&Level::TRACE, Some(line)) => sqlserver_done_trace_event(line, &message),
+            _ => None,
+        };
+        if let (Some(captured), Ok(mut events)) = (captured, self.events.lock()) {
+            events.push(captured);
         }
     }
 }
@@ -425,16 +444,47 @@ impl tracing::field::Visit for SqlServerMessageVisitor {
     }
 }
 
+fn sqlserver_done_trace_event(line: u32, message: &str) -> Option<SqlServerTdsEvent> {
+    if !matches!(
+        line,
+        TIBERIUS_DONE_TOKEN_EVENT_LINE | TIBERIUS_DONE_PROC_TOKEN_EVENT_LINE | TIBERIUS_DONE_IN_PROC_TOKEN_EVENT_LINE
+    ) {
+        return None;
+    }
+    if line == TIBERIUS_DONE_PROC_TOKEN_EVENT_LINE && message.contains("BitFlags<DoneStatus>(0b0)") {
+        return None;
+    }
+    if !message.contains("Count") {
+        return None;
+    }
+
+    let rows = if message.ends_with("(1 row left)") {
+        1
+    } else if let Some(prefix) = message.strip_suffix(" rows left)") {
+        prefix.rsplit_once('(').and_then(|(_, rows)| rows.parse::<u64>().ok()).unwrap_or(0)
+    } else {
+        0
+    };
+    Some(SqlServerTdsEvent::RowsAffected(rows))
+}
+
 async fn capture_sqlserver_messages<F, T>(future: F) -> (T, Vec<String>)
 where
     F: Future<Output = T>,
 {
-    let layer = SqlServerMessageLayer::default();
-    let messages = layer.messages.clone();
+    let layer = SqlServerTdsEventLayer::default();
+    let captured = layer.clone();
     // Tiberius consumes TDS INFO tokens internally and exposes them only as
     // tracing events. Scope collection to this future to isolate connections.
     let output = future.with_subscriber(tracing_subscriber::registry().with(layer)).await;
-    let messages = messages.lock().map(|messages| messages.clone()).unwrap_or_default();
+    let messages = captured
+        .take_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            SqlServerTdsEvent::Message(message) => Some(message),
+            SqlServerTdsEvent::RowsAffected(_) => None,
+        })
+        .collect();
     (output, messages)
 }
 
@@ -1239,21 +1289,81 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
     }
 }
 
-async fn collect_result_sets_limited(
+fn push_sqlserver_ordered_result_set(
+    results: &mut Vec<SqlServerBatchResult>,
+    result: Option<SqlServerResultSet>,
+    start: Instant,
+) {
+    let mut query_results = Vec::with_capacity(1);
+    push_sqlserver_result_set(&mut query_results, result, start);
+    results.extend(query_results.into_iter().map(|result| SqlServerBatchResult { result, server_message: false }));
+}
+
+fn push_sqlserver_ordered_events(
+    results: &mut Vec<SqlServerBatchResult>,
+    current: &mut Option<SqlServerResultSet>,
+    events: Vec<SqlServerTdsEvent>,
+    start: Instant,
+) {
+    if events.is_empty() {
+        return;
+    }
+    push_sqlserver_ordered_result_set(results, current.take(), start);
+
+    let mut messages = Vec::new();
+    for event in events {
+        match event {
+            SqlServerTdsEvent::Message(message) => messages.push(message),
+            SqlServerTdsEvent::RowsAffected(affected_rows) => {
+                if let Some(message_result) = server_messages_query_result(std::mem::take(&mut messages), start) {
+                    results.push(message_result);
+                }
+                results.push(SqlServerBatchResult {
+                    result: QueryResult {
+                        columns: vec![],
+                        column_types: vec![],
+                        column_sortables: vec![],
+                        spatial_columns: vec![],
+                        spatial_values: vec![],
+                        rows: vec![],
+                        affected_rows,
+                        execution_time_ms: start.elapsed().as_millis(),
+                        truncated: false,
+                        session_id: None,
+                        has_more: false,
+                        elasticsearch_raw_body: None,
+                    },
+                    server_message: false,
+                });
+            }
+        }
+    }
+    if let Some(message_result) = server_messages_query_result(messages, start) {
+        results.push(message_result);
+    }
+}
+
+async fn collect_ordered_result_sets_limited(
     mut stream: QueryStream<'_>,
     start: Instant,
     max_rows: Option<usize>,
     result_offset: usize,
-) -> Result<Vec<QueryResult>, String> {
+    event_layer: SqlServerTdsEventLayer,
+) -> Result<Vec<SqlServerBatchResult>, String> {
     let row_limit = query_result_row_limit(max_rows);
     let mut results = Vec::new();
     let mut current: Option<SqlServerResultSet> = None;
     let mut saw_result_set = false;
 
-    while let Some(item) = stream.try_next().await.map_err(|e| e.to_string())? {
+    loop {
+        let item = stream.try_next().await.map_err(|e| e.to_string())?;
+        push_sqlserver_ordered_events(&mut results, &mut current, event_layer.take_events(), start);
+        let Some(item) = item else {
+            break;
+        };
         match item {
             QueryItem::Metadata(metadata) => {
-                push_sqlserver_result_set(&mut results, current.take(), start);
+                push_sqlserver_ordered_result_set(&mut results, current.take(), start);
                 let remaining_offset = if saw_result_set { 0 } else { result_offset };
                 saw_result_set = true;
                 current = Some(SqlServerResultSet {
@@ -1286,7 +1396,7 @@ async fn collect_result_sets_limited(
         }
     }
 
-    push_sqlserver_result_set(&mut results, current, start);
+    push_sqlserver_ordered_result_set(&mut results, current, start);
     Ok(results)
 }
 
@@ -2650,22 +2760,21 @@ pub(crate) async fn execute_simple_batch_with_max_rows_metadata(
 ) -> Result<Vec<SqlServerBatchResult>, String> {
     let start = Instant::now();
     let result_offset = crate::query_result_sql::sqlserver_result_offset(sql);
-    let (results, messages) = capture_sqlserver_messages(async {
+    let layer = SqlServerTdsEventLayer::default();
+    let captured = layer.clone();
+    let results = async {
         let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-        sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows, result_offset)).await
-    })
+        sqlserver_driver_result(collect_ordered_result_sets_limited(stream, start, max_rows, result_offset, captured))
+            .await
+    }
+    .with_subscriber(tracing_subscriber::registry().with(layer))
     .await;
-    let mut results: Vec<SqlServerBatchResult> = results?
-        .into_iter()
-        .map(|mut result| {
-            strip_dbx_sqlserver_row_number_column(&mut result, sql);
-            SqlServerBatchResult { result, server_message: false }
-        })
-        .collect();
+    let mut results = results?;
+    for result in &mut results {
+        strip_dbx_sqlserver_row_number_column(&mut result.result, sql);
+    }
 
-    if let Some(message_result) = server_messages_query_result(messages, start) {
-        results.push(message_result);
-    } else if results.is_empty() {
+    if results.is_empty() {
         results.push(SqlServerBatchResult {
             result: QueryResult {
                 columns: vec![],
@@ -2737,12 +2846,17 @@ fn is_dbx_sqlserver_row_number_page_sql(sql: &str) -> bool {
 fn sqlserver_batch_can_use_execute(sql: &str) -> bool {
     let contains_transaction_control = contains_transaction_control(sql);
     !requires_simple_query_batch(sql)
+        && !sqlserver_batch_may_emit_info_messages(sql)
         // Tiberius executes this path through an RPC. SQL Server rejects an RPC
         // that changes @@TRANCOUNT with error 266, while a regular batch is allowed
         // to leave an explicit transaction open for a later COMMIT or ROLLBACK.
         && (!contains_transaction_control || sqlserver_balanced_transaction_batch_can_use_execute(sql))
         && !sqlserver_batch_may_return_result_set(sql)
         && !sqlserver_dml_output_returns_rows(sql)
+}
+
+fn sqlserver_batch_may_emit_info_messages(sql: &str) -> bool {
+    top_level_sqlserver_tokens(sql).iter().any(|token| matches!(token.text.as_str(), "PRINT" | "RAISERROR" | "DBCC"))
 }
 
 fn sqlserver_balanced_transaction_batch_can_use_execute(sql: &str) -> bool {
@@ -2941,17 +3055,18 @@ mod tests {
     use super::{
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, completion_context_from_query_result,
         decode_sqlserver_spatial_values, format_sqlserver_numeric, is_blocking_sqlserver_unsafe_probe_error,
-        is_sqlserver_spatial_column, is_sqlserver_variant_column, query_result_with_server_messages,
-        query_result_with_server_messages_metadata, requires_simple_query_batch,
+        is_sqlserver_spatial_column, is_sqlserver_variant_column, push_sqlserver_ordered_events,
+        query_result_with_server_messages, query_result_with_server_messages_metadata, requires_simple_query_batch,
         restore_sqlserver_legacy_probe_output_names, restore_sqlserver_spatial_column_types,
         sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
-        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error,
-        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
-        sqlserver_legacy_probe_with_nonce, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
-        sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate,
-        sqlserver_spatial_marker, sqlserver_supports_session_database_switch, sqlserver_table_comment_sql,
-        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerResultSet, SqlServerSpatialColumn,
+        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_done_trace_event,
+        sqlserver_filter_definition_error, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
+        sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
+        sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
+        sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
+        sqlserver_supports_session_database_switch, sqlserver_table_comment_sql, sqlserver_triggers_sql,
+        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
+        SqlServerProbeOutputNameOverride, SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent,
         SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
@@ -3039,6 +3154,97 @@ mod tests {
         assert!(!result.server_message);
         assert_eq!(result.result.columns, vec!["id"]);
         assert_eq!(result.result.rows, vec![vec![serde_json::json!(1)]]);
+    }
+
+    #[test]
+    fn sqlserver_done_trace_events_keep_valid_update_counts() {
+        assert_eq!(
+            sqlserver_done_trace_event(
+                super::TIBERIUS_DONE_TOKEN_EVENT_LINE,
+                "Done with status BitFlags<DoneStatus>(0b10001, More | Count) (2 rows left)",
+            ),
+            Some(SqlServerTdsEvent::RowsAffected(2))
+        );
+        assert_eq!(
+            sqlserver_done_trace_event(
+                super::TIBERIUS_DONE_IN_PROC_TOKEN_EVENT_LINE,
+                "Done with status BitFlags<DoneStatus>(0b10000, Count)",
+            ),
+            Some(SqlServerTdsEvent::RowsAffected(0))
+        );
+        assert_eq!(
+            sqlserver_done_trace_event(
+                super::TIBERIUS_DONE_PROC_TOKEN_EVENT_LINE,
+                "Done with status BitFlags<DoneStatus>(0b0)",
+            ),
+            None
+        );
+        assert_eq!(
+            sqlserver_done_trace_event(
+                super::TIBERIUS_DONE_TOKEN_EVENT_LINE,
+                "Done with status BitFlags<DoneStatus>(0b1, More)",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn sqlserver_ordered_events_preserve_message_result_and_count_order() {
+        let start = Instant::now();
+        let mut results = Vec::new();
+        let mut current = None;
+
+        push_sqlserver_ordered_events(
+            &mut results,
+            &mut current,
+            vec![SqlServerTdsEvent::Message("before".to_string())],
+            start,
+        );
+        current = Some(SqlServerResultSet {
+            columns: vec!["first".to_string()],
+            column_types: vec!["int".to_string()],
+            rows: vec![vec![serde_json::json!(1)]],
+            truncated: false,
+            remaining_offset: 0,
+        });
+        push_sqlserver_ordered_events(
+            &mut results,
+            &mut current,
+            vec![SqlServerTdsEvent::Message("between".to_string())],
+            start,
+        );
+        current = Some(SqlServerResultSet {
+            columns: vec!["second".to_string()],
+            column_types: vec!["int".to_string()],
+            rows: vec![vec![serde_json::json!(2)]],
+            truncated: false,
+            remaining_offset: 0,
+        });
+        push_sqlserver_ordered_events(
+            &mut results,
+            &mut current,
+            vec![
+                SqlServerTdsEvent::Message("after one".to_string()),
+                SqlServerTdsEvent::Message("after two".to_string()),
+                SqlServerTdsEvent::RowsAffected(3),
+            ],
+            start,
+        );
+
+        assert_eq!(results.len(), 6);
+        assert!(results[0].server_message);
+        assert_eq!(results[0].result.rows, vec![vec![serde_json::json!("before")]]);
+        assert_eq!(results[1].result.columns, vec!["first"]);
+        assert!(results[2].server_message);
+        assert_eq!(results[2].result.rows, vec![vec![serde_json::json!("between")]]);
+        assert_eq!(results[3].result.columns, vec!["second"]);
+        assert!(results[4].server_message);
+        assert_eq!(
+            results[4].result.rows,
+            vec![vec![serde_json::json!("after one")], vec![serde_json::json!("after two")]]
+        );
+        assert_eq!(results[5].result.affected_rows, 3);
+        assert!(!results[5].server_message);
     }
 
     #[test]
@@ -3193,6 +3399,11 @@ mod tests {
         assert!(sqlserver_batch_can_use_execute(
             "MERGE dbo.t AS t USING dbo.s AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name;"
         ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "PRINT N'before'; UPDATE dbo.users SET active = 0 WHERE id = 1; PRINT N'after';"
+        ));
+        assert!(!sqlserver_batch_can_use_execute("DBCC CHECKIDENT ('dbo.users', NORESEED);"));
+        assert!(!sqlserver_batch_can_use_execute("RAISERROR(N'progress', 0, 1) WITH NOWAIT;"));
     }
 
     #[test]

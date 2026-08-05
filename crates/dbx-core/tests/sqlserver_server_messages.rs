@@ -1,24 +1,21 @@
 use dbx_core::db::sqlserver;
 use std::time::Duration;
 
-#[tokio::test]
-#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
-async fn sqlserver_dbcc_messages_do_not_replace_results_or_errors() {
+async fn connect_sqlserver() -> sqlserver::SqlServerClient {
     let host = std::env::var("DBX_TEST_SQLSERVER_HOST").expect("DBX_TEST_SQLSERVER_HOST");
     let port = std::env::var("DBX_TEST_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
     let user = std::env::var("DBX_TEST_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_TEST_SQLSERVER_PASSWORD").expect("DBX_TEST_SQLSERVER_PASSWORD");
-    let mut client = sqlserver::connect_with_port_explicit(
-        &host,
-        port,
-        true,
-        &user,
-        &password,
-        Some("master"),
-        Duration::from_secs(15),
-    )
-    .await
-    .expect("connect to SQL Server");
+    let database = std::env::var("DBX_TEST_SQLSERVER_DATABASE").unwrap_or_else(|_| "master".to_string());
+    sqlserver::connect_with_port_explicit(&host, port, true, &user, &password, Some(&database), Duration::from_secs(15))
+        .await
+        .expect("connect to SQL Server")
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_dbcc_messages_do_not_replace_results_or_errors() {
+    let mut client = connect_sqlserver().await;
 
     let table = "dbo.dbx_issue_3583_messages";
     let setup = format!(
@@ -72,4 +69,55 @@ async fn sqlserver_dbcc_messages_do_not_replace_results_or_errors() {
     assert!(!error.trim().is_empty());
 
     sqlserver::execute_query(&mut client, &format!("DROP TABLE {table}")).await.expect("clean up DBCC fixture");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_print_messages_keep_tds_order_around_results_and_counts() {
+    let mut client = connect_sqlserver().await;
+
+    let result_order = sqlserver::execute_batch(
+        &mut client,
+        "SET NOCOUNT ON; \
+         PRINT N'before'; \
+         SELECT CAST(1 AS int) AS first; \
+         PRINT N'between'; \
+         SELECT CAST(2 AS int) AS second; \
+         PRINT N'after one'; \
+         PRINT N'after two';",
+    )
+    .await
+    .expect("execute PRINT and result-set batch");
+
+    assert_eq!(result_order.len(), 5, "unexpected ordered results: {result_order:?}");
+    assert_eq!(result_order[0].columns, vec!["Message"]);
+    assert_eq!(result_order[0].rows, vec![vec![serde_json::json!("before")]]);
+    assert_eq!(result_order[1].columns, vec!["first"]);
+    assert_eq!(result_order[2].rows, vec![vec![serde_json::json!("between")]]);
+    assert_eq!(result_order[3].columns, vec!["second"]);
+    assert_eq!(result_order[4].rows, vec![vec![serde_json::json!("after one")], vec![serde_json::json!("after two")]]);
+
+    sqlserver::execute_simple_batch_with_max_rows(
+        &mut client,
+        "SET NOCOUNT ON; \
+         CREATE TABLE #dbx_print_order (id int NOT NULL PRIMARY KEY, value int NOT NULL); \
+         INSERT INTO #dbx_print_order VALUES (1, 0), (2, 0); \
+         SET NOCOUNT OFF;",
+        None,
+    )
+    .await
+    .expect("create PRINT ordering fixture");
+    let count_order = sqlserver::execute_batch(
+        &mut client,
+        "PRINT N'before update'; \
+         UPDATE #dbx_print_order SET value = value + 1; \
+         PRINT N'after update';",
+    )
+    .await
+    .expect("execute PRINT and update-count batch");
+
+    assert_eq!(count_order.len(), 3, "unexpected message/count order: {count_order:?}");
+    assert_eq!(count_order[0].rows, vec![vec![serde_json::json!("before update")]]);
+    assert_eq!(count_order[1].affected_rows, 2);
+    assert_eq!(count_order[2].rows, vec![vec![serde_json::json!("after update")]]);
 }

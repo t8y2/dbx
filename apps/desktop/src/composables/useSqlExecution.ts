@@ -228,7 +228,11 @@ export function useSqlExecution(deps: {
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
     });
     if (producedResult === false) return;
-    if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
+    const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
+    if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
+      queryStore.setActiveResultIndex(tab.id, sqlServerMessageResultIndex);
+      deps.activeOutputView.value = "result";
+    } else if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
       deps.activeOutputView.value = "result";
     } else if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";

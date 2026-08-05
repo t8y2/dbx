@@ -173,7 +173,7 @@ class InformixAgentTest {
     }
 
     @Test
-    void listsSchemasFromUserTableOwnersOnly() {
+    void listsSchemasFromTableAndRoutineOwnersWithoutLoginFallback() {
         InformixAgent agent = new InformixAgent();
         java.sql.Connection connection = JdbcMetadataSqlFake.connection();
         TestSupport.setPrivateConnection(agent, connection);
@@ -184,14 +184,16 @@ class InformixAgentTest {
         Assertions.assertEquals(List.of(), agent.listSchemas());
 
         Assertions.assertEquals(
-            List.of("SELECT DISTINCT owner FROM systables WHERE tabid >= 100 AND owner IS NOT NULL ORDER BY owner"),
+            List.of("SELECT owner FROM systables WHERE tabid >= 100 AND owner IS NOT NULL "
+                    + "UNION SELECT owner FROM sysprocedures WHERE owner IS NOT NULL ORDER BY owner"),
             JdbcMetadataSqlFake.statements
         );
         Assertions.assertEquals(
             List.of("table_owner", "routine_owner"),
             InformixAgent.normalizeSchemaOwners(List.of("table_owner", "routine_owner", "routine_owner", " "))
         );
-        Assertions.assertFalse(InformixAgent.schemaCatalogSql().contains("sysprocedures"));
+        Assertions.assertTrue(InformixAgent.schemaCatalogSql().contains("sysprocedures"));
+        Assertions.assertFalse(InformixAgent.normalizeSchemaOwners(List.of("routine_owner", " ")).contains("current_owner"));
         Assertions.assertNotEquals(InformixAgent.databaseCatalogSql(), InformixAgent.schemaCatalogSql());
     }
 

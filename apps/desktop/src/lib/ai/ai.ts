@@ -379,10 +379,7 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
     ];
   }
 
-  return [
-    isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run.",
-    currentTimeGuidance,
-  ];
+  return [isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run.", currentTimeGuidance];
 }
 
 function currentTimeToolGuidance(): string {

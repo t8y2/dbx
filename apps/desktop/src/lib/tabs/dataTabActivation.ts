@@ -1,20 +1,18 @@
-import type { QueryResult, QueryTab } from "@/types/database";
+import type { QueryTab } from "@/types/database";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import type { DataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 
 export type DataTableDoubleClickAction = "activate" | "open" | "none";
 
-function isErrorResult(result: QueryResult | undefined): boolean {
-  return result?.columns.length === 1 && result.columns[0] === "Error";
-}
-
 export function canActivateExistingDataTableTab(tab: QueryTab, options: { activateExecuting?: boolean } = {}): boolean {
   if (tab.isExecuting) return options.activateExecuting !== false;
-  if (isErrorResult(tab.result)) return false;
+  if (tab.result && isQueryExecutionErrorResult(tab.result)) return false;
   return !!tab.result || !!tab.results?.length;
 }
 
-export function dataTableDoubleClickAction(tab: QueryTab | undefined, activation: "single" | "double", reuseDataTab = true): DataTableDoubleClickAction {
+export function dataTableDoubleClickAction(tab: QueryTab | undefined, activation: "single" | "double", reuseMode: DataTabReuseMode = "same-table"): DataTableDoubleClickAction {
   if (activation === "single") return "none";
-  if (!reuseDataTab) return "open";
+  if (reuseMode === "always-new") return "open";
   if (!tab) return activation === "double" ? "open" : "none";
   if (!canActivateExistingDataTableTab(tab)) return "open";
   return "activate";

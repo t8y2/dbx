@@ -231,6 +231,7 @@ fn column_info_serialization_roundtrip() {
         is_nullable: false,
         column_default: None,
         is_primary_key: true,
+        is_unique: true,
         extra: None,
         comment: None,
         numeric_precision: Some(10),
@@ -241,9 +242,65 @@ fn column_info_serialization_roundtrip() {
         collation: None,
     };
     let json = serde_json::to_value(&col).unwrap();
+    assert_eq!(json.get("is_unique"), Some(&serde_json::json!(true)));
     let deserialized: ColumnInfo = serde_json::from_value(json).unwrap();
     assert_eq!(col.name, deserialized.name);
     assert_eq!(col.numeric_precision, deserialized.numeric_precision);
+    assert!(deserialized.is_unique);
+
+    let legacy = serde_json::json!({
+        "name": "email",
+        "data_type": "varchar",
+        "is_nullable": true,
+        "column_default": null,
+        "is_primary_key": false,
+        "extra": null,
+        "comment": null,
+        "numeric_precision": null,
+        "numeric_scale": null,
+        "character_maximum_length": 255
+    });
+    let from_legacy: ColumnInfo = serde_json::from_value(legacy).unwrap();
+    assert!(!from_legacy.is_unique);
+}
+
+/// TableColumnsResult (get_all_columns) uses snake_case `table_name`, not camelCase.
+#[test]
+fn table_columns_result_serialization_contract() {
+    use dbx_core::db::TableColumnsResult;
+
+    let result = TableColumnsResult {
+        table_name: "users".to_string(),
+        columns: vec![ColumnInfo {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            is_nullable: false,
+            column_default: None,
+            is_primary_key: true,
+            is_unique: false,
+            extra: None,
+            comment: None,
+            numeric_precision: None,
+            numeric_scale: None,
+            character_maximum_length: None,
+            enum_values: None,
+            character_set: None,
+            collation: None,
+        }],
+        error: Some("partial".to_string()),
+    };
+    let json = serde_json::to_value(&result).unwrap();
+    let obj = json.as_object().expect("object");
+    assert!(obj.contains_key("table_name"));
+    assert!(!obj.contains_key("tableName"));
+    assert!(obj.contains_key("columns"));
+    assert!(obj.contains_key("error"));
+    assert_eq!(json["columns"][0]["is_unique"], false);
+
+    let roundtrip: TableColumnsResult = serde_json::from_value(json).unwrap();
+    assert_eq!(roundtrip.table_name, "users");
+    assert_eq!(roundtrip.error.as_deref(), Some("partial"));
+    assert_eq!(roundtrip.columns.len(), 1);
 }
 
 // ============================================================================

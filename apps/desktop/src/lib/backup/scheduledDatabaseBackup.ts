@@ -8,11 +8,38 @@ export const DATABASE_BACKUP_CONFIG_CHANGED_EVENT = "dbx:database-backup-config-
 export const MAX_DATABASE_BACKUP_HISTORY = 200;
 
 export type DatabaseBackupFrequency = "hourly" | "daily" | "weekly";
+export type DatabaseBackupExportStatus = "Running" | "Done" | "Error" | "Cancelled";
 export type DatabaseBackupRunStatus = "running" | "success" | "failed" | "cancelled";
 export type DatabaseBackupRunTrigger = "manual" | "scheduled";
 export type DatabaseBackupTableFilterMode = "all" | "include" | "exclude";
 
 const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres"]);
+
+export class DatabaseBackupConnectionQueue {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async run<T>(connectionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(connectionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.tails.set(connectionId, tail);
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.tails.get(connectionId) === tail) this.tails.delete(connectionId);
+    }
+  }
+}
+
+export function databaseBackupAggregateExportStatus(status: DatabaseBackupExportStatus, isFinal: boolean): DatabaseBackupExportStatus {
+  return isFinal ? status : "Running";
+}
 
 export function supportsScheduledDatabaseBackup(databaseType: string | undefined): boolean {
   return !!databaseType && CONSISTENT_BACKUP_DATABASE_TYPES.has(databaseType);
@@ -115,6 +142,7 @@ export interface DatabaseBackupRun {
   id: string;
   scheduleId: string;
   scheduleName: string;
+  displayName?: string;
   connectionId: string;
   connectionName: string;
   trigger: DatabaseBackupRunTrigger;
@@ -122,7 +150,19 @@ export interface DatabaseBackupRun {
   startedAt: string;
   completedAt?: string;
   files: DatabaseBackupFile[];
+  progressPercent?: number;
   error?: string;
+}
+
+export interface DatabaseBackupProgressInput {
+  completedDatabases: number;
+  totalDatabases: number;
+  completedExports: number;
+  totalExports: number;
+  currentObjectIndex?: number;
+  currentTotalObjects?: number;
+  currentExportComplete?: boolean;
+  backupComplete?: boolean;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -246,6 +286,7 @@ export function normalizeDatabaseBackupRun(value: unknown): DatabaseBackupRun | 
     id,
     scheduleId,
     scheduleName: stringValue(input.scheduleName).trim() || "Database backup",
+    displayName: stringValue(input.displayName).trim() || undefined,
     connectionId: stringValue(input.connectionId).trim(),
     connectionName: stringValue(input.connectionName).trim(),
     trigger: input.trigger === "scheduled" ? "scheduled" : "manual",
@@ -253,8 +294,25 @@ export function normalizeDatabaseBackupRun(value: unknown): DatabaseBackupRun | 
     startedAt,
     completedAt: typeof input.completedAt === "string" && Number.isFinite(Date.parse(input.completedAt)) ? input.completedAt : undefined,
     files: Array.isArray(input.files) ? input.files.map(normalizeDatabaseBackupFile).filter((file): file is DatabaseBackupFile => !!file) : [],
+    progressPercent: input.progressPercent === undefined ? undefined : boundedInteger(input.progressPercent, 0, 0, 100),
     error: stringValue(input.error).trim() || undefined,
   };
+}
+
+export function databaseBackupProgressPercent(input: DatabaseBackupProgressInput): number {
+  if (input.backupComplete) return 100;
+
+  const totalDatabases = Math.max(1, Math.round(input.totalDatabases));
+  const completedDatabases = Math.max(0, Math.min(totalDatabases, Math.round(input.completedDatabases)));
+  const totalExports = Math.max(0, Math.round(input.totalExports));
+  const completedExports = Math.max(0, Math.min(totalExports, Math.round(input.completedExports)));
+  const totalObjects = Math.max(0, Math.round(input.currentTotalObjects ?? 0));
+  const objectIndex = Math.max(0, Math.min(totalObjects, Math.round(input.currentObjectIndex ?? 0)));
+  const currentExportFraction = input.currentExportComplete ? 1 : totalObjects > 0 ? objectIndex / totalObjects : 0;
+  const currentDatabaseFraction = totalExports > 0 ? Math.min(1, (completedExports + currentExportFraction) / totalExports) : 0;
+  const overallFraction = Math.min(1, (completedDatabases + currentDatabaseFraction) / totalDatabases);
+
+  return Math.min(99, Math.max(0, Math.round(overallFraction * 100)));
 }
 
 function parseStoredArray(key: string): unknown[] {

@@ -103,9 +103,9 @@ export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "conn
   return { metadata: hit.value, cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
 }
 
-export function tableMetadataToDataTabMeta(metadata: TableMetadata, schema = metadata.schema): NonNullable<QueryTab["tableMeta"]> {
+export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: { schema?: string }): NonNullable<QueryTab["tableMeta"]> {
   return {
-    schema,
+    schema: overrides ? overrides.schema : metadata.schema,
     tableName: metadata.tableName,
     tableType: metadata.tableType,
     catalog: metadata.catalog,

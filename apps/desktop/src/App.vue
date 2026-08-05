@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
-import { invoke } from "@tauri-apps/api/core";
 import { ChevronsRight } from "@lucide/vue";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import AppToolbar from "@/components/layout/AppToolbar.vue";
@@ -53,6 +52,7 @@ import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
+import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, ObjectSourceKind, QueryTab, SavedSqlFile } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
@@ -86,10 +86,11 @@ import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
-import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/connection/agentDriverUpdateBadge";
+import { countAvailableAgentDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { apiUrl, webPath } from "@/lib/common/webPath";
+import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
 import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
@@ -244,7 +245,7 @@ function updateAgentDriverUpdateCount(count: number) {
 async function refreshAgentDriverUpdateCount() {
   if (!isDesktop || !settingsStore.editorSettings.updateNotificationsEnabled) return;
   try {
-    const drivers = await invoke<AgentDriverUpdateBadgeState[]>("list_installed_agents");
+    const drivers = await api.listInstalledAgents();
     if (!settingsStore.editorSettings.updateNotificationsEnabled) return;
     updateAgentDriverUpdateCount(countAvailableAgentDriverUpdates(drivers));
   } catch {
@@ -818,6 +819,7 @@ async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: bo
   if (!tab.externalSqlPath || !isTauriRuntime()) return false;
   try {
     await api.writeExternalSqlFile(tab.externalSqlPath, tab.sql);
+    rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database: tab.database });
     queryStore.markTabClean(tab);
     toast(t("savedSql.saved"), 2000);
     if (options.closeAfterSave) queryStore.closeTab(tab.id, { force: true });
@@ -1081,12 +1083,25 @@ async function saveActiveSqlAsLocalFile() {
     const path = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), tab.sql);
     if (!path) return;
     queryStore.linkExternalSqlPath(tab.id, path, sqlFileTitleFromPath(path));
+    rememberExternalSqlFileTarget(path, { connectionId: tab.connectionId, database: tab.database });
     invalidateSaveSqlFolderSelection();
     showSaveSqlDialog.value = false;
     closePendingSavedTab();
     toast(t("savedSql.saved"), 2000);
   } catch (e: any) {
     toast(t("toolbar.sqlSaveFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
+  const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), {
+    connectionId: tab.connectionId,
+    database: tab.database,
+  });
+  if (target.connectionId !== tab.connectionId) {
+    queryStore.updateConnection(tab.id, target.connectionId, target.database);
+  } else if (target.database !== tab.database) {
+    queryStore.updateDatabase(tab.id, target.database);
   }
 }
 
@@ -1105,6 +1120,7 @@ async function openSqlFile() {
         const content = await api.readExternalSqlFile(sqlPath);
         queryStore.updateSql(tab.id, content);
         queryStore.linkExternalSqlPath(tab.id, sqlPath, sqlFileTitleFromPath(sqlPath));
+        applyExternalSqlFileTarget(tab, sqlPath);
       }
     } else {
       const input = document.createElement("input");
@@ -1159,7 +1175,8 @@ async function openSqlFilePath(path: string) {
     const connectionId = connectionStore.activeConnectionId || activeTab.value?.connectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = activeTab.value?.database || (connection ? resolveDefaultDatabase(connection, []) : "");
-    queryStore.openExternalSqlFile(connectionId, database, path, content);
+    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, content);
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
@@ -1309,7 +1326,7 @@ async function newQuery() {
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
-          message: translateBackendError(t, e?.message || String(e)),
+          message: translateBackendError(t, e),
         }),
         5000,
       );
@@ -1344,7 +1361,7 @@ async function newQuery() {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1367,7 +1384,7 @@ async function openConnectionQuery(connectionId: string) {
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
-          message: translateBackendError(t, e?.message || String(e)),
+          message: translateBackendError(t, e),
         }),
         5000,
       );
@@ -1381,7 +1398,7 @@ async function openConnectionQuery(connectionId: string) {
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
-          message: translateBackendError(t, e?.message || String(e)),
+          message: translateBackendError(t, e),
         }),
         5000,
       );
@@ -1399,7 +1416,7 @@ async function openConnectionQuery(connectionId: string) {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1471,7 +1488,7 @@ async function onClickTable(table: SqlObjectNavigationTarget) {
   try {
     await openTableTarget(target, { tableInfoTab: "ddl" });
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1481,7 +1498,7 @@ async function onViewTableData(table: SqlObjectNavigationTarget) {
   try {
     await openTableTarget(target);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1509,7 +1526,7 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
     queryEditorObjectSourceTarget.value = { connectionId: target.connectionId, database: target.database, schema: target.schema, name: target.tableName, objectType, initialEditing };
     showQueryEditorObjectSourceDialog.value = true;
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -1547,7 +1564,7 @@ async function changeActiveConnection(connectionId: string) {
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
-        message: translateBackendError(t, e?.message || String(e)),
+        message: translateBackendError(t, e),
       }),
       5000,
     );
@@ -1873,6 +1890,10 @@ function activateAdjacentTab(direction: -1 | 1): boolean {
   return activateTabByIndex(nextIndex);
 }
 
+function handleNativeSelectAll(e: KeyboardEvent) {
+  if (shouldBlockAppNativeSelectAll(e)) e.preventDefault();
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
@@ -2138,6 +2159,7 @@ onMounted(async () => {
   });
   applyTheme();
   void applyUiScale(settingsStore.editorSettings.uiScale);
+  window.addEventListener("keydown", handleNativeSelectAll, true);
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   if (isDesktop) {
@@ -2204,6 +2226,7 @@ onUnmounted(() => {
   if (updateCheckTimer) {
     clearInterval(updateCheckTimer);
   }
+  window.removeEventListener("keydown", handleNativeSelectAll, true);
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   document.removeEventListener("contextmenu", handleContextMenu);
@@ -2399,6 +2422,7 @@ onUnmounted(() => {
                             connectionId: activeTab.connectionId,
                             database: activeTab.database,
                             schema: activeTab.schema,
+                            catalog: activeTab.catalog,
                             tableName: activeTab.structureTableName || '',
                           },
                           commentChanged,

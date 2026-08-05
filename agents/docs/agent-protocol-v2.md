@@ -1,6 +1,6 @@
 # Agent Protocol v2: Multi-session runtimes
 
-Protocol v2 allows one Agent process to serve multiple isolated database sessions. The handshake advertises `protocolVersion: 2` and the `multi_session` capability. DBX falls back to the v1 one-process-per-pool lifecycle when that capability is absent.
+Protocol v2 allows one Agent process to serve multiple isolated database sessions. Pooled JDBC Agents that use the common structured error producer advertise `protocolVersion: 2`, `multi_session`, and `structured_error_v1`. Generic/custom v2 handlers may advertise only `multi_session`. DBX falls back to the v1 one-process-per-pool lifecycle when `multi_session` is absent.
 
 ## Session lifecycle
 
@@ -37,13 +37,20 @@ JSON-RPC failures may include structured recovery data:
 
 ```json
 {
+  "contractVersion": 1,
   "category": "timeout|canceled|connection|protocol|resource|sql",
   "retryable": false,
   "sessionDisposition": "keep|quarantine|replace_runtime",
   "agentSessionId": "optional-session-id",
-  "stage": "checkout|connect|validate|execute|fetch|cancel|close"
+  "stage": "request|checkout|connect|validate|execute|fetch|cancel|close",
+  "operationOutcome": "not_started|unknown",
+  "sqlState": "optional-jdbc-sql-state",
+  "vendorCode": 0,
+  "exceptionClass": "optional-java-exception-class"
 }
 ```
+
+`contractVersion: 1` is guaranteed only when the handshake advertises `structured_error_v1`. Unknown extra fields are allowed, but unknown enum values, missing required fields, invalid types, or an `agentSessionId` that does not match the current request are contract violations. `operationOutcome` describes whether the user operation may have reached the database; `retryable` is an internal hint and never authorizes automatic SQL replay.
 
 `keep` preserves the logical session, `quarantine` removes only that session from routing, and `replace_runtime` requires DBX to atomically remove every pool sharing the runtime before terminating it. Agent code reports the disposition but must not independently terminate a shared runtime because it does not own DBX routing state. Temporary workload checkout backpressure uses `category=resource`, `retryable=true`, and `sessionDisposition=keep`; only unrecoverable runtime or cleanup saturation requests `replace_runtime`.
 

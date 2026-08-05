@@ -57,6 +57,7 @@ pub async fn document_find_documents(
     filter: Option<String>,
     projection: Option<String>,
     sort: Option<String>,
+    collation: Option<String>,
     execution_id: Option<String>,
 ) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
@@ -73,6 +74,7 @@ pub async fn document_find_documents(
             filter.as_deref(),
             projection.as_deref(),
             sort.as_deref(),
+            collation.as_deref(),
         ),
     )
     .await

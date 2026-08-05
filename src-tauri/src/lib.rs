@@ -4,15 +4,17 @@ mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
 mod models;
+#[cfg(any(target_os = "windows", test))]
+mod startup_recovery;
+#[cfg(all(not(target_os = "windows"), not(test)))]
+#[path = "startup_recovery_noop.rs"]
+mod startup_recovery;
 mod window_state_guard;
 
 use commands::connection::AppState;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
-use std::ffi::OsString;
-use std::io::Write;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,12 +36,6 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
-const STARTUP_PROBE_LOG_FILE: &str = "startup.log";
-const STARTUP_PROBE_LOG_DIR_ENV: &str = "DBX_STARTUP_LOG_DIR";
-const STARTUP_PROBE_KEEP_ENV: &str = "DBX_KEEP_STARTUP_LOG";
-const WINDOWS_APP_DATA_DIR_NAME: &str = "com.dbx.app";
-#[cfg(target_os = "windows")]
-const WEBVIEW2_NO_SANDBOX_ENV: &str = "DBX_WEBVIEW2_NO_SANDBOX";
 #[cfg(target_os = "macos")]
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 #[cfg(target_os = "macos")]
@@ -123,6 +119,14 @@ fn should_enable_single_instance(debug_build: bool) -> bool {
     !debug_build
 }
 
+fn startup_data_dir_mode(mode: &data_dir::DataDirMode) -> &'static str {
+    match mode {
+        data_dir::DataDirMode::Default => "default",
+        data_dir::DataDirMode::EnvOverride => "env_override",
+        data_dir::DataDirMode::Portable { .. } => "portable",
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn development_dock_badge_label(debug_build: bool) -> Option<&'static str> {
     debug_build.then_some("DEV")
@@ -157,111 +161,13 @@ fn should_show_main_window_before_setup_tasks() -> bool {
     true
 }
 
-fn startup_probe_log_dir_from_inputs(
-    target_os: &str,
-    explicit_dir: Option<OsString>,
-    windows_appdata: Option<OsString>,
-) -> Option<PathBuf> {
-    if let Some(dir) = explicit_dir.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-    if target_os == "windows" {
-        return windows_appdata
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .map(|dir| dir.join(WINDOWS_APP_DATA_DIR_NAME));
-    }
-    None
-}
-
-fn startup_probe_log_dir() -> Option<PathBuf> {
-    startup_probe_log_dir_from_inputs(
-        std::env::consts::OS,
-        std::env::var_os(STARTUP_PROBE_LOG_DIR_ENV),
-        std::env::var_os("APPDATA"),
-    )
-}
-
-fn startup_probe_log_path() -> Option<PathBuf> {
-    startup_probe_log_dir().map(|dir| dir.join(STARTUP_PROBE_LOG_FILE))
-}
-
-fn startup_probe_should_keep_after_frontend_ready_from_value(value: Option<&str>) -> bool {
-    matches!(value, Some("1"))
-}
-
-fn startup_probe_should_keep_after_frontend_ready() -> bool {
-    startup_probe_should_keep_after_frontend_ready_from_value(std::env::var(STARTUP_PROBE_KEEP_ENV).ok().as_deref())
-}
-
-fn ensure_startup_probe_parent_dir(path: &std::path::Path) -> bool {
-    let Some(dir) = path.parent() else {
-        return false;
-    };
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    true
-}
-
-fn reset_startup_probe() {
-    let Some(path) = startup_probe_log_path() else {
-        return;
-    };
-    if !ensure_startup_probe_parent_dir(&path) {
-        return;
-    }
-    let _ = std::fs::remove_file(path);
-}
-
 fn append_startup_probe(message: impl AsRef<str>) {
-    let Some(path) = startup_probe_log_path() else {
-        return;
-    };
-    if !ensure_startup_probe_parent_dir(&path) {
-        return;
-    }
-    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
-        return;
-    };
-    let _ = writeln!(
-        file,
-        "[{}][pid={}] {}",
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-        std::process::id(),
-        message.as_ref()
-    );
+    startup_recovery::record(message);
 }
 
 pub(crate) fn clear_startup_probe_after_frontend_ready() {
-    if startup_probe_should_keep_after_frontend_ready() {
-        append_startup_probe("frontend ready; keeping startup probe by request");
-        return;
-    }
-    let Some(path) = startup_probe_log_path() else {
-        return;
-    };
-    let _ = std::fs::remove_file(path);
+    startup_recovery::mark_frontend_ready();
 }
-
-#[cfg(target_os = "windows")]
-fn configure_webview2_sandbox_compat() {
-    if !matches!(std::env::var(WEBVIEW2_NO_SANDBOX_ENV).as_deref(), Ok("1")) {
-        return;
-    }
-
-    let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-    if !args.split_whitespace().any(|arg| arg == "--no-sandbox") {
-        if !args.is_empty() {
-            args.push(' ');
-        }
-        args.push_str("--no-sandbox");
-    }
-    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn configure_webview2_sandbox_compat() {}
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
@@ -400,9 +306,12 @@ fn linux_selected_drm_render_device<'a>(
     devices.iter().find(|device| device.boot_vga).or_else(|| devices.first())
 }
 
-#[cfg(target_os = "linux")]
-fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_drm_render_devices_from_paths(
+    sys_class_drm: &std::path::Path,
+    dev_dri: &std::path::Path,
+) -> Vec<LinuxDrmRenderDevice> {
+    let Ok(entries) = std::fs::read_dir(sys_class_drm) else {
         return Vec::new();
     };
     let mut devices = entries
@@ -414,20 +323,25 @@ fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
             if render_index.is_empty() || !render_index.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
+            let device_file = dev_dri.join(node_name);
+            if std::fs::OpenOptions::new().read(true).write(true).open(&device_file).is_err() {
+                return None;
+            }
             let device_path = entry.path().join("device");
             let driver = std::fs::read_link(device_path.join("driver"))
                 .ok()
                 .and_then(|path| path.file_name().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase));
             let boot_vga = std::fs::read_to_string(device_path.join("boot_vga")).is_ok_and(|value| value.trim() == "1");
-            Some(LinuxDrmRenderDevice {
-                device_file: std::path::Path::new("/dev/dri").join(node_name),
-                driver,
-                boot_vga,
-            })
+            Some(LinuxDrmRenderDevice { device_file, driver, boot_vga })
         })
         .collect::<Vec<_>>();
     devices.sort_by(|left, right| left.device_file.cmp(&right.device_file));
     devices
+}
+
+#[cfg(target_os = "linux")]
+fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
+    linux_drm_render_devices_from_paths(std::path::Path::new("/sys/class/drm"), std::path::Path::new("/dev/dri"))
 }
 
 #[cfg(target_os = "linux")]
@@ -448,7 +362,10 @@ fn linux_nvidia_driver() -> LinuxNvidiaDriver {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&'static str, &'static str)] {
+fn linux_webkit_rendering_workarounds(
+    driver: LinuxNvidiaDriver,
+    has_render_device: bool,
+) -> &'static [(&'static str, &'static str)] {
     match driver {
         LinuxNvidiaDriver::Proprietary => {
             // NVIDIA's proprietary driver needs both DMABuf and explicit-sync
@@ -458,6 +375,14 @@ fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&
         LinuxNvidiaDriver::Nouveau => {
             // WebKitGTK's DMABuf renderer can produce a fully black WebView on
             // Nouveau while the DOM remains interactive.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        }
+        LinuxNvidiaDriver::None if !has_render_device => {
+            // No DRM render node means Mesa can only render through llvmpipe.
+            // WebKitGTK's DMABuf compositing then drives llvmpipe's gallivm
+            // LLVM JIT, which can fail to materialize the compositing shaders
+            // (blank/white window on GPU-less VMs and servers), so disable the
+            // DMABuf renderer there as well.
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         }
         LinuxNvidiaDriver::None => {
@@ -524,7 +449,8 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver()) {
+    let has_render_device = !linux_drm_render_devices().is_empty();
+    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver(), has_render_device) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -924,15 +850,15 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_system_gtk_immodules_cache,
-        linux_appimage_wayland_backend_override, linux_nvidia_driver_from_state, linux_selected_drm_render_device,
-        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_probe_log_dir_from_inputs, startup_probe_should_keep_after_frontend_ready_from_value,
-        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
-        WINDOWS_APP_DATA_DIR_NAME,
+        linux_appimage_wayland_backend_override, linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state,
+        linux_selected_drm_render_device, linux_webkit_rendering_workarounds, native_window_decorations_override,
+        should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
+        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
-    use std::ffi::{OsStr, OsString};
+    use crate::data_dir::DataDirMode;
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
@@ -999,6 +925,16 @@ mod tests {
         assert!(should_enable_single_instance(false));
     }
 
+    #[test]
+    fn startup_data_dir_diagnostics_never_include_paths() {
+        let private_path = PathBuf::from(r"C:\Users\private-user\DBXData");
+        assert_eq!(startup_data_dir_mode(&DataDirMode::Default), "default");
+        assert_eq!(startup_data_dir_mode(&DataDirMode::EnvOverride), "env_override");
+        let label = startup_data_dir_mode(&DataDirMode::Portable { exe_dir: private_path });
+        assert_eq!(label, "portable");
+        assert!(!label.contains("private-user"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn labels_debug_builds_in_the_macos_dock() {
@@ -1048,40 +984,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_probe_log_dir_prefers_explicit_override() {
-        assert_eq!(
-            startup_probe_log_dir_from_inputs(
-                "windows",
-                Some(OsString::from(r"D:\DBXDiagnostics")),
-                Some(OsString::from(r"C:\Users\test\AppData\Roaming")),
-            ),
-            Some(PathBuf::from(r"D:\DBXDiagnostics"))
-        );
-    }
-
-    #[test]
-    fn startup_probe_log_dir_uses_windows_appdata() {
-        assert_eq!(
-            startup_probe_log_dir_from_inputs("windows", None, Some(OsString::from(r"C:\Users\test\AppData\Roaming")),),
-            Some(PathBuf::from(r"C:\Users\test\AppData\Roaming").join(WINDOWS_APP_DATA_DIR_NAME))
-        );
-    }
-
-    #[test]
-    fn startup_probe_log_dir_is_disabled_without_windows_appdata() {
-        assert_eq!(startup_probe_log_dir_from_inputs("windows", None, None), None);
-        assert_eq!(startup_probe_log_dir_from_inputs("macos", None, Some(OsString::from("/Users/test/Library"))), None);
-    }
-
-    #[test]
-    fn startup_probe_log_is_kept_only_when_requested() {
-        assert!(startup_probe_should_keep_after_frontend_ready_from_value(Some("1")));
-        assert!(!startup_probe_should_keep_after_frontend_ready_from_value(None));
-        assert!(!startup_probe_should_keep_after_frontend_ready_from_value(Some("true")));
-        assert!(!startup_probe_should_keep_after_frontend_ready_from_value(Some("0")));
-    }
-
-    #[test]
     fn only_user_requested_app_exit_needs_frontend_confirmation() {
         assert!(should_confirm_app_exit_request("windows", None, false));
         assert!(should_confirm_app_exit_request("macos", Some(0), false));
@@ -1117,6 +1019,25 @@ mod tests {
 
     fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
         LinuxDrmRenderDevice { device_file: PathBuf::from(path), driver: Some(driver.to_string()), boot_vga }
+    }
+
+    #[test]
+    fn discovers_only_usable_linux_drm_render_device_files() {
+        let root = std::env::temp_dir().join(format!("dbx-drm-render-devices-{}", uuid::Uuid::new_v4()));
+        let sys_class_drm = root.join("sys/class/drm");
+        let dev_dri = root.join("dev/dri");
+        std::fs::create_dir_all(sys_class_drm.join("renderD128/device")).unwrap();
+        std::fs::create_dir_all(sys_class_drm.join("renderD129/device")).unwrap();
+        std::fs::create_dir_all(&dev_dri).unwrap();
+
+        assert!(linux_drm_render_devices_from_paths(&sys_class_drm, &dev_dri).is_empty());
+
+        std::fs::write(dev_dri.join("renderD129"), []).unwrap();
+        let devices = linux_drm_render_devices_from_paths(&sys_class_drm, &dev_dri);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_file, dev_dri.join("renderD129"));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1172,14 +1093,20 @@ mod tests {
     #[test]
     fn applies_driver_specific_linux_webkit_rendering_workarounds() {
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
-        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None), &[]);
+        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, true), &[]);
+        // Without any DRM render node (GPU-less VM / server) Mesa falls back to
+        // llvmpipe, whose DMABuf compositing path can crash the WebKit process.
+        assert_eq!(
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, false),
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        );
     }
 
     #[test]
@@ -1279,16 +1206,8 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    reset_startup_probe();
-    append_startup_probe(format!(
-        "process start version={} os={} arch={} exe={:?}",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        std::env::current_exe()
-    ));
+    startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
-    configure_webview2_sandbox_compat();
     append_startup_probe("runtime prerequisites configured");
     #[cfg(target_os = "linux")]
     apply_linux_webkit_rendering_workarounds();
@@ -1380,7 +1299,8 @@ pub fn run() {
             let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
             let data_dir = data_dir_resolution.data_dir.clone();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
-            append_startup_probe(format!("data dir ready: {}", data_dir.display()));
+            let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
+            append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
             let alternative_data_dir = data_dir::alternative_data_dir(&data_dir_resolution);
             match maybe_import_user_data_db(&data_dir, alternative_data_dir.as_deref()) {
                 Ok(result) => eprintln!("[STARTUP] data db fallback import: {result:?}"),
@@ -1389,7 +1309,7 @@ pub fn run() {
             let db_path = data_dir.join("dbx.db");
 
             let t = Instant::now();
-            append_startup_probe(format!("opening storage: {}", db_path.display()));
+            append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
                 let s = Storage::open(&db_path).await.expect("Failed to open storage");
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
@@ -1600,6 +1520,9 @@ pub fn run() {
             commands::cloud_sync::snippet_token_status,
             commands::cloud_sync::save_snippet_saved_token,
             commands::cloud_sync::forget_snippet_saved_token,
+            commands::cloud_sync::snippet_sync_settings,
+            commands::cloud_sync::save_snippet_sync_id,
+            commands::cloud_sync::retry_snippet_legacy_cleanup,
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
             commands::connection::test_connection,
@@ -1651,6 +1574,7 @@ pub fn run() {
             commands::schema::list_schema_infos,
             commands::schema::list_data_types,
             commands::schema::get_columns,
+            commands::schema::get_all_columns,
             commands::schema::get_sqlserver_column_metadata,
             commands::schema::list_indexes,
             commands::schema::list_foreign_keys,
@@ -1782,6 +1706,7 @@ pub fn run() {
             commands::redis_cmd::redis_set_remove,
             commands::redis_cmd::redis_zadd,
             commands::redis_cmd::redis_zrem,
+            commands::redis_cmd::redis_zset_update,
             commands::redis_cmd::redis_stream_add,
             commands::redis_cmd::redis_json_set,
             commands::redis_cmd::redis_check_json_module,
@@ -2043,6 +1968,22 @@ pub fn run() {
             commands::mq_cmd::mq_raw_request,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_send_message,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_broker_info,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_subscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_unsubscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_publish,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_list_topics,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_topic_tree,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_clear_messages,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,
@@ -2104,8 +2045,16 @@ pub fn run() {
             commands::tunnel_profiles::test_tunnel_profile,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .inspect(|app| {
+            append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));
+            startup_recovery::start_watchdog(app.handle());
+        })
+        .unwrap_or_else(|error| {
+            append_startup_probe(format!("tauri application build failed: {error}"));
+            panic!("error while building tauri application: {error}");
+        })
         .run(|app_handle, event| {
+            startup_recovery::record_run_event();
             #[cfg(not(target_os = "macos"))]
             let _ = (&app_handle, &event);
 

@@ -115,6 +115,7 @@ pub struct RedisLoadMoreRequest {
     pub cursor: u64,
     pub count: usize,
     pub filter: Option<String>,
+    pub sort_direction: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +148,18 @@ pub struct RedisZaddRequest {
     pub member: String,
     pub score: f64,
     pub ttl: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisZsetUpdateRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub original_member: String,
+    pub expected_score: String,
+    pub member: String,
+    pub score: String,
 }
 
 #[derive(Deserialize)]
@@ -415,6 +428,7 @@ pub async fn load_more(
         req.cursor,
         req.count,
         req.filter.as_deref(),
+        req.sort_direction.as_deref(),
     )
     .await
     .map_err(AppError::from)?;
@@ -568,6 +582,26 @@ pub async fn zadd(State(state): State<Arc<WebState>>, Json(req): Json<RedisZaddR
     .await
     .map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+pub async fn zset_update(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisZsetUpdateRequest>,
+) -> Result<Json<bool>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "ZADD/ZREM").await?;
+    let used_acl_compatibility = dbx_core::redis_ops::redis_zset_update_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.original_member,
+        &req.expected_score,
+        &req.member,
+        &req.score,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(used_acl_compatibility))
 }
 
 pub async fn stream_add(

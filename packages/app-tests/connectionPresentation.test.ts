@@ -1,7 +1,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
-import { connectionDriverLabel, connectionEndpointLabel, connectionIconType, connectionOptionSubtitle, connectionRedactedEndpointLabel, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "../../apps/desktop/src/lib/connection/connectionPresentation.ts";
+import { connectionDisplayUrlScheme, connectionDriverLabel, connectionEndpointLabel, connectionIconType, connectionOptionSubtitle, connectionRedactedEndpointLabel, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "../../apps/desktop/src/lib/connection/connectionPresentation.ts";
 
 const baseConnection: ConnectionConfig = {
   id: "conn-1",
@@ -18,6 +18,18 @@ const baseConnection: ConnectionConfig = {
 
 test("uses driver profile for connection option icon identity", () => {
   assert.equal(connectionIconType(baseConnection), "tidb");
+});
+
+test("displays the configured GaussDB protocol in connection URLs", () => {
+  assert.equal(connectionDisplayUrlScheme({ db_type: "gaussdb", driver_profile: "gaussdb" }), "postgresql");
+  assert.equal(connectionDisplayUrlScheme({ db_type: "gaussdb", driver_profile: "gaussdb-m" }), "jdbc:gaussdb");
+});
+
+test("normalizes legacy single-host GaussDB endpoint labels", () => {
+  const connection = { ...baseConnection, db_type: "gaussdb" as const, host: "db.example.com:5433", port: 5432 };
+
+  assert.equal(connectionEndpointLabel(connection), "db.example.com:5433");
+  assert.equal(connectionRedactedEndpointLabel(connection), "db.***.com:****");
 });
 
 test("builds a compact subtitle for duplicate connection names", () => {

@@ -5,11 +5,11 @@ plugins {
 def infrastructureProjects = ['common', 'test-support'] as Set
 def legacyStandaloneProjects = ['mongodb', 'kafka', 'rocketmq'] as Set
 def pooledJdbcProjects = [
-    'access', 'bigquery', 'cassandra', 'dameng', 'databend', 'databricks', 'db2', 'exasol',
+    'access', 'bigquery', 'dameng', 'databend', 'databricks', 'db2', 'exasol',
     'firebird', 'gbase8a', 'gbase8s', 'goldendb', 'h2', 'h2-legacy', 'highgo', 'hive',
-    'informix', 'iotdb', 'iris', 'kylin', 'neo4j', 'oceanbase-oracle', 'oscar', 'saphana',
-    'snowflake', 'spark', 'sqlserver-legacy', 'sundb', 'tdengine', 'teradata', 'trino', 'uxdb',
-    'vastbase', 'vertica', 'yashandb'
+    'informix', 'iotdb', 'iris', 'kylin', 'oceanbase-oracle', 'oscar', 'saphana',
+    'snowflake', 'spark', 'sqlserver-legacy', 'sundb', 'teradata', 'trino', 'uxdb',
+    'vertica', 'yashandb'
 ] as Set
 def agentProjects = subprojects.findAll { !infrastructureProjects.contains(it.name) }
 def jdbcAgentProjects = agentProjects.findAll { !legacyStandaloneProjects.contains(it.name) }

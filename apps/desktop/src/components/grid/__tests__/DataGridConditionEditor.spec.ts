@@ -143,6 +143,37 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
+  it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
+    const { value, input } = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
+    input.focus();
+    input.value = "na";
+    input.setSelectionRange(2, 2);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    const firstOption = document.querySelector('[role="option"]') as HTMLElement;
+    firstOption.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
+    expect(firstOption.className).not.toContain("bg-gray-200");
+    expect(firstOption.className).not.toContain("bg-accent");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("na");
+
+    const secondEditor = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
+    secondEditor.input.focus();
+    secondEditor.input.value = "na";
+    secondEditor.input.setSelectionRange(2, 2);
+    secondEditor.input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    const nextFirstOption = document.querySelector('[role="option"]') as HTMLElement;
+    nextFirstOption.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
+  });
+
   it("keeps expanded input first-line indent and wraps long tokens", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
@@ -305,5 +336,46 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(source).toContain("bottom: expandedRect.value.top + expandedHeight.value");
     expect(expandedPaneCss).toContain("transition: box-shadow 150ms ease");
     expect(expandedPaneCss).not.toContain("height 150ms");
+  });
+});
+
+describe("DataGridConditionEditor Chinese column matching", () => {
+  function mountChineseColumns() {
+    return mountEditor("where", "", { columns: ["总租金", "租赁日期", "amount"] });
+  }
+
+  async function typeToken(input: HTMLTextAreaElement, token: string) {
+    input.focus();
+    input.value = token;
+    input.setSelectionRange(token.length, token.length);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("matches a single Han character anywhere in the column name", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "金");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("matches pinyin initials and initials subsequences", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "zzj");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+
+    await typeToken(input, "zj");
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("still matches plain English columns", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "am");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("amount");
   });
 });

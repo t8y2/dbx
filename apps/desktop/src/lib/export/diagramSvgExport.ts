@@ -1,9 +1,26 @@
 import type { EngineeringDiagram, EngineeringEntityNode } from "@/lib/diagram/engineeringDiagram";
 import type { DiagramPosition, DiagramRelationship, DiagramTable } from "@/lib/diagram/erDiagram";
+import { pickHandles } from "@/lib/diagram/vue-flow-adapter";
+import { pointAlongPolyline, pointsToSvgPath, type Point } from "@/lib/diagram/edge-obstacle-router";
+import { CARD_BOTTOM_PADDING, CARD_HEADER_HEIGHT, CARD_WIDTH, COLUMN_ROW_HEIGHT, MARGIN } from "@/lib/diagram/diagram-constants";
 
-type DiagramSvgMode = "table" | "engineering";
+const SOURCE_CARDINALITY_T = 0.18;
+const TARGET_CARDINALITY_T = 0.82;
 
 interface DiagramCanvas {
+  width: number;
+  height: number;
+  /** viewBox origin; defaults to 0 when omitted (engineering mode already normalizes to ~0). */
+  originX?: number;
+  originY?: number;
+}
+
+export interface DiagramSvgLayer {
+  id: string;
+  name: string;
+  color: string;
+  x: number;
+  y: number;
   width: number;
   height: number;
 }
@@ -13,14 +30,21 @@ export interface TableDiagramSvgOptions {
   relationships: DiagramRelationship[];
   positions: Record<string, DiagramPosition>;
   relationshipPaths: Record<string, string>;
+  /** Polyline points for endpoint cardinality badges (aligned with relationshipPaths). */
+  relationshipPolylines?: Record<string, Point[]>;
   canvas: DiagramCanvas;
   cardWidth: number;
   cardHeaderHeight: number;
   columnRowHeight: number;
-  maxVisibleColumns: number;
   cardBottomPadding?: number;
-  moreColumnsLabel?: (count: number) => string;
+  layers?: DiagramSvgLayer[];
 }
+
+type CardHeightMetrics = {
+  cardHeaderHeight: number;
+  columnRowHeight: number;
+  cardBottomPadding?: number;
+};
 
 function escapeXml(value: string | number): string {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -31,7 +55,11 @@ function svgNumber(value: number): string {
 }
 
 function svgHeader(canvas: DiagramCanvas): string {
-  return [`<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" viewBox="0 0 ${svgNumber(canvas.width)} ${svgNumber(canvas.height)}">`, '<rect width="100%" height="100%" fill="#fafafa"/>'].join("");
+  // Always viewBox 0 0 — callers that use non-zero canvas.origin must translate content (see buildTableDiagramSvg).
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" viewBox="0 0 ${svgNumber(canvas.width)} ${svgNumber(canvas.height)}">`,
+    `<rect x="0" y="0" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" fill="#fafafa"/>`,
+  ].join("");
 }
 
 function svgText(
@@ -54,35 +82,202 @@ function svgText(
   return `<text ${attrs.join(" ")}>${escapeXml(label)}</text>`;
 }
 
-function tableHeight(table: DiagramTable, options: TableDiagramSvgOptions): number {
-  const visibleCount = Math.min(table.columns.length, options.maxVisibleColumns);
-  const overflowHeight = table.columns.length > options.maxVisibleColumns ? options.columnRowHeight : 0;
-  return options.cardHeaderHeight + visibleCount * options.columnRowHeight + overflowHeight + (options.cardBottomPadding ?? 12);
-}
-
-function tableDiagramDefs(): string {
-  return ["<defs>", '<marker id="dbx-diagram-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">', '<path d="M 0 0 L 8 4 L 0 8 z" fill="#2563eb"/>', "</marker>", "</defs>"].join("");
+/** Shared table card height for SVG canvas / paths / cards. */
+function svgCardHeight(columnCount: number, metrics: CardHeightMetrics): number {
+  return metrics.cardHeaderHeight + columnCount * metrics.columnRowHeight + (metrics.cardBottomPadding ?? CARD_BOTTOM_PADDING);
 }
 
 function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
   return table.foreignKeys.some((fk) => fk.column === columnName);
 }
 
-export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
-  const parts = [svgHeader(options.canvas), tableDiagramDefs(), '<g fill="none" stroke="#2563eb" stroke-opacity="0.58" stroke-width="1.6">'];
+function handleAnchor(pos: DiagramPosition, handle: string, width: number, height: number): Point {
+  const cx = pos.x + width / 2;
+  const cy = pos.y + height / 2;
+  if (handle.startsWith("right")) return { x: pos.x + width, y: cy };
+  if (handle.startsWith("left")) return { x: pos.x, y: cy };
+  if (handle.startsWith("bottom")) return { x: cx, y: pos.y + height };
+  return { x: cx, y: pos.y };
+}
 
+/** Orthogonal fallback polyline when no ELK/obstacle waypoints are stored. */
+function orthogonalPointsBetweenTables(sourcePos: DiagramPosition, targetPos: DiagramPosition, sourceHeight: number, targetHeight: number, cardWidth: number): Point[] {
+  const { sourceHandle, targetHandle } = pickHandles(sourcePos, targetPos, sourceHeight, targetHeight, cardWidth);
+  const s = handleAnchor(sourcePos, sourceHandle, cardWidth, sourceHeight);
+  const t = handleAnchor(targetPos, targetHandle.replace(/-target$/, ""), cardWidth, targetHeight);
+  const mid: Point = Math.abs(s.x - t.x) >= Math.abs(s.y - t.y) ? { x: t.x, y: s.y } : { x: s.x, y: t.y };
+  return [s, mid, t];
+}
+
+type RelationshipGeometryInput = {
+  relationships: DiagramRelationship[];
+  positions: Record<string, DiagramPosition>;
+  tables: DiagramTable[];
+  waypoints?: Record<string, Point[]>;
+  cardWidth?: number;
+  cardHeaderHeight?: number;
+  columnRowHeight?: number;
+  cardBottomPadding?: number;
+};
+
+/**
+ * Build relationship polylines from live waypoints or table positions.
+ */
+export function buildTableRelationshipPolylines(input: RelationshipGeometryInput): Record<string, Point[]> {
+  const cardWidth = input.cardWidth ?? CARD_WIDTH;
+  const metrics: CardHeightMetrics = {
+    cardHeaderHeight: input.cardHeaderHeight ?? CARD_HEADER_HEIGHT,
+    columnRowHeight: input.columnRowHeight ?? COLUMN_ROW_HEIGHT,
+    cardBottomPadding: input.cardBottomPadding ?? CARD_BOTTOM_PADDING,
+  };
+  const heightByName = new Map(input.tables.map((t) => [t.name, svgCardHeight(t.columns.length, metrics)]));
+  const polylines: Record<string, Point[]> = {};
+
+  for (const rel of input.relationships) {
+    const stored = input.waypoints?.[rel.id];
+    if (stored && stored.length >= 2) {
+      polylines[rel.id] = stored.map((p) => ({ ...p }));
+      continue;
+    }
+    const sourcePos = input.positions[rel.sourceTable];
+    const targetPos = input.positions[rel.targetTable];
+    if (!sourcePos || !targetPos) continue;
+    const sh = heightByName.get(rel.sourceTable) ?? svgCardHeight(0, metrics);
+    const th = heightByName.get(rel.targetTable) ?? svgCardHeight(0, metrics);
+    polylines[rel.id] = orthogonalPointsBetweenTables(sourcePos, targetPos, sh, th, cardWidth);
+  }
+  return polylines;
+}
+
+/**
+ * Build SVG path `d` strings for relationships from live waypoints or table positions.
+ */
+export function buildTableRelationshipPaths(input: RelationshipGeometryInput): Record<string, string> {
+  const polylines = buildTableRelationshipPolylines(input);
+  const paths: Record<string, string> = {};
+  for (const [id, points] of Object.entries(polylines)) {
+    paths[id] = pointsToSvgPath(points);
+  }
+  return paths;
+}
+
+/** Compute canvas size that fits tables + layers + relationship polylines with padding. */
+export function computeTableDiagramCanvas(
+  tables: DiagramTable[],
+  positions: Record<string, DiagramPosition>,
+  options: {
+    cardWidth: number;
+    cardHeaderHeight: number;
+    columnRowHeight: number;
+    cardBottomPadding?: number;
+    layers?: DiagramSvgLayer[];
+    relationshipPolylines?: Record<string, Point[]>;
+    padding?: number;
+  },
+): DiagramCanvas {
+  const padding = options.padding ?? MARGIN;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  const expand = (x1: number, y1: number, x2: number, y2: number) => {
+    minX = Math.min(minX, x1);
+    minY = Math.min(minY, y1);
+    maxX = Math.max(maxX, x2);
+    maxY = Math.max(maxY, y2);
+  };
+
+  for (const layer of options.layers ?? []) {
+    if (layer.width <= 0 || layer.height <= 0) continue;
+    expand(layer.x, layer.y, layer.x + layer.width, layer.y + layer.height);
+  }
+
+  for (const table of tables) {
+    const pos = positions[table.name] ?? { x: 0, y: 0 };
+    const height = svgCardHeight(table.columns.length, options);
+    expand(pos.x, pos.y, pos.x + options.cardWidth, pos.y + height);
+  }
+
+  for (const points of Object.values(options.relationshipPolylines ?? {})) {
+    for (const point of points) {
+      expand(point.x, point.y, point.x, point.y);
+    }
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return { width: 400 + padding, height: 300 + padding, originX: 0, originY: 0 };
+  }
+
+  return {
+    width: Math.ceil(maxX - minX + 2 * padding),
+    height: Math.ceil(maxY - minY + 2 * padding),
+    originX: minX - padding,
+    originY: minY - padding,
+  };
+}
+
+export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
+  const ox = options.canvas.originX ?? 0;
+  const oy = options.canvas.originY ?? 0;
+  const parts = [svgHeader(options.canvas)];
+  parts.push(`<g transform="translate(${svgNumber(-ox)} ${svgNumber(-oy)})">`);
+
+  const layers = (options.layers ?? []).filter((l) => l.width > 0 && l.height > 0);
+  if (layers.length > 0) {
+    parts.push('<g class="diagram-layers">');
+    for (const layer of layers) {
+      const fill = layer.color || "#9ca3af";
+      parts.push(`<rect x="${svgNumber(layer.x)}" y="${svgNumber(layer.y)}" width="${svgNumber(layer.width)}" height="${svgNumber(layer.height)}" ` + `rx="8" fill="${escapeXml(fill)}" fill-opacity="0.08" stroke="${escapeXml(fill)}" stroke-opacity="0.55" stroke-width="1.5"/>`);
+      parts.push(
+        svgText(layer.name, layer.x + 12, layer.y + 18, {
+          size: 12,
+          weight: "600",
+          fill: fill,
+        }),
+      );
+    }
+    parts.push("</g>");
+  }
+
+  parts.push('<g fill="none" stroke="#2563eb" stroke-opacity="0.58" stroke-width="1.6">');
   for (const relationship of options.relationships) {
     const path = options.relationshipPaths[relationship.id];
     if (!path) continue;
-    parts.push(`<path d="${escapeXml(path)}" marker-end="url(#dbx-diagram-arrow)">` + `<title>${escapeXml(`${relationship.sourceTable}.${relationship.sourceColumn} -> ${relationship.targetTable}.${relationship.targetColumn}`)}</title>` + "</path>");
+    parts.push(`<path d="${escapeXml(path)}">` + `<title>${escapeXml(`${relationship.sourceTable}.${relationship.sourceColumn} -> ${relationship.targetTable}.${relationship.targetColumn}`)}</title>` + "</path>");
+  }
+  parts.push("</g>");
+
+  parts.push('<g class="diagram-cardinality">');
+  for (const relationship of options.relationships) {
+    const points = options.relationshipPolylines?.[relationship.id];
+    if (!points || points.length < 2) continue;
+    const sourcePos = pointAlongPolyline(points, SOURCE_CARDINALITY_T);
+    const targetPos = pointAlongPolyline(points, TARGET_CARDINALITY_T);
+    const sourceCard = relationship.sourceCardinality || "N";
+    const targetCard = relationship.targetCardinality || "1";
+    parts.push(
+      svgText(sourceCard, sourcePos.x, sourcePos.y, {
+        size: 11,
+        weight: "700",
+        anchor: "middle",
+        fill: "#18181b",
+      }),
+    );
+    parts.push(
+      svgText(targetCard, targetPos.x, targetPos.y, {
+        size: 11,
+        weight: "700",
+        anchor: "middle",
+        fill: "#18181b",
+      }),
+    );
   }
   parts.push("</g>");
 
   for (const table of options.tables) {
     const position = options.positions[table.name] ?? { x: 0, y: 0 };
-    const height = tableHeight(table, options);
-    const visibleColumns = table.columns.slice(0, options.maxVisibleColumns);
-    const hiddenCount = Math.max(0, table.columns.length - options.maxVisibleColumns);
+    const height = svgCardHeight(table.columns.length, options);
     parts.push(`<g transform="translate(${svgNumber(position.x)} ${svgNumber(position.y)})">`);
     parts.push(`<rect width="${options.cardWidth}" height="${svgNumber(height)}" rx="6" fill="#ffffff" stroke="#d4d4d8"/>`);
     parts.push(`<rect width="${options.cardWidth}" height="${options.cardHeaderHeight}" rx="6" fill="#f4f4f5"/>`);
@@ -96,7 +291,7 @@ export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
       }),
     );
 
-    visibleColumns.forEach((column, index) => {
+    table.columns.forEach((column, index) => {
       const rowTop = options.cardHeaderHeight + index * options.columnRowHeight;
       const rowCenter = rowTop + options.columnRowHeight / 2;
       parts.push(`<path d="M 0 ${svgNumber(rowTop)} H ${options.cardWidth}" stroke="#f0f0f1"/>`);
@@ -114,19 +309,10 @@ export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
         }),
       );
     });
-
-    if (hiddenCount > 0) {
-      const y = options.cardHeaderHeight + visibleColumns.length * options.columnRowHeight + options.columnRowHeight / 2;
-      parts.push(
-        svgText(options.moreColumnsLabel?.(hiddenCount) ?? `+ ${hiddenCount} columns`, 12, y, {
-          size: 11,
-          fill: "#71717a",
-        }),
-      );
-    }
     parts.push("</g>");
   }
 
+  parts.push("</g>");
   parts.push("</svg>");
   return parts.join("");
 }
@@ -237,6 +423,8 @@ export function buildEngineeringDiagramSvg(diagram: EngineeringDiagram): string 
   return parts.join("");
 }
 
+type DiagramSvgMode = "table" | "engineering";
+
 function fileToken(value: string): string {
   return value
     .trim()
@@ -245,6 +433,7 @@ function fileToken(value: string): string {
     .replace(/^-|-$/g, "");
 }
 
+/** Stable download name for SVG exports (shared with upstream contract tests). */
 export function diagramSvgFileName(connectionName: string, databaseName: string, mode: DiagramSvgMode): string {
   const context = [connectionName, databaseName].map(fileToken).filter(Boolean);
   const suffix = mode === "engineering" ? "engineering-er" : "table-structure";

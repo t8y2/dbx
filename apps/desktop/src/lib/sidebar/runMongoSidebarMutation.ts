@@ -11,7 +11,7 @@ export type RunMongoSidebarMutationOptions<T> = {
   /** Runs after production confirmation and after loading is set (e.g. ensureConnected). */
   beforeExecute?: () => Promise<void>;
   execute: () => Promise<T>;
-  onSuccess: (result: T) => void;
+  onSuccess: (result: T) => void | Promise<void>;
   onError?: (error: unknown) => void;
 };
 
@@ -41,10 +41,13 @@ export async function runMongoSidebarMutation<T>(options: RunMongoSidebarMutatio
     });
     // Cancel only: guard returns undefined when the user declines production confirmation.
     if (executed === undefined) return;
-    options.onSuccess(executed.result);
+    await options.onSuccess(executed.result);
   } catch (error: unknown) {
     options.onError?.(error);
   } finally {
     options.loading.value = false;
   }
 }
+
+// DataGrid and sidebar mutations intentionally share the same production-gated lifecycle.
+export const runMongoMutation = runMongoSidebarMutation;

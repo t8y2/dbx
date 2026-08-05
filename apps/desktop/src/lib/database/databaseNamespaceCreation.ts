@@ -1,4 +1,5 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
+import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 
 export type DatabaseNamespaceCreationTarget = "database" | "schema" | "attach" | "special";
 
@@ -83,11 +84,12 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   jdbc: { deferred: "generic JDBC does not expose a reliable dialect-specific create target" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace creation already uses the Nacos admin flow" },
+  mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
   if (!connection || connection.read_only) return null;
-  if (connection.db_type === "mongodb" && connection.driver_profile === "mongodb-legacy") return null;
+  if (connection.db_type === "mongodb" && isMongoLegacyDriverProfile(connection.driver_profile)) return null;
   if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
     return null;
   }

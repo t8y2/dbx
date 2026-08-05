@@ -35,8 +35,8 @@ import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
 import { getPostgresDataTypeHelp } from "@/lib/table/postgresDataTypeHelp";
 import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
-import { shouldLoadTableStructureTriggers, TRIGGERS_ONLY_REFRESH_SCOPE, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
-import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
+import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -620,7 +620,7 @@ function onIndexColResize(e: MouseEvent, col: number) {
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
-const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type));
+const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
@@ -925,6 +925,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     foreignKeys: cloneDraftValue(foreignKeys.value),
     triggers: cloneDraftValue(triggers.value),
     triggersLoaded: triggersLoaded.value,
+    loadedMetadataFacets: [...loadedMetadataFacets],
     scrollPositions: cloneDraftValue(structureScrollPositions.value),
     initialized,
   };
@@ -951,6 +952,17 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   triggers.value = cloneDraftValue(draft.triggers || []);
   // Drafts created before lazy trigger loading always contained live trigger metadata.
   triggersLoaded.value = draft.triggersLoaded ?? true;
+  loadedMetadataFacets.clear();
+  if (draft.loadedMetadataFacets) {
+    for (const facet of draft.loadedMetadataFacets) loadedMetadataFacets.add(facet);
+  } else {
+    const activeScope = visibleTableStructureRefreshScope(draft.activeTab || "columns");
+    if (activeScope.columns) loadedMetadataFacets.add("columns");
+    if (activeScope.indexes || draft.indexes?.length) loadedMetadataFacets.add("indexes");
+    if (activeScope.foreignKeys || draft.foreignKeys?.length) loadedMetadataFacets.add("foreign-keys");
+    if (activeScope.triggers || triggersLoaded.value) loadedMetadataFacets.add("triggers");
+    if (activeScope.tableComment) loadedMetadataFacets.add("comment");
+  }
   structureScrollPositions.value = cloneDraftValue(draft.scrollPositions || {});
   restoringDraft = false;
   draftHydrated = !needsColumnDraftMetadataHydration();
@@ -1131,7 +1143,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
     columns: columns.value,
-    indexes: indexes.value,
+    indexes: sanitizeStructureIndexesForCapabilities(indexes.value, structureCapabilities.value),
     foreignKeys: foreignKeys.value,
     triggers: triggers.value,
     tableComment: tableComment.value,
@@ -1242,15 +1254,6 @@ function setSecondaryMetadataLoading(scope: TableStructureRefreshScope, value: b
   if (scope.indexes && tableMetadataCapabilities.value.indexes) indexesLoading.value = value;
   if (scope.foreignKeys && tableMetadataCapabilities.value.foreignKeys) foreignKeysLoading.value = value;
   if (scope.triggers && tableMetadataCapabilities.value.triggers) triggersLoading.value = value;
-}
-
-function hasLoadedMetadataScope(scope: TableStructureRefreshScope): boolean {
-  if (scope.columns && !loadedMetadataFacets.has("columns")) return false;
-  if (scope.indexes && !loadedMetadataFacets.has("indexes")) return false;
-  if (scope.foreignKeys && !loadedMetadataFacets.has("foreign-keys")) return false;
-  if (scope.triggers && !loadedMetadataFacets.has("triggers")) return false;
-  if (scope.tableComment && !loadedMetadataFacets.has("comment")) return false;
-  return true;
 }
 
 async function fetchTableCommentValue(connectionId: string, database: string, schema: string, tableName: string, catalog?: string): Promise<string | undefined> {
@@ -2420,7 +2423,10 @@ onMounted(() => {
   }
   structureEditorReady = true;
   if (props.draft?.initialized) {
-    void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
+    void hydrateRestoredDraftFromDatabase().then(() => {
+      applyInitialStructureTarget();
+      void loadActiveTableStructureMetadataIfNeeded();
+    });
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else if (activeTab.value === "ddl") {
@@ -2436,7 +2442,10 @@ onActivated(() => {
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
     applyInitialStructureTarget();
-    void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
+    void hydrateRestoredDraftFromDatabase().then(() => {
+      applyInitialStructureTarget();
+      void loadActiveTableStructureMetadataIfNeeded();
+    });
   }
   restoreStructureScrollPosition();
 });
@@ -2542,25 +2551,6 @@ watch(activeTab, () => {
   syncDraftToParent();
 });
 
-async function loadTriggersIfNeeded() {
-  if (
-    !shouldLoadTableStructureTriggers({
-      activeTab: activeTab.value,
-      isCreateMode: isCreateMode.value,
-      supported: tableMetadataCapabilities.value.triggers,
-      loaded: triggersLoaded.value,
-      loading: triggersLoading.value,
-      structureLoading: loading.value,
-    })
-  )
-    return;
-  await loadStructure(true, TRIGGERS_ONLY_REFRESH_SCOPE, true, { blockSecondaryMetadata: true, preserveDraft: true });
-}
-
-watch([activeTab, loading], () => {
-  void loadTriggersIfNeeded();
-});
-
 watch(
   columns,
   (items) => {
@@ -2595,21 +2585,20 @@ watch(refreshVersion, (version, previous) => {
   void loadStructure(true, visibleTableStructureRefreshScope(activeTab.value));
 });
 
-watch(
-  activeTab,
-  (tab) => {
-    if (!structureEditorReady) return;
-    if (tab === "ddl") {
-      void fetchDdl();
-    } else if (!isCreateMode.value && !props.draft?.initialized && !loading.value) {
-      const scope = visibleTableStructureRefreshScope(tab);
-      if (!hasLoadedMetadataScope(scope)) {
-        void loadStructure(false, scope, true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
-      }
-    }
-  },
-  { flush: "sync" },
-);
+async function loadActiveTableStructureMetadataIfNeeded() {
+  if (!structureEditorReady || isCreateMode.value) return;
+  if (activeTab.value === "ddl") {
+    await fetchDdl();
+    return;
+  }
+  if (loading.value || secondaryMetadataLoading.value) return;
+  const scope = unloadedTableStructureRefreshScope(activeTab.value, loadedMetadataFacets);
+  if (!hasTableStructureRefreshWork(scope)) return;
+  await loadStructure(true, scope, true, { blockSecondaryMetadata: true, preserveDraft: true });
+  applyInitialStructureTarget();
+}
+
+watch([activeTab, loading, secondaryMetadataLoading], () => void loadActiveTableStructureMetadataIfNeeded(), { flush: "sync" });
 
 watch([activeTab, ddlLoading], ([tab, loading]) => {
   if (tab === "ddl" && !loading) {

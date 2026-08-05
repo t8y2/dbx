@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid, type DrawCanvasDataGridOptions } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { drawCanvasDataGrid, resolveCanvasBackingStoreMetrics, type DrawCanvasDataGridOptions } from "@/lib/dataGrid/canvasDataGridRenderer";
 
 function createMockCanvas(width = 800, height = 400) {
   const canvas = document.createElement("canvas");
@@ -78,6 +78,45 @@ describe("drawCanvasDataGrid with frozen columns", () => {
       lineHeight: "normal",
       getPropertyValue: () => "",
     } as CSSStyleDeclaration);
+  });
+
+  it("uses the exact observed device-pixel size instead of a nominal DPR", () => {
+    expect(
+      resolveCanvasBackingStoreMetrics({
+        width: 801,
+        height: 399,
+        pixelRatio: 1.25,
+        devicePixelSize: { cssWidth: 801, cssHeight: 399, pixelWidth: 1001, pixelHeight: 499 },
+      }),
+    ).toEqual({
+      pixelWidth: 1001,
+      pixelHeight: 499,
+      scaleX: 1001 / 801,
+      scaleY: 499 / 399,
+      measured: true,
+    });
+  });
+
+  it("ignores a stale observed size after the CSS viewport changes", () => {
+    expect(
+      resolveCanvasBackingStoreMetrics({
+        width: 900,
+        height: 400,
+        pixelRatio: 1.25,
+        devicePixelSize: { cssWidth: 801, cssHeight: 399, pixelWidth: 1001, pixelHeight: 499 },
+      }),
+    ).toEqual({ pixelWidth: 1125, pixelHeight: 500, scaleX: 1.25, scaleY: 1.25, measured: false });
+  });
+
+  it("caps the observed backing store at the configured pixel ratio", () => {
+    expect(
+      resolveCanvasBackingStoreMetrics({
+        width: 801,
+        height: 399,
+        pixelRatio: 4,
+        devicePixelSize: { cssWidth: 801, cssHeight: 399, pixelWidth: 4005, pixelHeight: 1995 },
+      }),
+    ).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: true });
   });
 
   it("draws without errors when frozenColumnCount is 0", () => {

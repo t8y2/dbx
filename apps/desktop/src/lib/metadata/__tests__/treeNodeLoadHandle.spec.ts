@@ -46,6 +46,20 @@ describe("TreeNodeLoadRegistry", () => {
     ).toBe(db);
   });
 
+  it("does not let a user-cancelled load reclaim ownership", () => {
+    const registry = new TreeNodeLoadRegistry();
+    const node: TreeNodeLike = { id: "c1:db:schema", connectionId: "c1", isLoading: false, children: [] };
+    const load = registry.begin(node);
+
+    registry.cancelPrefix("c1:db");
+    node.isLoading = false;
+    const reclaimed = load.reclaim(node);
+
+    expect(reclaimed).toBe(load);
+    expect(reclaimed.isCurrent()).toBe(false);
+    expect(node.isLoading).toBe(false);
+  });
+
   it("invalidates pruned descendant generations even when root no longer contains them", () => {
     const registry = new TreeNodeLoadRegistry();
     const db: TreeNodeLike = { id: "c1:db", connectionId: "c1", isLoading: false, children: [] };

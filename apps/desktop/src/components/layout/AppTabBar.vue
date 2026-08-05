@@ -184,6 +184,36 @@ function closeOtherRegularTabsFromTab(tab: QueryTab) {
   closeSpecialRegularSurfaces();
 }
 
+function tabsToRightInGroup(tab: QueryTab) {
+  const groupedTabs = tab.pinned ? fixedTabs.value : regularTabs.value;
+  const targetIndex = groupedTabs.findIndex((item) => item.id === tab.id);
+  return targetIndex < 0 ? [] : groupedTabs.slice(targetIndex + 1);
+}
+
+function hasTabsToRight(tab: QueryTab) {
+  return tabsToRightInGroup(tab).length > 0 || (!tab.pinned && (!!props.settingsPageOpen || !!props.driverStoreOpen));
+}
+
+function closeTabsToRightFromTab(tab: QueryTab) {
+  const shouldActivateTarget = !tab.pinned && (!!props.settingsPageActive || !!props.driverStoreActive);
+  queryStore.closeRightTabs(tab.id, () => {
+    if (tab.pinned) return;
+    closeSpecialRegularSurfaces();
+    if (shouldActivateTarget) activateTab(tab.id);
+  });
+}
+
+function hasSpecialRegularSurfaceToRight(surface: SpecialRegularSurface) {
+  return surface === "settings" && !!props.driverStoreOpen;
+}
+
+function closeSpecialRegularSurfacesToRight(surface: SpecialRegularSurface) {
+  if (surface !== "settings" || !props.driverStoreOpen) return;
+  const shouldActivateSettings = !!props.driverStoreActive;
+  emit("close-driver-store");
+  if (shouldActivateSettings) emit("activate-settings-page");
+}
+
 function closeAllRegularSurfaces() {
   queryStore.closeRegularTabs();
   closeSpecialRegularSurfaces();
@@ -233,6 +263,12 @@ function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextM
       disabled: closeOtherDisabled,
       icon: X,
       shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
+    },
+    {
+      label: t("contextMenu.closeRightTabs"),
+      action: () => closeSpecialRegularSurfacesToRight(surface),
+      disabled: !hasSpecialRegularSurfaceToRight(surface),
+      icon: X,
     },
     {
       label: closeAllLabel,
@@ -296,6 +332,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       disabled: closeOtherDisabled,
       icon: X,
       shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
+    },
+    {
+      label: t("contextMenu.closeRightTabs"),
+      action: () => closeTabsToRightFromTab(tab),
+      disabled: !hasTabsToRight(tab),
+      icon: X,
     },
     {
       label: closeAllLabel,

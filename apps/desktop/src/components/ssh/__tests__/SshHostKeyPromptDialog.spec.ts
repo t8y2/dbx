@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -49,11 +51,14 @@ vi.mock("@/components/ui/button", async () => {
 
 import SshHostKeyPromptDialog from "@/components/ssh/SshHostKeyPromptDialog.vue";
 
+const dialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/ssh/SshHostKeyPromptDialog.vue"), "utf8");
+
 class MockEventSource {
   static instances: MockEventSource[] = [];
 
   readonly url: string;
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   closed = false;
 
@@ -64,6 +69,14 @@ class MockEventSource {
 
   emit(data: unknown) {
     this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(data) }));
+  }
+
+  open() {
+    this.onopen?.();
+  }
+
+  error() {
+    this.onerror?.();
   }
 
   close() {
@@ -77,6 +90,7 @@ beforeEach(() => {
   resolveSshPromptMock.mockReset().mockResolvedValue(undefined);
   MockEventSource.instances = [];
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => [] } as Response));
   i18n.global.locale.value = "en";
 });
 
@@ -103,6 +117,13 @@ async function mountDialog() {
 }
 
 describe("SshHostKeyPromptDialog web bridge", () => {
+  it("requires an explicit answer for blocking SSH prompts", () => {
+    expect(dialogSource).toContain(':show-close-button="false"');
+    expect(dialogSource).toContain("@interact-outside.prevent");
+    expect(dialogSource).toContain("@escape-key-down.prevent");
+    expect(dialogSource).not.toContain(':dismissible="false"');
+  });
+
   it("shows an SSE host-key prompt and posts the user's acceptance", async () => {
     await mountDialog();
 
@@ -159,5 +180,92 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     eventSource?.emit({ type: "sync", pendingIds: [] });
     await nextTick();
     expect(document.body.textContent).not.toContain("stale.example.test:22");
+  });
+
+  it("recovers a pending host-key prompt via the polling fallback when the SSE event is missed", async () => {
+    // Simulate a prompt that fired before the EventSource was open: the backend
+    // has it pending, but the SSE `Prompt` event never reached the dialog. The
+    // polling fallback must surface it so the user can still confirm.
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: "prompt-3",
+          kind: "HostKeyVerify",
+          host: "first.example.test",
+          port: 22,
+          key_type: "ssh-ed25519",
+          fingerprint: "SHA256:first",
+        },
+      ],
+    } as Response);
+
+    await mountDialog();
+    await nextTick();
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("first.example.test:22");
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/ssh/prompts/pending", { credentials: "include" });
+  });
+
+  it("stops polling once the SSE stream opens and resumes it after an error", async () => {
+    const setSpy = vi.spyOn(globalThis, "setInterval");
+    const clearSpy = vi.spyOn(globalThis, "clearInterval");
+
+    await mountDialog();
+    const eventSource = MockEventSource.instances[0];
+
+    // Polling is armed on mount (first-connect fallback).
+    expect(setSpy).toHaveBeenCalled();
+
+    // Opening the stream stops the poller (SSE replay now covers lost prompts).
+    eventSource?.open();
+    expect(clearSpy).toHaveBeenCalled();
+
+    // A disconnect re-arms polling so prompts are not lost during the outage.
+    eventSource?.error();
+    expect(setSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits a keyboard-interactive TOTP challenge as a secret response", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "totp-1",
+        kind: "SecretInput",
+        host: "jump.example.test",
+        port: 2222,
+        prompt: "JumpServer\n\nOTP Code:",
+        echo: false,
+      },
+    });
+    await nextTick();
+
+    expect(document.body.textContent).toContain("SSH Verification Required");
+    expect(document.body.textContent).toContain("OTP Code:");
+
+    const input = document.body.querySelector<HTMLInputElement>("input");
+    expect(input?.type).toBe("password");
+    if (!input) throw new Error("TOTP input was not rendered");
+    input.value = "123456";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    const buttons = document.body.querySelectorAll<HTMLButtonElement>("button");
+    buttons.item(buttons.length - 1).click();
+
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "totp-1",
+        action: "secret",
+        remember: undefined,
+        secret: "123456",
+      });
+    });
   });
 });

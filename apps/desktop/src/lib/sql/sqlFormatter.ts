@@ -1,8 +1,24 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { looksLikeXml } from "@/lib/sql/autoFormat";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
+
+/**
+ * Thrown by {@link formatSqlText} when the input is XML-looking and must never
+ * be run through the SQL formatter. sql-formatter silently rewrites well-formed
+ * XML into corrupted output, so this guard keeps any caller (including future
+ * ones) from corrupting structured text. Callers that can format XML should
+ * route before calling (see {@link detectAndFormatStructured}); this is
+ * defense-in-depth.
+ */
+export class UnsupportedStructuredInputError extends Error {
+  constructor(readonly detectedType: "xml") {
+    super(`Cannot format ${detectedType} content as SQL.`);
+    this.name = "UnsupportedStructuredInputError";
+  }
+}
 
 /**
  * Maps a connection's database type to the SQL-formatter dialect to use.
@@ -63,6 +79,10 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   if (!sql.trim()) return sql;
   if (sql.length > MAX_SQL_FORMAT_CHARS) {
     throw new Error("SQL is too large to format safely.");
+  }
+
+  if (looksLikeXml(sql)) {
+    throw new UnsupportedStructuredInputError("xml");
   }
 
   const { format } = await import("sql-formatter");

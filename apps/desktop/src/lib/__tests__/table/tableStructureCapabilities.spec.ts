@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 
 describe("tableStructureCapabilities", () => {
   it("uses table rebuilds only for native SQLite connections", () => {
@@ -26,6 +26,40 @@ describe("tableStructureCapabilities", () => {
   it("marks databases with native ALTER COLUMN support as direct", () => {
     expect(getTableStructureCapabilities("mysql", "mysql").alterStrategy).toBe("direct");
     expect(getTableStructureCapabilities("postgres", "postgres").alterStrategy).toBe("direct");
+  });
+
+  it("enables PostgreSQL index INCLUDE only for known supported versions", () => {
+    expect(getTableStructureCapabilities("postgres", "postgres", "PostgreSQL 10.15 (Transwarp) on x86_64-pc-linux-gnu").indexInclude).toBe(false);
+    expect(getTableStructureCapabilities("postgres", "postgres", "9.6.24").indexInclude).toBe(false);
+    expect(getTableStructureCapabilities("postgres", "postgres", "11.0").indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", "PostgreSQL 16.14").indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", undefined).indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", "unknown").indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("sqlserver", "sqlserver", "10.0").indexInclude).toBe(true);
+  });
+
+  it("removes unsupported included columns before SQL generation", () => {
+    const index = {
+      id: "new:index",
+      name: "example_idx",
+      columns: ["key_column"],
+      isUnique: false,
+      isPrimary: false,
+      filter: "",
+      indexType: "BTREE",
+      includedColumns: ["included_column"],
+      comment: "",
+      markedForDrop: false,
+    };
+
+    const indexes = [index];
+    const postgres10Indexes = sanitizeStructureIndexesForCapabilities(indexes, getTableStructureCapabilities("postgres", "postgres", "10.15"));
+    expect(postgres10Indexes).not.toBe(indexes);
+    expect(postgres10Indexes[0].includedColumns).toEqual([]);
+    expect(index.includedColumns).toEqual(["included_column"]);
+
+    const postgres11Indexes = sanitizeStructureIndexesForCapabilities(indexes, getTableStructureCapabilities("postgres", "postgres", "11.0"));
+    expect(postgres11Indexes).toBe(indexes);
   });
 
   it("disables persisted comment editing for IRIS without disabling other structure changes", () => {

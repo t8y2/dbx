@@ -451,9 +451,9 @@ impl MessageQueueAdmin for PulsarAdmin {
         sub: &str,
         count: u32,
         _options: PeekMessagesOptions,
-    ) -> Result<Vec<PeekedMessage>, String> {
+    ) -> Result<PeekMessagesResult, String> {
         if count == 0 {
-            return Ok(Vec::new());
+            return Ok(PeekMessagesResult::default());
         }
 
         let messages: Vec<PeekedMessage> = stream::iter(1..=count)
@@ -477,7 +477,7 @@ impl MessageQueueAdmin for PulsarAdmin {
             .flatten()
             .collect();
 
-        Ok(messages)
+        Ok(PeekMessagesResult::complete(messages))
     }
 
     async fn expire_messages(&self, topic: &TopicRef, sub: &str, expire_seconds: i64) -> Result<(), String> {

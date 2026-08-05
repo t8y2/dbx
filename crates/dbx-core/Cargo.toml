@@ -7,7 +7,7 @@ license = "Apache-2.0"
 [features]
 default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = []
-mq-admin = []
+mq-admin = ["dep:rumqttc"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 openapi = ["dep:utoipa"]
 system-fonts = ["font-kit"]
@@ -49,8 +49,8 @@ tiberius = { version = "0.12.3", default-features = false, features = ["tds73", 
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
 prometheus-parse = "=0.2.5"
 futures = "0.3"
-iana-time-zone = "0.1"
 mongodb = "3.2.5"
+rumqttc = { version = "0.24", features = ["websocket"], optional = true }
 russh = "0.60"
 pageant = "0.2"
 portpicker = "0.1.1"
@@ -79,3 +79,6 @@ notify = { version = "7", default-features = false, features = ["macos_kqueue"] 
 arc-swap = "1"
 insta = { version = "1", features = ["json", "glob"] }
 tempfile = "3"
+
+[target.'cfg(not(all(windows, target_vendor = "win7")))'.dependencies]
+iana-time-zone = "0.1"

@@ -5,6 +5,7 @@ import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
+import { type GridNewRowMeta, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
@@ -28,6 +29,7 @@ interface RowItem {
 }
 
 export const DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID = Number.MIN_SAFE_INTEGER;
+export const DATA_GRID_MAX_BATCH_INSERT_ROWS = 1000;
 
 type RowKind = "none" | "existing" | "new" | "draft";
 
@@ -45,7 +47,7 @@ type CommitEditResult =
 
 interface CommitEditOptions {
   promoteDraft?: boolean;
-  explicitValue?: string | null;
+  explicitValue?: CellValue;
 }
 
 type GridScrollerRef =
@@ -108,6 +110,7 @@ export interface UseDataGridEditorOptions {
 
 interface PendingChangesSnapshot {
   newRows: CellValue[][];
+  newRowMeta: GridNewRowMeta[];
   quickEntryDraftRow?: CellValue[];
   dirtyRows: Map<number, Map<number, CellValue>>;
   deletedRows: Set<number>;
@@ -136,7 +139,7 @@ interface QueuedAutoSaveChange {
   value: CellValue;
 }
 
-type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive">;
+type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "newRowMeta" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive">;
 
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
@@ -211,6 +214,27 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const scrollerRef = ref<GridScrollerRef | null>(null);
   const dirtyRows = shallowRef<Map<number, Map<number, CellValue>>>(new Map());
   const newRows = ref<CellValue[][]>([]);
+  // Parallel to newRows: one stable token + display placement per pending row.
+  // Kept in lockstep with every structural mutation of newRows.
+  const newRowMeta = ref<GridNewRowMeta[]>([]);
+  let nextNewRowToken = 1;
+  function allocateNewRowMeta(placement: GridNewRowPlacement | null): GridNewRowMeta {
+    return { token: nextNewRowToken++, placement };
+  }
+  function cloneNewRowMeta(meta: readonly GridNewRowMeta[]): GridNewRowMeta[] {
+    return meta.map((item) => ({ token: item.token, placement: item.placement ? { ...item.placement } : null }));
+  }
+  // Restore a metadata snapshot and resume token allocation past its maximum so
+  // newly created rows never collide with tokens held by restored rows (a fresh
+  // composable instance starts the counter at 1 again).
+  function restoreNewRowMeta(meta: readonly GridNewRowMeta[]) {
+    newRowMeta.value = cloneNewRowMeta(meta);
+    let maxToken = 0;
+    for (const item of newRowMeta.value) {
+      if (item.token > maxToken) maxToken = item.token;
+    }
+    nextNewRowToken = maxToken + 1;
+  }
   const deletedRows = ref<Set<number>>(new Set());
   const quickEntryDraftRow = ref<CellValue[]>([]);
   const undoStack = ref<PendingChangesHistorySnapshot[]>([]);
@@ -233,6 +257,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const cached = pendingChangesCache.get(key);
     if (cached && cached.columnCount === result.value.columns.length && cached.rowCount === result.value.rows.length) {
       newRows.value = cached.newRows;
+      restoreNewRowMeta(cached.newRowMeta ?? []);
       quickEntryDraftRow.value = cached.quickEntryDraftRow ? [...cached.quickEntryDraftRow] : [];
       dirtyRows.value = cached.dirtyRows;
       deletedRows.value = cached.deletedRows;
@@ -319,6 +344,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function pendingChangesSnapshot(): PendingChangesHistorySnapshot {
     return {
       newRows: newRows.value.map((row) => [...row]),
+      newRowMeta: cloneNewRowMeta(newRowMeta.value),
       quickEntryDraftRow: quickEntryDraftRow.value.length > 0 ? [...quickEntryDraftRow.value] : undefined,
       dirtyRows: new Map([...dirtyRows.value].map(([rowIndex, changes]) => [rowIndex, new Map(changes)])),
       deletedRows: new Set(deletedRows.value),
@@ -328,6 +354,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function restorePendingChangesSnapshot(snapshot: PendingChangesHistorySnapshot) {
     newRows.value = snapshot.newRows.map((row) => [...row]);
+    restoreNewRowMeta(snapshot.newRowMeta ?? []);
     quickEntryDraftRow.value = snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : emptyDraftRow();
     dirtyRows.value = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
     deletedRows.value = new Set(snapshot.deletedRows);
@@ -630,6 +657,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value = [...newRows.value, [...quickEntryDraftRow.value]];
+    newRowMeta.value = [...newRowMeta.value, allocateNewRowMeta(null)];
     quickEntryDraftRow.value = emptyDraftRow();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
@@ -696,6 +724,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
       rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
       newRows.value = [...newRows.value, nextDraftRow];
+      newRowMeta.value = [...newRowMeta.value, allocateNewRowMeta(null)];
       quickEntryDraftRow.value = emptyDraftRow();
       touchPendingChanges();
       if (useTransaction.value && !transactionActive.value) {
@@ -933,7 +962,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(result.value.columns.map(() => null));
+    newRowMeta.value.push(allocateNewRowMeta(null));
     newRows.value = [...newRows.value];
+    newRowMeta.value = [...newRowMeta.value];
     touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
@@ -944,6 +975,41 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (el) el.scrollTop = el.scrollHeight;
       startEdit(rowId, initialEditColumn?.value ?? 0);
     });
+  }
+
+  // Batch-append N blank draft rows as a single undoable change. Each row is an
+  // independent clone so later edits to one row never alias another. Editing
+  // starts on the first inserted row, mirroring addRow.
+  //
+  // `placement` is a display-only hint: when set, the grid renders the new rows
+  // anchored to another row instead of at the end, and the caller is expected
+  // to scroll to the inserted rows (the composable cannot resolve display
+  // positions). Returns the first inserted row's id, or undefined when the
+  // count was rejected.
+  function addRows(count: number, placement: GridNewRowPlacement | null = null): number | undefined {
+    if (!Number.isInteger(count) || count <= 0) return undefined;
+    const clampedCount = Math.min(count, DATA_GRID_MAX_BATCH_INSERT_ROWS);
+    const firstNewIndex = newRows.value.length;
+    pushUndoSnapshot();
+    rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
+    const blankRow = result.value.columns.map(() => null);
+    for (let i = 0; i < clampedCount; i++) {
+      newRows.value.push([...blankRow]);
+      newRowMeta.value.push(allocateNewRowMeta(placement));
+    }
+    newRows.value = [...newRows.value];
+    newRowMeta.value = [...newRowMeta.value];
+    touchPendingChanges();
+    if (useTransaction.value && !transactionActive.value) {
+      enterTransaction();
+    }
+    const newRowId = -(firstNewIndex + 1);
+    nextTick(() => {
+      const el = getScrollerElement();
+      if (placement === null && el) el.scrollTop = el.scrollHeight;
+      startEdit(newRowId, initialEditColumn?.value ?? 0);
+    });
+    return newRowId;
   }
 
   function isBlankNewRow(row: readonly CellValue[]): boolean {
@@ -974,6 +1040,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (targetColumns.some((columnIndex) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
 
     const nextRows = newRows.value.map((row) => [...row]);
+    const nextMeta = cloneNewRowMeta(newRowMeta.value);
     let reusableNewRowCount = 0;
     if (!targetIsDraft) {
       for (let rowIndex = targetNewIndex!; rowIndex < nextRows.length && reusableNewRowCount < pastedRows.length; rowIndex++) {
@@ -994,11 +1061,22 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     pushUndoSnapshot();
     if (targetIsDraft) {
       nextRows.push(...mappedRows);
+      for (let i = 0; i < mappedRows.length; i++) nextMeta.push(allocateNewRowMeta(null));
       quickEntryDraftRow.value = emptyDraftRow();
     } else {
+      // Reused blank rows keep their original placement; rows added beyond the
+      // reusable count append at the end (preserving existing paste behavior).
+      const newMetas = mappedRows.map((_, rowOffset) => {
+        if (rowOffset < reusableNewRowCount) {
+          return nextMeta[targetNewIndex! + rowOffset] ?? allocateNewRowMeta(null);
+        }
+        return allocateNewRowMeta(null);
+      });
+      nextMeta.splice(targetNewIndex!, reusableNewRowCount, ...newMetas);
       nextRows.splice(targetNewIndex!, reusableNewRowCount, ...mappedRows);
     }
     newRows.value = nextRows;
+    newRowMeta.value = nextMeta;
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
@@ -1031,7 +1109,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
+    newRowMeta.value.push(allocateNewRowMeta(null));
     newRows.value = [...newRows.value];
+    newRowMeta.value = [...newRowMeta.value];
     touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
@@ -1052,8 +1132,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     for (const item of rowsToClone) {
       const clonedData = clonedRowData(item);
       newRows.value.push(clonedData);
+      newRowMeta.value.push(allocateNewRowMeta(null));
     }
     newRows.value = [...newRows.value];
+    newRowMeta.value = [...newRowMeta.value];
     touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
@@ -1089,8 +1171,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         .sort((a, b) => b - a)
         .forEach((newIndex) => {
           newRows.value.splice(newIndex, 1);
+          newRowMeta.value.splice(newIndex, 1);
         });
       newRows.value = [...newRows.value];
+      newRowMeta.value = [...newRowMeta.value];
     }
     if (sourceIndexes.size > 0) {
       for (const sourceIndex of sourceIndexes) {
@@ -1205,7 +1289,15 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
     if (snapshot.newRows.length > 0) {
       const savedNewRows = new Set(snapshot.newRowRefs);
-      newRows.value = newRows.value.filter((row) => !savedNewRows.has(row));
+      const keptRows: CellValue[][] = [];
+      const keptMeta: GridNewRowMeta[] = [];
+      newRows.value.forEach((row, rowIndex) => {
+        if (savedNewRows.has(row)) return;
+        keptRows.push(row);
+        keptMeta.push(newRowMeta.value[rowIndex] ?? allocateNewRowMeta(null));
+      });
+      newRows.value = keptRows;
+      newRowMeta.value = keptMeta;
     }
 
     for (const sourceIndex of snapshot.deletedRows) {
@@ -1471,6 +1563,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function discardChanges() {
     dirtyRows.value = new Map();
     newRows.value = [];
+    newRowMeta.value = [];
     deletedRows.value = new Set();
     quickEntryDraftRow.value = emptyDraftRow();
     queuedAutoSaveChanges.clear();
@@ -1512,6 +1605,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     pendingChangesCache.set(k, {
       newRows: newRows.value.map((r) => [...r]),
+      newRowMeta: cloneNewRowMeta(newRowMeta.value),
       quickEntryDraftRow: quickEntryDraftRowSnapshot,
       dirtyRows: new Map([...dirtyRows.value].map(([i, m]) => [i, new Map(m)])),
       deletedRows: new Set(deletedRows.value),
@@ -1603,6 +1697,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     scrollerRef,
     dirtyRows,
     newRows,
+    newRowMeta,
     deletedRows,
     quickEntryDraftRow,
     quickEntryDraftRowId: DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID,
@@ -1629,6 +1724,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     cancelEdit,
     onEditKeydown,
     addRow,
+    addRows,
     appendPastedRowsToNewRow,
     cloneRow,
     cloneRows,

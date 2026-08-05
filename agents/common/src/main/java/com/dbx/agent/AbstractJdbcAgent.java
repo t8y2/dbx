@@ -270,6 +270,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         poolRegistry = registry;
     }
 
+    public boolean supportsConnectionPooling() {
+        return true;
+    }
+
     final synchronized boolean usesConnectionPool() {
         return poolRegistry != null;
     }
@@ -531,7 +535,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return this::resultValue;
     }
 
-    private Connection openInitializedConnection(ConnectParams params) throws Exception {
+    protected final Connection openInitializedConnection(ConnectParams params) throws Exception {
         Connection opened = openConnection(params);
         try {
             afterPhysicalConnect(params, opened);

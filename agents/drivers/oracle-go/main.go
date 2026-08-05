@@ -31,13 +31,26 @@ const defaultMaxRows = 1000
 const oracleCharsetZHS32GB18030 = 854
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
+const oracleLegacyLOBMaxMajorVersion = 10
+const oracleDatabaseVersionProbeTimeout = 3 * time.Second
+
+const oracleDatabaseVersionSQL = `
+SELECT VERSION
+FROM PRODUCT_COMPONENT_VERSION
+WHERE PRODUCT LIKE 'Oracle Database%'
+  AND ROWNUM = 1`
 
 var (
 	oraclePlSQLBlockStartRegexp          = regexp.MustCompile(`(?is)^\s*(?:DECLARE|BEGIN|CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?))\b`)
 	oraclePlSQLBlockEndRegexp            = regexp.MustCompile(`(?is)\bEND\s*;\s*$`)
 	oracleNamedPlSQLBlockEndRegexp       = regexp.MustCompile(`(?is)\bEND\s+([A-Z0-9_$#]+)\s*;\s*$`)
 	oracleUnsupportedServerCharsetRegexp = regexp.MustCompile(`server use charset with id: ([0-9]+).*not supported by the driver`)
-	oracleStringConverters               = map[int]converters.IStringConverter{
+	oracleVersionNumberRegexp            = regexp.MustCompile(`(?:^|[^0-9])([0-9]+)\.[0-9]+`)
+	oracleDatabaseVersionQueries         = []string{
+		oracleDatabaseVersionSQL,
+		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle Database%' AND ROWNUM = 1`,
+	}
+	oracleStringConverters = map[int]converters.IStringConverter{
 		oracleCharsetZHS32GB18030: oracleGB18030Converter{},
 	}
 )
@@ -377,6 +390,7 @@ type triggerInfo struct {
 type server struct {
 	db                     *sql.DB
 	params                 connectParams
+	legacyLOBFetchDeferred bool
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -656,6 +670,11 @@ func (s *server) handleLine(line string) (response, bool) {
 }
 
 func (s *server) dispatch(method string, params map[string]json.RawMessage) (any, bool, error) {
+	if oracleMethodMayReadLOB(method) {
+		if err := s.ensureLegacyOracleLOBFetch(); err != nil {
+			return nil, false, err
+		}
+	}
 	switch method {
 	case "handshake":
 		return map[string]any{
@@ -793,23 +812,175 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 
 func (s *server) connect(params connectParams) error {
 	_ = s.disconnect()
-	db, err := openAndPingDB(params, 15*time.Second)
+	db, err := openConfiguredSessionDB(params, 15*time.Second)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	majorVersion, versionKnown := oracleServerMajorVersion(db, 15*time.Second)
+	s.db = db
+	s.params = params
+	s.legacyLOBFetchDeferred = shouldUseLegacyOracleLOBFetch(params, majorVersion, versionKnown)
+	return nil
+}
+
+func openConfiguredSessionDB(params connectParams, timeout time.Duration) (*sql.DB, error) {
+	db, err := openAndPingDB(params, timeout)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if _, err := db.ExecContext(ctx, "ALTER SESSION SET NLS_LANGUAGE='AMERICAN'"); err != nil {
 		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func oracleServerMajorVersion(db *sql.DB, timeout time.Duration) (int, bool) {
+	if timeout > oracleDatabaseVersionProbeTimeout {
+		timeout = oracleDatabaseVersionProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if majorVersion, ok := oracleServerMajorVersionFromDBConn(ctx, db); ok {
+		return majorVersion, true
+	}
+	for _, query := range oracleDatabaseVersionQueries {
+		var version string
+		err := db.QueryRowContext(ctx, query).Scan(&version)
+		if err == nil {
+			if majorVersion, ok := parseOracleMajorVersion(version); ok {
+				return majorVersion, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func oracleServerMajorVersionFromDBConn(ctx context.Context, db *sql.DB) (int, bool) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, false
+	}
+	defer conn.Close()
+	var majorVersion int
+	var versionKnown bool
+	if err := conn.Raw(func(driverConn any) error {
+		majorVersion, versionKnown = oracleServerMajorVersionFromDriverConn(driverConn)
+		return nil
+	}); err != nil {
+		return 0, false
+	}
+	return majorVersion, versionKnown
+}
+
+func oracleServerMajorVersionFromDriverConn(driverConn any) (int, bool) {
+	conn, ok := driverConn.(*go_ora.Connection)
+	if !ok {
+		return 0, false
+	}
+	return parseOracleAuthVersionNumber(conn.SessionProperties["AUTH_VERSION_NO"])
+}
+
+func parseOracleAuthVersionNumber(value string) (int, bool) {
+	encoded, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	majorVersion := int(encoded >> 24)
+	return majorVersion, majorVersion > 0
+}
+
+func parseOracleMajorVersion(version string) (int, bool) {
+	match := oracleVersionNumberRegexp.FindStringSubmatch(strings.TrimSpace(version))
+	if len(match) != 2 {
+		return 0, false
+	}
+	value, err := strconv.Atoi(match[1])
+	return value, err == nil && value > 0
+}
+
+func shouldUseLegacyOracleLOBFetch(params connectParams, majorVersion int, versionKnown bool) bool {
+	return versionKnown && majorVersion <= oracleLegacyLOBMaxMajorVersion && !hasOracleLOBFetchOption(params)
+}
+
+func oracleMethodMayReadLOB(method string) bool {
+	switch method {
+	case "get_table_ddl", "execute_query", "execute_query_page", "start_table_read", "execute_transaction":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *server) ensureLegacyOracleLOBFetch() error {
+	if !s.legacyLOBFetchDeferred {
+		return nil
+	}
+	effectiveParams := withOracleLOBFetchPost(s.params)
+	if effectiveParams == s.params {
+		s.legacyLOBFetchDeferred = false
+		return nil
+	}
+	db, err := openConfiguredSessionDB(effectiveParams, 15*time.Second)
+	if err != nil {
 		return err
 	}
+	oldDB := s.db
 	s.db = db
-	s.params = params
+	s.params = effectiveParams
+	s.legacyLOBFetchDeferred = false
+	if oldDB != nil {
+		_ = oldDB.Close()
+	}
 	return nil
+}
+
+func hasOracleLOBFetchOption(params connectParams) bool {
+	connectionString := strings.TrimSpace(params.ConnectionString)
+	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
+		parsed, err := url.Parse(connectionString)
+		return err == nil && hasURLValueKey(parsed.Query(), "LOB FETCH")
+	}
+	values, err := url.ParseQuery(params.URLParams)
+	return err == nil && hasURLValueKey(values, "LOB FETCH")
+}
+
+func hasURLValueKey(values url.Values, target string) bool {
+	for key := range values {
+		if strings.EqualFold(strings.TrimSpace(key), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func withOracleLOBFetchPost(params connectParams) connectParams {
+	connectionString := strings.TrimSpace(params.ConnectionString)
+	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
+		parsed, err := url.Parse(connectionString)
+		if err != nil {
+			return params
+		}
+		values := parsed.Query()
+		values.Set("LOB FETCH", "POST")
+		parsed.RawQuery = values.Encode()
+		params.ConnectionString = parsed.String()
+		return params
+	}
+	values, err := url.ParseQuery(params.URLParams)
+	if err != nil {
+		return params
+	}
+	values.Set("LOB FETCH", "POST")
+	params.URLParams = values.Encode()
+	return params
 }
 
 func (s *server) disconnect() error {
 	s.closeAllQuerySessions()
+	s.legacyLOBFetchDeferred = false
 	if s.db == nil {
 		return nil
 	}
@@ -827,17 +998,11 @@ func openDBWithStringConverter(params connectParams, stringConverter converters.
 	if err != nil {
 		return nil, err
 	}
-	var db *sql.DB
-	if stringConverter == nil {
-		db, err = sql.Open("oracle", dsn)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		connector := go_ora.NewConnector(dsn)
+	connector := go_ora.NewConnector(dsn)
+	if stringConverter != nil {
 		go_ora.SetStringConverter(connector, stringConverter, nil)
-		db = sql.OpenDB(connector)
 	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
@@ -1850,12 +2015,26 @@ ORDER BY CASE
          OWNER`, baseSQL, preferredParam, nameColumn, exactParam, typeColumn, nameColumn)
 }
 
+func oracleObjectNameCandidates(name string) (string, string, bool) {
+	exact := strings.TrimSpace(name)
+	uppercase := strings.ToUpper(exact)
+	return exact, uppercase, exact != uppercase
+}
+
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(table)
+	result, err := s.getColumnsByName(schema, exact)
+	if err != nil || len(result) > 0 || !hasUppercaseFallback {
+		return result, err
+	}
+	return s.getColumnsByName(schema, uppercase)
+}
+
+func (s *server) getColumnsByName(schema, table string) ([]columnInfo, error) {
 	rows, err := s.queryRows(`
 SELECT c.COLUMN_NAME,
        c.DATA_TYPE,
@@ -1911,7 +2090,15 @@ func (s *server) loadOracleColumnMeta(schema, table string) ([]oracleColumnMeta,
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(table)
+	result, err := s.loadOracleColumnMetaByName(schema, exact)
+	if err != nil || len(result) > 0 || !hasUppercaseFallback {
+		return result, err
+	}
+	return s.loadOracleColumnMetaByName(schema, uppercase)
+}
+
+func (s *server) loadOracleColumnMetaByName(schema, table string) ([]oracleColumnMeta, error) {
 	rows, err := s.queryRows(`
 SELECT COLUMN_NAME, DATA_TYPE
 FROM ALL_TAB_COLUMNS
@@ -2149,7 +2336,7 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	objectType, err = s.resolveDDLObjectType(schema, table, objectType)
+	objectType, table, err = s.resolveDDLObject(schema, table, objectType)
 	if err != nil {
 		return "", err
 	}
@@ -2157,7 +2344,7 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 		return s.buildViewDDL(schema, table)
 	}
 	var ddl string
-	err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, strings.ToUpper(table), schema).Scan(&ddl)
+	err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, table, schema).Scan(&ddl)
 	if err == nil && strings.TrimSpace(ddl) != "" {
 		return ddl, nil
 	}
@@ -2167,16 +2354,18 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 	return "", err
 }
 
-func (s *server) resolveDDLObjectType(schema, name, requested string) (string, error) {
+func (s *server) resolveDDLObject(schema, name, requested string) (string, string, error) {
+	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(name)
 	objectType := normalizeDDLObjectType(requested)
 	if objectType != "" {
-		return objectType, nil
+		return objectType, exact, nil
 	}
 	db, err := s.requireDB()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	err = db.QueryRow(`
+	resolve := func(objectName string) error {
+		return db.QueryRow(`
 SELECT OBJECT_TYPE
 FROM (
   SELECT OBJECT_TYPE
@@ -2186,14 +2375,22 @@ FROM (
     AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW')
   ORDER BY CASE OBJECT_TYPE WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 ELSE 2 END
 )
-WHERE ROWNUM = 1`, schema, strings.ToUpper(name)).Scan(&objectType)
+WHERE ROWNUM = 1`, schema, objectName).Scan(&objectType)
+	}
+	err = resolve(exact)
+	if errors.Is(err, sql.ErrNoRows) && hasUppercaseFallback {
+		err = resolve(uppercase)
+		if err == nil {
+			exact = uppercase
+		}
+	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("object not found: %s.%s", schema, name)
+		return "", "", fmt.Errorf("object not found: %s.%s", schema, name)
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return normalizeDDLObjectType(objectType), nil
+	return normalizeDDLObjectType(objectType), exact, nil
 }
 
 func normalizeDDLObjectType(value string) string {
@@ -2822,6 +3019,41 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 }
 
 func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+	return executeOracleSelectWithXMLTypeRetry(
+		sqlText,
+		func(query string) (queryResult, error) {
+			return s.executeSelectOnce(query, maxRows, timeoutSecs)
+		},
+		s.rewriteXMLTypeSelectSQL,
+	)
+}
+
+func executeOracleSelectWithXMLTypeRetry(
+	sqlText string,
+	execute func(string) (queryResult, error),
+	rewrite func(string) (string, error),
+) (queryResult, error) {
+	result, err := execute(sqlText)
+	if err == nil || !shouldRetryOracleXMLTypeRewrite(err) {
+		return result, err
+	}
+	rewritten, rewriteErr := rewrite(sqlText)
+	if rewriteErr != nil || rewritten == sqlText {
+		return result, err
+	}
+	return execute(rewritten)
+}
+
+func shouldRetryOracleXMLTypeRewrite(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "abnormal data representation for date") ||
+		strings.Contains(message, "TTC error: received code ")
+}
+
+func (s *server) executeSelectOnce(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
 	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, timeoutSecs)
 	if err != nil {
 		return queryResult{}, err

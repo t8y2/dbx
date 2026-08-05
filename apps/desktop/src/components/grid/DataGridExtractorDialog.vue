@@ -141,7 +141,7 @@ function save() {
       <div class="grid gap-4 md:grid-cols-[260px_minmax(0,1fr)]">
         <div class="space-y-3">
           <div class="space-y-1.5">
-            <Label>{{ t("grid.copyExtractorFormat") }}</Label>
+            <Label>{{ t("grid.copyExtractorDefaultFormat") }}</Label>
             <Select v-model="draftExtractor">
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>

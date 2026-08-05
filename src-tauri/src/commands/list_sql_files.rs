@@ -116,3 +116,40 @@ pub async fn list_sql_files_in_folder(folder_path: String) -> Result<Vec<SqlFile
     .await
     .map_err(|e| format!("Failed to scan folder: {e}"))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect_file_names(entries: &[SqlFileEntry], names: &mut Vec<String>) {
+        for entry in entries {
+            if entry.is_dir {
+                collect_file_names(&entry.children, names);
+            } else {
+                names.push(entry.name.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn scan_sql_files_skips_pruned_metadata_directories() {
+        let root = std::env::temp_dir().join(format!("dbx-sql-folder-scan-{}", uuid::Uuid::new_v4()));
+        let idea = root.join(".idea");
+        let nested = root.join("queries");
+        std::fs::create_dir_all(&idea).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("root.sql"), "SELECT 1;").unwrap();
+        std::fs::write(nested.join("nested.SQL"), "SELECT 2;").unwrap();
+        std::fs::write(nested.join("notes.txt"), "ignored").unwrap();
+        std::fs::write(idea.join("workspace.sql"), "SELECT 3;").unwrap();
+
+        let mut visited = HashSet::new();
+        let entries = scan_sql_files(&root, 0, &mut visited);
+        let mut names = Vec::new();
+        collect_file_names(&entries, &mut names);
+        names.sort();
+
+        assert_eq!(names, vec!["nested.SQL", "root.sql"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

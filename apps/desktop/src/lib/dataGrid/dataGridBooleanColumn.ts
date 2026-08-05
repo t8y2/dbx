@@ -1,0 +1,42 @@
+import type { DatabaseType } from "@/types/database";
+
+export const BOOLEAN_CELL_EDITOR_VALUES = ["true", "false"];
+
+export function isBooleanColumnType(dataType: string | undefined, databaseType?: DatabaseType): boolean {
+  if (!dataType) return false;
+  const normalized = dataType.trim().toLowerCase();
+  if (normalized === "boolean" || normalized === "bool") return true;
+  if (databaseType === "sqlserver") return normalized === "bit";
+  return false;
+}
+
+export function normalizeBooleanCellValue(value: unknown): boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1" || normalized === "t" || normalized === "yes") return true;
+    if (normalized === "false" || normalized === "0" || normalized === "f" || normalized === "no") return false;
+    return null;
+  }
+  return null;
+}
+
+export function isBooleanCellValue(value: unknown): boolean {
+  return value === null || normalizeBooleanCellValue(value) !== null;
+}
+
+export function booleanCellEditorValue(value: unknown): string {
+  const normalized = normalizeBooleanCellValue(value);
+  if (normalized === true) return "true";
+  if (normalized === false) return "false";
+  return "";
+}
+
+export function parseBooleanCellEditorValue(value: string | null): boolean | null | undefined {
+  if (value === null) return null;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return undefined;
+}

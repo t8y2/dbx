@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{stream, StreamExt};
+use sha2::{Digest, Sha256};
 
 use crate::agent_catalog;
 use crate::agent_manager::{
@@ -587,6 +588,7 @@ pub async fn reinstall_agent_jre_from(
         &r2_path_with_cache_buster(&github_url_to_r2_path(&platform_jre.url, "jre"), &jre_info.version),
         &jre_archive,
         platform_jre.size,
+        platform_jre.sha256.as_deref(),
         Some(CacheIdentity::Jre { key: jre_key, version: &jre_info.version }),
         None,
         None,
@@ -784,6 +786,7 @@ async fn ensure_jre_from_registry(
         &r2_path_with_cache_buster(&github_url_to_r2_path(&platform_jre.url, "jre"), &jre_info.version),
         &jre_archive,
         platform_jre.size,
+        platform_jre.sha256.as_deref(),
         Some(CacheIdentity::Jre { key: jre_key, version: &jre_info.version }),
         Some(db_type),
         current,
@@ -944,6 +947,7 @@ async fn install_agent_driver_from_registry(
         &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
         &download_path,
         artifact.size,
+        artifact.sha256.as_deref(),
         Some(CacheIdentity::Driver { db_type, version: &driver.version }),
         Some(db_type),
         current,
@@ -1172,21 +1176,23 @@ async fn download_with_progress(
     r2_path: &str,
     dest: &std::path::Path,
     total_size: u64,
+    expected_sha256: Option<&str>,
     cache_identity: Option<CacheIdentity<'_>>,
     db_type: Option<&str>,
     current: Option<u32>,
     total_drivers: Option<u32>,
 ) -> Result<(), String> {
     const DOWNLOAD_ATTEMPTS: usize = 4;
+    let expected_sha256 = normalized_sha256(expected_sha256)?;
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     let tmp = download_temp_path(dest);
     let tmp_source = download_source_path(&tmp);
-    let cache_path = cached_download_path(am, url, total_size, cache_identity, dest);
+    let cache_path = cached_download_path(am, url, total_size, expected_sha256, cache_identity, dest);
     prune_download_cache(am).ok();
-    if cached_download_is_valid(am, &cache_path, total_size) {
+    if cached_download_is_valid(am, &cache_path, total_size, expected_sha256) {
         std::fs::copy(&cache_path, &tmp).map_err(|err| format!("Failed to copy cached download: {err}"))?;
         progress(AgentProgressEvent::transfer(step, total_size, total_size).with_batch(
             db_type,
@@ -1202,6 +1208,7 @@ async fn download_with_progress(
         .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
     let mut last_err = None;
     let mut completed = false;
+    let mut rejected_sources = std::collections::HashSet::new();
     for attempt in 1..=DOWNLOAD_ATTEMPTS {
         let mut resume_from = std::fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
         let resume_source = std::fs::read_to_string(&tmp_source).ok().map(|value| value.trim().to_string());
@@ -1215,13 +1222,26 @@ async fn download_with_progress(
             resume_from = 0;
         }
         if total_size > 0 && resume_from == total_size {
-            progress(AgentProgressEvent::transfer(step, total_size, total_size).with_batch(
-                db_type,
-                current,
-                total_drivers,
-            ));
-            completed = true;
-            break;
+            match validate_artifact_integrity(&tmp, total_size, expected_sha256) {
+                Ok(()) => {
+                    progress(AgentProgressEvent::transfer(step, total_size, total_size).with_batch(
+                        db_type,
+                        current,
+                        total_drivers,
+                    ));
+                    completed = true;
+                    break;
+                }
+                Err(err) => {
+                    if let Some(source_url) = resume_source {
+                        rejected_sources.insert(source_url);
+                    }
+                    std::fs::remove_file(&tmp).ok();
+                    std::fs::remove_file(&tmp_source).ok();
+                    last_err = Some(err);
+                    continue;
+                }
+            }
         }
 
         let (mut resp, resumed, source_url) = match open_agent_download_response(
@@ -1233,6 +1253,7 @@ async fn download_with_progress(
             resume_from,
             total_size,
             resume_source.as_deref(),
+            &rejected_sources,
         )
         .await
         {
@@ -1280,8 +1301,19 @@ async fn download_with_progress(
 
         let actual_size = std::fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
         if total_size == 0 || actual_size == total_size {
-            completed = true;
-            break;
+            match validate_artifact_integrity(&tmp, total_size, expected_sha256) {
+                Ok(()) => {
+                    completed = true;
+                    break;
+                }
+                Err(err) => {
+                    rejected_sources.insert(source_url.clone());
+                    std::fs::remove_file(&tmp).ok();
+                    std::fs::remove_file(&tmp_source).ok();
+                    last_err = Some(format!("{err} (attempt {attempt}/{DOWNLOAD_ATTEMPTS}, source {source_url})"));
+                    continue;
+                }
+            }
         }
         if actual_size > total_size {
             std::fs::remove_file(&tmp).ok();
@@ -1317,9 +1349,14 @@ async fn open_agent_download_response(
     resume_from: u64,
     expected_size: u64,
     resume_source: Option<&str>,
+    rejected_sources: &std::collections::HashSet<String>,
 ) -> Result<(reqwest::Response, bool, String), String> {
     let mut errors = Vec::new();
     for candidate_url in source.download_candidate_urls(github_url, r2_path)? {
+        if rejected_sources.contains(&candidate_url) {
+            errors.push(format!("{candidate_url}: skipped after SHA-256 mismatch"));
+            continue;
+        }
         if resume_from > 0 && resume_source.is_some_and(|source| source != candidate_url) {
             continue;
         }
@@ -1405,12 +1442,14 @@ fn cached_download_path(
     am: &AgentManager,
     url: &str,
     total_size: u64,
+    expected_sha256: Option<&str>,
     cache_identity: Option<CacheIdentity<'_>>,
     dest: &std::path::Path,
 ) -> std::path::PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
     total_size.hash(&mut hasher);
+    expected_sha256.hash(&mut hasher);
     let identity_hash_key = cache_identity.map(CacheIdentity::hash_key);
     identity_hash_key.hash(&mut hasher);
     let hash = hasher.finish();
@@ -1419,7 +1458,12 @@ fn cached_download_path(
     am.download_cache_dir().join(format!("{prefix}-{hash:016x}-{file_name}"))
 }
 
-fn cached_download_is_valid(am: &AgentManager, path: &std::path::Path, expected_size: u64) -> bool {
+fn cached_download_is_valid(
+    am: &AgentManager,
+    path: &std::path::Path,
+    expected_size: u64,
+    expected_sha256: Option<&str>,
+) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
@@ -1435,7 +1479,53 @@ fn cached_download_is_valid(am: &AgentManager, path: &std::path::Path, expected_
         let _ = std::fs::remove_file(path);
         return false;
     }
+    if validate_artifact_integrity(path, expected_size, expected_sha256).is_err() {
+        let _ = std::fs::remove_file(path);
+        return false;
+    }
     true
+}
+
+fn normalized_sha256(expected_sha256: Option<&str>) -> Result<Option<&str>, String> {
+    let Some(expected_sha256) = expected_sha256.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid SHA-256 metadata for agent artifact".to_string());
+    }
+    Ok(Some(expected_sha256))
+}
+
+fn validate_artifact_integrity(path: &Path, expected_size: u64, expected_sha256: Option<&str>) -> Result<(), String> {
+    let metadata = std::fs::metadata(path).map_err(|err| format!("Failed to inspect downloaded artifact: {err}"))?;
+    if expected_size > 0 && metadata.len() != expected_size {
+        return Err(format!(
+            "Downloaded artifact size mismatch: expected {expected_size} bytes, got {} bytes",
+            metadata.len()
+        ));
+    }
+    let Some(expected_sha256) = expected_sha256 else {
+        return Ok(());
+    };
+    let actual_sha256 = file_sha256(path)?;
+    if actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        return Ok(());
+    }
+    Err(format!("Downloaded artifact SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"))
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|err| format!("Failed to hash downloaded artifact: {err}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|err| format!("Failed to hash downloaded artifact: {err}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn prune_download_cache(am: &AgentManager) -> Result<(), String> {
@@ -2542,12 +2632,13 @@ mod agent_registry_install_tests {
                 jre: DEFAULT_JRE_KEY.to_string(),
                 jar: Some(ArtifactInfo {
                     url: format!("https://example.com/dbx-agent-{db_type}-legacy-placeholder.jar"),
+                    sha256: None,
                     size: 0,
                     format: None,
                 }),
                 native: [(
                     AgentManager::current_platform().to_string(),
-                    ArtifactInfo { url: native_url.to_string(), size: native_size, format: None },
+                    ArtifactInfo { url: native_url.to_string(), sha256: None, size: native_size, format: None },
                 )]
                 .into_iter()
                 .collect(),
@@ -2565,7 +2656,7 @@ mod agent_registry_install_tests {
                 label: db_type.to_string(),
                 min_app_version: "0.1.0".to_string(),
                 jre: DEFAULT_JRE_KEY.to_string(),
-                jar: Some(ArtifactInfo { url: url.to_string(), size, format: None }),
+                jar: Some(ArtifactInfo { url: url.to_string(), sha256: None, size, format: None }),
                 native: std::collections::HashMap::new(),
             },
         );
@@ -2593,8 +2684,14 @@ mod agent_registry_install_tests {
         dest: &Path,
         bytes: &[u8],
     ) -> PathBuf {
-        let cache_path =
-            cached_download_path(am, url, bytes.len() as u64, Some(CacheIdentity::Driver { db_type, version }), dest);
+        let cache_path = cached_download_path(
+            am,
+            url,
+            bytes.len() as u64,
+            None,
+            Some(CacheIdentity::Driver { db_type, version }),
+            dest,
+        );
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(&cache_path, bytes).unwrap();
         cache_path
@@ -2732,7 +2829,7 @@ mod agent_registry_install_tests {
                     version: version.to_string(),
                     platforms: [(
                         AgentManager::current_platform().to_string(),
-                        ArtifactInfo { url: url.to_string(), size, format: None },
+                        ArtifactInfo { url: url.to_string(), sha256: None, size, format: None },
                     )]
                     .into_iter()
                     .collect(),
@@ -2778,6 +2875,7 @@ mod agent_registry_install_tests {
         version: &str,
         url: &str,
         format: Option<ArtifactFormat>,
+        expected_sha256: Option<&str>,
         archive: &[u8],
     ) {
         let dest = jre_archive_download_path(am, jre_key, format);
@@ -2785,11 +2883,50 @@ mod agent_registry_install_tests {
             am,
             url,
             archive.len() as u64,
+            expected_sha256,
             Some(CacheIdentity::Jre { key: jre_key, version }),
             &dest,
         );
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(cache_path, archive).unwrap();
+    }
+
+    #[test]
+    fn artifact_info_deserializes_sha256_metadata() {
+        let expected_sha256 = "a".repeat(64);
+        let artifact: ArtifactInfo = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/artifact.tar.zst",
+            "sha256": expected_sha256,
+            "size": 4,
+            "format": "tar_zstd"
+        }))
+        .unwrap();
+
+        assert_eq!(artifact.sha256.as_deref(), Some(expected_sha256.as_str()));
+    }
+
+    #[test]
+    fn cached_download_rejects_same_size_sha256_mismatch() {
+        let manager = test_manager("cache-sha256-mismatch");
+        let cache_path = manager.download_cache_dir().join("artifact.bin");
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, b"bad!").unwrap();
+        let expected_sha256 = format!("{:x}", Sha256::digest(b"good"));
+
+        assert!(!cached_download_is_valid(&manager, &cache_path, 4, Some(&expected_sha256)));
+        assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn cached_download_accepts_matching_sha256() {
+        let manager = test_manager("cache-sha256-match");
+        let cache_path = manager.download_cache_dir().join("artifact.bin");
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, b"good").unwrap();
+        let expected_sha256 = format!("{:x}", Sha256::digest(b"good"));
+
+        assert!(cached_download_is_valid(&manager, &cache_path, 4, Some(&expected_sha256)));
+        assert!(cache_path.exists());
     }
 
     #[tokio::test]
@@ -2987,7 +3124,7 @@ mod agent_registry_install_tests {
         let events = std::sync::Mutex::new(Vec::new());
         let progress = |event| events.lock().unwrap().push(event);
 
-        write_cached_jre_download(&manager, jre_key, version, url, None, &archive);
+        write_cached_jre_download(&manager, jre_key, version, url, None, None, &archive);
         ensure_jre_from_registry(
             &manager,
             &registry,
@@ -3003,7 +3140,7 @@ mod agent_registry_install_tests {
 
         // The successful install cleans its cache. Re-add it so the old
         // implementation fails deterministically by consuming it again.
-        write_cached_jre_download(&manager, jre_key, version, url, None, &archive);
+        write_cached_jre_download(&manager, jre_key, version, url, None, None, &archive);
         ensure_jre_from_registry(
             &manager,
             &registry,
@@ -3037,10 +3174,21 @@ mod agent_registry_install_tests {
         let version = "21.0.12";
         let url = "https://example.com/dbx-jre.tar.zst";
         let archive = build_zstd_jre_archive(&manager, jre_key);
+        let expected_sha256 = format!("{:x}", Sha256::digest(&archive));
         let mut registry = registry_with_jre(jre_key, version, url, archive.len() as u64);
-        registry.jres.get_mut(jre_key).unwrap().platforms.get_mut(AgentManager::current_platform()).unwrap().format =
-            Some(ArtifactFormat::TarZstd);
-        write_cached_jre_download(&manager, jre_key, version, url, Some(ArtifactFormat::TarZstd), &archive);
+        let artifact =
+            registry.jres.get_mut(jre_key).unwrap().platforms.get_mut(AgentManager::current_platform()).unwrap();
+        artifact.format = Some(ArtifactFormat::TarZstd);
+        artifact.sha256 = Some(expected_sha256.clone());
+        write_cached_jre_download(
+            &manager,
+            jre_key,
+            version,
+            url,
+            Some(ArtifactFormat::TarZstd),
+            Some(&expected_sha256),
+            &archive,
+        );
 
         ensure_jre_from_registry(&manager, &registry, DownloadSource::Official, jre_key, "dameng", &|_| {}, None, None)
             .await

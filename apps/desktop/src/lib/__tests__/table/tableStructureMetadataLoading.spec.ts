@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldLoadTableStructureTriggers, visibleTableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
+import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 
 describe("table structure metadata loading", () => {
   it.each([
@@ -12,28 +12,16 @@ describe("table structure metadata loading", () => {
     expect(visibleTableStructureRefreshScope(tab)).toEqual(expected);
   });
 
-  it("loads trigger metadata once when the trigger tab becomes visible", () => {
-    const base = {
-      activeTab: "triggers" as const,
-      isCreateMode: false,
-      supported: true,
-      loading: false,
-      structureLoading: false,
-    };
+  it("requests only index metadata after columns and comments are already loaded", () => {
+    const scope = unloadedTableStructureRefreshScope("indexes", new Set(["columns", "comment"]));
 
-    expect(shouldLoadTableStructureTriggers({ ...base, loaded: false })).toBe(true);
-    expect(shouldLoadTableStructureTriggers({ ...base, loaded: true })).toBe(false);
+    expect(scope).toEqual({ columns: false, indexes: true, foreignKeys: false, triggers: false, tableComment: false });
+    expect(hasTableStructureRefreshWork(scope)).toBe(true);
+    expect(hasTableStructureRefreshWork(unloadedTableStructureRefreshScope("indexes", new Set(["columns", "indexes", "comment"])))).toBe(false);
   });
 
-  it("waits for the initial structure load and skips create mode", () => {
-    const base = {
-      activeTab: "triggers" as const,
-      supported: true,
-      loaded: false,
-      loading: false,
-    };
-
-    expect(shouldLoadTableStructureTriggers({ ...base, isCreateMode: false, structureLoading: true })).toBe(false);
-    expect(shouldLoadTableStructureTriggers({ ...base, isCreateMode: true, structureLoading: false })).toBe(false);
+  it("requests trigger metadata only until that facet is loaded", () => {
+    expect(unloadedTableStructureRefreshScope("triggers", new Set(["comment"]))).toEqual({ columns: false, indexes: false, foreignKeys: false, triggers: true, tableComment: false });
+    expect(hasTableStructureRefreshWork(unloadedTableStructureRefreshScope("triggers", new Set(["triggers", "comment"])))).toBe(false);
   });
 });

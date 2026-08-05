@@ -137,12 +137,14 @@ pub async fn ai_agent_stream(
     request: AiCompletionRequest,
     connection_id: String,
     database: String,
+    schema: Option<String>,
     db_type: String,
     mode: Option<String>,
     allow_write_sql: Option<bool>,
     confirmed_write_sql: Option<String>,
     confirmed_connection_id: Option<String>,
     confirmed_database: Option<String>,
+    confirmed_schema: Option<String>,
 ) -> Result<String, String> {
     let mut request = resolve_cli_provider_request(request);
     merge_global_max_retries(
@@ -179,8 +181,10 @@ pub async fn ai_agent_stream(
         confirmed_write_sql,
         confirmed_connection_id,
         confirmed_database,
+        confirmed_schema,
         &connection_id,
         &database,
+        schema.as_deref(),
     );
     // Explicit confirmation grants write access only to this agent run, never to
     // production.  Writes are only allowed when a specific SQL statement was
@@ -195,6 +199,7 @@ pub async fn ai_agent_stream(
         state: state.inner().clone(),
         connection_id,
         database,
+        schema,
         db_type: parsed_db_type,
         cli_mcp_server_command,
         sql_permissions,
@@ -329,8 +334,10 @@ mod tests {
             Some("DELETE FROM users WHERE id = 1".to_string()),
             Some("conn-1".to_string()),
             Some("app".to_string()),
+            None,
             "conn-1",
             "app",
+            None,
         );
         assert_eq!(allow, Some(true));
         assert_eq!(confirmed, Some("DELETE FROM users WHERE id = 1".to_string()));
@@ -343,8 +350,10 @@ mod tests {
             Some("DELETE FROM users WHERE id = 1".to_string()),
             Some("conn-staging".to_string()),
             Some("app".to_string()),
+            None,
             "conn-production",
             "app",
+            None,
         );
         assert_eq!(allow, Some(false));
         assert_eq!(confirmed, None);
@@ -357,8 +366,10 @@ mod tests {
             Some("DELETE FROM users WHERE id = 1".to_string()),
             Some("conn-1".to_string()),
             Some("staging".to_string()),
+            None,
             "conn-1",
             "production",
+            None,
         );
         assert_eq!(allow, Some(false));
         assert_eq!(confirmed, None);
@@ -373,8 +384,10 @@ mod tests {
             None,
             Some("conn-staging".to_string()),
             Some("staging".to_string()),
+            None,
             "conn-production",
             "production",
+            None,
         );
         assert_eq!(allow, Some(false));
         assert_eq!(confirmed, None);
@@ -390,8 +403,26 @@ mod tests {
             Some("DELETE FROM users WHERE id = 1".to_string()),
             None,
             None,
+            None,
             "conn-1",
             "app",
+            None,
+        );
+        assert_eq!(allow, Some(false));
+        assert_eq!(confirmed, None);
+    }
+
+    #[test]
+    fn verify_confirmed_target_rejects_mismatched_schema() {
+        let (allow, confirmed) = dbx_core::agent_tools::verify_confirmed_target(
+            Some(true),
+            Some("DELETE FROM users WHERE id = 1".to_string()),
+            Some("conn-1".to_string()),
+            Some("APPDB".to_string()),
+            Some("APP_USER".to_string()),
+            "conn-1",
+            "APPDB",
+            Some("REPORTING"),
         );
         assert_eq!(allow, Some(false));
         assert_eq!(confirmed, None);

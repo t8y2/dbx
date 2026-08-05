@@ -780,7 +780,7 @@ describe("useQuickOpen", () => {
       setQuery("ord");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "ord", 25, undefined, true);
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "ord", 25, undefined, true, undefined, undefined, { activateConnection: false });
       expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "orders", type: "table", database: "app" })]));
     });
 
@@ -851,7 +851,7 @@ describe("useQuickOpen", () => {
       expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
     });
 
-    it("does not request metadata from disconnected contexts", async () => {
+    it("searches disconnected contexts through lazy connection", async () => {
       const mockStore = remoteSearchStore({ connectedIds: new Set<string>() });
       vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
 
@@ -859,7 +859,125 @@ describe("useQuickOpen", () => {
       setQuery("users");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "users", 25, undefined, true, undefined, undefined, { activateConnection: false });
+    });
+
+    it("prioritizes the active connection before applying the remote request cap", async () => {
+      const connections = Array.from({ length: 9 }, (_, index) => ({ id: `conn${index}`, name: `Connection ${index}`, db_type: "mysql", database: `db${index}` }));
+      const mockStore = remoteSearchStore({
+        connections,
+        activeConnectionId: "conn8",
+        connectedIds: new Set(["conn8"]),
+        treeNodes: [],
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { setQuery } = useQuickOpen();
+      setQuery("users");
+      await runDebouncedSearch();
+
+      const requestedConnections = mockStore.listCompletionTables.mock.calls.map(([connectionId]) => connectionId);
+      expect(requestedConnections).toContain("conn8");
+      expect(requestedConnections).not.toContain("conn7");
+      expect(mockStore.listCompletionTables).toHaveBeenCalledTimes(8);
+    });
+
+    it("publishes active connection results without waiting for slow cold connections", async () => {
+      const slowSearch = deferred<Array<{ name: string; type: "table" }>>();
+      const mockStore = remoteSearchStore({
+        connections: [
+          { id: "cold", name: "Cold", db_type: "mysql", database: "cold_db" },
+          { id: "active", name: "Active", db_type: "mysql", database: "active_db" },
+        ],
+        activeConnectionId: "active",
+        connectedIds: new Set(["active"]),
+        treeNodes: [],
+        listCompletionTables: vi.fn((connectionId) => (connectionId === "active" ? Promise.resolve([{ name: "active_users", type: "table" as const }]) : slowSearch.promise)),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("users");
+      await runDebouncedSearch();
+
+      expect(filteredItems.value.map((item) => item.label)).toContain("active_users");
+      slowSearch.resolve([]);
+      await flushAsyncWork();
+    });
+
+    it("drops stale queued contexts before scheduling a newer query", async () => {
+      const alphaRequests: Array<ReturnType<typeof deferred<Array<{ name: string; type: "table" }>>>> = [];
+      const listCompletionTables = vi.fn((_connectionId, _database, query) => {
+        if (query === "alpha") {
+          const request = deferred<Array<{ name: string; type: "table" }>>();
+          alphaRequests.push(request);
+          return request.promise;
+        }
+        return Promise.resolve([{ name: "beta_table", type: "table" as const }]);
+      });
+      const mockStore = remoteSearchStore({
+        treeNodes: Array.from({ length: 4 }, (_, index) => ({
+          id: `conn1:db${index}`,
+          connectionId: "conn1",
+          type: "database",
+          database: `db${index}`,
+          label: `db${index}`,
+        })),
+        listCompletionTables,
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("alpha");
+      await runDebouncedSearch();
+      expect(listCompletionTables).toHaveBeenCalledTimes(2);
+
+      setQuery("beta");
+      await runDebouncedSearch();
+      expect(listCompletionTables).toHaveBeenCalledTimes(2);
+
+      alphaRequests[0]!.resolve([]);
+      await flushAsyncWork();
+      expect(listCompletionTables.mock.calls[2]?.[2]).toBe("beta");
+      expect(listCompletionTables.mock.calls.filter(([, , query]) => query === "alpha")).toHaveLength(2);
+
+      alphaRequests[1]!.resolve([]);
+      await flushAsyncWork();
+      expect(filteredItems.value.map((item) => item.label)).toContain("beta_table");
+    });
+
+    it("derives the SQLite main database before its tree is expanded", async () => {
+      const mockStore = remoteSearchStore({
+        connections: [{ id: "sqlite-1", name: "SQLite", db_type: "sqlite", host: "/tmp/app.sqlite" }],
+        connectedIds: new Set<string>(),
+        treeNodes: [],
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "scroll_test", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("scroll_test");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("sqlite-1", "main", "scroll_test", 25, undefined, true, undefined, undefined, { activateConnection: false });
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "scroll_test", type: "table", database: "main" })]));
+    });
+
+    it("searches the PostgreSQL backend default database before its tree is expanded", async () => {
+      const mockStore = remoteSearchStore({
+        connections: [{ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "" }],
+        connectedIds: new Set<string>(),
+        treeNodes: [],
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "cold_start_table", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("cold_start_table");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("pg-1", "postgres", "cold_start_table", 25, undefined, true, undefined, undefined, { activateConnection: false });
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "cold_start_table", type: "table", database: "postgres" })]));
     });
 
     it("keeps local results when remote metadata search fails", async () => {

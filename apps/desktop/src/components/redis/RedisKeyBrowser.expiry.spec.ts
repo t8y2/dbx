@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
   toast: vi.fn(),
   updateRedisDbKeyStats: vi.fn(),
+  redisScanPageSize: 100,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -52,7 +53,7 @@ vi.mock("@/lib/redis/redisKeyTree", async (importOriginal) => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
-    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: 100 }),
+    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
     invalidateCompletionCache: vi.fn(),
     refreshRedisDbKeyCounts: vi.fn(),
@@ -81,7 +82,7 @@ vi.mock("@/components/ui/button", async () => {
 });
 
 vi.mock("@/components/ui/input", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, mergeProps } = await import("vue");
   return {
     Input: defineComponent({
       inheritAttrs: false,
@@ -89,12 +90,14 @@ vi.mock("@/components/ui/input", async () => {
       emits: ["update:modelValue"],
       setup(props, { attrs, emit }) {
         return () =>
-          h("input", {
-            ...attrs,
-            value: props.modelValue ?? "",
-            disabled: props.disabled,
-            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
-          });
+          h(
+            "input",
+            mergeProps(attrs, {
+              value: props.modelValue ?? "",
+              disabled: props.disabled,
+              onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
+            }),
+          );
       },
     }),
   };
@@ -342,6 +345,7 @@ function deferred<T>() {
 
 function resetApiMocks() {
   vi.clearAllMocks();
+  mocks.redisScanPageSize = 100;
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
   mocks.redisGetValue.mockImplementation((_connectionId: string, _db: number, keyRaw: string) => Promise.resolve(redisValue(keyRaw)));
   mocks.redisSetString.mockResolvedValue(undefined);
@@ -681,6 +685,199 @@ describe("RedisKeyBrowser expiry creation", () => {
 });
 
 describe("RedisKeyBrowser fuzzy key hierarchy", () => {
+  it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const target = { key_display: "issue5012:target", key_raw: "aXNzdWU1MDEyOnRhcmdldA==", key_type: "string", ttl: -1 };
+    let batch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation(() => {
+      batch += 1;
+      if (batch === 8) return Promise.resolve({ cursor: 801, keys: [target], total_keys: 0 });
+      return Promise.resolve({ cursor: batch * 100, keys: [], total_keys: batch === 1 ? 200_000 : 0 });
+    });
+
+    await submitKeySearch("issue5012:target");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
+    await settle();
+    expect(document.body.textContent).not.toContain("target");
+    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => {
+      const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+      expect(labels).toContain("target");
+    });
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8);
+    expect(mocks.redisScanKeysBatch.mock.calls.every((call) => call[3] === "*issue5012:target*")).toBe(true);
+  });
+
+  it("bounds a large no-match keyspace and exposes the saved-cursor continuation", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    let batch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation(() => {
+      batch += 1;
+      return Promise.resolve({ cursor: batch, keys: [], total_keys: batch === 1 ? 5_000_000 : 0 });
+    });
+
+    await submitKeySearch("missing-key");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
+    await settle();
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7);
+    expect(mocks.redisScanKeysBatch.mock.calls[mocks.redisScanKeysBatch.mock.calls.length - 1]?.[2]).toBe(6);
+    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
+    expect(Array.from(document.querySelectorAll("button")).some((button) => button.textContent?.includes("redis.loadMoreKeys"))).toBe(true);
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14));
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14);
+    expect(mocks.redisScanKeysBatch.mock.calls[7]?.[2]).toBe(7);
+    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
+  });
+
+  it("keeps existing matches while continuing to the next sparse fuzzy result", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const first = { key_display: "issue5012:first", key_raw: "aXNzdWU1MDEyOmZpcnN0", key_type: "string", ttl: -1 };
+    const next = { key_display: "issue5012:next", key_raw: "aXNzdWU1MDEyOm5leHQ=", key_type: "string", ttl: -1 };
+    let continuationBatch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 1, keys: [first], total_keys: 200_000 });
+      continuationBatch += 1;
+      if (continuationBatch === 8) return Promise.resolve({ cursor: 0, keys: [next], total_keys: 0 });
+      return Promise.resolve({ cursor: continuationBatch + 1, keys: [], total_keys: 0 });
+    });
+
+    await submitKeySearch("issue5012");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("first"));
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(continuationBatch).toBe(7));
+    expect(document.body.textContent).toContain("first");
+    expect(document.body.textContent).not.toContain("next");
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("next"));
+
+    expect(continuationBatch).toBe(8);
+    expect(document.body.textContent).toContain("first");
+  });
+
+  it("cancels a sparse scan immediately when the search text changes", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const oldPage = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const fresh = { key_display: "new:result", key_raw: "bmV3OnJlc3VsdA==", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => {
+      if (pattern === "*old*") return oldPage.promise;
+      return Promise.resolve({ cursor: 0, keys: [fresh], total_keys: 1 });
+    });
+
+    await submitKeySearch("old");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1));
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
+    input.value = "new";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    oldPage.resolve({ cursor: 1, keys: [], total_keys: 1_000_000 });
+    await settle();
+
+    expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[3] === "*old*")).toHaveLength(1);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("result"));
+    expect(mocks.redisScanKeysBatch.mock.calls.map((call) => call[3])).toEqual(["*old*", "*new*"]);
+  });
+
+  it("keeps a current continuation locked when an older load-more request finishes", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const oldContinuation = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const currentContinuation = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const oldInitial = { key_display: "old:initial", key_raw: "b2xkOmluaXRpYWw=", key_type: "string", ttl: -1 };
+    const currentInitial = { key_display: "new:initial", key_raw: "bmV3OmluaXRpYWw=", key_type: "string", ttl: -1 };
+    const currentFirstPage = { key_display: "new:first-page", key_raw: "bmV3OmZpcnN0LXBhZ2U=", key_type: "string", ttl: -1 };
+    const currentLastPage = { key_display: "new:last-page", key_raw: "bmV3Omxhc3QtcGFnZQ==", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "*old*") {
+        if (cursor === 0) return Promise.resolve({ cursor: 11, keys: [oldInitial], total_keys: 100 });
+        return oldContinuation.promise;
+      }
+      if (pattern === "*new*") {
+        if (cursor === 0) return Promise.resolve({ cursor: 21, keys: [currentInitial], total_keys: 100 });
+        if (cursor === 21) return Promise.resolve({ cursor: 22, keys: [currentFirstPage], total_keys: 0 });
+        if (cursor === 22) return currentContinuation.promise;
+      }
+      return Promise.resolve({ cursor: 0, keys: [], total_keys: 0 });
+    });
+
+    await submitKeySearch("old");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*old*")).toHaveLength(1));
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.some((call) => call[2] === 11)).toBe(true));
+
+    await submitKeySearch("new");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*new*")).toHaveLength(1));
+    const firstCurrentLoadMore = await vi.waitFor(() => {
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((candidate) => candidate.textContent?.includes("redis.loadMoreKeys"));
+      const button = buttons.find((candidate) => !candidate.disabled);
+      expect(button).toBeDefined();
+      return button!;
+    });
+    firstCurrentLoadMore.click();
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 21)).toHaveLength(1));
+    const secondCurrentLoadMore = await vi.waitFor(() => {
+      const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.loadMoreKeys") && !candidate.disabled);
+      expect(button).toBeDefined();
+      return button!;
+    });
+    secondCurrentLoadMore.click();
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 22)).toHaveLength(1));
+
+    oldContinuation.resolve({ cursor: 12, keys: [], total_keys: 0 });
+    await settle();
+
+    const loadMoreButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"));
+    expect(loadMoreButtons.length).toBeGreaterThan(0);
+    expect(loadMoreButtons.every((button) => button.disabled)).toBe(true);
+    loadMoreButtons[0]!.click();
+    await settle();
+    expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 22)).toHaveLength(1);
+
+    currentContinuation.resolve({ cursor: 0, keys: [currentLastPage], total_keys: 0 });
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"))).toHaveLength(0));
+    const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+    expect(labels).toContain("new");
+    expect(labels).not.toContain("old");
+  });
+
   it("keeps NUL-containing fuzzy groups isolated when selecting keys to delete", async () => {
     const firstKeyRaw = "cmF3LWZpcnN0";
     const secondKeyRaw = "cmF3LXNlY29uZA==";

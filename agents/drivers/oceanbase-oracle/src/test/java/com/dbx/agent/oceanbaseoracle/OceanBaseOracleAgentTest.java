@@ -88,7 +88,7 @@ class OceanBaseOracleAgentTest {
             OceanBaseOracleAgent.queryTimeoutSql(300)
         );
         Assertions.assertEquals(
-            "ALTER SESSION SET ob_query_timeout = 0",
+            "ALTER SESSION SET ob_query_timeout = 3216672000000000",
             OceanBaseOracleAgent.queryTimeoutSql(0)
         );
         Assertions.assertEquals(
@@ -100,6 +100,23 @@ class OceanBaseOracleAgentTest {
     @Test
     void rejectsNegativeQueryTimeout() {
         Assertions.assertThrows(IllegalArgumentException.class, () -> OceanBaseOracleAgent.queryTimeoutSql(-1));
+    }
+
+    @Test
+    void treatsZeroQueryTimeoutAsUnlimitedForOceanBaseSession() {
+        List<String> sql = new ArrayList<>();
+        List<Integer> queryTimeouts = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        Connection connection = executionConnection(sql, queryTimeouts, List.of());
+        TestSupport.setPrivateConnection(agent, connection);
+
+        agent.executeQuery("INSERT INTO ITEMS (ID) VALUES (1)", null, new ExecuteQueryOptions(10, null, 0));
+
+        Assertions.assertEquals(List.of(
+            "ALTER SESSION SET ob_query_timeout = 3216672000000000",
+            "INSERT INTO ITEMS (ID) VALUES (1)"
+        ), sql);
+        Assertions.assertEquals(List.of(), queryTimeouts);
     }
 
     @Test
@@ -122,7 +139,7 @@ class OceanBaseOracleAgentTest {
             "SELECT 2 FROM DUAL",
             "ALTER SESSION SET ob_query_timeout = 14000000",
             "SELECT 3 FROM DUAL",
-            "ALTER SESSION SET ob_query_timeout = 0"
+            "ALTER SESSION SET ob_query_timeout = 3216672000000000"
         ), sql);
         Assertions.assertEquals(List.of(12, 13, 14), queryTimeouts);
     }

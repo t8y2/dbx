@@ -121,6 +121,7 @@ async function initDdlEditor(content: string) {
         },
       }),
       basicSetup,
+      EditorState.allowMultipleSelections.of(true),
       langSql.sql({ dialect }),
       themeExt,
       fontExt,

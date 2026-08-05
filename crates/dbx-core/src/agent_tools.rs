@@ -66,22 +66,27 @@ pub fn verify_confirmed_target(
     confirmed_write_sql: Option<String>,
     confirmed_connection_id: Option<String>,
     confirmed_database: Option<String>,
+    confirmed_schema: Option<String>,
     actual_connection_id: &str,
     actual_database: &str,
+    actual_schema: Option<&str>,
 ) -> (Option<bool>, Option<String>) {
     let Some(ref confirmed_sql) = confirmed_write_sql else {
         return (allow_write_sql, confirmed_write_sql);
     };
     // Only verify when a write SQL was actually confirmed.
     let target_mismatch = confirmed_connection_id.as_deref() != Some(actual_connection_id)
-        || confirmed_database.as_deref() != Some(actual_database);
+        || confirmed_database.as_deref() != Some(actual_database)
+        || confirmed_schema.as_deref() != actual_schema;
     if target_mismatch {
         log::warn!(
-            "Write-SQL grant voided: confirmed target (conn={:?}, db={:?}) does not match actual (conn={}, db={}).",
+            "Write-SQL grant voided: confirmed target (conn={:?}, db={:?}, schema={:?}) does not match actual (conn={}, db={}, schema={:?}).",
             confirmed_connection_id,
             confirmed_database,
+            confirmed_schema,
             actual_connection_id,
             actual_database,
+            actual_schema,
         );
         // SQL can contain literals or credentials. Keep diagnostic visibility
         // behind the shared debug-only redaction boundary.
@@ -106,13 +111,75 @@ pub fn is_vector_db(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb)
 }
 
+/// `get_current_time` tool definition — DB-independent utility that returns
+/// the current UTC time plus a caller-provided local offset.
+fn get_current_time_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_current_time",
+        description: "Get the current date and time with timezone information. \
+                      Pass the client UTC offset from the system prompt; when \
+                      omitted, local time safely falls back to UTC. Use this to resolve \
+                      relative time expressions like \"last 7 days\", \
+                      \"yesterday\", \"this month\" into concrete dates \
+                      for constructing SQL queries.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "utc_offset_minutes": {
+                    "type": "integer",
+                    "minimum": -1439,
+                    "maximum": 1439,
+                    "description": "Client UTC offset in minutes from the system prompt"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Client IANA timezone name from the system prompt"
+                }
+            },
+            "required": []
+        }),
+        read_only: true,
+        parallel_ok: true,
+    }
+}
+
+/// Execute `get_current_time` — returns a JSON payload with utc, local,
+/// utc_offset_minutes, timezone, and readable fields.
+fn execute_get_current_time(tool_call: &ToolCall) -> Result<String, String> {
+    let utc = chrono::Utc::now();
+    let offset_minutes = tool_call.arguments.get("utc_offset_minutes").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let offset_minutes = i32::try_from(offset_minutes).map_err(|_| "utc_offset_minutes is out of range".to_string())?;
+    let offset_seconds =
+        offset_minutes.checked_mul(60).ok_or_else(|| "utc_offset_minutes is out of range".to_string())?;
+    let offset = chrono::FixedOffset::east_opt(offset_seconds)
+        .ok_or_else(|| "utc_offset_minutes must be between -1439 and 1439".to_string())?;
+    let local = utc.with_timezone(&offset);
+    let timezone = tool_call
+        .arguments
+        .get("timezone")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| if offset_minutes == 0 { "UTC".to_string() } else { format!("UTC{}", local.format("%:z")) });
+    let readable = format!("{} ({timezone}, UTC{})", local.format("%Y-%m-%d %H:%M:%S"), local.format("%:z"));
+    Ok(serde_json::json!({
+        "utc": utc.to_rfc3339(),
+        "local": local.to_rfc3339(),
+        "utc_offset_minutes": offset_minutes,
+        "timezone": timezone,
+        "readable": readable,
+    })
+    .to_string())
+}
+
 /// Get read-only tool definitions for the given database type.
 /// Returns vector tools for vector DBs, SQL tools otherwise.
 pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        vec![list_collections_tool()]
+        vec![list_collections_tool(), get_current_time_tool()]
     } else {
-        vec![list_tables_tool(), get_columns_tool()]
+        vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()]
     }
 }
 
@@ -121,9 +188,9 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
 /// explain_query for database types that support them.
 pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        return vec![list_collections_tool(), browse_collection_tool()];
+        return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
-    let mut tools = vec![list_tables_tool(), get_columns_tool()];
+    let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
     if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
@@ -313,21 +380,25 @@ pub async fn execute_tool(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
 ) -> ToolResult {
     let result = match tool_call.name.as_str() {
-        "list_tables" => execute_list_tables(tool_call, state, connection_id, database, db_type).await,
-        "get_columns" => execute_get_columns(tool_call, state, connection_id, database, db_type).await,
+        "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
+        "get_columns" => execute_get_columns(tool_call, state, connection_id, database, default_schema, db_type).await,
         "execute_query" => {
-            execute_execute_query(tool_call, state, connection_id, database, db_type, sql_permissions).await
+            execute_execute_query(tool_call, state, connection_id, database, default_schema, db_type, sql_permissions)
+                .await
         }
-        "get_sample_data" => execute_get_sample_data(tool_call, state, connection_id, database, db_type).await,
+        "get_sample_data" => {
+            execute_get_sample_data(tool_call, state, connection_id, database, default_schema, db_type).await
+        }
         "list_collections" => execute_list_collections(tool_call, state, connection_id, database, db_type).await,
         "browse_collection" => execute_browse_collection(tool_call, state, connection_id, database, db_type).await,
         "explain_query" => {
             let (text_result, explain_data) =
-                execute_explain_query(tool_call, state, connection_id, database, db_type).await;
+                execute_explain_query(tool_call, state, connection_id, database, default_schema, db_type).await;
             match text_result {
                 Ok(content) => {
                     return ToolResult {
@@ -349,6 +420,7 @@ pub async fn execute_tool(
                 }
             }
         }
+        "get_current_time" => execute_get_current_time(tool_call),
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -375,9 +447,10 @@ async fn execute_list_tables(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     _db_type: &DatabaseType,
 ) -> Result<String, String> {
-    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let schema = effective_schema(tool_call, default_schema).unwrap_or_default();
 
     // Request one extra to detect whether more tables exist beyond the limit.
     let tables = crate::schema::list_tables_core(
@@ -426,6 +499,7 @@ async fn execute_get_columns(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     _db_type: &DatabaseType,
 ) -> Result<String, String> {
     let table = tool_call
@@ -447,7 +521,7 @@ async fn execute_get_columns(
         return Err(format!("Table name contains invalid characters: '{}'", table));
     }
 
-    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let schema = effective_schema(tool_call, default_schema).unwrap_or_default();
 
     let columns = crate::schema::get_columns_core(state, connection_id, database, &schema, &table)
         .await
@@ -529,6 +603,7 @@ async fn execute_execute_query(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
 ) -> Result<String, String> {
@@ -588,17 +663,26 @@ async fn execute_execute_query(
         client_session_id: client_session_id.map(str::to_string),
         ..Default::default()
     };
-    let result =
-        crate::query::execute_sql_statement_with_options(state, connection_id, database, sql, None, None, options)
-            .await?;
+    let result = crate::query::execute_sql_statement_with_options(
+        state,
+        connection_id,
+        database,
+        sql,
+        default_schema,
+        None,
+        options,
+    )
+    .await?;
 
     format_query_result_as_text(&result, limit)
 }
 
 /// Format a QueryResult as a Markdown table for LLM consumption.
 fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<String, String> {
-    if result.rows.is_empty() {
-        return Ok("Query returned 0 rows.".to_string());
+    // A result without columns is a command result, not an empty result set.
+    // This is how drivers represent DML that does not use RETURNING.
+    if result.columns.is_empty() {
+        return Ok(format!("Query executed. {} row(s) affected.", result.affected_rows));
     }
 
     let mut lines = Vec::new();
@@ -647,6 +731,7 @@ async fn execute_get_sample_data(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
 ) -> Result<String, String> {
     let table =
@@ -659,7 +744,7 @@ async fn execute_get_sample_data(
         return Err(format!("Table name contains invalid characters: '{}'", table));
     }
 
-    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    let schema = effective_schema(tool_call, default_schema);
     let limit = tool_call
         .arguments
         .get("limit")
@@ -669,7 +754,7 @@ async fn execute_get_sample_data(
 
     // Reuse the table-data builder so identifier quoting and row limiting follow
     // the active database instead of assuming PostgreSQL syntax.
-    let sql = build_sample_data_sql(db_type, schema, table, limit);
+    let sql = build_sample_data_sql(db_type, schema.as_deref(), table, limit);
 
     // Delegate to execute_execute_query with a synthetic tool call
     let synthetic_call = ToolCall {
@@ -678,8 +763,16 @@ async fn execute_get_sample_data(
         arguments: serde_json::json!({ "sql": sql, "limit": limit }),
         provider_payload: None,
     };
-    execute_execute_query(&synthetic_call, state, connection_id, database, db_type, AgentSqlPermissions::default())
-        .await
+    execute_execute_query(
+        &synthetic_call,
+        state,
+        connection_id,
+        database,
+        schema.as_deref(),
+        db_type,
+        AgentSqlPermissions::default(),
+    )
+    .await
 }
 
 fn build_sample_data_sql(db_type: &DatabaseType, schema: Option<&str>, table: &str, limit: usize) -> String {
@@ -699,6 +792,7 @@ async fn execute_explain_query(
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
     db_type: &DatabaseType,
 ) -> (Result<String, String>, Option<serde_json::Value>) {
     let sql = match tool_call.arguments.get("sql").and_then(|v| v.as_str()) {
@@ -733,7 +827,7 @@ async fn execute_explain_query(
             state,
             connection_id,
             Some(database),
-            None,
+            default_schema,
             sql,
             Some("explain"),
         )
@@ -745,8 +839,12 @@ async fn execute_explain_query(
     }
 
     // Build the database-specific EXPLAIN SQL
-    let explain_result =
-        build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), format: None, sql: sql.to_string() });
+    let explain_result = build_explain_sql(ExplainSqlOptions {
+        database_type: Some(*db_type),
+        format: None,
+        analyze: None,
+        sql: sql.to_string(),
+    });
 
     let explain_sql = match (explain_result.ok, explain_result.sql) {
         (true, Some(sql)) => sql,
@@ -764,7 +862,7 @@ async fn execute_explain_query(
         connection_id,
         database,
         &explain_sql,
-        None,
+        default_schema,
         None,
         options,
     )
@@ -782,6 +880,20 @@ async fn execute_explain_query(
     };
 
     (Ok(text), explain_data)
+}
+
+/// A selected context schema is authoritative for an Agent run. If none was
+/// selected, keep the existing per-tool schema parameter behavior.
+fn effective_schema(tool_call: &ToolCall, default_schema: Option<&str>) -> Option<String> {
+    default_schema.map(str::trim).filter(|schema| !schema.is_empty()).map(ToOwned::to_owned).or_else(|| {
+        tool_call
+            .arguments
+            .get("schema")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 /// Execute list_collections tool (vector databases).
@@ -933,13 +1045,123 @@ async fn resolve_chroma_collection_uuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::connection::PoolKind;
+    #[cfg(unix)]
+    use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
+    #[cfg(unix)]
+    use crate::models::connection::{default_redis_key_separator, ConnectionConfig};
+    #[cfg(unix)]
+    use crate::storage::Storage;
+
+    #[cfg(unix)]
+    async fn spawn_recording_agent(record_path: &std::path::Path) -> (AgentDriverClient, tempfile::NamedTempFile) {
+        use std::io::Write;
+
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            script,
+            r#"import json
+import sys
+
+record_path = sys.argv[1]
+print(json.dumps({{"ready": True}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    with open(record_path, "a", encoding="utf-8") as record:
+        record.write(json.dumps(request) + "\n")
+    result = {{
+        "columns": [],
+        "column_types": [],
+        "column_sortables": [],
+        "rows": [],
+        "affected_rows": 1,
+        "execution_time_ms": 0,
+        "truncated": False,
+        "session_id": None,
+        "has_more": False
+    }}
+    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+"#
+        )
+        .unwrap();
+        script.flush().unwrap();
+
+        let client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new("python3")
+                .with_args([script.path().to_string_lossy().to_string(), record_path.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        (client, script)
+    }
+
+    #[cfg(unix)]
+    fn agent_test_connection(id: &str, name: &str, db_type: DatabaseType, database: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: id.to_string(),
+            name: name.to_string(),
+            note: String::new(),
+            db_type,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: "localhost".to_string(),
+            port: 5236,
+            username: "APP_USER".to_string(),
+            password: String::new(),
+            database: Some(database.to_string()),
+            visible_databases: None,
+            visible_schemas: None,
+            show_system_schemas: false,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 10,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 30,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+        }
+    }
 
     #[test]
     fn vector_read_only_tools_do_not_include_collection_browsing() {
         let tools = read_only_tools(DatabaseType::Qdrant);
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(!names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
     }
 
     #[test]
@@ -947,7 +1169,9 @@ mod tests {
         let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections", "browse_collection"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
     }
 
     #[test]
@@ -984,6 +1208,50 @@ mod tests {
         assert!(names.contains(&"explain_query"));
     }
 
+    fn query_result(columns: Vec<&str>, rows: Vec<Vec<serde_json::Value>>, affected_rows: u64) -> QueryResult {
+        QueryResult {
+            columns: columns.into_iter().map(str::to_string).collect(),
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows,
+            affected_rows,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        }
+    }
+
+    #[test]
+    fn query_result_formatter_reports_dml_affected_rows() {
+        let result = query_result(vec![], vec![], 2);
+
+        assert_eq!(format_query_result_as_text(&result, 50).unwrap(), "Query executed. 2 row(s) affected.");
+    }
+
+    #[test]
+    fn query_result_formatter_distinguishes_zero_row_dml_from_an_empty_result_set() {
+        let dml = query_result(vec![], vec![], 0);
+        let returning = query_result(vec!["id", "name"], vec![], 0);
+
+        assert_eq!(format_query_result_as_text(&dml, 50).unwrap(), "Query executed. 0 row(s) affected.");
+        assert_eq!(format_query_result_as_text(&returning, 50).unwrap(), "| id | name |\n|---|---|\n(0 rows, 1ms)");
+    }
+
+    #[test]
+    fn query_result_formatter_renders_returning_rows() {
+        let result =
+            query_result(vec!["id", "name"], vec![vec![serde_json::json!(5), serde_json::json!("returning")]], 0);
+
+        assert_eq!(
+            format_query_result_as_text(&result, 50).unwrap(),
+            "| id | name |\n|---|---|\n| 5 | returning |\n(1 rows, 1ms)"
+        );
+    }
+
     #[test]
     fn sample_data_sql_uses_database_identifier_and_limit_syntax() {
         assert_eq!(
@@ -1002,6 +1270,123 @@ mod tests {
             build_sample_data_sql(&DatabaseType::Oracle, Some("APP"), "SYS_TENANT", 20),
             "SELECT * FROM (SELECT * FROM \"APP\".\"SYS_TENANT\") WHERE ROWNUM <= 20"
         );
+    }
+
+    #[test]
+    fn selected_schema_overrides_the_tool_schema_argument() {
+        let call = ToolCall {
+            id: "call-1".to_string(),
+            name: "list_tables".to_string(),
+            arguments: serde_json::json!({ "schema": "OTHER" }),
+            provider_payload: None,
+        };
+
+        assert_eq!(effective_schema(&call, Some("REPORTING")).as_deref(), Some("REPORTING"));
+        assert_eq!(effective_schema(&call, None).as_deref(), Some("OTHER"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dameng_agent_queries_and_confirmed_writes_use_selected_schema() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let record_path = temp_dir.path().join("agent-requests.jsonl");
+        let (client, _script) = spawn_recording_agent(&record_path).await;
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let connection = agent_test_connection("dameng-1", "Dameng", DatabaseType::Dameng, "APPDB");
+        state.configs.write().await.insert(connection.id.clone(), connection);
+        state.connections.write().await.insert("dameng-1:APPDB".to_string(), PoolKind::agent(client));
+
+        let read = ToolCall {
+            id: "read".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "SELECT * FROM orders" }),
+            provider_payload: None,
+        };
+        let read_result = execute_tool(
+            &read,
+            &state,
+            "dameng-1",
+            "APPDB",
+            Some("REPORTING"),
+            &DatabaseType::Dameng,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+        assert!(!read_result.is_error, "{}", read_result.content);
+
+        let confirmed_sql = "DELETE FROM orders WHERE id = 1";
+        let write = ToolCall {
+            id: "write".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": confirmed_sql }),
+            provider_payload: None,
+        };
+        let write_result = execute_tool(
+            &write,
+            &state,
+            "dameng-1",
+            "APPDB",
+            Some("REPORTING"),
+            &DatabaseType::Dameng,
+            confirmed_write_sql_permissions(false, true, Some(confirmed_sql.to_string())),
+        )
+        .await;
+        assert!(!write_result.is_error, "{}", write_result.content);
+
+        let requests = std::fs::read_to_string(&record_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|request| request["method"] == "execute_query")
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["params"]["sql"], "SELECT * FROM orders");
+        assert_eq!(requests[1]["params"]["sql"], confirmed_sql);
+        for request in requests {
+            assert_eq!(request["params"]["database"], "APPDB");
+            assert_eq!(request["params"]["schema"], "REPORTING");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mysql_agent_allows_show_triggers_without_write_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let record_path = temp_dir.path().join("agent-requests.jsonl");
+        let (client, _script) = spawn_recording_agent(&record_path).await;
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let connection = agent_test_connection("mysql-1", "MySQL", DatabaseType::Mysql, "rs_main");
+        state.configs.write().await.insert(connection.id.clone(), connection);
+        state.connections.write().await.insert("mysql-1:rs_main".to_string(), PoolKind::agent(client));
+
+        let sql = "SHOW TRIGGERS FROM `rs_main` LIKE 'trg_order_items_after_%';";
+        let call = ToolCall {
+            id: "show-triggers".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": sql }),
+            provider_payload: None,
+        };
+        let result = execute_tool(
+            &call,
+            &state,
+            "mysql-1",
+            "rs_main",
+            None,
+            &DatabaseType::Mysql,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        let request = std::fs::read_to_string(&record_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|request| request["method"] == "execute_query")
+            .unwrap();
+        assert_eq!(request["params"]["sql"], sql);
     }
 
     #[test]
@@ -1189,5 +1574,164 @@ mod tests {
         // contract — the frontend is responsible for only sending
         // allow_write_sql=true when a specific SQL was confirmed.
         assert!(sql_matches_confirmed_write("INSERT INTO t VALUES (1)", &None));
+    }
+
+    // ── get_current_time tests ────────────────────────────────────────────
+
+    #[test]
+    fn get_current_time_is_in_all_tools_postgres() {
+        let tools = all_tools(DatabaseType::Postgres, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_postgres() {
+        let tools = read_only_tools(DatabaseType::Postgres);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_all_tools_qdrant() {
+        let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_qdrant() {
+        let tools = read_only_tools(DatabaseType::Qdrant);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_tool_is_read_only_and_parallel_ok() {
+        let tool = get_current_time_tool();
+        assert!(tool.read_only, "get_current_time must be read_only");
+        assert!(tool.parallel_ok, "get_current_time must be parallel_ok");
+    }
+
+    #[test]
+    fn execute_get_current_time_returns_valid_timestamps() {
+        let before_secs = chrono::Utc::now().timestamp();
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": 480, "timezone": "Asia/Shanghai" }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let after_secs = chrono::Utc::now().timestamp();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("get_current_time result should be valid JSON");
+
+        let utc_str = parsed["utc"].as_str().expect("utc field should be a string");
+        let local_str = parsed["local"].as_str().expect("local field should be a string");
+
+        // Parse as RFC3339 timestamps.
+        let _utc_dt = chrono::DateTime::parse_from_rfc3339(utc_str).expect("utc should be valid RFC3339");
+        let local_dt = chrono::DateTime::parse_from_rfc3339(local_str).expect("local should be valid RFC3339");
+
+        // Verify UTC is within tolerance.
+        let utc_dt_utc = chrono::DateTime::parse_from_rfc3339(utc_str)
+            .expect("utc should parse as rfc3339")
+            .with_timezone(&chrono::Utc);
+        let utc_ts = utc_dt_utc.timestamp();
+        assert!(
+            utc_ts >= before_secs && utc_ts <= after_secs + 1,
+            "UTC timestamp {utc_ts} should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // Verify local is within tolerance (converted to UTC).
+        let local_ts = local_dt.with_timezone(&chrono::Utc).timestamp();
+        assert!(
+            local_ts >= before_secs && local_ts <= after_secs + 1,
+            "Local timestamp {local_ts} (UTC) should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // utc_offset_minutes should match the offset in local.
+        let offset_minutes =
+            parsed["utc_offset_minutes"].as_i64().expect("utc_offset_minutes should be an integer") as i32;
+        let local_offset_secs = local_dt.offset().local_minus_utc();
+        // The offset from the RFC3339 timestamp should match utc_offset_minutes * 60.
+        assert_eq!(
+            local_offset_secs / 60,
+            offset_minutes,
+            "utc_offset_minutes {offset_minutes} does not match local offset {}",
+            local_offset_secs / 60
+        );
+        assert_eq!(offset_minutes, 480);
+        assert_eq!(parsed["timezone"], "Asia/Shanghai");
+
+        // readable should be a non-empty string.
+        let readable = parsed["readable"].as_str().expect("readable field should be a string");
+        assert!(!readable.is_empty(), "readable should not be empty");
+    }
+
+    #[test]
+    fn execute_get_current_time_defaults_to_utc_without_client_context() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({}),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["utc_offset_minutes"], 0);
+        assert_eq!(parsed["timezone"], "UTC");
+        assert!(parsed["local"].as_str().unwrap().ends_with("+00:00"));
+    }
+
+    #[test]
+    fn execute_get_current_time_labels_offset_when_timezone_name_is_missing() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": -300 }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["timezone"], "UTC-05:00");
+        assert!(parsed["local"].as_str().unwrap().ends_with("-05:00"));
+    }
+
+    #[test]
+    fn execute_tool_get_current_time_is_not_error() {
+        // Test via execute_tool dispatch. All args can be dummy since the tool
+        // does not use any of them.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let storage = crate::storage::Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+            let state = std::sync::Arc::new(crate::connection::AppState::new(storage));
+            let tool_call = ToolCall {
+                id: "call-gct".to_string(),
+                name: "get_current_time".to_string(),
+                arguments: serde_json::json!({}),
+                provider_payload: None,
+            };
+            let result = execute_tool(
+                &tool_call,
+                &state,
+                "dummy",
+                "dummy",
+                None,
+                &DatabaseType::Postgres,
+                AgentSqlPermissions::default(),
+            )
+            .await;
+            assert!(!result.is_error, "execute_tool get_current_time should not error: {}", result.content);
+            let parsed: serde_json::Value = serde_json::from_str(&result.content).expect("result should be valid JSON");
+            assert!(parsed["utc"].is_string());
+            assert!(parsed["local"].is_string());
+            assert!(parsed["readable"].is_string());
+        });
     }
 }

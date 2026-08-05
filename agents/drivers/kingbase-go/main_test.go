@@ -397,24 +397,241 @@ func TestHandshakeAdvertisesMultiSession(t *testing.T) {
 	}
 }
 
-func TestBuildDSNQuotesCredentialsAndFiltersKeys(t *testing.T) {
+// dsnContainsParam reports whether dsn contains key= as a real parameter pair
+// (not as a substring of another parameter name such as fallback_application_name).
+func dsnContainsParam(dsn, key string) bool {
+	lowerDSN := strings.ToLower(dsn)
+	needle := strings.ToLower(strings.TrimSpace(key)) + "="
+	if strings.HasPrefix(lowerDSN, needle) {
+		return true
+	}
+	for _, boundary := range []string{" ", "?", "&"} {
+		if strings.Contains(lowerDSN, boundary+needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildDSNQuotesCredentialsAndFiltersUnsafeKeys(t *testing.T) {
 	dsn := buildDSN(connectParams{
 		Host:      "db host",
 		Port:      54321,
 		Database:  "test'db",
 		Username:  "system",
 		Password:  `p'ass\\word`,
-		URLParams: "application_name=dbx&bad-key=ignored",
+		URLParams: "application_name=dbx&fallback_application_name=dbx&useSSL=false&bad-key=ignored",
 	})
 	for _, expected := range []string{
-		`host='db host'`, `dbname='test\'db'`, `password='p\'ass\\\\word'`, `application_name='dbx'`,
+		`host='db host'`, `dbname='test\'db'`, `password='p\'ass\\\\word'`, `application_name='dbx'`, `fallback_application_name='dbx'`,
 	} {
 		if !strings.Contains(dsn, expected) {
 			t.Fatalf("DSN missing %q: %s", expected, dsn)
 		}
 	}
-	if strings.Contains(dsn, "bad-key") {
-		t.Fatalf("unsafe parameter key was accepted: %s", dsn)
+	for _, skipped := range []string{"useSSL", "bad-key"} {
+		if dsnContainsParam(dsn, skipped) {
+			t.Fatalf("unsupported parameter %q was not skipped: %s", skipped, dsn)
+		}
+	}
+}
+
+func TestBuildDSNKeepsOnlySupportedURLParams(t *testing.T) {
+	cp := connectParams{
+		Host:     "127.0.0.1",
+		Port:     54321,
+		Database: "test",
+		Username: "system",
+		Password: "secret",
+		URLParams: "fallback_application_name=dbx&connect_timeout=30&sslcert=cert.pem&sslkey=key.pem&sslrootcert=root.pem" +
+			"&disable_prepared_binary_result=yes&binary_parameters=yes&krbsrvname=kingbase&krbspn=kingbase/db.example.com" +
+			"&application_name=dbx&options=-csearch_path=public&client_encoding=UTF8&search_path=public&statement_timeout=1000&work_mem=64MB" +
+			"&timezone=Asia/Shanghai&default_transaction_read_only=off&synchronous_commit=on" +
+			"&useSSL=false&autoReconnect=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true" +
+			"&useServerPrepStmts=true&connectTimeout=10&socketTimeout=30&useCompression=true&zeroDateTimeBehavior=convertToNull" +
+			"&useAffectedRows=true&useCursorFetch=true&defaultFetchSize=100&allowMultiQueries=true&useUnicode=true&currentSchema=public",
+	}
+	dsn := buildDSN(cp)
+	for _, expected := range []string{
+		`fallback_application_name='dbx'`, `connect_timeout='30'`, `sslcert='cert.pem'`, `sslkey='key.pem'`, `sslrootcert='root.pem'`,
+		`disable_prepared_binary_result='yes'`, `binary_parameters='yes'`, `krbsrvname='kingbase'`, `krbspn='kingbase/db.example.com'`,
+		`application_name='dbx'`, `options='-csearch_path=public'`, `client_encoding='UTF8'`, `search_path='public'`, `statement_timeout='1000'`, `work_mem='64MB'`,
+		`timezone='Asia/Shanghai'`, `default_transaction_read_only='off'`, `synchronous_commit='on'`,
+	} {
+		if !strings.Contains(dsn, expected) {
+			t.Fatalf("DSN missing supported parameter %q: %s", expected, dsn)
+		}
+	}
+	for _, skipped := range []string{
+		"useSSL", "autoReconnect", "characterEncoding", "serverTimezone", "rewriteBatchedStatements", "useServerPrepStmts",
+		"connectTimeout", "socketTimeout", "useCompression", "zeroDateTimeBehavior", "useAffectedRows", "useCursorFetch",
+		"defaultFetchSize", "allowMultiQueries", "useUnicode", "currentSchema",
+	} {
+		if dsnContainsParam(dsn, skipped) {
+			t.Fatalf("unsupported parameter %q was not skipped: %s", skipped, dsn)
+		}
+	}
+}
+
+func TestBuildDSNKeepsOnlySupportedNativeConnectionStringParameters(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		connectionString   string
+		preservedFragments []string
+	}{
+		{
+			name:             "keyword DSN",
+			connectionString: "host=db.example.com port=54321 user=system password=secret dbname=test connect_timeout=30 fallback_application_name='dbx' application_name='dbx app' options='-c search_path=public' client_encoding=UTF8 disable_prepared_binary_result=yes binary_parameters=yes krbsrvname=kingbase krbspn='kingbase/db.example.com' statement_timeout=1000 useSSL=false serverTimezone=Asia/Shanghai currentSchema=public",
+			preservedFragments: []string{
+				"host=db.example.com", "port=54321", "user=system", "password=secret", "dbname=test", "connect_timeout=30",
+				"fallback_application_name='dbx'", "application_name='dbx app'", "options='-c search_path=public'", "client_encoding=UTF8",
+				"disable_prepared_binary_result=yes", "binary_parameters=yes", "krbsrvname=kingbase", "krbspn='kingbase/db.example.com'",
+				"statement_timeout=1000",
+			},
+		},
+		{
+			name:             "Kingbase URL",
+			connectionString: "kingbase://system:secret@db.example.com:54321/test?connect_timeout=30&fallback_application_name=dbx&application_name=dbx&options=-c%20search_path%3Dpublic&disable_prepared_binary_result=yes&binary_parameters=yes&krbsrvname=kingbase&statement_timeout=1000&useSSL=false&serverTimezone=Asia%2FShanghai&currentSchema=public",
+			preservedFragments: []string{
+				"connect_timeout=30", "fallback_application_name=dbx", "application_name=dbx", "options=-c%20search_path%3Dpublic",
+				"disable_prepared_binary_result=yes", "binary_parameters=yes", "krbsrvname=kingbase", "statement_timeout=1000",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dsn := buildDSN(connectParams{ConnectionString: test.connectionString})
+			for _, expected := range test.preservedFragments {
+				if !strings.Contains(dsn, expected) {
+					t.Fatalf("native DSN missing supported parameter %q: %s", expected, dsn)
+				}
+			}
+			for _, skipped := range []string{"useSSL", "serverTimezone", "currentSchema"} {
+				if dsnContainsParam(dsn, skipped) {
+					t.Fatalf("native DSN kept unsupported parameter %q: %s", skipped, dsn)
+				}
+			}
+		})
+	}
+}
+
+// kingbaseParamSurfaces expands a &-separated parameter list into the three
+// connection-input surfaces the driver must treat consistently: app-supplied
+// url_params, a native keyword DSN, and a kingbase:// URL. Values must not
+// contain spaces so they survive the keyword-DSN join.
+func kingbaseParamSurfaces(params string) map[string]connectParams {
+	pairs := strings.Split(params, "&")
+	keyword := "host=db.example.com user=system password=secret dbname=test " + strings.Join(pairs, " ")
+	kurl := "kingbase://system:secret@db.example.com:54321/test?" + params
+	return map[string]connectParams{
+		"url_params":   {Host: "db.example.com", Port: 54321, Database: "test", Username: "system", Password: "secret", URLParams: params},
+		"keyword_dsn":  {ConnectionString: keyword},
+		"kingbase_url": {ConnectionString: kurl},
+	}
+}
+
+// TestBuildDSNForwardsUnknownServerParameters locks in the review's central
+// requirement: gokb forwards every non-driver-setting to the server startup
+// packet (conn.go startup()), so user/session GUCs that are not in the curated
+// native list must still be passed through rather than silently dropped.
+func TestBuildDSNForwardsUnknownServerParameters(t *testing.T) {
+	for surface, cp := range kingbaseParamSurfaces("plan_cache_mode=force_generic_plan&row_security=off&bytea_output=hex") {
+		t.Run(surface, func(t *testing.T) {
+			dsn := buildDSN(cp)
+			for _, key := range []string{"plan_cache_mode", "row_security", "bytea_output"} {
+				if !dsnContainsParam(dsn, key) {
+					t.Fatalf("expected server GUC %q to be forwarded: %s", key, dsn)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildDSNNormalizesJDBCAliases verifies JDBC properties with a direct native
+// equivalent are rewritten to the gokb/server name instead of being discarded.
+func TestBuildDSNNormalizesJDBCAliases(t *testing.T) {
+	for surface, cp := range kingbaseParamSurfaces("connectTimeout=20&currentSchema=public&ApplicationName=dbx&clientEncoding=UTF-8") {
+		t.Run(surface, func(t *testing.T) {
+			dsn := buildDSN(cp)
+			for _, native := range []string{"connect_timeout", "search_path", "application_name", "client_encoding"} {
+				if !dsnContainsParam(dsn, native) {
+					t.Fatalf("expected JDBC alias to normalize to %q: %s", native, dsn)
+				}
+			}
+			for _, jdbc := range []string{"connectTimeout", "currentSchema", "ApplicationName", "clientEncoding"} {
+				if dsnContainsParam(dsn, jdbc) {
+					t.Fatalf("JDBC alias %q must not be forwarded verbatim: %s", jdbc, dsn)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildDSNDropsNonUTF8ClientEncoding checks that a non-UTF-8 clientEncoding
+// is dropped: gokb rejects any client_encoding other than UTF-8, so forwarding
+// or renaming a GBK value would fail the whole connection.
+func TestBuildDSNDropsNonUTF8ClientEncoding(t *testing.T) {
+	for surface, cp := range kingbaseParamSurfaces("clientEncoding=GBK") {
+		t.Run(surface, func(t *testing.T) {
+			dsn := buildDSN(cp)
+			if dsnContainsParam(dsn, "client_encoding") || strings.Contains(strings.ToLower(dsn), "gbk") {
+				t.Fatalf("non-UTF8 clientEncoding must be dropped: %s", dsn)
+			}
+		})
+	}
+}
+
+// TestBuildDSNDropsUnknownCamelCaseJDBCProperties guards the heuristic: unknown
+// camelCase names are treated as client-side JDBC properties and dropped, since
+// forwarding them would make the server reject the startup packet.
+func TestBuildDSNDropsUnknownCamelCaseJDBCProperties(t *testing.T) {
+	for surface, cp := range kingbaseParamSurfaces("tinyInt1isBit=true&someFutureJdbcFlag=1") {
+		t.Run(surface, func(t *testing.T) {
+			dsn := buildDSN(cp)
+			for _, jdbc := range []string{"tinyInt1isBit", "someFutureJdbcFlag"} {
+				if dsnContainsParam(dsn, jdbc) {
+					t.Fatalf("unknown camelCase JDBC property %q must be dropped: %s", jdbc, dsn)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildDSNParameterPrecedenceNativeBeatsAlias verifies duplicate-parameter
+// precedence: an explicit native parameter wins over its JDBC alias and the
+// parameter is emitted exactly once (no duplicate for gokb to resolve).
+func TestBuildDSNParameterPrecedenceNativeBeatsAlias(t *testing.T) {
+	for _, params := range []string{"connect_timeout=30&connectTimeout=10", "connectTimeout=10&connect_timeout=30"} {
+		for surface, cp := range kingbaseParamSurfaces(params) {
+			t.Run(surface+"/"+params, func(t *testing.T) {
+				dsn := buildDSN(cp)
+				if got := strings.Count(strings.ToLower(dsn), "connect_timeout="); got != 1 {
+					t.Fatalf("connect_timeout must appear exactly once, saw %d: %s", got, dsn)
+				}
+				unquoted := strings.ReplaceAll(dsn, "'", "")
+				if !strings.Contains(unquoted, "connect_timeout=30") {
+					t.Fatalf("native connect_timeout=30 must win over alias: %s", dsn)
+				}
+				if strings.Contains(unquoted, "connect_timeout=10") {
+					t.Fatalf("alias connectTimeout=10 must not win: %s", dsn)
+				}
+			})
+		}
+	}
+}
+
+func TestBuildDSNPreservesFirstDuplicateWithinSameParameterClass(t *testing.T) {
+	for _, params := range []string{"application_name=first&application_name=second", "ApplicationName=first&applicationName=second"} {
+		for surface, cp := range kingbaseParamSurfaces(params) {
+			t.Run(surface+"/"+params, func(t *testing.T) {
+				dsn := strings.ReplaceAll(buildDSN(cp), "'", "")
+				if !strings.Contains(dsn, "application_name=first") {
+					t.Fatalf("first duplicate value must be preserved: %s", dsn)
+				}
+				if strings.Contains(dsn, "application_name=second") {
+					t.Fatalf("later duplicate value must not replace the first: %s", dsn)
+				}
+			})
+		}
 	}
 }
 
@@ -440,7 +657,7 @@ func TestBuildDSNNormalizesPreferWithoutPassingLiteralMode(t *testing.T) {
 		Database:  "test",
 		Username:  "system",
 		Password:  "secret",
-		URLParams: "SSLMODE=disable&sslmode=prefer&application_name=dbx",
+		URLParams: "SSLMODE=disable&sslmode=prefer&application_name=dbx&fallback_application_name=dbx&useSSL=false",
 	}
 	if mode := effectiveSSLMode(cp); mode != "prefer" {
 		t.Fatalf("unexpected effective SSL mode: %q", mode)
@@ -452,8 +669,13 @@ func TestBuildDSNNormalizesPreferWithoutPassingLiteralMode(t *testing.T) {
 	if !strings.Contains(dsn, "sslmode=require") || strings.Contains(strings.ToLower(dsn), "sslmode=prefer") {
 		t.Fatalf("prefer must be converted to the first require attempt: %s", dsn)
 	}
-	if !strings.Contains(dsn, "application_name='dbx'") {
-		t.Fatalf("unrelated URL parameters must be preserved: %s", dsn)
+	for _, expected := range []string{`application_name='dbx'`, `fallback_application_name='dbx'`} {
+		if !strings.Contains(dsn, expected) {
+			t.Fatalf("unrelated URL parameters must be preserved, missing %q: %s", expected, dsn)
+		}
+	}
+	if dsnContainsParam(dsn, "useSSL") {
+		t.Fatalf("unsupported parameter was not skipped: %s", dsn)
 	}
 }
 
@@ -462,23 +684,31 @@ func TestBuildDSNOverridesPreferInNativeConnectionStrings(t *testing.T) {
 		name               string
 		connectionString   string
 		preservedFragments []string
+		droppedFragments   []string
 	}{
 		{
 			name:             "keyword DSN",
-			connectionString: "host=db.example.com application_name='dbx app' sslmode = 'prefer' options='-c search_path=public tenant'",
+			connectionString: "host=db.example.com application_name='dbx app' sslmode = 'prefer' options='-c search_path=public tenant' useSSL=false",
 			preservedFragments: []string{
 				"host=db.example.com",
 				"application_name='dbx app'",
 				"options='-c search_path=public tenant'",
 			},
+			droppedFragments: []string{
+				"useSSL",
+			},
 		},
 		{
 			name:             "Kingbase URL",
-			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx&SSLMODE=prefer#section",
+			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx&options=-c%20search_path%3Dpublic&useSSL=false&SSLMODE=prefer#section",
 			preservedFragments: []string{
 				"kingbase://system:secret@db.example.com/test?",
 				"application_name=dbx",
+				"options=-c%20search_path%3Dpublic",
 				"#section",
+			},
+			droppedFragments: []string{
+				"useSSL",
 			},
 		},
 	} {
@@ -499,6 +729,11 @@ func TestBuildDSNOverridesPreferInNativeConnectionStrings(t *testing.T) {
 					t.Fatalf("native DSN lost %q: %s", fragment, dsn)
 				}
 			}
+			for _, fragment := range test.droppedFragments {
+				if dsnContainsParam(dsn, fragment) {
+					t.Fatalf("native DSN kept unsupported %q: %s", fragment, dsn)
+				}
+			}
 		})
 	}
 }
@@ -511,18 +746,20 @@ func TestOpenAndPingDBNativeConnectionStringsWithoutSSLModeUsePreferFallback(t *
 	}{
 		{
 			name:             "keyword DSN",
-			connectionString: "host=db.example.com application_name=dbx",
+			connectionString: "host=db.example.com application_name=dbx fallback_application_name=dbx useSSL=false",
 			preservedFragments: []string{
 				"host=db.example.com",
 				"application_name=dbx",
+				"fallback_application_name=dbx",
 			},
 		},
 		{
 			name:             "Kingbase URL",
-			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx",
+			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx&fallback_application_name=dbx&useSSL=false",
 			preservedFragments: []string{
 				"kingbase://system:secret@db.example.com/test?",
 				"application_name=dbx",
+				"fallback_application_name=dbx",
 			},
 		},
 	} {
@@ -1094,7 +1331,7 @@ func TestColumnDDLDefinitionRestoresMySQLCompatibilityTypeModifiers(t *testing.T
 
 func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-		if !strings.Contains(query, "c.column_type") {
+		if !strings.Contains(query, "c.column_type") || !strings.Contains(query, "THEN c.udt_name") {
 			return nil, errors.New("full column type was not requested")
 		}
 		return &valueRows{
@@ -1130,7 +1367,117 @@ func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
 	}
 }
 
-func TestInformationSchemaColumnsFallsBackOnlyForMissingColumnType(t *testing.T) {
+func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.column_type") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.column_type does not exist"}
+		}
+		if !strings.Contains(query, "THEN c.udt_name") {
+			return nil, errors.New("user-defined type name was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	columns, err := server.informationSchemaColumns("public", "orders", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 1 || columns[0].FullDataType != "datetime" {
+		t.Fatalf("unexpected user-defined metadata columns: %#v", columns)
+	}
+	if ddl := renderTableDDL("public", "orders", columns, nil); !strings.Contains(ddl, `"created_at" datetime`) || strings.Contains(ddl, "USER-DEFINED") {
+		t.Fatalf("unexpected user-defined type DDL:\n%s", ddl)
+	}
+
+	if _, err := server.informationSchemaColumns("public", "events", map[string]bool{}); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 3 || strings.Contains(queries[2], "c.column_type") {
+		t.Fatalf("missing column_type capability must be cached: %v", queries)
+	}
+}
+
+func TestInformationSchemaColumnsPreserveColumnTypeWithoutUdtName(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.udt_name") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "kb: column c.udt_name does not exist"}
+		}
+		if !strings.Contains(query, "c.column_type") {
+			return nil, errors.New("column type fallback was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for _, table := range []string{"orders", "events"} {
+		columns, err := server.informationSchemaColumns("public", table, map[string]bool{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columns[0].FullDataType != "enum('new','done')" {
+			t.Fatalf("unexpected metadata columns: %#v", columns)
+		}
+		if ddl := renderTableDDL("public", table, columns, nil); !strings.Contains(ddl, `"status" enum('new','done')`) {
+			t.Fatalf("unexpected table DDL:\n%s", ddl)
+		}
+	}
+	state.mu.Lock()
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 3 || !strings.Contains(queries[0], "c.udt_name") || strings.Contains(queries[1], "c.udt_name") || strings.Contains(queries[2], "c.udt_name") {
+		t.Fatalf("missing udt_name capability must be detected once and cached: %v", queries)
+	}
+}
+
+func TestInformationSchemaColumnsFallbackWithoutExtendedTypeColumns(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.column_type") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.column_type does not exist"}
+		}
+		if strings.Contains(query, "c.udt_name") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.udt_name does not exist"}
+		}
+		if !strings.Contains(query, "NULL AS column_type") {
+			return nil, errors.New("base type fallback was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for _, table := range []string{"orders", "events"} {
+		columns, err := server.informationSchemaColumns("public", table, map[string]bool{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columnDDLDefinition(columns[0]) != `"label" varchar(64)` {
+			t.Fatalf("unexpected fallback columns: %#v", columns)
+		}
+	}
+	state.mu.Lock()
+	queries := append([]string(nil), state.queries...)
+	state.mu.Unlock()
+	if len(queries) != 4 || !strings.Contains(queries[2], "NULL AS column_type") || !strings.Contains(queries[3], "NULL AS column_type") {
+		t.Fatalf("missing extended type capabilities must be detected once and cached: %v", queries)
+	}
+}
+
+func TestInformationSchemaColumnsRetriesOnlyForMissingTypeMetadataColumns(t *testing.T) {
 	tests := []struct {
 		name         string
 		firstError   error
@@ -1147,7 +1494,7 @@ func TestInformationSchemaColumnsFallsBackOnlyForMissingColumnType(t *testing.T)
 				if strings.Contains(query, "c.column_type") {
 					return nil, test.firstError
 				}
-				if !strings.Contains(query, "NULL AS column_type") {
+				if !strings.Contains(query, "THEN c.udt_name") || !strings.Contains(query, "END AS column_type") {
 					return nil, errors.New("unexpected fallback query: " + query)
 				}
 				return &valueRows{
@@ -1181,6 +1528,19 @@ func TestInformationSchemaColumnsFallsBackOnlyForMissingColumnType(t *testing.T)
 				t.Fatalf("unexpected query count: got %d, want %d: %v", len(queries), wantQueries, queries)
 			}
 		})
+	}
+}
+
+func TestDisconnectResetsInformationSchemaCapabilityCache(t *testing.T) {
+	server := newServer()
+	server.infoColumnTypeUnsupported = true
+	server.infoUdtNameUnsupported = true
+
+	if err := server.disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if server.infoColumnTypeUnsupported || server.infoUdtNameUnsupported {
+		t.Fatal("disconnect must reset cached information_schema capabilities")
 	}
 }
 

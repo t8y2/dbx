@@ -7,6 +7,7 @@ const apiMock = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(async () => 'SELECT * FROM "main"."users" LIMIT 10000'),
   executeQuery: vi.fn(),
   exportQueryResultJson: vi.fn(),
+  getTableDdl: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
@@ -24,10 +25,14 @@ vi.mock("vue-i18n", () => ({
 }));
 
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
+import { showStructurePreviewDialog, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
 
 describe("useSidebarTreeExportRuntime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    showStructurePreviewDialog.value = false;
+    structurePreviewSql.value = "";
+    structurePreviewTitle.value = "";
   });
 
   it("translates direct executeQuery errors for sidebar JSON export", async () => {
@@ -51,5 +56,34 @@ describe("useSidebarTreeExportRuntime", () => {
 
     expect(apiMock.executeQuery).toHaveBeenCalledOnce();
     expect(toastMock).toHaveBeenCalledWith("导出失败：上一个 DuckDB 查询仍在停止中，请稍后重试。", 5000);
+  });
+
+  it("loads and joins every selected DDL in tree order", async () => {
+    apiMock.getTableDdl.mockResolvedValueOnce("CREATE TABLE one (id INT)").mockResolvedValueOnce("CREATE VIEW two AS SELECT 1;");
+    const first = { id: "table-1", type: "table", label: "one", connectionId: "conn-1", database: "db", schema: "main" } as TreeNode;
+    const second = { id: "view-1", type: "view", label: "two", connectionId: "conn-1", database: "db", schema: "main" } as TreeNode;
+    const group = { id: "tables", type: "group-tables", label: "Tables", children: [first, second] } as TreeNode;
+    const activeNode = shallowRef(first);
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      treeNodes: [group],
+      selectedTreeNodeIds: [second.id, first.id],
+    };
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode,
+      connectionStore: connectionStore as never,
+      settingsStore: {} as never,
+      acceptedSelectionIds: () => null,
+    });
+
+    await runtime.exportStructure();
+
+    expect(connectionStore.ensureConnected).toHaveBeenNthCalledWith(1, first.connectionId);
+    expect(connectionStore.ensureConnected).toHaveBeenNthCalledWith(2, second.connectionId);
+    expect(apiMock.getTableDdl).toHaveBeenNthCalledWith(1, first.connectionId, first.database, first.schema, first.label, undefined, undefined);
+    expect(apiMock.getTableDdl).toHaveBeenNthCalledWith(2, second.connectionId, second.database, second.schema, second.label, "VIEW", undefined);
+    expect(structurePreviewSql.value).toBe("CREATE TABLE one (id INT);\n\nCREATE VIEW two AS SELECT 1;\n");
+    expect(structurePreviewTitle.value).toBe("contextMenu.exportStructurePreviewTitleMultiple");
+    expect(showStructurePreviewDialog.value).toBe(true);
   });
 });

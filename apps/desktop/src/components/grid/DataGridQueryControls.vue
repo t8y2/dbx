@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref } from "vue";
-import { Filter, Plus, X } from "@lucide/vue";
+import { Filter, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -131,10 +131,10 @@ onUnmounted(onResizeEnd);
             <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
           </button>
         </PopoverTrigger>
-        <PopoverContent align="start" class="w-[480px] max-w-[calc(100vw-24px)] gap-3 p-3">
+        <PopoverContent align="start" class="w-[624px] max-w-[calc(100vw-24px)] gap-3 p-3">
           <div class="flex items-center justify-between gap-3">
             <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-            <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('addRule')"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("grid.filterBuilderAddRule") }}</Button>
+            <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
           </div>
 
           <div v-if="hasLocalColumnFilters" class="space-y-2 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-2">

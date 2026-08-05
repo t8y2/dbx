@@ -66,6 +66,8 @@ describe("data grid paint theme", () => {
     expect(light.cellSelected).toBe("rgb(239, 246, 255)");
     expect(light.cellSelectedBorder).toBe("rgb(59, 130, 246)");
     expect(light.cellSelectedSingle).toBe("rgb(191, 219, 254)");
+    expect(light.cellSelectedDirty).toBe("rgb(235, 224, 184)");
+    expect(light.cellDirty).toBe("rgb(166, 210, 255)");
     expect(light.rowNumberTextNew).toBe("rgb(0, 122, 85)");
     expect(light.rowNumberTextEdited).toBe("rgb(187, 77, 0)");
     expect(contrastRatio(light.cellSelectedBorder, light.cellSelected)).toBeGreaterThanOrEqual(3);
@@ -73,6 +75,8 @@ describe("data grid paint theme", () => {
     expect(dark.cellSelected).toBe("rgb(20, 40, 60)");
     expect(dark.cellSelectedBorder).toBe("rgb(96, 165, 250)");
     expect(dark.cellSelectedSingle).toBe("rgb(30, 64, 96)");
+    expect(dark.cellSelectedDirty).toBe("rgb(76, 66, 38)");
+    expect(dark.cellDirty).toBe("rgb(33, 66, 131)");
   });
 
   it("honors an explicit --data-grid-cell-selected-border token when provided in light mode", () => {
@@ -94,6 +98,19 @@ describe("data grid paint theme", () => {
     });
 
     expect(theme.cellSelectedBorder).toBe("rgb(37, 99, 235)");
+  });
+
+  it("honors explicit --data-grid-cell-dirty-bg token in dark mode when save error occurs", () => {
+    const vars: Record<string, string> = {
+      "--data-grid-cell-dirty-bg": "rgb(94, 56, 57)",
+    };
+
+    const theme = resolveDataGridPaintTheme({
+      getVar: (name) => vars[name] ?? "",
+      isDark: true,
+    });
+
+    expect(theme.cellDirty).toBe("rgb(94, 56, 57)");
   });
 });
 

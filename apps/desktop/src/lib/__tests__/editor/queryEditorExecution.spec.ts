@@ -21,10 +21,20 @@ describe("QueryEditor execution routing", () => {
 
   it("keeps selection priority and the configured current/all target choice", () => {
     const selectionBranch = queryEditorSource.indexOf("if (!options.ignoreSelection && !selection.empty)");
-    const executeModeBranch = queryEditorSource.indexOf('settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all"');
+    const executeModeBranch = queryEditorSource.indexOf("executionCandidateForMode(candidates, settingsStore.editorSettings.executeMode)");
 
     expect(selectionBranch).toBeGreaterThan(-1);
     expect(executeModeBranch).toBeGreaterThan(selectionBranch);
+  });
+
+  it("does not fall back to all SQL when current mode has no statement at the cursor", () => {
+    expect(queryEditorSource).toContain("const candidate = executionCandidateForMode(candidates, settingsStore.editorSettings.executeMode)");
+    expect(queryEditorSource).toContain("if (!candidate) return true");
+    expect(queryEditorSource).not.toContain("?? candidates[0]");
+  });
+
+  it("consumes the execution shortcut when the editor has no executable target", () => {
+    expect(queryEditorSource).toContain("if (candidates.length === 0) return true");
   });
 
   it("preserves the source range when executing a current/all candidate without a manual selection", () => {

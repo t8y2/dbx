@@ -101,6 +101,32 @@ describe("QueryEditor completion Tab keymap", () => {
     expect(result).not.toHaveProperty("filter");
   });
 
+  it("keeps ASCII single-character filtering while allowing Han pinyin matches", () => {
+    const source = [extractFunction("completionItemsForBypassedFilter"), extractFunction("shouldBypassCompletionFilter"), extractFunction("buildCompletionResult")].join("\n");
+    const javascript = ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const buildCompletionResult = new Function("completionOptionForItem", "completionMatchRanges", `${javascript}\nreturn buildCompletionResult;`)(
+      (item: { label: string }) => item,
+      () => [],
+    ) as (items: Array<{ label: string }>, from: number, validFor?: RegExp, prefix?: string) => { filter?: boolean; options: Array<{ label: string }> } | null;
+
+    const result = buildCompletionResult([{ label: "amount" }, { label: "memo" }, { label: "明细" }], 0, undefined, "m");
+
+    expect(result?.filter).toBe(false);
+    expect(result?.options.map((item) => item.label)).toEqual(["memo", "明细"]);
+  });
+
+  it("bypasses CodeMirror filtering for Han substring matches", () => {
+    const javascript = ts.transpileModule(extractFunction("shouldBypassCompletionFilter"), {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const shouldBypassCompletionFilter = new Function(`${javascript}\nreturn shouldBypassCompletionFilter;`)() as (prefix: string, items: Array<{ label: string }>) => boolean;
+
+    expect(shouldBypassCompletionFilter("金", [{ label: "总租金" }])).toBe(true);
+    expect(shouldBypassCompletionFilter("m", [{ label: "amount" }, { label: "memo" }])).toBe(false);
+  });
+
   it("keeps normal Tab indentation when completion is inactive", () => {
     const harness = createHarness({ completionStatus: () => null });
     const view = createView();

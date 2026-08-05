@@ -9,6 +9,7 @@ import { aiSkillForAction } from "@/lib/ai/aiSkills";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 
@@ -80,6 +81,8 @@ export interface AiContext {
   connectionName: string;
   databaseType: DatabaseType;
   database: string;
+  /** Selected schema when it is distinct from the connection database (for example Dameng). */
+  schema?: string;
   currentSql: string;
   lastError?: string;
   lastResultPreview?: string;
@@ -98,9 +101,15 @@ export interface AiRequestInput {
   allowWriteSql?: boolean;
   /** When allowWriteSql is true, the specific write SQL the user confirmed. */
   confirmedWriteSql?: string;
-  /** Connection/database snapshot at confirmation time; verified at backend. */
+  /** Connection/database/schema snapshot at confirmation time; verified at backend. */
   confirmedConnectionId?: string;
   confirmedDatabase?: string;
+  confirmedSchema?: string;
+}
+
+export interface AiNamespaceSelection {
+  kind: "database" | "schema";
+  value: string;
 }
 
 export interface CustomPromptContext {
@@ -189,6 +198,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     },
     input.context.connectionId,
     input.context.database,
+    input.context.schema,
     input.context.databaseType,
     onEvent,
     input.mode || "ask",
@@ -196,6 +206,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.confirmedWriteSql,
     input.confirmedConnectionId,
     input.confirmedDatabase,
+    input.confirmedSchema,
   );
 }
 
@@ -264,6 +275,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
     `Database type: ${context.databaseType}`,
     `Connection: ${context.connectionName}`,
     `Database: ${context.database}`,
+    context.schema ? `Selected schema: ${context.schema}` : "",
     schemaCoverageLine(context, isZh),
     "",
     `Current SQL:\n${context.currentSql.trim() || "(empty)"}`,
@@ -339,23 +351,27 @@ function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode, cust
 }
 
 function buildVectorModePromptLines(context: AiContext, mode: AiAssistantMode, isZh: boolean): string[] {
+  const currentTimeGuidance = currentTimeToolGuidance();
   if (mode === "agent") {
-    return [isZh ? "你处于 Agent 模式。你有以下工具可用：list_collections、browse_collection。" : "You are in Agent mode. You have the following tools available: list_collections, browse_collection."];
+    return [isZh ? "你处于 Agent 模式。你有以下工具可用：list_collections、browse_collection、get_current_time。" : "You are in Agent mode. You have the following tools available: list_collections, browse_collection, get_current_time.", currentTimeGuidance];
   }
   return [
     isZh
       ? `你处于 Ask 模式。你只能使用 list_collections 确认集合清单；不要浏览集合数据。${dbLabel(context.databaseType)} 的查询格式为 REST API（METHOD /path + JSON body），具体格式因数据库类型而异。只生成查询请求文本和说明，不要暗示已经执行。`
       : `You are in Ask mode. You may only use list_collections to inspect collection names; do not browse collection data. ${dbLabel(context.databaseType)} uses a REST API query format (METHOD /path + JSON body) that varies by database type. Generate query strings and explanations only; do not imply execution.`,
+    currentTimeGuidance,
   ];
 }
 
 function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
+  const currentTimeGuidance = currentTimeToolGuidance();
   if (mode === "agent") {
     return [
-      isZh ? "你处于 Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_sample_data。" : "You are in Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_sample_data.",
+      isZh ? "你处于 Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_sample_data、get_current_time。" : "You are in Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_sample_data, get_current_time.",
       isZh
         ? "用户提出数据查询意图时，必须调用 execute_query 工具执行 SQL，不要只输出 SQL 文本后停止。先用 list_tables/get_columns 了解 schema，再调用 execute_query 获取真实结果，最后基于结果回答用户。"
         : "When the user expresses a data query intent, you MUST call the execute_query tool to run the SQL — do NOT just output SQL text and stop. Use list_tables/get_columns to understand the schema first, then call execute_query to get real results, then answer based on the actual data.",
+      currentTimeGuidance,
       isZh
         ? "当用户要求写入操作（INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE 等）时，先在一个 ```sql 代码块中给出精确的写 SQL，再在回复末尾用问句明确询问用户是否确认执行（例如'需要我执行这条 CREATE TABLE 语句吗？'）。待用户明确确认后再调用 execute_query，并原样使用该代码块中的 SQL，不得改写、重新格式化或补充语句。禁止不经确认直接执行写入。"
         : "When the user requests a write operation (INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE, etc.), first put the exact proposed write SQL in one ```sql code block, then ask for explicit confirmation at the end of your reply with a question that names the specific operation (e.g., 'Should I execute this CREATE TABLE?'). Only call execute_query for writes after the user explicitly confirms, and use the exact SQL from that code block without rewriting, reformatting, or adding statements. Never execute writes without confirmation.",
@@ -363,7 +379,13 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
     ];
   }
 
-  return [isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run."];
+  return [isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run.", currentTimeGuidance];
+}
+
+function currentTimeToolGuidance(): string {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const utcOffsetMinutes = -new Date().getTimezoneOffset();
+  return `When a request needs a relative time expression such as yesterday, last 7 days, this month, or today, call get_current_time first with {"timezone":"${timezone}","utc_offset_minutes":${utcOffsetMinutes}}; do not guess the current date or timezone.`;
 }
 
 function schemaCoverageLine(context: AiContext, isZh: boolean): string {
@@ -435,7 +457,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
   const maxIndexesPerTable = options.maxIndexesPerTable ?? 10;
   const maxFksPerTable = options.maxFksPerTable ?? 10;
   const databaseType = aiDatabaseTypeForConnection(connection);
-  const database = aiDatabaseNamespace(tab, connection);
+  const { database, schema } = resolveAiDatabaseTarget(tab, connection);
   const tables: AiSchemaTable[] = [];
   const tableKeys = new Set<string>();
   let truncated = false;
@@ -551,6 +573,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
     connectionName: connection.name,
     databaseType,
     database,
+    schema,
     currentSql: currentCollectionName ?? tab.sql,
     lastError: extractLastError(tab.result),
     lastResultPreview: formatResultPreview(tab.result),
@@ -604,7 +627,8 @@ async function resolveMentionedTableSchema(tab: QueryTab, connection: Connection
 }
 
 async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig): Promise<string[]> {
-  const database = aiDatabaseNamespace(tab, connection);
+  const { database, schema } = resolveAiDatabaseTarget(tab, connection);
+  if (schema) return [schema];
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
     const schemas = await api.listSchemas(tab.connectionId, database);
     return prioritizeSchemas(schemas);
@@ -617,8 +641,37 @@ function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType
 }
 
 function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
+  return resolveAiDatabaseTarget(tab, connection).database;
+}
+
+export function resolveAiNamespaceSelection(tab: QueryTab, connection: ConnectionConfig): AiNamespaceSelection {
+  if (connection.db_type === "dameng") {
+    return { kind: "schema", value: tab.schema?.trim() || "" };
+  }
+  return { kind: "database", value: tab.database || "" };
+}
+
+export function resolveDefaultAiSchema(connection: ConnectionConfig, schemaOptions: string[]): string | undefined {
+  if (connection.db_type !== "dameng") return undefined;
+  const username = connection.username.trim().toLowerCase();
+  return schemaOptions.find((schema) => schema.trim().toLowerCase() === username) ?? schemaOptions[0];
+}
+
+/**
+ * Resolve the namespace used by an AI request without treating a Dameng schema
+ * selection as a connection database override. Dameng connections stay bound to
+ * their configured database while the query tab's selection scopes metadata and
+ * SQL execution through the schema parameter.
+ */
+export function resolveAiDatabaseTarget(tab: QueryTab, connection: ConnectionConfig): { database: string; schema?: string } {
   const database = tab.database || connection.database || "main";
-  return connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database;
+  if (connection.db_type === "dameng") {
+    return {
+      database,
+      schema: resolveAiNamespaceSelection(tab, connection).value || undefined,
+    };
+  }
+  return { database: connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database };
 }
 
 function prioritizeSchemas(schemas: string[]): string[] {
@@ -632,12 +685,12 @@ function prioritizeSchemas(schemas: string[]): string[] {
 }
 
 function extractLastError(result?: QueryResult): string | undefined {
-  if (!result?.columns.includes("Error")) return undefined;
+  if (!result || !isQueryExecutionErrorResult(result)) return undefined;
   return result.rows[0]?.[0] == null ? undefined : String(result.rows[0][0]);
 }
 
 function formatResultPreview(result?: QueryResult): string | undefined {
-  if (!result || result.columns.includes("Error") || !result.rows.length) return undefined;
+  if (!result || isQueryExecutionErrorResult(result) || !result.rows.length) return undefined;
   const MAX_VALUE_CHARS = 200;
   const rows = result.rows.slice(0, 5).map((row) => {
     return result.columns

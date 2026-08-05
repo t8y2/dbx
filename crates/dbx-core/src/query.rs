@@ -17,12 +17,14 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
 use crate::db;
+use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::is_write_sql;
-use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword};
+use crate::sql::{split_sql_batches, split_sql_statements};
 use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 
@@ -43,12 +45,98 @@ pub enum PoolErrorAction {
     ReconnectAndRetry,
 }
 
-fn query_error_with_omitted_sql_context(error: &str, _sql: &str) -> String {
-    if error.contains(SQL_OMITTED_ERROR_CONTEXT) {
-        error.to_string()
-    } else {
-        format!("{error}\n{SQL_OMITTED_ERROR_CONTEXT}")
+#[derive(Debug, Clone)]
+pub enum QueryExecutionError {
+    Agent(AgentCallError),
+    Canceled { stage: AgentErrorStage, operation_outcome: AgentOperationOutcome },
+    Timeout(String),
+    Sql(String),
+    Legacy(String),
+}
+
+impl QueryExecutionError {
+    pub fn into_legacy_string(self) -> String {
+        match self {
+            Self::Agent(error) => error.into_legacy_string(),
+            Self::Canceled { .. } => canceled_error(),
+            Self::Timeout(error) => error,
+            Self::Sql(error) => error,
+            Self::Legacy(error) => error,
+        }
     }
+
+    pub fn into_backend_error(self) -> crate::backend_error::BackendError {
+        match self {
+            Self::Agent(error) => crate::backend_error::BackendError::from_agent_call_error(&error),
+            Self::Canceled { stage, operation_outcome } => {
+                crate::backend_error::BackendError::from_canceled(stage, operation_outcome)
+            }
+            Self::Timeout(error) => crate::backend_error::BackendError::from_timeout_detail(&error),
+            Self::Sql(error) => crate::backend_error::BackendError::from_sql_detail(&error),
+            Self::Legacy(error) => crate::backend_error::BackendError::from_legacy_string(&error),
+        }
+    }
+
+    fn with_omitted_sql_context(self, sql: &str) -> Self {
+        match self {
+            Self::Agent(error) => Self::Agent(error),
+            canceled @ Self::Canceled { .. } => canceled,
+            Self::Timeout(error) => Self::Timeout(query_error_with_omitted_sql_context(&error, sql)),
+            Self::Sql(error) => Self::Sql(query_error_with_omitted_sql_context(&error, sql)),
+            Self::Legacy(error) => Self::Legacy(query_error_with_omitted_sql_context(&error, sql)),
+        }
+    }
+
+    fn with_context(self, context: &str) -> Self {
+        match self {
+            Self::Agent(error) => Self::Agent(error),
+            canceled @ Self::Canceled { .. } => canceled,
+            Self::Timeout(error) => Self::Timeout(format!("{error}; {context}")),
+            Self::Sql(error) => Self::Sql(format!("{error}; {context}")),
+            Self::Legacy(error) => Self::Legacy(format!("{error}; {context}")),
+        }
+    }
+
+    fn as_agent_error(&self) -> Option<&AgentCallError> {
+        match self {
+            Self::Agent(error) => Some(error),
+            Self::Canceled { .. } | Self::Timeout(_) | Self::Sql(_) | Self::Legacy(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for QueryExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent(error) => error.fmt(formatter),
+            Self::Canceled { .. } => formatter.write_str(QUERY_CANCELED),
+            Self::Timeout(error) => formatter.write_str(error),
+            Self::Sql(error) => formatter.write_str(error),
+            Self::Legacy(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<AgentCallError> for QueryExecutionError {
+    fn from(error: AgentCallError) -> Self {
+        Self::Agent(error)
+    }
+}
+
+impl From<String> for QueryExecutionError {
+    fn from(error: String) -> Self {
+        Self::Legacy(error)
+    }
+}
+
+impl From<&str> for QueryExecutionError {
+    fn from(error: &str) -> Self {
+        Self::Legacy(error.to_string())
+    }
+}
+
+fn query_error_with_omitted_sql_context(error: &str, _sql: &str) -> String {
+    crate::db::agent_driver::append_legacy_error_context(error, SQL_OMITTED_ERROR_CONTEXT)
 }
 
 /// A multi-statement result with metadata intended for query clients.
@@ -64,9 +152,11 @@ pub struct ExecuteMultiResult {
     pub execution_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub statement_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::backend_error::BackendError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExecuteMultiProgress {
     pub statement_index: usize,
     pub completed: usize,
@@ -74,7 +164,7 @@ pub struct ExecuteMultiProgress {
     pub success: bool,
     pub execution_time_ms: u128,
     pub affected_rows: u64,
-    pub error: Option<String>,
+    pub error: Option<crate::backend_error::BackendError>,
 }
 
 pub type ExecuteMultiProgressCallback = Arc<dyn Fn(ExecuteMultiProgress) + Send + Sync>;
@@ -85,7 +175,7 @@ fn report_execute_multi_progress(
     total: usize,
     result: &db::QueryResult,
     success: bool,
-    error: Option<String>,
+    error: Option<crate::backend_error::BackendError>,
 ) {
     if let Some(progress) = progress {
         progress(ExecuteMultiProgress {
@@ -102,15 +192,30 @@ fn report_execute_multi_progress(
 
 impl ExecuteMultiResult {
     fn execution_error(result: db::QueryResult) -> Self {
-        Self { result, execution_error: true, statement_index: None }
+        let error = error_from_query_result(&result);
+        Self { result, execution_error: true, statement_index: None, error }
     }
 
     fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
-        Self { result, execution_error: true, statement_index: Some(statement_index) }
+        let error = error_from_query_result(&result);
+        Self { result, execution_error: true, statement_index: Some(statement_index), error }
+    }
+
+    fn execution_error_with_backend(
+        result: db::QueryResult,
+        statement_index: Option<usize>,
+        error: crate::backend_error::BackendError,
+    ) -> Self {
+        Self { result, execution_error: true, statement_index, error: Some(error) }
     }
 
     fn success_with_index(result: db::QueryResult, statement_index: usize) -> Self {
-        Self { result, execution_error: false, statement_index: Some(statement_index) }
+        Self { result, execution_error: false, statement_index: Some(statement_index), error: None }
+    }
+
+    pub fn without_error_detail(mut self) -> Self {
+        self.error = self.error.map(crate::backend_error::BackendError::without_detail);
+        self
     }
 
     fn into_query_result(self) -> db::QueryResult {
@@ -120,12 +225,16 @@ impl ExecuteMultiResult {
 
 impl From<db::QueryResult> for ExecuteMultiResult {
     fn from(result: db::QueryResult) -> Self {
-        Self { result, execution_error: false, statement_index: None }
+        Self { result, execution_error: false, statement_index: None, error: None }
     }
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn error_from_query_result(result: &db::QueryResult) -> Option<crate::backend_error::BackendError> {
+    result.rows.first()?.first()?.as_str().map(crate::backend_error::BackendError::from_legacy_string)
 }
 
 /// Unified database operation execution budget.
@@ -431,6 +540,7 @@ pub enum QueryExecutionMode {
     #[default]
     Standard,
     Simple,
+    PostgresReadOnlyTransaction,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -455,7 +565,29 @@ pub struct QueryExecutionOptions {
     pub continue_on_error: bool,
     /// Explicit low-level execution path. `Simple` is currently used by SQL Server
     /// SHOWPLAN so the source SQL bypasses result-set probing and query rewriting.
+    /// `PostgresReadOnlyTransaction` executes on an isolated client session and
+    /// always rolls the transaction back after the result is collected.
     pub execution_mode: QueryExecutionMode,
+}
+
+fn validate_query_execution_mode(
+    db_type: Option<DatabaseType>,
+    sql: &str,
+    options: &QueryExecutionOptions,
+) -> Result<(), String> {
+    if options.execution_mode != QueryExecutionMode::PostgresReadOnlyTransaction {
+        return Ok(());
+    }
+    if db_type != Some(DatabaseType::Postgres) {
+        return Err("PostgreSQL read-only transaction mode requires a PostgreSQL connection".to_string());
+    }
+    if options.client_session_id.as_deref().is_none_or(|session_id| session_id.trim().is_empty()) {
+        return Err("PostgreSQL read-only transaction mode requires an isolated client session".to_string());
+    }
+    if crate::sql::split_sql_statements_for_database(sql, DatabaseType::Postgres).len() != 1 {
+        return Err("PostgreSQL read-only transaction mode requires exactly one statement".to_string());
+    }
+    Ok(())
 }
 
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
@@ -545,9 +677,6 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 }
 
 pub fn is_connection_error(err: &str) -> bool {
-    if crate::db::agent_driver::agent_rpc_error_category(err).as_deref() == Some("connection") {
-        return true;
-    }
     let lower = err.to_lowercase();
     if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) {
         return false;
@@ -595,47 +724,29 @@ fn is_schema_reset_cleanup_error(lower: &str) -> bool {
     lower.contains("schema.reset cleanup failed")
 }
 
+fn is_postgres_transaction_cleanup_error(lower: &str) -> bool {
+    lower.contains("postgresql read-only transaction cleanup failed")
+}
+
 fn should_discard_agent_pool_after_error(err: &str) -> bool {
-    if matches!(
-        crate::db::agent_driver::agent_session_disposition(err),
-        Some(
-            crate::db::agent_driver::AgentSessionDisposition::Quarantine
-                | crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime
-        )
-    ) {
-        return true;
-    }
-    let lower = err.to_lowercase();
-    is_dbx_query_timeout_error(&lower)
-        || is_agent_rpc_timeout_error(&lower)
-        || lower.contains("agent stdin not available")
-        || lower.contains("agent stdout not available")
-        || lower.contains("failed to write to agent stdin")
-        || lower.contains("failed to flush agent stdin")
-        || lower.contains("agent rpc task failed")
+    crate::db::agent_driver::agent_recovery_decision(err, RecoveryScope::UserOperation).discards_session()
 }
 
 pub fn pool_error_action(db_type: Option<DatabaseType>, err: &str) -> PoolErrorAction {
-    if db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type))
-        && matches!(
-            crate::db::agent_driver::agent_session_disposition(err),
-            Some(
-                crate::db::agent_driver::AgentSessionDisposition::Quarantine
-                    | crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime
-            )
-        )
-    {
-        // The connection may be replaced, but the result of the user operation is unknown.
-        // Discard the session without replaying SQL, DDL, writes, or transactions.
-        return PoolErrorAction::Discard;
+    if db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type)) {
+        return if should_discard_agent_pool_after_error(err) {
+            // Agent user operations are never replayed from an error hint because
+            // the database-side outcome may be unknown.
+            PoolErrorAction::Discard
+        } else {
+            PoolErrorAction::Keep
+        };
     }
     let lower = err.to_lowercase();
     if db::sqlserver::is_driver_panic_error(err)
         || (is_dbx_query_timeout_error(&lower) && should_discard_pool_after_query_timeout(db_type))
         || is_schema_reset_cleanup_error(&lower)
-        || (db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type))
-            && should_discard_agent_pool_after_error(err)
-            && !is_connection_error(err))
+        || is_postgres_transaction_cleanup_error(&lower)
     {
         return PoolErrorAction::Discard;
     }
@@ -714,10 +825,8 @@ async fn discard_pool_after_error(state: &AppState, pool_key: &str, db_type: Opt
         return;
     }
 
-    let replace_agent_runtime = matches!(
-        crate::db::agent_driver::agent_session_disposition(error),
-        Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
-    );
+    let replace_agent_runtime = db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type))
+        && crate::db::agent_driver::agent_recovery_decision(error, RecoveryScope::UserOperation).replaces_runtime();
     if replace_agent_runtime {
         state.detach_pool_by_key(pool_key, true).await;
     } else {
@@ -725,22 +834,25 @@ async fn discard_pool_after_error(state: &AppState, pool_key: &str, db_type: Opt
     }
 }
 
-async fn discard_agent_pool_after_error(
+async fn discard_agent_pool_after_typed_error(
     state: &AppState,
     pool_key: &str,
     client: &Arc<crate::db::agent_driver::PooledAgentClient>,
-    db_type: Option<DatabaseType>,
-    error: &str,
+    error: &AgentCallError,
+    scope: RecoveryScope,
 ) {
-    let action = pool_error_action(db_type, error);
-    if !matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
-        return;
+    discard_agent_pool_after_decision(state, pool_key, client, RecoveryPolicy::decide(error, scope)).await;
+}
+
+async fn discard_agent_pool_after_decision(
+    state: &AppState,
+    pool_key: &str,
+    client: &Arc<crate::db::agent_driver::PooledAgentClient>,
+    decision: RecoveryDecision,
+) {
+    if decision.discards_session() {
+        state.detach_agent_pool_if_current(pool_key, client, decision.replaces_runtime()).await;
     }
-    let replace_agent_runtime = matches!(
-        crate::db::agent_driver::agent_session_disposition(error),
-        Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
-    );
-    state.detach_agent_pool_if_current(pool_key, client, replace_agent_runtime).await;
 }
 
 fn query_pool_error_action(db_type: Option<DatabaseType>, sql: &str, err: &str) -> PoolErrorAction {
@@ -750,6 +862,27 @@ fn query_pool_error_action(db_type: Option<DatabaseType>, sql: &str, err: &str) 
         // protection classifier; writes discard the stale pool without retry.
         PoolErrorAction::ReconnectAndRetry if is_write_sql(sql) => PoolErrorAction::Discard,
         action => action,
+    }
+}
+
+fn query_execution_error_action(
+    db_type: Option<DatabaseType>,
+    sql: &str,
+    error: &QueryExecutionError,
+) -> PoolErrorAction {
+    if let Some(agent_error) = error.as_agent_error() {
+        return if RecoveryPolicy::decide(agent_error, RecoveryScope::UserOperation).discards_session() {
+            PoolErrorAction::Discard
+        } else {
+            PoolErrorAction::Keep
+        };
+    }
+    match error {
+        QueryExecutionError::Canceled { .. } => PoolErrorAction::Keep,
+        QueryExecutionError::Timeout(message)
+        | QueryExecutionError::Sql(message)
+        | QueryExecutionError::Legacy(message) => query_pool_error_action(db_type, sql, message),
+        QueryExecutionError::Agent(_) => unreachable!("Agent errors return above"),
     }
 }
 
@@ -774,6 +907,36 @@ fn timeout_error_for(timeout_duration: Duration) -> String {
 
 pub fn canceled_error() -> String {
     QUERY_CANCELED.to_string()
+}
+
+fn canceled_query_execution_error() -> QueryExecutionError {
+    QueryExecutionError::Canceled { stage: AgentErrorStage::Cancel, operation_outcome: AgentOperationOutcome::Unknown }
+}
+
+fn pre_dispatch_canceled_query_execution_error() -> QueryExecutionError {
+    QueryExecutionError::Canceled {
+        stage: AgentErrorStage::Request,
+        operation_outcome: AgentOperationOutcome::NotStarted,
+    }
+}
+
+fn postgres_transaction_statement_error(
+    statement_index: usize,
+    message: &str,
+    sql: &str,
+    is_server_error: bool,
+) -> QueryExecutionError {
+    let detail = query_error_with_omitted_sql_context(&format!("Statement {statement_index} failed: {message}"), sql);
+    let lower = message.to_ascii_lowercase();
+    if is_dbx_query_timeout_error(&lower) {
+        QueryExecutionError::Timeout(detail)
+    } else if message == QUERY_CANCELED {
+        canceled_query_execution_error()
+    } else if is_server_error {
+        QueryExecutionError::Sql(detail)
+    } else {
+        QueryExecutionError::Legacy(detail)
+    }
 }
 
 pub(crate) struct StreamProgressClock {
@@ -1035,7 +1198,7 @@ async fn apply_oceanbase_mysql_session_timeout(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn do_execute(
+async fn do_execute_typed(
     state: &AppState,
     pool_key: &str,
     mysql_dialect: db::mysql::MySqlQueryDialect,
@@ -1044,7 +1207,7 @@ pub async fn do_execute(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
-) -> Result<db::QueryResult, String> {
+) -> Result<db::QueryResult, QueryExecutionError> {
     crate::sql_diagnostics::debug_sql("do_execute", sql);
     if let Some(execution_id) = options.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.to_string());
@@ -1067,7 +1230,8 @@ pub async fn do_execute(
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
-    let result = match pool {
+    let mut typed_agent_error = None;
+    let result: Result<db::QueryResult, String> = match pool {
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
@@ -1090,7 +1254,7 @@ pub async fn do_execute(
         }
         #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => {
-            return Err("DuckDB worker support is not compiled in this build".to_string());
+            return Err("DuckDB worker support is not compiled in this build".into());
         }
         PoolKind::Mysql(p, mode) => {
             let p = p.clone();
@@ -1108,9 +1272,9 @@ pub async fn do_execute(
                 Ok(conn) => conn,
                 Err(err) if err == QUERY_CANCELED => {
                     state.remove_pool_by_key(pool_key).await;
-                    return Err(err);
+                    return Err(err.into());
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             };
             let connection_id = conn.id();
             if let Some(ref execution_id) = options.execution_id {
@@ -1148,9 +1312,21 @@ pub async fn do_execute(
             let schema = schema.map(|s| s.to_string());
             let max_rows = options.max_rows;
             let prefer_text_protocol = postgres_prefers_text_protocol(pool_db_type);
+            let execution_mode = options.execution_mode;
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
             drop(connections);
-            if let Some(schema) = schema {
+            if execution_mode == QueryExecutionMode::PostgresReadOnlyTransaction {
+                db::postgres::execute_query_in_read_only_transaction_with_rollback(
+                    &p,
+                    schema.as_deref(),
+                    sql,
+                    max_rows,
+                    cancel_token,
+                    operation_budget.clone(),
+                    cancel_context,
+                )
+                .await
+            } else if let Some(schema) = schema {
                 db::postgres::execute_query_with_schema_and_max_rows_and_cancel(
                     &p,
                     &schema,
@@ -1240,7 +1416,7 @@ pub async fn do_execute(
             let mut client = match cancel_token.as_ref() {
                 Some(token) => tokio::select! {
                     biased;
-                    _ = token.cancelled() => return Err(canceled_error()),
+                    _ = token.cancelled() => return Err(canceled_error().into()),
                     guard = client.lock() => guard,
                 },
                 None => client.lock().await,
@@ -1314,6 +1490,8 @@ pub async fn do_execute(
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
         PoolKind::MongoDb(_) => Err(MONGO_SHELL_COMMAND_HINT.to_string()),
         PoolKind::MessageQueue => Err("Use Message Queue-specific commands".to_string()),
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(_) => Err("Use MQTT-specific commands".to_string()),
         PoolKind::Nacos => Err("Use Nacos-specific commands".to_string()),
         PoolKind::InfluxDb(client) => {
             let client = client.clone();
@@ -1342,7 +1520,7 @@ pub async fn do_execute(
             let rpc_timeout = query_timeout;
             drop(connections);
             if is_canceled(&cancel_token) {
-                return Err(canceled_error());
+                return Err(canceled_error().into());
             }
             let cancel_for_agent = cancel_token.clone();
             let result = async move {
@@ -1350,7 +1528,10 @@ pub async fn do_execute(
                     Some(token) => {
                         tokio::select! {
                             biased;
-                            _ = token.cancelled() => return Err(canceled_error()),
+                            _ = token.cancelled() => return Err(AgentCallError::Canceled {
+                                stage: AgentErrorStage::Cancel,
+                                operation_outcome: AgentOperationOutcome::Unknown,
+                            }),
                             guard = client.lock() => guard,
                         }
                     }
@@ -1358,28 +1539,35 @@ pub async fn do_execute(
                 };
                 if let Some(session_id) = options.result_session_id.as_deref() {
                     let params = agent_fetch_query_page_params(session_id, options.page_size.unwrap_or(MAX_ROWS));
-                    client.fetch_query_page_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone()).await
+                    client
+                        .fetch_query_page_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
+                        .await
                 } else if options.page_size.is_some() {
                     let params = agent_execute_query_page_params(&sql, database.as_deref(), schema.as_deref(), options);
                     client
-                        .execute_query_page_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
+                        .execute_query_page_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
                         .await
                 } else {
                     let params = agent_execute_query_params(&sql, database.as_deref(), schema.as_deref(), options);
-                    client.execute_query_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone()).await
+                    client
+                        .execute_query_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
+                        .await
                 }
             }
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
-            if matches!(result.as_ref(), Err(err) if err == QUERY_CANCELED) {
-                state.detach_agent_pool_if_current(pool_key, &source_client, false).await;
-            }
             if let Err(err) = result.as_ref() {
-                if err != QUERY_CANCELED {
-                    discard_agent_pool_after_error(state, pool_key, &source_client, pool_db_type, err).await;
-                }
+                discard_agent_pool_after_typed_error(
+                    state,
+                    pool_key,
+                    &source_client,
+                    err,
+                    RecoveryScope::UserOperation,
+                )
+                .await;
             }
-            result
+            typed_agent_error = result.as_ref().err().cloned();
+            result.map_err(AgentCallError::into_legacy_string)
         }
         PoolKind::ExternalDriver { config, session, .. } => {
             let config = config.clone();
@@ -1413,7 +1601,49 @@ pub async fn do_execute(
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
     };
-    result.map(normalize_query_result_for_js)
+    result
+        .map(normalize_query_result_for_js)
+        .map_err(|error| {
+            typed_agent_error.map_or_else(|| QueryExecutionError::Legacy(error), QueryExecutionError::Agent)
+        })
+        .map_err(|error| classify_query_error(pool_db_type, error))
+}
+
+fn classify_query_error(db_type: Option<DatabaseType>, error: QueryExecutionError) -> QueryExecutionError {
+    match error {
+        QueryExecutionError::Legacy(message) if message == QUERY_CANCELED => canceled_query_execution_error(),
+        QueryExecutionError::Legacy(message) if is_dbx_query_timeout_error(&message.to_ascii_lowercase()) => {
+            QueryExecutionError::Timeout(message)
+        }
+        QueryExecutionError::Legacy(message) if is_native_sql_server_error(db_type, &message) => {
+            QueryExecutionError::Sql(message)
+        }
+        other => other,
+    }
+}
+
+fn is_native_sql_server_error(db_type: Option<DatabaseType>, message: &str) -> bool {
+    let message = message.trim_start();
+    match db_type {
+        Some(DatabaseType::Postgres) => message.starts_with("ERROR:"),
+        Some(DatabaseType::Mysql) => message.starts_with("Server error: `ERROR "),
+        _ => false,
+    }
+}
+
+pub async fn do_execute(
+    state: &AppState,
+    pool_key: &str,
+    mysql_dialect: db::mysql::MySqlQueryDialect,
+    database: Option<&str>,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<db::QueryResult, String> {
+    do_execute_typed(state, pool_key, mysql_dialect, database, sql, schema, cancel_token, options)
+        .await
+        .map_err(QueryExecutionError::into_legacy_string)
 }
 
 async fn invoke_external_driver_query_page(
@@ -1501,7 +1731,7 @@ pub async fn execute_sql_statement(
     .await
 }
 
-pub async fn execute_sql_statement_with_options(
+pub async fn execute_sql_statement_with_options_typed(
     state: &AppState,
     connection_id: &str,
     database: &str,
@@ -1509,16 +1739,17 @@ pub async fn execute_sql_statement_with_options(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
-) -> Result<db::QueryResult, String> {
+) -> Result<db::QueryResult, QueryExecutionError> {
     // MongoDB connections use shell-style commands dispatched through the
     // frontend parser. Queries that fall through to the generic SQL executor
     // (e.g. typos) must be rejected before any pool/key creation so that
     // session-scoped pools do not leak MongoDB Clients and SSH tunnels.
     if connection_is_mongodb(state, connection_id).await {
-        return Err(MONGO_SHELL_COMMAND_HINT.to_string());
+        return Err(MONGO_SHELL_COMMAND_HINT.into());
     }
 
     let db_type = connection_database_type(state, connection_id).await;
+    validate_query_execution_mode(db_type, sql, &options)?;
     let has_executable_sql = db_type.map_or_else(
         || crate::sql::has_executable_sql(sql),
         |db_type| crate::sql::has_executable_sql_for_database(sql, db_type),
@@ -1529,7 +1760,8 @@ pub async fn execute_sql_statement_with_options(
 
     if let Some(target_database) = postgres_drop_database_target(db_type, sql) {
         return execute_postgres_drop_database(state, connection_id, &target_database, sql, cancel_token, options)
-            .await;
+            .await
+            .map_err(Into::into);
     }
 
     // When a query tab has a client session, keep even database-less execution
@@ -1542,18 +1774,27 @@ pub async fn execute_sql_statement_with_options(
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
 
     if is_canceled(&cancel_token) {
-        return Err(canceled_error());
+        return Err(pre_dispatch_canceled_query_execution_error());
     }
 
     let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-    let result =
-        do_execute(state, &pool_key, mysql_dialect, Some(database), sql, schema, cancel_token.clone(), options.clone())
-            .await;
+    let result = do_execute_typed(
+        state,
+        &pool_key,
+        mysql_dialect,
+        Some(database),
+        sql,
+        schema,
+        cancel_token.clone(),
+        options.clone(),
+    )
+    .await;
 
-    let with_sql_context =
-        |r: Result<db::QueryResult, String>| r.map_err(|e| query_error_with_omitted_sql_context(&e, sql));
+    let with_sql_context = |result: Result<db::QueryResult, QueryExecutionError>| {
+        result.map_err(|error| error.with_omitted_sql_context(sql))
+    };
 
-    let action = result.as_ref().err().map(|e| query_pool_error_action(db_type, sql, e));
+    let action = result.as_ref().err().map(|error| query_execution_error_action(db_type, sql, error));
     match action {
         Some(PoolErrorAction::ReconnectAndRetry) if !is_canceled(&cancel_token) => {
             let pool_database = query_pool_database(database, options.catalog.as_deref());
@@ -1562,7 +1803,8 @@ pub async fn execute_sql_statement_with_options(
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
-                do_execute(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options).await,
+                do_execute_typed(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options)
+                    .await,
             )
         }
         Some(PoolErrorAction::Discard) => {
@@ -1575,6 +1817,20 @@ pub async fn execute_sql_statement_with_options(
         }
         _ => with_sql_context(result),
     }
+}
+
+pub async fn execute_sql_statement_with_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<db::QueryResult, String> {
+    execute_sql_statement_with_options_typed(state, connection_id, database, sql, schema, cancel_token, options)
+        .await
+        .map_err(QueryExecutionError::into_legacy_string)
 }
 
 async fn execute_postgres_drop_database(
@@ -1731,7 +1987,22 @@ pub async fn execute_multi_core_with_options_for_client(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
-    execute_multi_core_with_options_for_client_and_progress(
+    execute_multi_core_with_options_for_client_typed(state, connection_id, database, sql, schema, cancel_token, options)
+        .await
+        .map_err(QueryExecutionError::into_legacy_string)
+}
+
+/// Execute a SQL batch for a client while preserving typed failures.
+pub async fn execute_multi_core_with_options_for_client_typed(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
+    execute_multi_core_with_options_for_client_and_progress_typed(
         state,
         connection_id,
         database,
@@ -1755,10 +2026,44 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     options: QueryExecutionOptions,
     progress: Option<ExecuteMultiProgressCallback>,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
+    execute_multi_core_with_options_for_client_and_progress_typed(
+        state,
+        connection_id,
+        database,
+        sql,
+        schema,
+        cancel_token,
+        options,
+        progress,
+    )
+    .await
+    .map_err(QueryExecutionError::into_legacy_string)
+}
+
+/// Executes a SQL batch without erasing structured query errors at transport boundaries.
+pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+    progress: Option<ExecuteMultiProgressCallback>,
+) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
     let pool_database = query_pool_database(database, options.catalog.as_deref());
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
-        return Err(MONGO_SHELL_COMMAND_HINT.to_string());
+        return Err(MONGO_SHELL_COMMAND_HINT.into());
+    }
+
+    let db_type = connection_database_type(state, connection_id).await;
+    validate_query_execution_mode(db_type, sql, &options)?;
+    if options.execution_mode == QueryExecutionMode::PostgresReadOnlyTransaction {
+        let result =
+            execute_sql_statement_with_options(state, connection_id, database, sql, schema, cancel_token, options)
+                .await?;
+        return Ok(vec![result.into()]);
     }
 
     let pool_key = state
@@ -1777,9 +2082,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     };
 
     if is_sqlserver {
-        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options)
-            .await
-            .map(|results| results.into_iter().map(Into::into).collect());
+        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options).await.map_err(Into::into);
     }
 
     let is_http_sqlite = {
@@ -1792,13 +2095,20 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     // HTTP SQLite providers send all statements in one request so the provider
     // can preserve batch ordering and atomicity.
     if is_http_sqlite {
-        let result =
-            execute_sql_statement_with_options(state, connection_id, database, sql, schema, cancel_token, options)
-                .await?;
-        return Ok(vec![result.into()]);
+        return single_statement_multi_result(
+            execute_sql_statement_with_options_typed(
+                state,
+                connection_id,
+                database,
+                sql,
+                schema,
+                cancel_token,
+                options,
+            )
+            .await,
+        );
     }
 
-    let db_type = connection_database_type(state, connection_id).await;
     let statements = db_type.map_or_else(
         || split_sql_statements(sql),
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
@@ -1810,7 +2120,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     // When use_transaction is explicitly true and we have multiple statements,
     // route through the transaction wrapper instead of the sequential auto-commit loop.
     if options.use_transaction == Some(true) && statements.len() > 1 {
-        let result = execute_statements_in_transaction(
+        let result = execute_statements_in_transaction_typed(
             state,
             connection_id,
             database,
@@ -1832,17 +2142,18 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
 
     if statements.len() <= 1 {
         let single_sql = statements.into_iter().next().unwrap_or_default();
-        let result = execute_sql_statement_with_options(
-            state,
-            connection_id,
-            database,
-            &single_sql,
-            schema,
-            cancel_token,
-            options,
-        )
-        .await?;
-        return Ok(vec![result.into()]);
+        return single_statement_multi_result(
+            execute_sql_statement_with_options_typed(
+                state,
+                connection_id,
+                database,
+                &single_sql,
+                schema,
+                cancel_token,
+                options,
+            )
+            .await,
+        );
     }
 
     if let Some((pool, mode)) = mysql_pool {
@@ -1864,7 +2175,8 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
             options,
             progress.as_ref(),
         )
-        .await;
+        .await
+        .map_err(Into::into);
     }
 
     // Kingbase Go keeps one physical connection per Agent session, so an open
@@ -1875,10 +2187,15 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     let mut results = Vec::with_capacity(statements.len());
     for (statement_index, stmt) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
-            results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
+            let error = canceled_query_execution_error();
+            results.push(ExecuteMultiResult::execution_error_with_backend(
+                error_query_result(error.clone().into_legacy_string()),
+                Some(statement_index),
+                error.into_backend_error(),
+            ));
             break;
         }
-        match execute_sql_statement_with_options(
+        match execute_sql_statement_with_options_typed(
             state,
             connection_id,
             database,
@@ -1893,18 +2210,23 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
                 report_execute_multi_progress(progress.as_ref(), statement_index, statements.len(), &r, true, None);
                 results.push(ExecuteMultiResult::success_with_index(r, statement_index));
             }
-            Err(e) => {
-                let action = query_pool_error_action(db_type, stmt, &e);
-                let result = error_query_result(e.clone());
+            Err(error) => {
+                let action = query_execution_error_action(db_type, stmt, &error);
+                let result = error_query_result(error.clone().into_legacy_string());
+                let backend_error = error.into_backend_error();
                 report_execute_multi_progress(
                     progress.as_ref(),
                     statement_index,
                     statements.len(),
                     &result,
                     false,
-                    Some(e),
+                    Some(backend_error.clone()),
                 );
-                results.push(ExecuteMultiResult::execution_error_with_index(result, statement_index));
+                results.push(ExecuteMultiResult::execution_error_with_backend(
+                    result,
+                    Some(statement_index),
+                    backend_error,
+                ));
                 if !should_continue_batch_after_error(options.continue_on_error, action) {
                     break;
                 }
@@ -1913,6 +2235,12 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     }
 
     Ok(results)
+}
+
+fn single_statement_multi_result(
+    result: Result<db::QueryResult, QueryExecutionError>,
+) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
+    result.map(|result| vec![result.into()])
 }
 
 trait MysqlBatchStatementExecutor {
@@ -1977,7 +2305,14 @@ where
             Err(err) => {
                 let action = pool_error_action(db_type, &err);
                 let result = error_query_result(err.clone());
-                report_execute_multi_progress(progress, statement_index, statements.len(), &result, false, Some(err));
+                report_execute_multi_progress(
+                    progress,
+                    statement_index,
+                    statements.len(),
+                    &result,
+                    false,
+                    Some(crate::backend_error::BackendError::from_legacy_backend(&err)),
+                );
                 results.push(ExecuteMultiResult::execution_error_with_index(result, statement_index));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
@@ -2096,13 +2431,17 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
     }
 }
 
+fn sqlserver_batch_results(results: Vec<db::QueryResult>) -> Vec<ExecuteMultiResult> {
+    results.into_iter().map(ExecuteMultiResult::from).collect()
+}
+
 async fn execute_multi_sqlserver(
     state: &AppState,
     pool_key: &str,
     sql: &str,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
-) -> Result<Vec<db::QueryResult>, String> {
+) -> Result<Vec<ExecuteMultiResult>, String> {
     let batches = split_sql_batches(sql);
 
     // Read-only check for SQL Server batch path
@@ -2114,20 +2453,12 @@ async fn execute_multi_sqlserver(
 
     for batch in &batches {
         if is_canceled(&cancel_token) {
-            all_results.push(db::QueryResult {
-                columns: vec!["Error".to_string()],
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                spatial_columns: vec![],
-                spatial_values: vec![],
-                rows: vec![vec![serde_json::Value::String(canceled_error())]],
-                affected_rows: 0,
-                execution_time_ms: 0,
-                truncated: false,
-                session_id: None,
-                has_more: false,
-                elasticsearch_raw_body: None,
-            });
+            let error = canceled_error();
+            all_results.push(ExecuteMultiResult::execution_error_with_backend(
+                error_query_result(error.clone()),
+                None,
+                crate::backend_error::BackendError::from_legacy_backend(&error),
+            ));
             break;
         }
 
@@ -2142,14 +2473,21 @@ async fn execute_multi_sqlserver(
         let mut client_guard = match wait_for_value_opt(cancel_token.clone(), query_timeout, client.lock()).await {
             Ok(guard) => guard,
             Err(err) => {
-                all_results.push(error_query_result(err));
+                all_results.push(ExecuteMultiResult::execution_error_with_backend(
+                    error_query_result(err.clone()),
+                    None,
+                    crate::backend_error::BackendError::from_legacy_backend(&err),
+                ));
                 break;
             }
         };
 
         if !sqlserver_pool_is_current(state, pool_key, &client).await {
-            all_results.push(error_query_result(
-                "SQL Server connection was reset while waiting for the query lock; please retry.".to_string(),
+            let error = "SQL Server connection was reset while waiting for the query lock; please retry.".to_string();
+            all_results.push(ExecuteMultiResult::execution_error_with_backend(
+                error_query_result(error.clone()),
+                None,
+                crate::backend_error::BackendError::from_legacy_backend(&error),
             ));
             break;
         }
@@ -2165,23 +2503,14 @@ async fn execute_multi_sqlserver(
         drop(client_guard);
 
         match result {
-            Ok(results) => all_results.extend(results),
+            Ok(results) => all_results.extend(sqlserver_batch_results(results)),
             Err(e) => {
                 let action = pool_error_action(Some(DatabaseType::SqlServer), &e);
-                all_results.push(db::QueryResult {
-                    columns: vec!["Error".to_string()],
-                    column_types: Vec::new(),
-                    column_sortables: vec![],
-                    spatial_columns: vec![],
-                    spatial_values: vec![],
-                    rows: vec![vec![serde_json::Value::String(e)]],
-                    affected_rows: 0,
-                    execution_time_ms: 0,
-                    truncated: false,
-                    session_id: None,
-                    has_more: false,
-                    elasticsearch_raw_body: None,
-                });
+                all_results.push(ExecuteMultiResult::execution_error_with_backend(
+                    error_query_result(e.clone()),
+                    None,
+                    crate::backend_error::BackendError::from_legacy_backend(&e),
+                ));
                 if matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
                     state.remove_pool_by_key(pool_key).await;
                 }
@@ -2193,20 +2522,7 @@ async fn execute_multi_sqlserver(
     }
 
     if all_results.is_empty() {
-        all_results.push(db::QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            spatial_columns: vec![],
-            spatial_values: vec![],
-            rows: vec![],
-            affected_rows: 0,
-            execution_time_ms: 0,
-            truncated: false,
-            session_id: None,
-            has_more: false,
-            elasticsearch_raw_body: None,
-        });
+        all_results.push(empty_query_result(0).into());
     }
 
     Ok(all_results)
@@ -2218,8 +2534,8 @@ async fn execute_multi_agent(
     statements: &[String],
     schema: Option<&str>,
     timeout_secs: Option<u64>,
-) -> Result<db::QueryResult, String> {
-    client.execute_batch(database, statements, schema, resolve_query_timeout(timeout_secs)).await
+) -> Result<db::QueryResult, AgentCallError> {
+    client.execute_batch_typed(database, statements, schema, resolve_query_timeout(timeout_secs)).await
 }
 
 pub async fn execute_statements(
@@ -2271,14 +2587,20 @@ pub async fn execute_statements(
         match result {
             Ok(result) => return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result }),
             Err(err) => {
-                if is_agent_execute_batch_unsupported(&err) {
+                if is_agent_execute_batch_unsupported(&err.to_string()) {
                     log::warn!(
                         "Agent does not support execute_batch; falling back to statement-by-statement execution"
                     );
                 } else {
-                    let db_type = connection_database_type(state, connection_id).await;
-                    discard_agent_pool_after_error(state, &pool_key, &source_client, db_type, &err).await;
-                    return Err(query_error_with_omitted_sql_context(&err, sql_ctx));
+                    discard_agent_pool_after_typed_error(
+                        state,
+                        &pool_key,
+                        &source_client,
+                        &err,
+                        RecoveryScope::UserOperation,
+                    )
+                    .await;
+                    return Err(query_error_with_omitted_sql_context(&err.into_legacy_string(), sql_ctx));
                 }
             }
         }
@@ -2314,10 +2636,11 @@ pub async fn execute_statements(
                     }
                     PoolErrorAction::Discard | PoolErrorAction::Keep => {}
                 }
-                return Err(query_error_with_omitted_sql_context(
-                    &format!("Statement {} failed: {}. Previous {} statement(s) may have been committed.", i + 1, e, i),
-                    sql,
-                ));
+                let error = crate::db::agent_driver::append_legacy_error_context(
+                    &e,
+                    &format!("Statement {} failed; previous {} statement(s) may have been committed.", i + 1, i),
+                );
+                return Err(query_error_with_omitted_sql_context(&error, sql));
             }
         }
     }
@@ -2462,6 +2785,8 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::ExternalDriver { .. } => false,
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(_) => false,
     }
 }
 
@@ -2606,6 +2931,20 @@ pub async fn execute_statements_in_transaction(
     schema: Option<&str>,
     catalog: Option<&str>,
 ) -> Result<db::QueryResult, String> {
+    execute_statements_in_transaction_typed(state, connection_id, database, statements, schema, catalog)
+        .await
+        .map_err(QueryExecutionError::into_legacy_string)
+}
+
+/// Execute multiple SQL statements transactionally while retaining typed failures.
+pub async fn execute_statements_in_transaction_typed(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+    catalog: Option<&str>,
+) -> Result<db::QueryResult, QueryExecutionError> {
     let sql_ctx = statements.first().map(|s| s.as_str()).unwrap_or("");
     let pool_database = query_pool_database(database, catalog);
     let pool_key = state
@@ -2613,8 +2952,16 @@ pub async fn execute_statements_in_transaction(
         .await
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql_ctx))?;
 
-    execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, statements, schema, catalog)
-        .await
+    execute_statements_in_transaction_on_pool_typed(
+        state,
+        &pool_key,
+        connection_id,
+        database,
+        statements,
+        schema,
+        catalog,
+    )
+    .await
 }
 
 /// Execute multiple SQL statements transactionally on an already-resolved pool.
@@ -2628,6 +2975,29 @@ pub async fn execute_statements_in_transaction_on_pool(
     schema: Option<&str>,
     catalog: Option<&str>,
 ) -> Result<db::QueryResult, String> {
+    execute_statements_in_transaction_on_pool_typed(
+        state,
+        pool_key,
+        connection_id,
+        database,
+        statements,
+        schema,
+        catalog,
+    )
+    .await
+    .map_err(QueryExecutionError::into_legacy_string)
+}
+
+/// Execute a transaction on an already-resolved pool without erasing typed failures.
+pub async fn execute_statements_in_transaction_on_pool_typed(
+    state: &AppState,
+    pool_key: &str,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+    catalog: Option<&str>,
+) -> Result<db::QueryResult, QueryExecutionError> {
     // Read-only check: intercept all transaction paths before dispatching
     check_read_only_for_connection_multi(state, pool_key, statements).await?;
 
@@ -2649,6 +3019,8 @@ pub async fn execute_statements_in_transaction_on_pool(
             }
             PoolKind::Agent(client) => TxPath::Agent(client.clone()),
             PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
+            #[cfg(feature = "mq-admin")]
+            PoolKind::Mqtt(_) => TxPath::None,
             PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
@@ -2665,21 +3037,20 @@ pub async fn execute_statements_in_transaction_on_pool(
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
-        Some(TxPath::Mysql(pool, _bare)) => {
-            exec_tx_mysql_inner(
-                state,
-                pool_key,
-                pool,
-                statements,
-                start,
-                operation_budget.clone(),
-                mysql_catalog_dialect,
-                catalog,
-                database,
-            )
-            .await
-        }
-        Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
+        Some(TxPath::Mysql(pool, _bare)) => exec_tx_mysql_inner(
+            state,
+            pool_key,
+            pool,
+            statements,
+            start,
+            operation_budget.clone(),
+            mysql_catalog_dialect,
+            catalog,
+            database,
+        )
+        .await
+        .map_err(Into::into),
+        Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await.map_err(Into::into),
         Some(TxPath::CloudflareD1(client)) => {
             let sql = statements.join(";\n");
             wait_for_query_opt(
@@ -2688,27 +3059,33 @@ pub async fn execute_statements_in_transaction_on_pool(
                 db::cloudflare_d1_driver::execute_query_with_max_rows(&client, &sql, None),
             )
             .await
+            .map_err(Into::into)
         }
         Some(TxPath::Agent(client)) => {
             let result = exec_tx_agent_inner(client.clone(), db_type, Some(database), statements, schema, start).await;
             if let Err(error) = result.as_ref() {
-                discard_agent_pool_after_error(state, pool_key, &client, db_type, error).await;
+                discard_agent_pool_after_typed_error(state, pool_key, &client, error, RecoveryScope::UserOperation)
+                    .await;
             }
-            return result;
+            return result.map_err(QueryExecutionError::Agent);
         }
         Some(TxPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start)
+                .await
+                .map_err(Into::into)
         }
         Some(TxPath::None) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_none_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_none_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start)
+                .await
+                .map_err(Into::into)
         }
-        None => Err("Connection not found for transaction".to_string()),
+        None => Err("Connection not found for transaction".to_string().into()),
     };
 
     if let Err(err) = result.as_ref() {
-        discard_pool_after_error(state, pool_key, db_type, err).await;
+        discard_pool_after_error(state, pool_key, db_type, &err.to_string()).await;
     }
 
     result
@@ -2735,17 +3112,17 @@ async fn exec_tx_pg_inner(
     start: std::time::Instant,
     budget: DbOperationBudget,
     cancel_context: Option<db::postgres::PostgresCancelContext>,
-) -> Result<db::QueryResult, String> {
+) -> Result<db::QueryResult, QueryExecutionError> {
     let mut client = db::postgres::checkout_postgres_client(&pool, None, budget.checkout_timeout)
         .await
         .map_err(|e| format!("Failed to acquire connection: {}", e))?;
     let had_schema = schema.is_some();
     if let Some(s) = schema {
-        db::postgres::execute_postgres_infra_statement(
+        db::postgres::set_postgres_search_path(
             &client,
-            &db::postgres::postgres_set_search_path_sql(s, db::postgres::PostgresSearchPathContext::Transaction),
+            s,
+            db::postgres::PostgresSearchPathContext::Transaction,
             budget.recycle_timeout,
-            "schema.set",
         )
         .await
         .map_err(|e| format!("SET search_path failed: {}", e))?;
@@ -2761,7 +3138,7 @@ async fn exec_tx_pg_inner(
             "schema.reset",
         )
         .await
-        .map_err(|err| format!("PostgreSQL schema.reset cleanup failed: {err}"))
+        .map_err(|err| QueryExecutionError::Legacy(format!("PostgreSQL schema.reset cleanup failed: {err}")))
     } else {
         Ok(0)
     };
@@ -2783,7 +3160,7 @@ async fn exec_tx_pg_inner(
         }),
         (Err(e), Ok(_)) => Err(e),
         (Ok(_), Err(reset_err)) => Err(reset_err),
-        (Err(e), Err(reset_err)) => Err(format!("{e}; {reset_err}")),
+        (Err(e), Err(reset_err)) => Err(e.with_context(&reset_err.to_string())),
     }
 }
 
@@ -2792,7 +3169,7 @@ async fn exec_tx_pg_statements(
     statements: &[String],
     budget: &DbOperationBudget,
     cancel_context: Option<db::postgres::PostgresCancelContext>,
-) -> Result<u64, String> {
+) -> Result<u64, QueryExecutionError> {
     let tx = tokio::time::timeout(budget.recycle_timeout, client.transaction())
         .await
         .map_err(|_| {
@@ -2802,15 +3179,21 @@ async fn exec_tx_pg_statements(
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
         let pg_cancel_token = tx.client().cancel_token();
+        let mut is_server_error = false;
         let affected = db::postgres::wait_postgres_operation(
             pg_cancel_token,
             cancel_context.clone(),
             budget.query_timeout,
             budget.cancel_timeout,
-            async { tx.execute(sql, &[]).await.map_err(|e| e.to_string()) },
+            async {
+                tx.execute(sql, &[]).await.map_err(|error| {
+                    is_server_error = error.as_db_error().is_some();
+                    error.to_string()
+                })
+            },
         )
         .await
-        .map_err(|e| query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql))?;
+        .map_err(|e| postgres_transaction_statement_error(i + 1, &e, sql, is_server_error))?;
         total_affected += affected;
     }
     tokio::time::timeout(budget.cleanup_timeout, tx.commit())
@@ -3016,7 +3399,7 @@ async fn exec_tx_agent_inner(
     statements: &[String],
     schema: Option<&str>,
     start: std::time::Instant,
-) -> Result<db::QueryResult, String> {
+) -> Result<db::QueryResult, AgentCallError> {
     let execution_schema = schema_for_execution_context(db_type, schema);
     let rewritten_statements;
     let statements = if qualifies_unqualified_agent_relations(db_type) {
@@ -3027,7 +3410,7 @@ async fn exec_tx_agent_inner(
         statements
     };
     let mut client = client.lock().await;
-    let result: db::QueryResult = client.execute_transaction(database, statements, execution_schema).await?;
+    let result: db::QueryResult = client.execute_transaction_typed(database, statements, execution_schema).await?;
     Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result })
 }
 
@@ -3158,12 +3541,11 @@ async fn begin_transaction_session(
             let begin_sql = postgres_transaction_begin_sql(consistent_snapshot);
             conn.execute(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
             if let Some(schema) = schema {
-                conn.execute(
-                    &db::postgres::postgres_set_search_path_sql(
-                        schema,
-                        db::postgres::PostgresSearchPathContext::LocalTransaction,
-                    ),
-                    &[],
+                db::postgres::set_postgres_search_path(
+                    &conn,
+                    schema,
+                    db::postgres::PostgresSearchPathContext::LocalTransaction,
+                    db::connection_timeout(),
                 )
                 .await
                 .map_err(|e| format!("SET search_path failed: {e}"))?;
@@ -3523,7 +3905,7 @@ async fn execute_manual_txn_postgres_statement(
     sql: &str,
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if db::postgres::postgres_statement_returns_rows(sql) {
         db::postgres::execute_select_query(conn, sql, std::time::Instant::now(), row_limit).await
     } else {
         let affected = conn.execute(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
@@ -3549,7 +3931,7 @@ async fn execute_manual_txn_mysql_statement(
     sql: &str,
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"]) {
+    if db::mysql::is_result_set_query(sql, db::mysql::MySqlQueryDialect::default()) {
         let start = std::time::Instant::now();
         let mut result = conn.query_iter(sql).await.map_err(|e| format!("Query failed: {e}"))?;
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
@@ -3742,7 +4124,13 @@ for line in sys.stdin:
 
         let error = execute_multi_agent(&mut client, None, &["slow".to_string()], None, Some(1)).await.unwrap_err();
 
-        assert_eq!(error, "Agent RPC call timed out (1s)");
+        assert!(matches!(
+            error,
+            AgentCallError::Timeout {
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+            }
+        ));
     }
 
     #[cfg(unix)]
@@ -3927,6 +4315,28 @@ for line in sys.stdin:
         assert_eq!(QueryExecutionMode::default(), QueryExecutionMode::Standard);
     }
 
+    #[test]
+    fn query_execution_mode_deserializes_postgres_read_only_transaction() {
+        let mode: QueryExecutionMode = serde_json::from_str("\"postgres_read_only_transaction\"").unwrap();
+
+        assert_eq!(mode, QueryExecutionMode::PostgresReadOnlyTransaction);
+    }
+
+    #[test]
+    fn postgres_read_only_transaction_requires_postgres_and_isolated_session() {
+        let mut options = QueryExecutionOptions {
+            execution_mode: QueryExecutionMode::PostgresReadOnlyTransaction,
+            ..Default::default()
+        };
+
+        assert!(validate_query_execution_mode(Some(DatabaseType::Mysql), "SELECT 1", &options).is_err());
+        assert!(validate_query_execution_mode(Some(DatabaseType::Postgres), "SELECT 1", &options).is_err());
+
+        options.client_session_id = Some("tab:explain:execution".to_string());
+        assert_eq!(validate_query_execution_mode(Some(DatabaseType::Postgres), "SELECT 1", &options), Ok(()));
+        assert!(validate_query_execution_mode(Some(DatabaseType::Postgres), "SELECT 1; SELECT 2", &options).is_err());
+    }
+
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
             id: "conn-1".to_string(),
@@ -4059,6 +4469,104 @@ for line in sys.stdin:
         assert!(error.contains("injected Agent failure"));
         assert!(!state.connections.read().await.contains_key("conn-1"));
         assert!(runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn single_statement_multi_core_keeps_query_error_typed() {
+        let (state, dir, runtime) = agent_error_state("keep").await;
+
+        let error = execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            "conn-1",
+            "",
+            "SELECT 1",
+            None,
+            None,
+            QueryExecutionOptions::default(),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, QueryExecutionError::Agent(_)));
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn native_pre_dispatch_cancellation_stays_typed() {
+        let dir = std::env::temp_dir().join(format!("dbx-query-native-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-cancel";
+        let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
+        state.connections.write().await.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Sqlite));
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let error = execute_sql_statement_with_options_typed(
+            &state,
+            connection_id,
+            "",
+            "SELECT 1",
+            None,
+            Some(cancel_token),
+            QueryExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            QueryExecutionError::Canceled {
+                stage: AgentErrorStage::Request,
+                operation_outcome: AgentOperationOutcome::NotStarted,
+            }
+        ));
+        let backend_error = error.into_backend_error();
+        assert_eq!(backend_error.code(), "DBX-JDBC-2003");
+        assert_eq!(backend_error.source(), crate::backend_error::BackendErrorSource::LegacyBackend);
+        assert_eq!(backend_error.operation_outcome(), crate::backend_error::BackendOperationOutcome::NotStarted);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn agent_pre_dispatch_cancellation_stays_local_and_typed() {
+        let (state, dir, runtime) = agent_error_state("keep").await;
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let error = execute_sql_statement_with_options_typed(
+            &state,
+            "conn-1",
+            "",
+            "SELECT 1",
+            None,
+            Some(cancel_token),
+            QueryExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            QueryExecutionError::Canceled {
+                stage: AgentErrorStage::Request,
+                operation_outcome: AgentOperationOutcome::NotStarted,
+            }
+        ));
+        let backend_error = error.into_backend_error();
+        assert_eq!(backend_error.code(), "DBX-JDBC-2003");
+        assert_eq!(backend_error.source(), crate::backend_error::BackendErrorSource::LegacyBackend);
+        assert_eq!(backend_error.operation_outcome(), crate::backend_error::BackendOperationOutcome::NotStarted);
+        assert!(!runtime.is_failed());
 
         runtime.kill();
         let _ = std::fs::remove_dir_all(dir);
@@ -4301,7 +4809,7 @@ for line in sys.stdin:
                     success: false,
                     execution_time_ms: 0,
                     affected_rows: 0,
-                    error: Some("Duplicate entry".to_string()),
+                    error: Some(crate::backend_error::BackendError::from_legacy_backend("Duplicate entry")),
                 },
             ]
         );
@@ -4447,6 +4955,13 @@ for line in sys.stdin:
         assert!(success.get("execution_error").is_none());
         assert!(success.get("statement_index").is_none());
 
+        let mut error_column = empty_query_result(0);
+        error_column.columns = vec!["Error".to_string()];
+        error_column.rows = vec![vec![serde_json::json!("valid query value")]];
+        let error_column = serde_json::to_value(ExecuteMultiResult::success_with_index(error_column, 0)).unwrap();
+        assert!(error_column.get("execution_error").is_none());
+        assert!(error_column.get("error").is_none());
+
         let failure = serde_json::to_value(ExecuteMultiResult::execution_error_with_index(
             error_query_result("failed".to_string()),
             2,
@@ -4455,6 +4970,176 @@ for line in sys.stdin:
         assert_eq!(failure.get("execution_error"), Some(&serde_json::Value::Bool(true)));
         assert_eq!(failure.get("statement_index"), Some(&serde_json::json!(2)));
         assert_eq!(failure.get("columns"), Some(&serde_json::json!(["Error"])));
+        assert_eq!(
+            failure.get("error").and_then(|value| value.get("code")),
+            Some(&serde_json::json!("DBX-LEGACY-0001"))
+        );
+
+        let redacted = serde_json::to_value(
+            ExecuteMultiResult::execution_error_with_index(error_query_result("safe failure".to_string()), 2)
+                .without_error_detail(),
+        )
+        .unwrap();
+        assert!(redacted.get("error").and_then(|value| value.get("detail")).is_none());
+    }
+
+    #[test]
+    fn sqlserver_batch_results_do_not_claim_statement_indexes() {
+        assert_eq!(split_sql_batches("SELECT 1; SELECT 2;").len(), 1);
+
+        let results = sqlserver_batch_results(vec![empty_query_result(1), empty_query_result(2)]);
+
+        assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![None, None]);
+    }
+
+    #[test]
+    fn query_execution_error_preserves_structured_catalog_identity() {
+        let error = QueryExecutionError::Agent(AgentCallError::Structured {
+            rpc_code: -1,
+            message: "connection lost".to_string(),
+            context: crate::db::agent_driver::AgentErrorContext {
+                contract_version: 1,
+                category: crate::db::agent_driver::AgentErrorCategory::Connection,
+                retryable: false,
+                session_disposition: crate::db::agent_driver::AgentSessionDisposition::Quarantine,
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+                agent_session_id: Some("session-1".to_string()),
+                sql_state: None,
+                vendor_code: None,
+                exception_class: None,
+            },
+        });
+
+        assert_eq!(error.into_backend_error().code(), "DBX-JDBC-1002");
+    }
+
+    #[test]
+    fn query_timeout_preserves_timeout_catalog_identity_and_detail() {
+        let error = classify_query_error(
+            Some(DatabaseType::Postgres),
+            QueryExecutionError::Legacy("Query timed out after 1 seconds".to_string()),
+        )
+        .with_omitted_sql_context("SELECT pg_sleep(10)");
+        let backend_error = error.into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-2002");
+        assert_eq!(
+            backend_error.message_params().get("stage"),
+            Some(&crate::backend_error::BackendMessageParam::String("execute".to_string()))
+        );
+        assert_eq!(
+            backend_error.detail(),
+            Some("Query timed out after 1 seconds SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement.")
+        );
+    }
+
+    #[test]
+    fn postgres_server_error_preserves_sql_catalog_identity_and_detail() {
+        let error = classify_query_error(
+            Some(DatabaseType::Postgres),
+            QueryExecutionError::Legacy("ERROR: relation \"dbx_table_that_does_not_exist\" does not exist".to_string()),
+        )
+        .with_omitted_sql_context("SELECT * FROM dbx_table_that_does_not_exist");
+        let backend_error = error.into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-4001");
+        assert_eq!(
+            backend_error.message_params().get("stage"),
+            Some(&crate::backend_error::BackendMessageParam::String("execute".to_string()))
+        );
+        assert_eq!(
+            backend_error.detail(),
+            Some(
+                "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+            )
+        );
+    }
+
+    #[test]
+    fn mysql_server_error_preserves_sql_catalog_identity_and_detail() {
+        let error = classify_query_error(
+            Some(DatabaseType::Mysql),
+            QueryExecutionError::Legacy(
+                "Server error: `ERROR 1064 (42000): You have an error in your SQL syntax`".to_string(),
+            ),
+        )
+        .with_omitted_sql_context("SELECT 111 AS first_value FROM DUAL");
+        let backend_error = error.into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-4001");
+        assert_eq!(backend_error.message_key(), "backendErrors.jdbc.sqlFailed");
+        assert_eq!(
+            backend_error.message_params().get("stage"),
+            Some(&crate::backend_error::BackendMessageParam::String("execute".to_string()))
+        );
+        assert_eq!(
+            backend_error.detail(),
+            Some(
+                "Server error: `ERROR 1064 (42000): You have an error in your SQL syntax` SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+            )
+        );
+    }
+
+    #[test]
+    fn single_statement_multi_result_preserves_sql_error_type() {
+        let error = classify_query_error(
+            Some(DatabaseType::Postgres),
+            QueryExecutionError::Legacy("ERROR: relation \"dbx_table_that_does_not_exist\" does not exist".to_string()),
+        )
+        .with_omitted_sql_context("SELECT * FROM dbx_table_that_does_not_exist");
+
+        let error = single_statement_multi_result(Err(error)).unwrap_err();
+        let backend_error = error.into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-4001");
+        assert_eq!(backend_error.message_key(), "backendErrors.jdbc.sqlFailed");
+        assert_eq!(
+            backend_error.detail(),
+            Some(
+                "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+            )
+        );
+    }
+
+    #[test]
+    fn postgres_transaction_statement_error_preserves_sql_catalog_identity() {
+        let error = postgres_transaction_statement_error(
+            1,
+            "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist",
+            "SELECT * FROM dbx_table_that_does_not_exist",
+            true,
+        );
+        let backend_error = error.into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-4001");
+        assert_eq!(backend_error.message_key(), "backendErrors.jdbc.sqlFailed");
+        assert_eq!(
+            backend_error.detail(),
+            Some(
+                "Statement 1 failed: ERROR: relation \"dbx_table_that_does_not_exist\" does not exist SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+            )
+        );
+    }
+
+    #[test]
+    fn postgres_transaction_uses_driver_fact_not_error_wording() {
+        let error = postgres_transaction_statement_error(
+            1,
+            "ERROR: relation \"connection_closed\" does not exist",
+            "SELECT * FROM connection_closed",
+            true,
+        );
+
+        assert_eq!(error.into_backend_error().code(), "DBX-JDBC-4001");
+    }
+
+    #[test]
+    fn sequential_multi_cancellation_uses_canceled_catalog() {
+        let backend_error = canceled_query_execution_error().into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-2003");
+        assert_eq!(backend_error.message_key(), "backendErrors.jdbc.operationCanceled");
     }
 
     #[test]
@@ -4928,14 +5613,22 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn pool_error_action_reconnects_connection_errors() {
+    fn pool_error_action_discards_postgres_read_only_transaction_cleanup_without_retry() {
+        let err = "PostgreSQL read-only transaction cleanup failed: PostgreSQL explain_analyze.rollback timed out after 3 seconds";
+
+        assert_eq!(pool_error_action(Some(DatabaseType::Postgres), err), PoolErrorAction::Discard);
+        assert!(should_discard_pool_after_error(Some(DatabaseType::Postgres), err));
+    }
+
+    #[test]
+    fn pool_error_action_reconnects_non_agent_errors_but_never_replays_agent_operations() {
         let err = "connection reset by peer";
 
         assert_eq!(pool_error_action(Some(DatabaseType::SqlServer), err), PoolErrorAction::ReconnectAndRetry);
         assert_eq!(pool_error_action(Some(DatabaseType::Postgres), err), PoolErrorAction::ReconnectAndRetry);
 
         let dameng_err = "Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常";
-        assert_eq!(pool_error_action(Some(DatabaseType::Dameng), dameng_err), PoolErrorAction::ReconnectAndRetry);
+        assert_eq!(pool_error_action(Some(DatabaseType::Dameng), dameng_err), PoolErrorAction::Discard);
     }
 
     #[test]
@@ -5307,13 +6000,12 @@ for line in sys.stdin:
 
         assert!(should_discard_agent_pool_after_error(quarantined));
         assert!(should_discard_agent_pool_after_error(replace_runtime));
-        assert!(is_connection_error(quarantined));
         assert_eq!(pool_error_action(Some(DatabaseType::Oracle), quarantined), PoolErrorAction::Discard);
         assert_eq!(pool_error_action(Some(DatabaseType::Oracle), replace_runtime), PoolErrorAction::Discard);
     }
 
     #[test]
-    fn unavailable_agent_pipes_are_reconnectable_errors() {
+    fn unavailable_agent_pipes_discard_without_replaying_user_operations() {
         assert!(should_discard_agent_pool_after_error("Agent stdin not available"));
         assert!(should_discard_agent_pool_after_error("Agent stdout not available"));
         assert!(is_connection_error("Agent stdin not available"));
@@ -5322,15 +6014,12 @@ for line in sys.stdin:
         assert!(is_connection_error("Agent runtime is unavailable"));
         assert_eq!(
             pool_error_action(Some(DatabaseType::Oracle), "Agent stdin not available"),
-            PoolErrorAction::ReconnectAndRetry
+            PoolErrorAction::Discard
         );
-        assert_eq!(
-            pool_error_action(Some(DatabaseType::Oracle), "Agent runtime terminated"),
-            PoolErrorAction::ReconnectAndRetry
-        );
+        assert_eq!(pool_error_action(Some(DatabaseType::Oracle), "Agent runtime terminated"), PoolErrorAction::Discard);
         assert_eq!(
             pool_error_action(Some(DatabaseType::Oracle), "Agent runtime is unavailable"),
-            PoolErrorAction::ReconnectAndRetry
+            PoolErrorAction::Discard
         );
     }
 

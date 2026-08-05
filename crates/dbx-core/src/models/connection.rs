@@ -320,6 +320,11 @@ pub struct SshTunnelConfig {
     /// password auth if the key is rejected.
     #[serde(default)]
     pub auth_method: String,
+    /// Allow an SSH session exec channel to run `nc` when the server rejects
+    /// `direct-tcpip`. Disabled by default because this can bypass a server's
+    /// TCP-forwarding policy; enable only for trusted JumpServer/Koko setups.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_exec_channel_proxy: bool,
     /// When non-empty, this layer references a shared tunnel profile
     /// (Settings > Tunnels). The profile's configuration replaces this
     /// layer's own fields at connect time; only `id` and `enabled` are
@@ -540,6 +545,10 @@ pub enum DatabaseType {
     /// system is determined by `external_config.systemKind`.
     #[serde(rename = "mq")]
     MessageQueue,
+    /// MQTT broker connection. The broker address, client ID, and authentication
+    /// are stored in `external_config`.
+    #[serde(rename = "mqtt")]
+    Mqtt,
 }
 
 #[derive(Deserialize)]
@@ -983,7 +992,11 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                format!("postgres://{host}:{port}{db_part}{suffix}")
+                if is_multi_host(raw_host) {
+                    format!("postgres://{raw_host}{db_part}{suffix}")
+                } else {
+                    format!("postgres://{host}:{port}{db_part}{suffix}")
+                }
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
@@ -1029,7 +1042,14 @@ impl ConnectionConfig {
             DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
-            DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
+            DatabaseType::Gaussdb => {
+                if is_multi_host(raw_host) {
+                    format!("gaussdb://{raw_host}{db_part}")
+                } else {
+                    let (gaussdb_host, gaussdb_port) = gaussdb_single_host_port(raw_host, port);
+                    format!("gaussdb://{gaussdb_host}:{gaussdb_port}{db_part}")
+                }
+            }
             DatabaseType::Kwdb => format!("kwdb://{host}:{port}{db_part}"),
             DatabaseType::Yashandb => format!("yashandb://{host}:{port}{db_part}"),
             DatabaseType::Databricks => format!("databricks://{host}:{port}{db_part}"),
@@ -1086,6 +1106,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Mqtt => self.mqtt_broker_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
         }
     }
@@ -1124,7 +1145,12 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
+                if is_multi_host(raw_host) {
+                    // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
+                    format!("postgres://{}:{}@{raw_host}{db_part}{suffix}", username, password)
+                } else {
+                    format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
+                }
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
@@ -1192,7 +1218,13 @@ impl ConnectionConfig {
                 format!("goldendb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Gaussdb => {
-                format!("gaussdb://{}:{}@{host}:{port}{db_part}", username, password)
+                if is_multi_host(raw_host) {
+                    // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
+                    format!("gaussdb://{}:{}@{raw_host}{db_part}", username, password)
+                } else {
+                    let (gaussdb_host, gaussdb_port) = gaussdb_single_host_port(raw_host, port);
+                    format!("gaussdb://{}:{}@{gaussdb_host}:{gaussdb_port}{db_part}", username, password)
+                }
             }
             DatabaseType::Kwdb => {
                 format!("kwdb://{}:{}@{host}:{port}{db_part}", username, password)
@@ -1316,6 +1348,7 @@ impl ConnectionConfig {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()
             }
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Mqtt => self.mqtt_broker_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
         }
     }
@@ -1351,6 +1384,18 @@ impl ConnectionConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or("nacos://")
             .to_string()
+    }
+
+    fn mqtt_broker_url(&self) -> String {
+        #[cfg(feature = "mq-admin")]
+        {
+            use crate::mqtt::types::MqttConnectionConfig;
+            if let Ok(config) = MqttConnectionConfig::from_connection(self) {
+                return config.broker_url();
+            }
+        }
+        let scheme = if self.ssl { "mqtts" } else { "mqtt" };
+        format!("{}://{}:{}", scheme, self.host, self.port)
     }
 
     fn normalized_url_params(&self) -> String {
@@ -2142,6 +2187,39 @@ fn bracket_ipv6(host: &str) -> String {
     } else {
         host.to_string()
     }
+}
+
+/// Returns `true` when `host` contains two or more comma-separated entries
+/// where each entry already embeds its own `:port` suffix.
+///
+/// A single entry such as `db.example.com:5432` is **not** multi-host —
+/// the scalar `port` parameter must be appended separately.
+fn is_multi_host(host: &str) -> bool {
+    let count = host.split(',').count();
+    count >= 2
+}
+
+fn gaussdb_single_host_port(host: &str, default_port: u16) -> (String, u16) {
+    let host = host.trim();
+    if let Some(close) = host.strip_prefix('[').and_then(|value| value.find(']').map(|index| index + 1)) {
+        let bracketed_host = &host[..=close];
+        if let Some(port) = host
+            .get(close + 1..)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .and_then(|value| value.parse::<u16>().ok())
+        {
+            return (bracketed_host.to_string(), port);
+        }
+        return (bracketed_host.to_string(), default_port);
+    }
+    if host.matches(':').count() == 1 {
+        if let Some((single_host, raw_port)) = host.rsplit_once(':') {
+            if let Ok(port) = raw_port.parse::<u16>() {
+                return (bracket_ipv6(single_host), port);
+            }
+        }
+    }
+    (bracket_ipv6(host), default_port)
 }
 
 #[cfg(test)]
@@ -3185,6 +3263,28 @@ mod tests {
         config.db_type = DatabaseType::Gaussdb;
 
         assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@10.1.2.3:2883/postgres");
+    }
+
+    #[test]
+    fn gaussdb_url_normalizes_legacy_single_host_port() {
+        let mut config = mysql_config("gaussdb", "secret", None);
+        config.db_type = DatabaseType::Gaussdb;
+        config.host = "db.example.com:5433".to_string();
+        config.port = 5432;
+
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@db.example.com:5433/postgres");
+        assert_eq!(config.redacted_connection_url(), "gaussdb://db.example.com:5433/postgres");
+    }
+
+    #[test]
+    fn gaussdb_url_supports_single_and_multi_host_ipv6() {
+        let mut config = mysql_config("gaussdb", "secret", None);
+        config.db_type = DatabaseType::Gaussdb;
+        config.host = "[2001:db8::1]:5433".to_string();
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@[2001:db8::1]:5433/postgres");
+
+        config.host = "[2001:db8::1]:5433,[2001:db8::2]:5434".to_string();
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@[2001:db8::1]:5433,[2001:db8::2]:5434/postgres");
     }
 
     #[test]

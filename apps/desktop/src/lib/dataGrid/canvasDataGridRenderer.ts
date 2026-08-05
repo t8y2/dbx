@@ -4,6 +4,13 @@ import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridP
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 
+export interface CanvasDevicePixelSize {
+  cssWidth: number;
+  cssHeight: number;
+  pixelWidth: number;
+  pixelHeight: number;
+}
+
 export interface CanvasDataGridRow {
   id: number;
   displayIndex: number;
@@ -48,6 +55,7 @@ export interface DrawCanvasDataGridOptions {
   width: number;
   height: number;
   pixelRatio?: number;
+  devicePixelSize?: CanvasDevicePixelSize | null;
   isDark: boolean;
   styleKey?: string;
   rowCount: number;
@@ -90,6 +98,33 @@ interface CanvasRenderState {
   searchFill: string;
   currentSearchFill: string;
   currentSearchBorder: string;
+}
+
+export interface CanvasBackingStoreMetrics {
+  pixelWidth: number;
+  pixelHeight: number;
+  scaleX: number;
+  scaleY: number;
+  measured: boolean;
+}
+
+export function resolveCanvasBackingStoreMetrics(options: { width: number; height: number; pixelRatio: number; devicePixelSize?: CanvasDevicePixelSize | null }): CanvasBackingStoreMetrics {
+  const width = Math.max(1, options.width);
+  const height = Math.max(1, options.height);
+  const fallbackRatio = Math.max(1, options.pixelRatio);
+  const measured = options.devicePixelSize;
+  const measurementMatches = !!measured && Math.abs(measured.cssWidth - width) <= 0.5 && Math.abs(measured.cssHeight - height) <= 0.5 && measured.pixelWidth > 0 && measured.pixelHeight > 0;
+  const fallbackPixelWidth = Math.max(1, Math.ceil(width * fallbackRatio));
+  const fallbackPixelHeight = Math.max(1, Math.ceil(height * fallbackRatio));
+  const pixelWidth = measurementMatches ? Math.min(measured.pixelWidth, fallbackPixelWidth) : fallbackPixelWidth;
+  const pixelHeight = measurementMatches ? Math.min(measured.pixelHeight, fallbackPixelHeight) : fallbackPixelHeight;
+  return {
+    pixelWidth,
+    pixelHeight,
+    scaleX: pixelWidth / width,
+    scaleY: pixelHeight / height,
+    measured: measurementMatches,
+  };
 }
 
 export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
@@ -276,9 +311,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     columnAligns,
     rightAlignedActionCell,
   } = options;
-  const dpr = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
-  const pixelWidth = Math.max(1, Math.ceil(width * dpr));
-  const pixelHeight = Math.max(1, Math.ceil(height * dpr));
+  const fallbackRatio = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
+  const { pixelWidth, pixelHeight, scaleX, scaleY } = resolveCanvasBackingStoreMetrics({
+    width,
+    height,
+    pixelRatio: fallbackRatio,
+    devicePixelSize: options.devicePixelSize,
+  });
   if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
     canvas.width = pixelWidth;
     canvas.height = pixelHeight;
@@ -290,7 +329,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
 
@@ -317,9 +356,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
   const firstCol = firstVisibleColumn(offsets, Math.max(0, contentStart - maxPreviewRightShift));
   const columnOffset = offsets[firstCol] ?? 0;
   const paintSearchMatches = !isScrolling && searchMatchKeys.size > 0;
-  const rowNumberBorderX = crispCanvasLine(rowNumberWidth - 1, dpr);
-  const rowNumberTextX = alignCanvasPixel(Math.max(0, rowNumberWidth - 1) / 2, dpr);
-  const rowTextOffsetY = alignCanvasPixel(CANVAS_DATA_GRID_ROW_HEIGHT / 2, dpr);
+  const rowNumberBorderX = crispCanvasLine(rowNumberWidth - 1, scaleX);
+  const rowNumberTextX = alignCanvasPixel(Math.max(0, rowNumberWidth - 1) / 2, scaleX);
+  const rowTextOffsetY = alignCanvasPixel(CANVAS_DATA_GRID_ROW_HEIGHT / 2, scaleY);
 
   for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex++) {
     const item = rowAt(rowIndex);
@@ -334,7 +373,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       isDeleted: item.isDeleted,
       isSelected: rowSelectionVisual,
     });
-    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
+    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, scaleY);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
     ctx.fillStyle = rowFill;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
@@ -364,7 +403,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.fillStyle = rowNumberText;
     ctx.font = item.status === "new" || item.status === "edited" || item.status === "draft" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
-    const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
+    const textY = alignCanvasPixel(y + rowTextOffsetY, scaleY);
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
@@ -438,13 +477,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.clip();
       const value = item.data[actualColIdx];
       const isRightAlign = columnAligns?.[visibleColIdx] === "right";
+      const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
       ctx.textAlign = isRightAlign ? "right" : "left";
       ctx.fillStyle = value === null ? theme.mutedForeground : theme.foreground;
       ctx.font = value === null ? italicFont : tabularFont;
       setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
       const reservedWidth = rightAlignedActionCell?.rowIndex === item.displayIndex && rightAlignedActionCell.visibleColIdx === visibleColIdx ? rightAlignedActionCell.reservedWidth : 0;
-      const { textAnchorX, maxWidth: cellMaxWidth } = resolveCanvasCellTextLayout({ drawX, colWidth, dpr, isRightAlign, reservedWidth });
-      const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
+      const { textAnchorX, maxWidth: cellMaxWidth } = resolveCanvasCellTextLayout({ drawX, colWidth, dpr: scaleX, isRightAlign, reservedWidth });
       const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
       const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
       const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isRightAlign ? "right" : "left");
@@ -455,7 +494,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         ctx.strokeStyle = theme.foreground;
         ctx.beginPath();
         ctx.moveTo(lineStartX, textY);
-        ctx.lineTo(alignCanvasPixel(lineStartX + textWidth, dpr), textY);
+        ctx.lineTo(alignCanvasPixel(lineStartX + textWidth, scaleX), textY);
         ctx.stroke();
       }
       ctx.restore();
@@ -464,7 +503,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
       ctx.strokeStyle = theme.border;
       ctx.beginPath();
-      const columnBorderX = crispCanvasLine(drawX + colWidth - 1, dpr);
+      const columnBorderX = crispCanvasLine(drawX + colWidth - 1, scaleX);
       ctx.moveTo(columnBorderX, y);
       ctx.lineTo(columnBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
       ctx.stroke();

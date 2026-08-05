@@ -19,6 +19,8 @@ vi.mock("@/lib/backend/api", () => ({
   mqSendMessage: backend.mqSendMessage,
 }));
 
+vi.mock("@/components/ui/select", async () => (await import("./selectStub")).createSelectStub());
+
 import SendMessagePanel from "@/components/mq/SendMessagePanel.vue";
 
 const TOPIC = {
@@ -49,6 +51,15 @@ async function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, valu
   input.value = value;
   input.dispatchEvent(new Event("input", { bubbles: true }));
   await nextTick();
+}
+
+async function setSelectValue(trigger: HTMLElement, value: string) {
+  trigger.click();
+  await flushUi();
+  const item = document.querySelector<HTMLElement>(`[data-slot="select-item"][data-value="${value}"]`);
+  if (!item) throw new Error(`Select item not found: ${value}`);
+  item.click();
+  await flushUi();
 }
 
 function expectedTopic(system: BrowseableSystem) {
@@ -124,8 +135,10 @@ describe("SendMessagePanel post-send browsing", () => {
     it(`keeps ${system} results unchanged after sending`, async () => {
       const panel = await mountPanel(system);
 
+      expect(panel.querySelector('[data-testid="message-browser"]')?.classList.contains("message-browser")).toBe(true);
+      expect(panel.querySelector('[data-testid="message-browser"]')?.classList.contains("is-monitoring")).toBe(false);
       await loadMessages(panel);
-      expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic(system), "__dbx_kafka_viewer__", 20, {});
+      expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic(system), "__dbx_kafka_viewer__", 20, system === "kafka" ? { startPosition: "latest" } : {});
       expect(panel.textContent).toContain("existing message");
 
       await sendMessage(panel, "new message");
@@ -135,14 +148,19 @@ describe("SendMessagePanel post-send browsing", () => {
     });
   }
 
-  it("preserves Kafka advanced filters until the user explicitly loads messages", async () => {
+  it("sends Kafka's selected start position and specific offset", async () => {
     const panel = await mountPanel("kafka");
 
-    buttonByText(panel, "mqMessages.advancedFilter").click();
-    await flushUi();
-    const partitionInput = panel.querySelector<HTMLInputElement>('input[placeholder="mqMessages.partitionPlaceholderAll"]');
-    const offsetInput = panel.querySelector<HTMLInputElement>('input[placeholder="mqMessages.offsetPlaceholderEarliest"]');
-    if (!partitionInput || !offsetInput) throw new Error("Advanced filter inputs not found");
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    if (!startPosition) throw new Error("Kafka start position select not found");
+    await setSelectValue(startPosition, "earliest");
+    await loadMessages(panel);
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { startPosition: "earliest" });
+
+    await setSelectValue(startPosition, "offset");
+    const partitionInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-partition"]');
+    const offsetInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-offset"]');
+    if (!partitionInput || !offsetInput) throw new Error("Kafka offset inputs not found");
     await setInputValue(partitionInput, "2");
     await setInputValue(offsetInput, "17");
 
@@ -150,9 +168,99 @@ describe("SendMessagePanel post-send browsing", () => {
 
     expect(partitionInput.value).toBe("2");
     expect(offsetInput.value).toBe("17");
-    expect(backend.mqPeekMessages).not.toHaveBeenCalled();
+    expect(backend.mqPeekMessages).toHaveBeenCalledTimes(1);
 
     await loadMessages(panel);
-    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { partition: 2, offset: 17 });
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { startPosition: "offset", partition: 2, offset: 17 });
+  });
+
+  it("keeps Kafka's result limit within the supported range", async () => {
+    const panel = await mountPanel("kafka");
+    const countInput = panel.querySelector<HTMLInputElement>('[data-testid="peek-count"]');
+    if (!countInput) throw new Error("Peek count input not found");
+
+    await setInputValue(countInput, "999");
+    await loadMessages(panel);
+
+    expect(countInput.value).toBe("100");
+    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 100, { startPosition: "latest" });
+
+    await setInputValue(countInput, "");
+    await loadMessages(panel);
+
+    expect(countInput.value).toBe("20");
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { startPosition: "latest" });
+  });
+
+  it("does not request Kafka offset mode without an offset", async () => {
+    const panel = await mountPanel("kafka");
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    if (!startPosition) throw new Error("Kafka start position control not found");
+
+    await setSelectValue(startPosition, "offset");
+    await loadMessages(panel);
+    expect(backend.mqPeekMessages).not.toHaveBeenCalled();
+    expect(panel.textContent).toContain("mqMessages.offsetRequiredForOffset");
+
+    const offsetInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-offset"]');
+    if (!offsetInput) throw new Error("Kafka offset input not found");
+    await setInputValue(offsetInput, "17");
+    await loadMessages(panel);
+    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { startPosition: "offset", offset: 17 });
+  });
+
+  it("clears Kafka results and validation errors when the start position changes", async () => {
+    const panel = await mountPanel("kafka");
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    if (!startPosition) throw new Error("Kafka start position select not found");
+
+    await loadMessages(panel);
+    expect(panel.textContent).toContain("existing message");
+
+    await setSelectValue(startPosition, "offset");
+    expect(panel.textContent).not.toContain("existing message");
+
+    await loadMessages(panel);
+    expect(panel.textContent).toContain("mqMessages.offsetRequiredForOffset");
+
+    await setSelectValue(startPosition, "earliest");
+    expect(panel.textContent).not.toContain("existing message");
+    expect(panel.textContent).not.toContain("mqMessages.offsetRequiredForOffset");
+  });
+
+  it("does not leak a saved Kafka offset after switching start positions", async () => {
+    const panel = await mountPanel("kafka");
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    const partitionInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-partition"]');
+    if (!startPosition || !partitionInput) throw new Error("Kafka start position controls not found");
+
+    await setSelectValue(startPosition, "offset");
+    const offsetInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-offset"]');
+    if (!offsetInput) throw new Error("Kafka offset input not found");
+    await setInputValue(partitionInput, "2");
+    await setInputValue(offsetInput, "17");
+
+    await setSelectValue(startPosition, "latest");
+    await loadMessages(panel);
+
+    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { startPosition: "latest", partition: 2 });
+    await setSelectValue(startPosition, "offset");
+    const restoredOffsetInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-offset"]');
+    expect(restoredOffsetInput?.value).toBe("17");
+  });
+
+  it("keeps RabbitMQ advanced-filter requests unchanged", async () => {
+    const panel = await mountPanel("rabbitmq");
+
+    buttonByText(panel, "mqMessages.advancedFilter").click();
+    await flushUi();
+    const partitionInput = panel.querySelector<HTMLInputElement>('input[placeholder="mqMessages.partitionPlaceholderAll"]');
+    const offsetInput = panel.querySelector<HTMLInputElement>('input[placeholder="mqMessages.offsetPlaceholderEarliest"]');
+    if (!partitionInput || !offsetInput) throw new Error("RabbitMQ advanced filter inputs not found");
+    await setInputValue(partitionInput, "2");
+    await setInputValue(offsetInput, "17");
+
+    await loadMessages(panel);
+    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic("rabbitmq"), "__dbx_kafka_viewer__", 20, { partition: 2, offset: 17 });
   });
 });

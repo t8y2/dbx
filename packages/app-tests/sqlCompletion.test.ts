@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
   buildSqlCompletionItems,
+  buildSqlCompletionItemsFromContext,
   getSqlFunctionSignatureHelp,
   getSqlCompletionResultValidFor,
   isSqlCommentContext,
@@ -494,6 +495,40 @@ test("suggests SQL Server tables for unquoted Chinese prefixes", () => {
     ["客户订单"],
   );
   assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true);
+});
+
+test("suggests SQL Server columns for an aliased unquoted Chinese table", () => {
+  const sql = "SELECT * FROM 大客户报废物资 AS tb2 WHERE ";
+  const options = { databaseType: "sqlserver" as const, dialect: "sqlserver" as const };
+  const legacy = getSqlCompletionContext(sql, sql.length, options);
+  const semantic = buildSqlSemanticModel(sql, sql.length, options);
+  const context = sqlCompletionContextFromSemantic(semantic, legacy);
+  const items = buildSqlCompletionItemsFromContext(context, {
+    ...options,
+    tables: [{ name: "大客户报废物资", schema: "dbo", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "dbo.大客户报废物资",
+        [
+          { name: "物资编号", table: "大客户报废物资", schema: "dbo" },
+          { name: "客户名称", table: "大客户报废物资", schema: "dbo" },
+        ],
+      ],
+    ]),
+  });
+
+  assert.equal(context.referencedTables.length, 1);
+  assert.equal(context.referencedTables[0]?.name, "大客户报废物资");
+  assert.equal(context.referencedTables[0]?.alias, "tb2");
+  assert.equal(context.suggestColumns, true);
+  assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length, options), true);
+  assert.deepEqual(
+    items
+      .filter((item) => item.type === "column")
+      .map((item) => item.label)
+      .sort(),
+    ["客户名称", "物资编号"],
+  );
 });
 
 test("preserves Unicode prefixes through the semantic completion context", () => {
@@ -1704,6 +1739,67 @@ test("applies keyword case to built-in SQL snippets", () => {
   assert.equal(snippet.apply, "select *\nfrom ${table}\nlimit 100;");
 });
 
+test("applies keyword and function case to built-in function templates", () => {
+  const windowItems = buildSqlCompletionItems("select row_", "select row_".length, {
+    tables,
+    columnsByTable,
+    keywordCase: "lower",
+    functionCase: "lower",
+  });
+  const rowNumber = windowItems.find((item) => item.type === "function" && item.label === "row_number");
+  assert.equal(rowNumber?.apply, "row_number() over (partition by ${col} order by ${col})");
+
+  const castItems = buildSqlCompletionItems("select cas", "select cas".length, {
+    tables,
+    columnsByTable,
+    keywordCase: "lower",
+    functionCase: "lower",
+  });
+  const cast = castItems.find((item) => item.type === "function" && item.label === "cast");
+  assert.equal(cast?.apply, "cast(${expression as type})");
+
+  const mysqlItems = buildSqlCompletionItems("select date_a", "select date_a".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+    keywordCase: "lower",
+    functionCase: "lower",
+  });
+  const dateAdd = mysqlItems.find((item) => item.type === "function" && item.label === "date_add");
+  assert.equal(dateAdd?.apply, "date_add(${date}, interval ${expr} ${unit})");
+});
+
+test("preserves the canonical function case when requested", () => {
+  const items = buildSqlCompletionItems("select row_", "select row_".length, {
+    tables,
+    columnsByTable,
+    keywordCase: "lower",
+    functionCase: "preserve",
+  });
+  const rowNumber = items.find((item) => item.type === "function" && item.label === "ROW_NUMBER");
+  assert.equal(rowNumber?.apply, "ROW_NUMBER() over (partition by ${col} order by ${col})");
+});
+
+test("applies keyword case to boolean comparison values", () => {
+  const booleanColumns = new Map<string, SqlCompletionColumn[]>([["public.flags", [{ name: "enabled", table: "flags", schema: "public", dataType: "boolean" }]]]);
+  const sql = "select * from flags where enabled = ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "flags", schema: "public", type: "table" }],
+    columnsByTable: booleanColumns,
+    keywordCase: "lower",
+  });
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "true"));
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "false"));
+  assert.equal(
+    items.some((item) => item.type === "keyword" && item.label === "TRUE"),
+    false,
+  );
+  assert.equal(
+    items.some((item) => item.type === "keyword" && item.label === "FALSE"),
+    false,
+  );
+});
+
 test("suggests DATE_FORMAT as parameter snippet", () => {
   const sql = "select date_";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -1838,6 +1934,29 @@ test("suggests Oracle table-function helpers in table reference context", () => 
   const tableFunction = items.find((item) => item.label === "TABLE" && item.type === "function");
   assert.ok(tableFunction);
   assert.ok(tableFunction.apply?.startsWith("TABLE("));
+});
+
+test("applies keyword and function casing to Oracle table-function helpers", () => {
+  const lowerKeywords = buildSqlCompletionItems("select * from ", "select * from ".length, {
+    tables,
+    columnsByTable,
+    databaseType: "oracle",
+    keywordCase: "lower",
+    functionCase: "preserve",
+  });
+  assert.equal(lowerKeywords.find((item) => item.label === "table")?.apply, "table(${function_call})");
+  assert.equal(lowerKeywords.find((item) => item.label === "XMLTABLE")?.apply, "XMLTABLE(${xpath})");
+
+  const lowerFunctions = buildSqlCompletionItems("select * from ", "select * from ".length, {
+    tables,
+    columnsByTable,
+    databaseType: "oracle",
+    keywordCase: "upper",
+    functionCase: "lower",
+  });
+  assert.equal(lowerFunctions.find((item) => item.label === "TABLE")?.apply, "TABLE(${function_call})");
+  assert.equal(lowerFunctions.find((item) => item.label === "xmltable")?.apply, "xmltable(${xpath})");
+  assert.equal(lowerFunctions.find((item) => item.label === "json_table")?.apply, "json_table(${expr}, ${path})");
 });
 
 test("suggests package members after package qualifier", () => {
@@ -2555,6 +2674,36 @@ test("suggests table alias after FROM table", () => {
   const aliasItem = items.find((item) => item.type === "snippet" && item.detail?.includes("alias for"));
   assert.ok(aliasItem, "should suggest alias for table");
   assert.ok(aliasItem!.apply!.includes("AS"), "alias apply should include AS");
+});
+
+test("applies the configured keyword case to generated table aliases", () => {
+  const tableItems = buildSqlCompletionItems("select * from ord", "select * from ord".length, {
+    tables,
+    columnsByTable,
+    autoAliasTables: true,
+    keywordCase: "lower",
+  });
+  const tableItem = tableItems.find((item) => item.type === "table" && item.label === "orders");
+  assert.equal(tableItem?.apply, "orders as ord");
+
+  const aliasItems = buildSqlCompletionItems("select * from orders ", "select * from orders ".length, {
+    tables,
+    columnsByTable,
+    keywordCase: "lower",
+  });
+  const aliasItem = aliasItems.find((item) => item.type === "snippet" && item.detail === "alias for orders");
+  assert.equal(aliasItem?.apply, "as ord ");
+});
+
+test("keeps generated table aliases uppercase when keyword case is preserved", () => {
+  const items = buildSqlCompletionItems("select * from ord", "select * from ord".length, {
+    tables,
+    columnsByTable,
+    autoAliasTables: true,
+    keywordCase: "preserve",
+  });
+  const tableItem = items.find((item) => item.type === "table" && item.label === "orders");
+  assert.equal(tableItem?.apply, "orders AS ord");
 });
 
 test("prioritizes table acronym matches above alias snippets", () => {

@@ -320,7 +320,7 @@ test("result grid cache key includes result run id and statement result index", 
 
 test("execution summary items include table and non-table statement results", () => {
   const items = executionSummaryItems({
-    results: [result([]), result(["id"]), { ...result(["Error"]), rows: [["boom"]] }],
+    results: [result([]), result(["id"]), { ...result(["Error"]), rows: [["boom"]], execution_error: true }],
   });
 
   assert.deepEqual(

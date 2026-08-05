@@ -21,7 +21,7 @@ describe("shortcutRegistry editor actions", () => {
     "exPasteSqlInCondition",
     "toggleFold",
   ];
-  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "viewTableDdl"];
 
   it("registers the new-data-tab mouse modifier as a configurable sidebar shortcut", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "openDataInNewTab");
@@ -98,10 +98,18 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.undo).toBe("Mod+Z");
     expect(shortcuts.redo).toBe("Shift+Mod+Z");
     expect(shortcuts.selectAll).toBe("Mod+A");
+    expect(shortcuts.extendSelection).toBe("Alt+W");
     expect(shortcuts.uppercaseSelection).toBe("Shift+Alt+U");
     expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
     expect(shortcuts.exPasteSqlInCondition).toBe("");
     expect(shortcuts.toggleFold).toBe("Mod+.");
+  });
+
+  it("registers IntelliJ-style extend selection as a configurable editor shortcut", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "extendSelection");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Alt+W" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.extendSelection).toBe("Alt+W");
   });
 
   it("detects conflicts between formatter editor shortcuts and other editor shortcuts", () => {

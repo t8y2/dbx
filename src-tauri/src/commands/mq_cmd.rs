@@ -354,7 +354,7 @@ pub async fn mq_peek_messages(
     sub: String,
     count: u32,
     options: Option<dbx_core::mq::PeekMessagesOptions>,
-) -> Result<Vec<dbx_core::mq::PeekedMessage>, String> {
+) -> Result<dbx_core::mq::PeekMessagesResult, String> {
     dbx_core::mq::service::mq_peek_messages_core(&state, &connection_id, topic, sub, count, options).await
 }
 

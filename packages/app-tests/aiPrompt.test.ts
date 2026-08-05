@@ -73,6 +73,9 @@ test("ask mode prompt forbids auto-execution assumptions", () => {
   assert.match(prompt, /Ask 模式/);
   assert.match(prompt, /只生成 SQL 和说明/);
   assert.match(prompt, /不要暗示已经执行或即将自动执行/);
+  assert.match(prompt, /get_current_time/);
+  assert.match(prompt, /utc_offset_minutes/);
+  assert.match(prompt, /timezone/);
 });
 
 test("prompt gives explicit guidance for truncated schema context", () => {
@@ -219,4 +222,12 @@ test("buildUserPrompt skips action instruction for vector databases", () => {
   const sqlPrompt = buildUserPrompt("generate", sqlCtx, "show me users", true);
   assert.match(sqlPrompt, /Action: generate/);
   assert.match(sqlPrompt, /生成 SQL/);
+});
+
+test("ask mode exposes current-time guidance for relative time filters", () => {
+  const sqlPrompt = buildSystemPrompt("generate", context(), "ask");
+  const vectorPrompt = buildSystemPrompt("generate", vectorContext(), "ask");
+
+  assert.match(sqlPrompt, /get_current_time/);
+  assert.match(vectorPrompt, /get_current_time/);
 });

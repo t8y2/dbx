@@ -88,6 +88,21 @@ public final class JdbcExecutor {
         int timeoutSecs,
         ResultValueReader valueReader
     ) {
+        return execute(conn, sql, schema, setSchemaSql, resetSchemaSql, maxRows, fetchSize, timeoutSecs, valueReader, StatementMessageReader.NONE);
+    }
+
+    public QueryResult execute(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        int maxRows,
+        Integer fetchSize,
+        int timeoutSecs,
+        ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader
+    ) {
         return unchecked(() -> {
             String trimmedSql = trimSql(sql);
             long start = System.currentTimeMillis();
@@ -122,7 +137,7 @@ public final class JdbcExecutor {
                         false
                     );
                 }
-                return withStatementWarnings(result, stmt);
+                return withStatementMessages(result, stmt, effectiveMaxRows, statementMessageReader);
                 } finally {
                     activeStatements.remove(stmt);
                 }
@@ -198,7 +213,19 @@ public final class JdbcExecutor {
         QueryPageOptions options,
         ResultValueReader valueReader
     ) {
-        return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, sessions);
+        return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, StatementMessageReader.NONE, sessions);
+    }
+
+    public QueryPageResult executePage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader
+    ) {
+        return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, statementMessageReader, sessions);
     }
 
     public QueryPageResult executePage(
@@ -210,7 +237,7 @@ public final class JdbcExecutor {
         QueryPageOptions options,
         ResultValueReader valueReader
     ) {
-        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, sessions);
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, StatementMessageReader.NONE, sessions);
     }
 
     public QueryPageResult startTableRead(
@@ -221,7 +248,7 @@ public final class JdbcExecutor {
         QueryPageOptions options,
         ResultValueReader valueReader
     ) {
-        return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, tableReadSessions);
+        return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, StatementMessageReader.NONE, tableReadSessions);
     }
 
     public QueryPageResult startTableRead(
@@ -233,7 +260,7 @@ public final class JdbcExecutor {
         QueryPageOptions options,
         ResultValueReader valueReader
     ) {
-        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, tableReadSessions);
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, StatementMessageReader.NONE, tableReadSessions);
     }
 
     private QueryPageResult executePage(
@@ -244,6 +271,7 @@ public final class JdbcExecutor {
         Supplier<String> resetSchemaSql,
         QueryPageOptions options,
         ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader,
         ConcurrentHashMap<String, QuerySession> targetSessions
     ) {
         return unchecked(() -> {
@@ -267,13 +295,32 @@ public final class JdbcExecutor {
                 long elapsed = System.currentTimeMillis() - start;
                 if (!hasResultSet) {
                     int updateCount = stmt.getUpdateCount();
-                    activeStatements.remove(stmt);
-                    stmt.close();
-                    return new QueryPageResult(
+                    QueryResult result = new QueryResult(
                         Collections.emptyList(),
                         Collections.emptyList(),
                         updateCount >= 0 ? updateCount : 0,
-                        elapsed
+                        elapsed,
+                        false
+                    );
+                    if (statementMessageReader != StatementMessageReader.NONE) {
+                        result = withStatementMessages(
+                            result,
+                            stmt,
+                            Math.max(options.getMaxRows(), 1),
+                            statementMessageReader
+                        );
+                    }
+                    activeStatements.remove(stmt);
+                    stmt.close();
+                    return new QueryPageResult(
+                        result.getColumns(),
+                        result.getColumn_types(),
+                        result.getRows(),
+                        result.getAffected_rows(),
+                        result.getExecution_time_ms(),
+                        result.getTruncated(),
+                        null,
+                        false
                     );
                 }
 
@@ -700,17 +747,28 @@ public final class JdbcExecutor {
         }
     }
 
-    private static QueryResult withStatementWarnings(QueryResult result, Statement stmt) {
+    private static QueryResult withStatementMessages(
+        QueryResult result,
+        Statement stmt,
+        int maxRows,
+        StatementMessageReader statementMessageReader
+    ) {
         if (!result.getColumns().isEmpty() || !result.getRows().isEmpty()) {
             return result;
         }
 
         List<List<Object>> rows = new ArrayList<>();
+        int effectiveMaxRows = Math.max(maxRows, 1);
+        boolean truncated = result.getTruncated();
         try {
             Set<SQLWarning> seen = Collections.newSetFromMap(new IdentityHashMap<>());
             for (SQLWarning warning = stmt.getWarnings(); warning != null && seen.add(warning); warning = warning.getNextWarning()) {
                 String message = warning.getMessage();
                 if (message != null && !message.trim().isEmpty()) {
+                    if (rows.size() >= effectiveMaxRows) {
+                        truncated = true;
+                        break;
+                    }
                     rows.add(Collections.singletonList(message));
                 }
             }
@@ -718,6 +776,24 @@ public final class JdbcExecutor {
         } catch (SQLException ignored) {
             // Warning retrieval is advisory; a driver bug here must not turn a
             // successfully executed statement into a query failure.
+        }
+
+        try {
+            List<String> messages = statementMessageReader.read(stmt);
+            if (messages != null) {
+                for (String message : messages) {
+                    if (message == null) {
+                        continue;
+                    }
+                    if (rows.size() >= effectiveMaxRows) {
+                        truncated = true;
+                        break;
+                    }
+                    rows.add(Collections.singletonList(message));
+                }
+            }
+        } catch (Exception ignored) {
+            // Driver-specific informational output is advisory, like SQLWarning.
         }
 
         if (rows.isEmpty()) {
@@ -729,7 +805,7 @@ public final class JdbcExecutor {
             rows,
             result.getAffected_rows(),
             result.getExecution_time_ms(),
-            result.getTruncated()
+            truncated
         );
     }
 
@@ -798,6 +874,14 @@ public final class JdbcExecutor {
     @FunctionalInterface
     public interface ResultValueReader {
         Object read(ResultSet rs, int index, int sqlType) throws SQLException;
+    }
+
+    /** Reads driver-specific informational output that is not exposed as {@link SQLWarning}. */
+    @FunctionalInterface
+    public interface StatementMessageReader {
+        StatementMessageReader NONE = statement -> Collections.emptyList();
+
+        List<String> read(Statement statement) throws SQLException;
     }
 
     /**

@@ -197,6 +197,26 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void queriesSequencesAndPackagesWhenRequested() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+
+        agent.listObjects(
+            "APP",
+            new MetadataListConstraints(null, 20, null, List.of("SEQUENCE", "PACKAGE", "PACKAGE_BODY"))
+        );
+
+        String objectsSql = JdbcMetadataSqlFake.statements.stream()
+            .filter(sql -> sql.contains("FROM ALL_OBJECTS o"))
+            .findFirst()
+            .orElseThrow();
+        Assertions.assertTrue(objectsSql.contains("o.OBJECT_TYPE IN (?, ?, ?)"), objectsSql);
+        Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("param:2=SEQUENCE"));
+        Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("param:3=PACKAGE"));
+        Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("param:4=PACKAGE BODY"));
+    }
+
+    @Test
     void fallsBackToJdbcMetadataForRestrictedSchemaObjects() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();
@@ -321,17 +341,31 @@ class DamengAgentMetadataTest {
     }
 
     @Test
-    void listSchemasFallsBackToAllUsersWithoutSysObjectsPrivilege() {
+    void listSchemasFallsBackToJdbcMetadataWithoutSysObjectsPrivilege() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();
-        TestSupport.setPrivateConnection(agent, restrictedSchemaConnection(sqls));
+        List<String> jdbcMetadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedSchemaConnection(sqls, jdbcMetadataCalls, null));
 
         List<String> schemas = agent.listSchemas();
 
-        Assertions.assertEquals(List.of("APP", "REPORTING", "SYSDBA"), schemas);
-        Assertions.assertEquals(2, sqls.size(), String.join("\n", sqls));
+        Assertions.assertEquals(List.of("APP", "REPORTING", "REPORTING_ARCHIVE", "SYSDBA"), schemas);
+        Assertions.assertEquals(1, sqls.size(), String.join("\n", sqls));
         Assertions.assertTrue(sqls.get(0).contains("SYS.SYSOBJECTS"), sqls.get(0));
-        Assertions.assertTrue(sqls.get(1).contains("ALL_USERS"), sqls.get(1));
+        Assertions.assertEquals(List.of("getSchemas"), jdbcMetadataCalls);
+    }
+
+    @Test
+    void listSchemasPreservesCatalogErrorWhenJdbcMetadataFails() {
+        DamengAgent agent = new DamengAgent();
+        SQLException metadataError = new SQLException("JDBC metadata getSchemas failed");
+        TestSupport.setPrivateConnection(agent, restrictedSchemaConnection(new ArrayList<>(), new ArrayList<>(), metadataError));
+
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, agent::listSchemas);
+
+        Assertions.assertEquals("no SYS.SYSOBJECTS privilege", error.getCause().getMessage());
+        Assertions.assertEquals(1, error.getCause().getSuppressed().length);
+        Assertions.assertSame(metadataError, error.getCause().getSuppressed()[0]);
     }
 
     @Test
@@ -591,6 +625,42 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void fallsBackToGeneratedTableDdlWhenDbmsMetadataPermissionIsDenied() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnectionWithDbmsMetadataError(
+            sqls,
+            "没有[SYS.DBMS_METADATA.GET_DDL]对象的执行权限"
+        ));
+
+        String ddl = agent.getTableDdl("APP", "USERS");
+
+        Assertions.assertTrue(ddl.contains("CREATE TABLE \"APP\".\"USERS\""), ddl);
+        Assertions.assertTrue(ddl.contains("\"ID\" NUMBER(10) NOT NULL"), ddl);
+        Assertions.assertEquals(1, sqls.stream().filter(sql -> sql.contains("DBMS_METADATA.GET_DDL")).count());
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("ALL_TAB_COLUMNS")), String.join("\n", sqls));
+    }
+
+    @Test
+    void propagatesNonPermissionDbmsMetadataErrorsWithoutFallback() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnectionWithDbmsMetadataError(
+            sqls,
+            "DBMS_METADATA.GET_DDL connection reset"
+        ));
+
+        RuntimeException error = Assertions.assertThrows(
+            RuntimeException.class,
+            () -> agent.getTableDdl("APP", "USERS")
+        );
+
+        Assertions.assertEquals("DBMS_METADATA.GET_DDL connection reset", error.getCause().getMessage());
+        Assertions.assertEquals(1, sqls.size());
+        Assertions.assertTrue(sqls.get(0).contains("DBMS_METADATA.GET_DDL"), sqls.toString());
+    }
+
+    @Test
     void appendsIndependentIndexesToTableDdl() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();
@@ -665,6 +735,19 @@ class DamengAgentMetadataTest {
         );
     }
 
+    private static Connection metadataConnectionWithDbmsMetadataError(List<String> sqls, String message) {
+        return metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of(),
+            sqls,
+            "CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);",
+            defaultColumnMetadataRows("id comment"),
+            message
+        );
+    }
+
     private static Connection metadataConnection(
         String allColumnComment,
         String fallbackColumnComment,
@@ -715,6 +798,28 @@ class DamengAgentMetadataTest {
         String dbmsMetadataDdl,
         List<List<Object>> columnRows
     ) {
+        return metadataConnection(
+            allColumnComment,
+            fallbackColumnComment,
+            includeMaterializedView,
+            independentIndexes,
+            sqls,
+            dbmsMetadataDdl,
+            columnRows,
+            null
+        );
+    }
+
+    private static Connection metadataConnection(
+        String allColumnComment,
+        String fallbackColumnComment,
+        boolean includeMaterializedView,
+        List<List<Object>> independentIndexes,
+        List<String> sqls,
+        String dbmsMetadataDdl,
+        List<List<Object>> columnRows,
+        String dbmsMetadataError
+    ) {
         boolean[] dbmsMetadataResultOpen = {false};
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
@@ -727,6 +832,9 @@ class DamengAgentMetadataTest {
                     sqls.add(sql);
                 }
                 if (sql.contains("DBMS_METADATA.GET_DDL")) {
+                    if (dbmsMetadataError != null) {
+                        return failingMetadataStatement(dbmsMetadataError);
+                    }
                     return dbmsMetadataStatement(dbmsMetadataDdl, dbmsMetadataResultOpen);
                 }
                 if (sql.startsWith("SELECT NAME FROM SYS.SYSOBJECTS WHERE TYPE$ = 'SCH'")) {
@@ -993,7 +1101,11 @@ class DamengAgentMetadataTest {
         });
     }
 
-    private static Connection restrictedSchemaConnection(List<String> sqls) {
+    private static Connection restrictedSchemaConnection(
+        List<String> sqls,
+        List<String> jdbcMetadataCalls,
+        SQLException jdbcMetadataError
+    ) {
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
             if ("prepareStatement".equals(name)) {
@@ -1002,16 +1114,35 @@ class DamengAgentMetadataTest {
                 if (sql.contains("SYS.SYSOBJECTS")) {
                     return failingMetadataStatement("no SYS.SYSOBJECTS privilege");
                 }
-                if (sql.contains("ALL_USERS")) {
-                    return metadataStatement(List.of(List.of("APP"), List.of("REPORTING"), List.of("SYSDBA")));
-                }
                 throw new AssertionError("Unexpected SQL: " + sql);
+            }
+            if ("getMetaData".equals(name)) {
+                return jdbcSchemaMetadata(jdbcMetadataCalls, jdbcMetadataError);
             }
             if ("close".equals(name)) {
                 return null;
             }
             if ("isClosed".equals(name)) {
                 return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static DatabaseMetaData jdbcSchemaMetadata(List<String> calls, SQLException failure) {
+        return proxy(DatabaseMetaData.class, (method, args) -> {
+            if ("getSchemas".equals(method.getName())) {
+                calls.add("getSchemas");
+                if (failure != null) {
+                    throw failure;
+                }
+                return metadataResultSet(List.of(
+                    List.of("REPORTING_ARCHIVE"),
+                    List.of("APP"),
+                    List.of("REPORTING"),
+                    List.of("SYSDBA"),
+                    List.of("APP")
+                ));
             }
             return defaultValue(method.getReturnType());
         });
@@ -1089,7 +1220,7 @@ class DamengAgentMetadataTest {
                     return value == null ? null : value.toString();
                 }
                 return switch (((String) args[0]).toUpperCase()) {
-                    case "TABLE_NAME", "OBJECT_NAME" -> string(rows, index[0], 0);
+                    case "TABLE_NAME", "TABLE_SCHEM", "OBJECT_NAME" -> string(rows, index[0], 0);
                     case "TABLE_TYPE", "OBJECT_TYPE" -> string(rows, index[0], 1);
                     case "COLUMN_NAME" -> string(rows, index[0], 0);
                     case "DATA_TYPE" -> string(rows, index[0], 1);

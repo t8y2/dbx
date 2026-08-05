@@ -66,8 +66,8 @@ async function mountPopover() {
   await nextTick();
 }
 
-describe("ExportProgressPopover data transfer duration", () => {
-  it("shows frozen transfer elapsed time without adding it to other task kinds", async () => {
+describe("ExportProgressPopover task duration", () => {
+  it("shows frozen transfer elapsed time and live duration for table tasks", async () => {
     const tracker = useExportTracker();
     now = 1_000;
     const transfer = tracker.addDataTransferTask("transfer", "users", 1);
@@ -89,7 +89,7 @@ describe("ExportProgressPopover data transfer duration", () => {
     await mountPopover();
 
     expect(document.body.textContent).toContain("Elapsed: 1m 5s");
-    expect(document.body.textContent?.match(/Elapsed:/g)).toHaveLength(1);
+    expect(document.body.textContent?.match(/Elapsed:/g)).toHaveLength(2);
   });
 
   it("expands complete per-table transfer failure details", async () => {

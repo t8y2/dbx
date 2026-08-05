@@ -92,6 +92,7 @@ pub async fn start_transport_layers(
                     &target_endpoint.host,
                     target_endpoint.port,
                     is_last && resolved.expose_lan,
+                    resolved.allow_exec_channel_proxy,
                 )
                 .await
                 .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?,
@@ -264,6 +265,7 @@ mod tests {
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
+            allow_exec_channel_proxy: false,
         })
     }
 

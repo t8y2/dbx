@@ -20,7 +20,7 @@ assertMatches("crates/dbx-web/Cargo.toml", /\[features\][\s\S]*default\s*=\s*\[[
 
 assertIncludes("apps/desktop/src/components/layout/ContentArea.vue", "MqAdminConsole", "Main content area must import and render the MQ admin console.");
 assertIncludes("apps/desktop/src/components/layout/ContentArea.vue", "activeTab.mode === 'mq'", "Main content area must have an mq mode render branch.");
-assertIncludes("apps/desktop/src/components/sidebar/TreeItem.vue", '"mq"', "Sidebar connection handling must be aware of MQ connections.");
+assertIncludes("apps/desktop/src/components/sidebar/TreeItem.vue", "mq-tenant", "Sidebar tree items must render MQ tenant nodes.");
 assertIncludes("apps/desktop/src/stores/queryStore.ts", "openMqAdmin", "Query store must expose an MQ admin tab opener.");
 
 const manifest = JSON.parse(read("crates/dbx-core/assets/database-drivers.manifest.json"));
@@ -80,6 +80,16 @@ for (const panel of ["PoliciesPanel.vue", "PermissionsPanel.vue", "RawApiPanel.v
 for (const panel of ["TenantsPanel.vue", "NamespacesPanel.vue", "TopicsPanel.vue", "SubscriptionsPanel.vue"]) {
   assertIncludes(`apps/desktop/src/components/mq/${panel}`, "readOnly", `${panel} must disable mutating actions in read-only mode.`);
 }
+assertIncludes(
+  "apps/desktop/src/components/mq/TopicsPanel.vue",
+  "topics-table-hscroll",
+  "TopicsPanel must keep a shared horizontal scroller so wide RocketMQ action columns stay reachable.",
+);
+assertIncludes(
+  "apps/desktop/src/components/mq/TopicsPanel.vue",
+  "overflow-x: auto",
+  "TopicsPanel horizontal scroller must allow overflow-x.",
+);
 for (const panel of ["ExchangesPanel.vue", "SendMessagePanel.vue", "rabbitmq/RabbitMqClientsPanel.vue", "ProducerConsumerPanel.vue"]) {
   assertIncludes(`apps/desktop/src/components/mq/${panel}`, "readOnly", `${panel} must disable mutating actions in read-only mode.`);
 }

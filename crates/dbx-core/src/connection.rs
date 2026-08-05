@@ -15,9 +15,10 @@ use crate::agent_connection::{
     trino_like_jdbc_connection_string, AgentSessionRole,
 };
 use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
+use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::database_capabilities;
 use crate::db;
-use crate::db::agent_driver::AgentMethod;
+use crate::db::agent_driver::{AgentCallError, AgentMethod};
 use crate::db::http_tunnel::HttpTunnelManager;
 use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
@@ -116,6 +117,9 @@ pub enum PoolKind {
     MessageQueue,
     /// Nacos admin connection marker.
     Nacos,
+    /// MQTT broker connection with an active client.
+    #[cfg(feature = "mq-admin")]
+    Mqtt(Arc<super::mqtt::client::MqttClient>),
 }
 
 impl PoolKind {
@@ -550,8 +554,7 @@ fn fail_stop_removed_agent_pool(pool_key: &str, pool: &PoolKind) {
 }
 
 fn should_replace_agent_runtime(error: &str) -> bool {
-    crate::db::agent_driver::agent_session_disposition(error)
-        == Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
+    crate::db::agent_driver::agent_recovery_decision(error, RecoveryScope::ConnectionOpen).replaces_runtime()
 }
 
 pub fn metadata_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
@@ -620,6 +623,7 @@ pub fn prestosql_jdbc_config_for_endpoint(config: &ConnectionConfig, host: &str,
     let mut jdbc_config = config.clone();
     jdbc_config.connection_string =
         Some(trino_like_jdbc_connection_string(config, host, port, config.effective_database().unwrap_or("")));
+    jdbc_config.url_params = None;
     if jdbc_config.jdbc_driver_class.as_deref().is_none_or(|value| value.trim().is_empty()) {
         jdbc_config.jdbc_driver_class = Some(PRESTOSQL_JDBC_DRIVER_CLASS.to_string());
     }
@@ -681,10 +685,10 @@ pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
 }
 
 pub fn sqlserver_legacy_driver_error(agent_error: &str) -> String {
-    // AgentManager currently returns launch failures as strings. This exact marker is generated
-    // internally and only adds guidance for an explicitly selected compatibility driver.
+    // This mapper handles both AgentManager launch strings and Agent call errors, so context
+    // must remain before any structured-error compatibility marker.
     if agent_error.contains("driver is not installed") {
-        format!("{agent_error}\n\n{SQLSERVER_LEGACY_DRIVER_INSTALL_HINT}")
+        crate::db::agent_driver::append_legacy_error_context(agent_error, SQLSERVER_LEGACY_DRIVER_INSTALL_HINT)
     } else {
         agent_error.to_string()
     }
@@ -1417,7 +1421,6 @@ impl AppState {
         pool: PoolKind,
         config: &ConnectionConfig,
     ) {
-        // mq_registry only exists in mq-admin builds; other builds reject MQ connects before a pool is created.
         #[cfg(feature = "mq-admin")]
         if matches!(pool, PoolKind::MessageQueue) {
             self.mq_registry.drop_connection(connection_id).await;
@@ -1462,12 +1465,14 @@ impl AppState {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
+                            let replace_runtime =
+                                err.recovery_decision().is_some_and(RecoveryDecision::replaces_runtime);
                             if !detach_keepalive_target_if_current(
                                 &routing,
                                 &connections,
                                 &key,
                                 target,
-                                should_replace_agent_runtime(&err),
+                                replace_runtime,
                             )
                             .await
                             {
@@ -2167,29 +2172,55 @@ impl AppState {
                 // connection_id is recognized as valid.
                 let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = crate::mq::service::resolve_mq_agent_launch_spec(&mqc, self);
-                let adapter = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
-                    Ok(adapter) => adapter,
-                    Err(err) => {
+                // Temporary "__test_*" probes must not retain agents in the registry.
+                // reconnect fast-path caching only applies to durable connection ids;
+                // drain_connection_pools no longer drops MQ adapters (reconnect reuse).
+                if connection_id.starts_with("__test_") {
+                    let adapter = self.mq_registry.build_transient_config(mqc, agent_launch).await?;
+                    adapter.test_connection().await?;
+                    if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                        return Err(err);
+                    }
+                    // adapter drops here and kills agent-backed processes (RocketMQ/Kafka/RabbitMQ).
+                    PoolKind::MessageQueue
+                } else {
+                    let build = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
+                        Ok(build) => build,
+                        Err(err) => {
+                            self.mq_registry.drop_connection(connection_id).await;
+                            return Err(err);
+                        }
+                    };
+                    if let Err(err) = crate::mq::validate_mq_adapter_after_build(&build).await {
                         self.mq_registry.drop_connection(connection_id).await;
                         return Err(err);
                     }
-                };
-                if let Err(err) = adapter.test_connection().await {
-                    self.mq_registry.drop_connection(connection_id).await;
-                    return Err(err);
+                    if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+                        self.mq_registry.drop_connection(connection_id).await;
+                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                        return Err(err);
+                    }
+                    PoolKind::MessageQueue
                 }
-                if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-                    self.mq_registry.drop_connection(connection_id).await;
-                    self.reset_connection_transport_for_config(connection_id, &db_config).await;
-                    return Err(err);
-                }
-                PoolKind::MessageQueue
             }
             #[cfg(not(feature = "mq-admin"))]
             DatabaseType::MessageQueue => {
                 return Err(
                     "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
                         .to_string(),
+                );
+            }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::Mqtt => {
+                let mqtt_config = crate::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
+                let client = crate::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                PoolKind::Mqtt(client)
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::Mqtt => {
+                return Err(
+                    "MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string()
                 );
             }
         };
@@ -2295,6 +2326,7 @@ impl AppState {
                         "127.0.0.1",
                         1,
                         false,
+                        ssh.allow_exec_channel_proxy,
                     )
                     .await;
                 self.tunnels.stop_tunnel(&probe_id).await;
@@ -2904,15 +2936,15 @@ impl AppState {
                         return false;
                     };
                     let timeout = crate::db::connection_timeout();
-                    match agent.validate_connection(Some(timeout)).await {
+                    match agent.validate_connection_typed(Some(timeout)).await {
                         Ok(_) => false,
-                        Err(err) if is_agent_validate_connection_unsupported(&err) => {
+                        Err(err) if is_agent_validate_connection_unsupported(&err.to_string()) => {
                             log::debug!(
                                 "Agent connection pool '{pool_key}' does not support validate_connection; keeping pool"
                             );
                             false
                         }
-                        Err(err) if should_replace_agent_runtime(&err) => {
+                        Err(err) if RecoveryPolicy::decide(&err, RecoveryScope::Keepalive).replaces_runtime() => {
                             log::warn!(
                                 "Agent connection pool '{pool_key}' requested runtime replacement during health probe: {err}"
                             );
@@ -2931,6 +2963,8 @@ impl AppState {
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos => false,
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(_) => false,
             }
         };
 
@@ -3021,11 +3055,7 @@ impl AppState {
             self.postgres_cancel_contexts.write().await.remove(&pool_key);
             let removed = self.connections.write().await.remove(&pool_key);
             if let Some(pool) = removed {
-                if matches!(&pool, PoolKind::Agent(_)) {
-                    self.pool_routing_control().close_removed_in_background(vec![(pool_key.clone(), pool)]);
-                } else {
-                    self.pool_routing_control().close_pool_with_timeout(pool_key.clone(), pool).await;
-                }
+                self.pool_routing_control().close_pool_with_timeout(pool_key.clone(), pool).await;
             }
         }
         self.get_or_create_pool_for_session_inner(
@@ -3143,12 +3173,12 @@ impl AppState {
         self.detach_pool_by_key(&pool_key, true).await
     }
 
-    pub(crate) async fn detach_metadata_pool_after_error(
+    pub(crate) async fn detach_metadata_pool_after_recovery(
         &self,
         connection_id: &str,
         database: Option<&str>,
         client_session_id: Option<&str>,
-        error: &str,
+        agent_session_id: Option<&str>,
         replace_agent_runtime: bool,
     ) -> bool {
         let config = {
@@ -3159,11 +3189,11 @@ impl AppState {
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
-        if let Some(session_id) = crate::db::agent_driver::agent_rpc_error_session_id(error) {
+        if let Some(session_id) = agent_session_id {
             let expected_client = {
                 let connections = self.connections.read().await;
                 match connections.get(&pool_key) {
-                    Some(PoolKind::Agent(client)) if client.matches_session_id(&session_id) => Some(client.clone()),
+                    Some(PoolKind::Agent(client)) if client.matches_session_id(session_id) => Some(client.clone()),
                     Some(PoolKind::Agent(_)) => return false,
                     _ => None,
                 }
@@ -3786,9 +3816,9 @@ impl AppState {
                         log::debug!("Agent connection pool '{key}' is busy; skipping resume health probe");
                         continue;
                     };
-                    match agent.validate_connection(Some(timeout)).await {
+                    match agent.validate_connection_typed(Some(timeout)).await {
                         Ok(_) => true,
-                        Err(err) if is_agent_validate_connection_unsupported(&err) => {
+                        Err(err) if is_agent_validate_connection_unsupported(&err.to_string()) => {
                             log::debug!(
                                 "Agent connection pool '{key}' does not support validate_connection; keeping pool"
                             );
@@ -3796,7 +3826,11 @@ impl AppState {
                         }
                         Err(e) => {
                             log::warn!("Agent connection pool '{key}' is unhealthy: {e}");
-                            failed_agent_checks.push((key.clone(), client.clone(), should_replace_agent_runtime(&e)));
+                            failed_agent_checks.push((
+                                key.clone(),
+                                client.clone(),
+                                RecoveryPolicy::decide(&e, RecoveryScope::Keepalive).replaces_runtime(),
+                            ));
                             false
                         }
                     }
@@ -3806,6 +3840,8 @@ impl AppState {
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos => true,
+                #[cfg(feature = "mq-admin")]
+                PoolKind::Mqtt(_) => true,
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy && !matches!(pool, PoolKind::Agent(_)) {
@@ -3936,9 +3972,6 @@ impl AppState {
             }
         }
         drop(conns);
-        // Also drop the MQ admin adapter if this is an MQ connection.
-        #[cfg(feature = "mq-admin")]
-        self.mq_registry.drop_connection(connection_id).await;
         removed
     }
 
@@ -4030,6 +4063,36 @@ enum KeepaliveTarget {
     Agent(Arc<db::agent_driver::PooledAgentClient>),
 }
 
+#[derive(Debug)]
+enum KeepaliveError {
+    Agent(AgentCallError),
+    Legacy(String),
+}
+
+impl KeepaliveError {
+    fn recovery_decision(&self) -> Option<RecoveryDecision> {
+        match self {
+            Self::Agent(error) => Some(RecoveryPolicy::decide(error, RecoveryScope::Keepalive)),
+            Self::Legacy(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for KeepaliveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent(error) => error.fmt(formatter),
+            Self::Legacy(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<String> for KeepaliveError {
+    fn from(error: String) -> Self {
+        Self::Legacy(error)
+    }
+}
+
 impl KeepaliveTarget {
     fn matches_pool(&self, pool: &PoolKind) -> bool {
         match (self, pool) {
@@ -4095,41 +4158,55 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
     }
 }
 
-async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) -> Result<(), String> {
+async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) -> Result<(), KeepaliveError> {
     match target {
         KeepaliveTarget::Mysql(pool) => {
             let mut conn = db::mysql::get_conn_with_health_check(pool).await?;
-            conn.ping().await.map_err(|e| e.to_string())
+            conn.ping().await.map_err(|error| KeepaliveError::Legacy(error.to_string()))
         }
         KeepaliveTarget::Postgres(pool) => {
             let client = pool.get().await.map_err(|e| format!("PostgreSQL pool error: {e}"))?;
-            client.simple_query("SELECT 1").await.map(|_| ()).map_err(|e| e.to_string())
+            client.simple_query("SELECT 1").await.map(|_| ()).map_err(|error| KeepaliveError::Legacy(error.to_string()))
         }
-        KeepaliveTarget::Rqlite(client) => db::rqlite_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::Turso(client) => db::turso_driver::test_connection(client, timeout).await,
+        KeepaliveTarget::Rqlite(client) => {
+            db::rqlite_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::Turso(client) => db::turso_driver::test_connection(client, timeout).await.map_err(Into::into),
         KeepaliveTarget::MongoDb { client, database } => {
-            db::mongo_driver::test_connection(client, timeout, database.as_deref()).await
+            db::mongo_driver::test_connection(client, timeout, database.as_deref()).await.map_err(Into::into)
         }
-        KeepaliveTarget::ClickHouse(client) => db::clickhouse_driver::test_connection(client, timeout).await,
+        KeepaliveTarget::ClickHouse(client) => {
+            db::clickhouse_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
         KeepaliveTarget::SqlServer(client) => {
             let Ok(mut client) = client.try_lock() else {
                 return Ok(());
             };
-            db::sqlserver::test_connection(&mut client).await
+            db::sqlserver::test_connection(&mut client).await.map_err(Into::into)
         }
-        KeepaliveTarget::Elasticsearch(client) => db::elasticsearch_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::Easysearch(client) => db::easysearch_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::HBase(client) => db::hbase_driver::test_connection(client, timeout).await.map(|_| ()),
-        KeepaliveTarget::VectorDb(client) => db::vector_driver::test_connection(client, timeout).await,
-        KeepaliveTarget::InfluxDb(client) => db::influxdb_driver::test_connection(client, timeout).await,
+        KeepaliveTarget::Elasticsearch(client) => {
+            db::elasticsearch_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::Easysearch(client) => {
+            db::easysearch_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::HBase(client) => {
+            db::hbase_driver::test_connection(client, timeout).await.map(|_| ()).map_err(Into::into)
+        }
+        KeepaliveTarget::VectorDb(client) => {
+            db::vector_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::InfluxDb(client) => {
+            db::influxdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
         KeepaliveTarget::Agent(client) => {
             let Ok(mut client) = client.try_lock() else {
                 return Ok(());
             };
-            match client.validate_connection(Some(timeout)).await {
+            match client.validate_connection_typed(Some(timeout)).await {
                 Ok(_) => Ok(()),
-                Err(err) if is_agent_validate_connection_unsupported(&err) => Ok(()),
-                Err(err) => Err(err),
+                Err(error) if is_agent_validate_connection_unsupported(&error.to_string()) => Ok(()),
+                Err(error) => Err(KeepaliveError::Agent(error)),
             }
         }
     }
@@ -4157,6 +4234,8 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
             .unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::MessageQueue {
         parse_mq_admin_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
+    } else if config.db_type == DatabaseType::Mqtt {
+        parse_mqtt_broker_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::Nacos {
         parse_nacos_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else {
@@ -4204,6 +4283,27 @@ fn parse_nacos_server_host_port(config: &ConnectionConfig) -> Option<(String, u1
     let host = url.host_str()?.to_string();
     let port = url.port_or_known_default()?;
     Some((host, port))
+}
+
+fn parse_mqtt_broker_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
+    let value = config
+        .external_config
+        .as_ref()?
+        .get("host")
+        .or_else(|| config.external_config.as_ref()?.get("host"))?
+        .as_str()?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    let port = config
+        .external_config
+        .as_ref()?
+        .get("port")
+        .or_else(|| config.external_config.as_ref()?.get("port"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1883) as u16;
+    Some((value.to_string(), port))
 }
 
 fn normalize_client_session_id(client_session_id: Option<&str>) -> Option<String> {
@@ -4335,6 +4435,8 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         }
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
     }
 }
@@ -4391,6 +4493,11 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => {
+            // 发送 DISCONNECT 并等待事件循环任务结束
+            client.disconnect().await;
+        }
     }
     Ok(())
 }
@@ -4588,7 +4695,51 @@ pub async fn probe_connection_endpoint(config: &ConnectionConfig, host: &str, po
         return Ok(());
     }
     let timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
-    db::probe_tcp_endpoint(&format!("{:?}", config.db_type), host, port, timeout).await
+
+    let entries = connection_probe_endpoints(host, port);
+
+    if entries.is_empty() {
+        return Err("no host entries to probe".to_string());
+    }
+
+    // Probe each node sequentially; return success on the first reachable node.
+    // This matches the failover semantics of the real connection path.
+    let mut last_error = String::new();
+    for (entry_host, entry_port) in &entries {
+        match db::probe_tcp_endpoint(&format!("{:?}", config.db_type), entry_host, *entry_port, timeout).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
+fn connection_probe_endpoints(host: &str, default_port: u16) -> Vec<(String, u16)> {
+    host.split(',').filter_map(|part| parse_connection_probe_endpoint(part.trim(), default_port)).collect()
+}
+
+fn parse_connection_probe_endpoint(endpoint: &str, default_port: u16) -> Option<(String, u16)> {
+    if endpoint.is_empty() {
+        return None;
+    }
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        let close = rest.find(']')?;
+        let host = rest[..close].to_string();
+        let port = rest
+            .get(close + 1..)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(default_port);
+        return Some((host, port));
+    }
+    if endpoint.matches(':').count() == 1 {
+        if let Some((host, raw_port)) = endpoint.rsplit_once(':') {
+            if let Ok(port) = raw_port.parse::<u16>() {
+                return Some((host.to_string(), port));
+            }
+        }
+    }
+    Some((endpoint.to_string(), default_port))
 }
 
 fn validate_h2_file_connection(config: &ConnectionConfig) -> Result<(), String> {
@@ -4675,16 +4826,16 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
-        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, metadata_connection_config,
-        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql,
-        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
-        redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
-        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
-        validate_h2_database_path, AppState, MysqlMode, PoolKind, GAUSSDB_M_JDBC_DRIVER_CLASS,
-        GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        agent_connect_timeout, connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
+        database_connection_config, database_connection_config_with_catalog,
+        gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
+        metadata_connection_config, mysql_metadata_fallback_url, mysql_pool_setup_queries,
+        oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
+        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
+        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
+        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -4847,6 +4998,26 @@ mod tests {
     }
 
     #[test]
+    fn prestosql_jdbc_config_consumes_url_params_after_building_url() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::PrestoSql;
+        config.ssl = true;
+        config.url_params = Some(
+            "SSL=true&SSLKeyStorePassword=secret&SSLKeyStorePath=D:/keystore/presto/presto_keystore.jks".to_string(),
+        );
+
+        let jdbc_config = prestosql_jdbc_config_for_endpoint(&config, "presto.example.com", 8443);
+
+        assert_eq!(
+            jdbc_config.connection_string.as_deref(),
+            Some(
+                "jdbc:presto://presto.example.com:8443?SSL=true&SSLKeyStorePassword=secret&SSLKeyStorePath=D:/keystore/presto/presto_keystore.jks"
+            )
+        );
+        assert_eq!(jdbc_config.url_params, None);
+    }
+
+    #[test]
     fn gaussdb_m_profile_uses_vendor_jdbc_url_and_driver() {
         let mut config = mysql_config(Some("业务库"));
         config.db_type = DatabaseType::Gaussdb;
@@ -4947,6 +5118,34 @@ mod tests {
 
         assert!(message.contains("Driver Manager"));
         assert!(message.contains("enable SQL Server legacy compatibility mode again"));
+    }
+
+    #[test]
+    fn sqlserver_legacy_driver_hint_preserves_structured_agent_error() {
+        let error = crate::db::agent_driver::AgentCallError::Structured {
+            rpc_code: -6007,
+            message: "driver is not installed".to_string(),
+            context: crate::db::agent_driver::AgentErrorContext {
+                contract_version: 1,
+                category: crate::db::agent_driver::AgentErrorCategory::Connection,
+                retryable: false,
+                session_disposition: crate::db::agent_driver::AgentSessionDisposition::Quarantine,
+                stage: crate::db::agent_driver::AgentErrorStage::Connect,
+                operation_outcome: crate::db::agent_driver::AgentOperationOutcome::NotStarted,
+                agent_session_id: None,
+                sql_state: None,
+                vendor_code: None,
+                exception_class: None,
+            },
+        }
+        .into_legacy_string();
+
+        let message = sqlserver_legacy_driver_error(&error);
+
+        assert!(matches!(
+            crate::db::agent_driver::agent_error_from_legacy(&message, None),
+            crate::db::agent_driver::AgentCallError::Structured { .. }
+        ));
     }
 
     #[test]
@@ -5440,6 +5639,7 @@ mod tests {
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
+            allow_exec_channel_proxy: false,
             profile_id: String::new(),
         });
         assert!(state.test_tunnel_profile(&ssh).await.is_err());
@@ -5675,6 +5875,15 @@ mod tests {
         assert_eq!(
             redacted_connection_url_for_endpoint(&config, &config.host, config.port),
             "postgres://127.0.0.1:3306/postgres?sslmode=prefer"
+        );
+    }
+
+    #[test]
+    fn gaussdb_probe_endpoints_parse_legacy_and_ipv6_hosts() {
+        assert_eq!(connection_probe_endpoints("db.example.com:5433", 5432), vec![("db.example.com".to_string(), 5433)]);
+        assert_eq!(
+            connection_probe_endpoints("[2001:db8::1]:5433,[2001:db8::2]:5434", 5432),
+            vec![("2001:db8::1".to_string(), 5433), ("2001:db8::2".to_string(), 5434)]
         );
     }
 
@@ -6590,6 +6799,108 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn reconnect_waits_for_agent_runtime_replacement_before_publishing_new_pool() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (state, dir) = test_app_state().await;
+        let script_path = dir.join("delayed-close-replace-runtime-agent.py");
+        let close_finished_path = dir.join("close-finished");
+        let close_finished = serde_json::to_string(&close_finished_path.to_string_lossy()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, pathlib, sys, time
+close_finished = pathlib.Path({close_finished})
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'result': {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}}
+        }}
+    elif req['method'] == 'close_session':
+        time.sleep(0.5)
+        close_finished.write_text('done')
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'error': {{
+                'code': -1,
+                'message': 'Agent runtime resource limit reached',
+                'data': {{
+                    'category': 'resource',
+                    'retryable': False,
+                    'sessionDisposition': 'replace_runtime',
+                    'stage': 'close'
+                }}
+            }}
+        }}
+    else:
+        response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{}}}}
+    print(json.dumps(response), flush=True)
+"#
+            ),
+        )
+        .unwrap();
+
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+        let client = std::sync::Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::shared_session(
+                runtime.clone(),
+                "metadata-agent-session".to_string(),
+            ),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "rqlite probe ended before the request headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            assert!(String::from_utf8_lossy(&request).starts_with("POST /db/query HTTP/1.1"));
+            let body = r#"{"results":[{"columns":["1"],"values":[[1]]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Rqlite;
+        config.host = address.ip().to_string();
+        config.port = address.port();
+        config.keepalive_interval_secs = 0;
+        state.configs.write().await.insert(config.id.clone(), config);
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Agent(client));
+
+        let pool_key = state.reconnect_metadata_pool_for_session("conn", None, None).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(pool_key, "conn");
+        assert!(close_finished_path.exists(), "reconnect returned before the old Agent close completed");
+        assert!(runtime.is_failed());
+        assert!(matches!(state.connections.read().await.get("conn"), Some(PoolKind::Rqlite(_))));
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn inserting_agent_pool_rejects_runtime_failed_before_publish() {
         let (state, dir) = test_app_state().await;
         let (runtime, client, sibling_client) = replace_runtime_on_error_clients(&dir, "unused").await;
@@ -6788,12 +7099,11 @@ for line in sys.stdin:
         state.configs.write().await.insert(config.id.clone(), config);
         let pool_key = "conn:analytics:role:metadata";
         state.connections.write().await.insert(pool_key.to_string(), PoolKind::Agent(current_client.clone()));
-        let stale_error = concat!(
-            "Agent RPC error (-1): stale metadata failure\nDBX_AGENT_ERROR_DATA:",
-            r#"{"category":"resource","sessionDisposition":"replace_runtime","agentSessionId":"stale-session"}"#
+        assert!(
+            !state
+                .detach_metadata_pool_after_recovery("conn", Some("analytics"), None, Some("stale-session"), true,)
+                .await
         );
-
-        assert!(!state.detach_metadata_pool_after_error("conn", Some("analytics"), None, stale_error, true).await);
 
         let connections = state.connections.read().await;
         let PoolKind::Agent(routed_client) = connections.get(pool_key).expect("new metadata generation must remain")
@@ -6816,10 +7126,7 @@ for line in sys.stdin:
 
         let error = super::ping_keepalive_target(&mut target, Duration::from_secs(1)).await.unwrap_err();
 
-        assert_eq!(
-            crate::db::agent_driver::agent_session_disposition(&error),
-            Some(crate::db::agent_driver::AgentSessionDisposition::ReplaceRuntime)
-        );
+        assert!(matches!(error.recovery_decision(), Some(crate::agent_recovery::RecoveryDecision::ReplaceRuntime)));
         assert!(!runtime.is_failed());
         runtime.kill();
         let _ = std::fs::remove_dir_all(dir);
@@ -7016,6 +7323,7 @@ for line in sys.stdin:
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
+            allow_exec_channel_proxy: false,
             profile_id: profile_id.to_string(),
         }
     }

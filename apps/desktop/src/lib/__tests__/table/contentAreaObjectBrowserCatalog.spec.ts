@@ -35,14 +35,14 @@ describe("ContentArea object browser refresh wiring", () => {
     expect(contentAreaSource).toContain('if (props.activeTab.mode === "objects") return objectBrowserRef.value?.refresh?.() ?? false;');
   });
 
-  it("exposes the existing ObjectBrowser reload path as refresh", () => {
-    expect(objectBrowserSource).toMatch(/function refresh\(\): boolean \{\s+void reload\(\);\s+return true;\s+\}/);
+  it("exposes object and active table-info reloads as refresh", () => {
+    expect(objectBrowserSource).toMatch(/function refresh\(\): boolean \{\s+void reload\(\);\s+void refreshActiveTableInfo\(\);\s+return true;\s+\}/);
     expect(objectBrowserSource).toContain("defineExpose({ focusSearch, refresh });");
   });
 
   it("shows the configured content refresh shortcut on the refresh button", () => {
     expect(objectBrowserSource).toContain("formatShortcut(settingsStore.editorSettings.shortcuts.refreshData)");
-    expect(objectBrowserSource).toMatch(/<Button[^>]*:title="refreshTooltip"[^>]*@click="reload">/);
+    expect(objectBrowserSource).toMatch(/<Button[^>]*:title="refreshTooltip"[^>]*@click="refresh">/);
   });
 });
 

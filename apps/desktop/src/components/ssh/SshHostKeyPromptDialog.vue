@@ -17,6 +17,7 @@ interface SshPromptRequest {
   key_type?: string | null;
   fingerprint?: string | null;
   prompt?: string | null;
+  echo?: boolean;
 }
 
 interface SshHostKeyNotice {
@@ -35,6 +36,7 @@ const { toast } = useToast();
 // Using a queue keyed by request id means every prompt is shown and answered.
 const queue = ref<SshPromptRequest[]>([]);
 const current = computed<SshPromptRequest | null>(() => queue.value[0] ?? null);
+const isSecretPrompt = computed(() => current.value?.kind === "SecretInput");
 const visible = ref(false);
 
 const remember = ref(true);
@@ -42,6 +44,7 @@ const secretCode = ref("");
 const resolving = ref(false);
 const unlisteners: Array<() => void> = [];
 let webEventSource: EventSource | null = null;
+let pendingTimer: ReturnType<typeof setInterval> | null = null;
 let mounted = true;
 
 function enqueuePrompt(request: SshPromptRequest) {
@@ -125,12 +128,43 @@ async function setupTauriPromptBridge() {
   }
 }
 
+// Fallback delivery alongside the SSE stream. On first connect the dialog's
+// EventSource may not be open yet when the backend fires a host-key prompt, so
+// the SSE `Prompt` event is lost and (without this) the connection hangs until
+// its timeout. Polling the pending endpoint recovers any lost prompt so the
+// dialog still appears. `enqueuePrompt` dedupes by id, so repeated polls are
+// harmless.
+async function fetchPendingPrompts() {
+  try {
+    const res = await fetch(apiUrl("/api/ssh/prompts/pending"), { credentials: "include" });
+    if (!res.ok) return;
+    const pending = (await res.json()) as SshPromptRequest[];
+    pending.forEach((req) => enqueuePrompt(req));
+  } catch {
+    // Transient failure — the next poll retries.
+  }
+}
+
 function setupWebPromptBridge() {
   webEventSource = new EventSource(apiUrl("/api/ssh/prompts"));
   webEventSource.onmessage = (event) => handleWebEvent(event.data);
-  webEventSource.onerror = () => {
-    // EventSource automatically retries. Do not close it while the app is mounted.
+  webEventSource.onopen = () => {
+    // The SSE stream is live; its replay already carries any prompt that fired
+    // before the stream opened, so stop polling to avoid needless requests.
+    if (pendingTimer) {
+      clearInterval(pendingTimer);
+      pendingTimer = null;
+    }
   };
+  webEventSource.onerror = () => {
+    // EventSource reconnects automatically. While disconnected, fall back to
+    // polling so a prompt fired during the outage is not lost.
+    if (!pendingTimer) pendingTimer = setInterval(fetchPendingPrompts, 2000);
+  };
+  // First-connect fallback: the stream may not be open yet when the backend
+  // fires a host-key prompt, so poll until it is.
+  void fetchPendingPrompts();
+  if (!pendingTimer) pendingTimer = setInterval(fetchPendingPrompts, 2000);
 }
 
 onMounted(() => {
@@ -143,6 +177,10 @@ onBeforeUnmount(() => {
   unlisteners.forEach((u) => u());
   webEventSource?.close();
   webEventSource = null;
+  if (pendingTimer) {
+    clearInterval(pendingTimer);
+    pendingTimer = null;
+  }
   if (isTauriRuntime()) void import("@tauri-apps/api/core").then(({ invoke }) => invoke("ssh_prompt_not_ready")).catch(() => undefined);
 });
 
@@ -199,17 +237,19 @@ function submitSecret() {
 </script>
 
 <template>
-  <Dialog v-model:open="visible" :dismissible="false">
-    <DialogContent class="sm:max-w-[460px]">
+  <Dialog v-model:open="visible">
+    <DialogContent class="sm:max-w-[460px]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader>
-        <DialogTitle>{{ t("connection.sshHostKeyVerifyTitle") }}</DialogTitle>
+        <DialogTitle>
+          {{ t(isSecretPrompt ? "connection.sshInteractiveTitle" : "connection.sshHostKeyVerifyTitle") }}
+        </DialogTitle>
         <DialogDescription class="text-muted-foreground">
-          {{ t("connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
+          {{ t(isSecretPrompt ? "connection.sshInteractiveMessage" : "connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
         </DialogDescription>
       </DialogHeader>
 
       <div v-if="current" class="space-y-3 py-1">
-        <div class="rounded-md border border-border bg-muted/40 p-3 text-sm">
+        <div v-if="current.kind === 'HostKeyVerify'" class="rounded-md border border-border bg-muted/40 p-3 text-sm">
           <div class="flex items-center justify-between gap-3">
             <span class="text-muted-foreground">{{ t("connection.sshHostKeyVerifyKeyType") }}</span>
             <span class="font-medium">{{ current.key_type || "—" }}</span>
@@ -226,18 +266,29 @@ function submitSecret() {
         </label>
 
         <div v-else-if="current.kind === 'SecretInput'" class="space-y-2">
-          <p class="text-sm text-muted-foreground">{{ current.prompt || "Enter verification code" }}</p>
-          <input v-model="secretCode" type="text" autocomplete="off" class="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring" :placeholder="'••••••'" />
+          <p class="whitespace-pre-wrap text-sm text-muted-foreground">
+            {{ current.prompt || t("connection.sshInteractiveDefaultPrompt") }}
+          </p>
+          <input
+            v-model="secretCode"
+            :type="current.echo ? 'text' : 'password'"
+            autocomplete="one-time-code"
+            class="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+            :placeholder="t('connection.sshInteractivePlaceholder')"
+            @keydown.enter="submitSecret"
+          />
         </div>
       </div>
 
       <DialogFooter>
-        <Button variant="outline" :disabled="resolving" @click="reject">{{ t("connection.sshHostKeyVerifyReject") }}</Button>
+        <Button variant="outline" :disabled="resolving" @click="reject">
+          {{ t(isSecretPrompt ? "connection.sshInteractiveCancel" : "connection.sshHostKeyVerifyReject") }}
+        </Button>
         <Button v-if="current?.kind !== 'SecretInput'" :disabled="resolving" @click="accept">
           {{ t("connection.sshHostKeyVerifyAccept") }}
         </Button>
         <Button v-else :disabled="resolving || !secretCode" @click="submitSecret">
-          {{ t("connection.sshHostKeyVerifyAccept") }}
+          {{ t("connection.sshInteractiveSubmit") }}
         </Button>
       </DialogFooter>
     </DialogContent>

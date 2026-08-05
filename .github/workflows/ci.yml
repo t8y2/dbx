@@ -101,6 +101,7 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v5
 
@@ -118,35 +119,118 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup Rust for standard Windows
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Check standard Windows dependency path
+        run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
+
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
 
+      - name: Prepare Win7-compatible WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
+
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
+
       - name: Build frontend
         run: pnpm build
 
       - name: Build DBX for Windows 7
-        run: cargo build --locked --package dbx --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
-
-      - name: Prepare WebView2 109 offline runtime
         shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+        run: |
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
-      - name: Bundle Windows 7 offline installer
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
+      - name: Bundle Windows 7 fixed-runtime installer
         shell: pwsh
         run: |
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-offline.conf.json
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-fixed.conf.json
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
           if (!$installer) {
-            Write-Error "Missing Windows 7 WebView2 offline installer in ${bundleDir}"
+            Write-Error "Missing Windows 7 fixed-runtime installer in ${bundleDir}"
             exit 1
           }
           Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+
+      - name: Audit Windows 7 installer contents
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "target/x86_64-win7-windows-msvc/release/bundle/nsis" -Filter "*.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
+
+      - name: Upload Windows 7 test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBX-win7-fixed-runtime-test
+          path: target/x86_64-win7-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  duckdb-windows-driver:
+    needs: changes
+    if: needs.changes.outputs.duckdb_windows == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust for Windows 7
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Build DuckDB Windows driver
+        shell: bash
+        run: |
+          pushd agents/drivers/duckdb
+          cargo build \
+            --locked \
+            --release \
+            --bin dbx-duckdb-driver \
+            --target x86_64-win7-windows-msvc \
+            -Z build-std=std,panic_abort
+          popd
+
+      - name: Validate DuckDB Windows driver
+        shell: bash
+        run: |
+          DRIVER="target/duckdb-driver/x86_64-win7-windows-msvc/release/dbx-duckdb-driver.exe"
+          python agents/scripts/validate_windows_pe_dependencies.py "$DRIVER"
+          "$DRIVER" < /dev/null
 
   rust-fmt-clippy:
     needs: changes
@@ -332,8 +416,8 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
-          cache: maven
+          java-version: "21"
+          cache: gradle
 
       - name: JDBC plugin version guard
         env:
@@ -370,6 +454,7 @@ jobs:
       rust_full: ${{ steps.rust-mode.outputs.full }}
       jdbc: ${{ steps.filter.outputs.jdbc }}
       agents: ${{ steps.filter.outputs.agents }}
+      duckdb_windows: ${{ steps.filter.outputs.duckdb_windows }}
       nix: ${{ steps.filter.outputs.nix }}
       windows_win7_bundle: ${{ steps.filter.outputs.windows_win7_bundle }}
       github_scripts: ${{ steps.filter.outputs.github_scripts }}
@@ -406,6 +491,7 @@ jobs:
             rust:
               - 'crates/**'
               - 'src-tauri/**'
+              - 'vendor/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain*'
@@ -419,6 +505,11 @@ jobs:
               - 'Cargo.lock'
               - '.github/scripts/bump-agent-versions.mjs'
               - '.github/scripts/bump-agent-versions.test.mjs'
+              - '.github/workflows/agents-release.yml'
+              - '.github/workflows/ci.yml'
+            duckdb_windows:
+              - 'agents/drivers/duckdb/**'
+              - 'agents/scripts/validate_windows_pe_dependencies.py'
               - '.github/workflows/agents-release.yml'
               - '.github/workflows/ci.yml'
             nix:
@@ -436,16 +527,27 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/update-nix-pnpm-hash.yml'
             windows_win7_bundle:
+              - '.github/scripts/assert-win7-pe-compat.ps1'
+              - '.github/scripts/assert-win7-installer-content.ps1'
+              - '.github/scripts/assert-webview2-win7-runtime.ps1'
+              - '.github/scripts/prepare-webview2-win7-loader.ps1'
               - '.github/scripts/prepare-webview2-win7-runtime.ps1'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'
-              - 'src-tauri/tauri.webview2-win7-offline.conf.json'
+              - 'src-tauri/tauri.webview2-win7-fixed.conf.json'
+              - 'src-tauri/build.rs'
+              - 'src-tauri/Cargo.toml'
               - 'src-tauri/windows/nsis/**'
               - 'src-tauri/src/commands/update.rs'
+              - 'crates/dbx-core/Cargo.toml'
+              - 'crates/dbx-core/src/db/postgres.rs'
               - 'crates/dbx-core/src/update.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'vendor/ctor/**'
+              - 'vendor/dirs-sys/**'
+              - 'vendor/pageant/**'
+              - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
               - '.github/workflows/ci.yml'
@@ -470,13 +572,13 @@ jobs:
 
             while IFS= read -r file; do
               case "$file" in
-                Cargo.toml|Cargo.lock|rust-toolchain*|.github/workflows/ci.yml|*/Cargo.toml)
+                Cargo.toml|Cargo.lock|rust-toolchain*|.github/workflows/ci.yml|*/Cargo.toml|vendor/*)
                   full=true
                   break
                   ;;
               esac
 
-            done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri .github/workflows/ci.yml)
+            done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri vendor .github/workflows/ci.yml)
           fi
 
           echo "full=$full" >> "$GITHUB_OUTPUT"
@@ -502,7 +604,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.24.x"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -523,6 +625,9 @@ jobs:
       - name: DuckDB driver tests
         run: cargo test --manifest-path drivers/duckdb/Cargo.toml --locked
 
+      - name: TDengine driver tests
+        run: cargo test --manifest-path drivers/tdengine/Cargo.toml --locked
+
       - name: Agent validation
         run: python3 scripts/validate_agents.py
 
@@ -538,6 +643,18 @@ jobs:
         run: go test ./...
         working-directory: agents/drivers/rabbitmq
 
+      - name: Cassandra native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/cassandra-go
+
+      - name: Vastbase native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/vastbase-go
+
+      - name: Neo4j native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/neo4j-go
+
       - name: Oracle native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-oracle-linux-x64 .
         working-directory: agents/drivers/oracle-go
@@ -549,6 +666,108 @@ jobs:
       - name: RabbitMQ native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rabbitmq-linux-x64 .
         working-directory: agents/drivers/rabbitmq
+
+      - name: Cassandra native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-cassandra-linux-x64 .
+        working-directory: agents/drivers/cassandra-go
+
+      - name: Vastbase native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-vastbase-linux-x64 .
+        working-directory: agents/drivers/vastbase-go
+
+      - name: Neo4j native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-neo4j-linux-x64 .
+        working-directory: agents/drivers/neo4j-go
+
+      - name: TDengine native agent build
+        run: cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
+
+      - name: TDengine native agent integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r version image; do
+            name="dbx-tdengine-${version//./-}"
+            docker rm -fv "$name" >/dev/null 2>&1 || true
+            docker run -d --name "$name" \
+              --memory 4g \
+              --ulimit nofile=65535:65535 \
+              -p 6030:6030 \
+              -p 6041:6041 \
+              "$image"
+            cleanup() {
+              docker rm -fv "$name" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            ready=false
+            dnodes=""
+            for _ in $(seq 1 90); do
+              dnodes="$(docker exec "$name" taos -s 'SHOW DNODES' 2>/dev/null || true)"
+              if grep -Eq '\|[[:space:]]*ready[[:space:]]*\|' <<<"$dnodes"; then
+                ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != "true" ]; then
+              printf '%s\n' "$dnodes"
+              docker logs "$name"
+              exit 1
+            fi
+            TDENGINE_INTEGRATION=1 \
+              TDENGINE_TEST_HOST=127.0.0.1 \
+              TDENGINE_TEST_PORT=6041 \
+              cargo test --manifest-path drivers/tdengine/Cargo.toml --locked --test live -- --nocapture
+            cleanup
+            trap - EXIT
+          done <<'EOF'
+          2.4.0.14|tdengine/tdengine:2.4.0.14
+          2.6.0.34|tdengine/tdengine:2.6.0.34
+          3.0.7.1|tdengine/tdengine:3.0.7.1
+          3.3.6.13|tdengine/tdengine:3.3.6.13
+          3.4.2.2|tdengine/tsdb:3.4.2.2
+          EOF
+
+      - name: Cassandra native agent integration tests
+        shell: bash
+        working-directory: agents/drivers/cassandra-go
+        run: |
+          set -euo pipefail
+          for version in 3.11.19 5.0.6; do
+            name="dbx-cassandra-${version//./-}"
+            docker rm -fv "$name" >/dev/null 2>&1 || true
+            docker run -d --name "$name" \
+              -e CASSANDRA_CLUSTER_NAME="DBX Cassandra CI $version" \
+              -e CASSANDRA_DC=dc1 \
+              -e CASSANDRA_RACK=rack1 \
+              -e CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch \
+              -e CASSANDRA_NUM_TOKENS=16 \
+              -e MAX_HEAP_SIZE=512M \
+              -e HEAP_NEWSIZE=100M \
+              -p 9042:9042 \
+              "cassandra:$version"
+            cleanup() {
+              docker rm -fv "$name" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            ready=false
+            for _ in $(seq 1 100); do
+              if docker exec "$name" cqlsh -e 'SELECT release_version FROM system.local' >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 3
+            done
+            if [ "$ready" != "true" ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            CASSANDRA_TEST_HOST=127.0.0.1 \
+              CASSANDRA_TEST_PORT=9042 \
+              go test -run '^TestCassandraIntegration$' -count=1 ./...
+            cleanup
+            trap - EXIT
+          done
 
       - name: RabbitMQ native agent integration tests
         shell: bash

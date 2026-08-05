@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import type { EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
 
 export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "informix" | "influxdb" | "unsupported";
 export type TableStructureAlterStrategy = "none" | "direct" | "sqlite-rebuild";
@@ -109,6 +110,11 @@ const postgresCapabilities = capabilities({
   indexComment: true,
   alterPrimaryKey: true,
   foreignKey: true,
+});
+
+const postgresBefore11Capabilities = capabilities({
+  ...postgresCapabilities,
+  indexInclude: false,
 });
 
 const redshiftCapabilities = capabilities({
@@ -343,9 +349,27 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   manticoresearch: manticoreSearchCapabilities,
 };
 
-export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType): TableStructureCapabilities {
+function postgresMajorVersion(productVersion?: string): number | undefined {
+  const normalized = productVersion?.trim();
+  if (!normalized) return undefined;
+  const match = normalized.match(/\bPostgreSQL\s+(\d+)(?:\.\d+)?\b/i) ?? normalized.match(/^(\d+)(?:\.\d+)?\b/);
+  if (!match) return undefined;
+  const majorVersion = Number.parseInt(match[1], 10);
+  return Number.isFinite(majorVersion) ? majorVersion : undefined;
+}
+
+export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType, productVersion?: string): TableStructureCapabilities {
   if (dbType === "sqlite" && connectionDbType === "sqlite") return nativeSqliteCapabilities;
+  if (dbType === "postgres") {
+    const majorVersion = postgresMajorVersion(productVersion);
+    if (majorVersion !== undefined && majorVersion < 11) return postgresBefore11Capabilities;
+  }
   return dbType ? (capabilityByType[dbType] ?? unsupportedCapabilities) : unsupportedCapabilities;
+}
+
+export function sanitizeStructureIndexesForCapabilities(indexes: EditableStructureIndex[], capabilities: Pick<TableStructureCapabilities, "indexInclude">): EditableStructureIndex[] {
+  if (capabilities.indexInclude || indexes.every((index) => index.includedColumns.length === 0)) return indexes;
+  return indexes.map((index) => (index.includedColumns.length === 0 ? index : { ...index, includedColumns: [] }));
 }
 
 export function canEditTableStructure(dbType?: DatabaseType): boolean {

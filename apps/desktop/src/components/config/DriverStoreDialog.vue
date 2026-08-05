@@ -13,6 +13,7 @@ import DriverInstallProgressCircle from "@/components/config/DriverInstallProgre
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { uuid } from "@/lib/common/utils";
 import { countAvailableDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
 import type { JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, JdbcPluginStatus } from "@/types/database";
 import * as api from "@/lib/backend/api";
@@ -465,7 +466,7 @@ async function installDriver(dbType: string) {
 async function runDriverInstall(dbType: string) {
   const label = driverLabel(dbType);
   installing.value = dbType;
-  activeAgentOperationId.value = crypto.randomUUID();
+  activeAgentOperationId.value = uuid();
   resetAgentInstallProgress();
   try {
     if (isPrestoSqlBuiltinDriver(dbType)) {
@@ -509,7 +510,7 @@ async function runQueuedDriverInstalls() {
 
 async function upgradeAll() {
   upgradingAll.value = true;
-  activeAgentOperationId.value = crypto.randomUUID();
+  activeAgentOperationId.value = uuid();
   upgradingCompletedCount.value = 0;
   queuedDriverInstalls.value = [];
   resetAgentInstallProgress();
@@ -623,7 +624,7 @@ async function importOfflineZip() {
   }
   if (!selected) return;
   importingZip.value = true;
-  activeAgentOperationId.value = crypto.randomUUID();
+  activeAgentOperationId.value = uuid();
   resetAgentInstallProgress();
   try {
     const count = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
@@ -655,7 +656,7 @@ async function importDriverFile(driver: AgentDriverInfo) {
   const isWindows = navigator.userAgent.toLowerCase().includes("windows");
   const installSelectedFile = async (selected: string | File) => {
     if (isOfflineDriverPackage(selected)) {
-      activeAgentOperationId.value = crypto.randomUUID();
+      activeAgentOperationId.value = uuid();
       resetAgentInstallProgress();
       try {
         const count = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
@@ -701,7 +702,7 @@ async function importDriverFile(driver: AgentDriverInfo) {
 
 async function reinstallJre(jreKey: string) {
   reinstallingJre.value = jreKey;
-  activeAgentOperationId.value = crypto.randomUUID();
+  activeAgentOperationId.value = uuid();
   resetAgentInstallProgress();
   try {
     await api.reinstallJre(jreKey, activeAgentOperationId.value);

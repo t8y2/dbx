@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
+import { afterAll, beforeAll, test, vi } from "vitest";
 import {
   eventToShortcut,
   isBrowserReloadShortcut,
@@ -30,6 +30,9 @@ import {
 } from "../../apps/desktop/src/lib/editor/keyboardShortcuts.ts";
 import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/editor/shortcutRegistry.ts";
 
+beforeAll(() => vi.stubGlobal("navigator", { platform: "Linux x86_64" }));
+afterAll(() => vi.unstubAllGlobals());
+
 test("matches Cmd+Enter for SQL execution", () => {
   assert.equal(isExecuteSqlShortcut({ key: "Enter", metaKey: true }), true);
 });
@@ -48,7 +51,11 @@ test("matches custom shortcut settings for SQL execution", () => {
 });
 
 test("records custom shortcuts from keydown events", () => {
-  assert.equal(eventToShortcut({ key: "r", metaKey: true, shiftKey: true } as any), "Shift+Mod+R");
+  assert.equal(eventToShortcut({ key: "r", metaKey: true, shiftKey: true } as any, "MacIntel"), "Shift+Mod+R");
+  assert.equal(eventToShortcut({ key: "r", ctrlKey: true, shiftKey: true } as any, "MacIntel"), "Shift+Ctrl+R");
+  assert.equal(eventToShortcut({ key: "r", ctrlKey: true, shiftKey: true } as any, "Win32"), "Shift+Mod+R");
+  assert.equal(eventToShortcut({ key: "r", metaKey: true, shiftKey: true } as any, "Win32"), "Shift+Mod+R");
+  assert.equal(eventToShortcut({ key: "r", ctrlKey: true, metaKey: true, shiftKey: true } as any, "Win32"), "Shift+Mod+Meta+R");
   assert.equal(eventToShortcut({ key: "F2" } as any), "F2");
   assert.equal(eventToShortcut({ key: "Control", ctrlKey: true } as any), null);
 });

@@ -60,8 +60,14 @@ describe("SQL Server explain plan", () => {
   });
 
   it("surfaces a SQL Server batch error instead of treating it as a plan", () => {
-    expect(sqlServerExplainResult([result(["Error"], [["Invalid object name 'missing_table'"]])])).toEqual({
+    expect(sqlServerExplainResult([{ ...result(["Error"], [["Invalid object name 'missing_table'"]]), execution_error: true }])).toEqual({
       error: "Invalid object name 'missing_table'",
+    });
+  });
+
+  it("does not mistake a successful Error column for a SQL Server batch failure", () => {
+    expect(sqlServerExplainResult([result(["Error"], [["valid query value"]])])).toEqual({
+      error: "SQL Server did not return ShowPlan XML",
     });
   });
 

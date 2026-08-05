@@ -39,7 +39,7 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
 
 export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): string {
   if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres") && identifierQuote != null) return quoteGaussDbJdbcIdentifier(name, identifierQuote);
-  if (databaseType === "kingbase" && identifierQuote != null) {
+  if ((databaseType === "kingbase" || databaseType === "informix") && identifierQuote != null) {
     if (!identifierQuote) return name;
     return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;
   }
@@ -80,6 +80,11 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
       return `${quoteTableDataIdentifier(databaseType, trimmedSchema, identifierQuote)}.${quotedTable}`;
     }
     return quotedTable;
+  }
+  if (databaseType === "informix" && identifierQuote != null) {
+    const quotedTable = quoteTableDataIdentifier(databaseType, tableName, identifierQuote);
+    const trimmedSchema = schema?.trim();
+    return trimmedSchema ? `${quoteTableDataIdentifier(databaseType, trimmedSchema, identifierQuote)}.${quotedTable}` : quotedTable;
   }
   if ((isSchemaAware(databaseType) || databaseType === "sqlite") && !usesDatabaseObjectTreeMode(databaseType) && schema) {
     if (databaseType === "sqlserver") {

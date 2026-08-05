@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,18 @@ const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } =
 const open = ref(false);
 const showAll = ref(false);
 const expandedFailureTaskIds = ref<string[]>([]);
+const currentTime = ref(Date.now());
 const MAX_VISIBLE = 5;
+
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  elapsedTimer = setInterval(() => {
+    currentTime.value = Date.now();
+  }, 1000);
+});
+onBeforeUnmount(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+});
 
 const reversedTasks = computed(() => {
   return [...tasks.value].reverse();
@@ -38,6 +49,7 @@ const progressPercent = (totalRows: number | null, rowsExported: number) => {
 
 const progressValue = (task: ExportTask) => {
   if (task.kind === "database-export") {
+    if (task.overallPercent !== undefined) return task.overallPercent;
     if (!task.totalObjects || task.totalObjects <= 0) return 0;
     return Math.min(100, Math.round(((task.objectIndex ?? 0) / task.totalObjects) * 100));
   }
@@ -64,6 +76,7 @@ const taskTitle = (task: ExportTask) => {
 
 const rowsText = (task: ExportTask) => {
   if (task.kind === "database-export") {
+    if (task.overallPercent !== undefined) return `${task.overallPercent}%`;
     if (task.totalObjects) {
       return t("exportProgress.objectsCount", {
         current: (task.objectIndex ?? 0).toLocaleString(),
@@ -92,6 +105,12 @@ const rowsText = (task: ExportTask) => {
   }
   if (task.totalRows) return `${task.rowsExported.toLocaleString()} / ${task.totalRows.toLocaleString()}`;
   return `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;
+};
+
+const elapsedText = (task: ExportTask) => {
+  if (task.startedAt === undefined) return "";
+  const finishedAt = task.finishedAt ?? currentTime.value;
+  return t("exportProgress.elapsed", { duration: formatDataTransferDuration(finishedAt - task.startedAt) });
 };
 
 const statusIcon = (task: ExportTask) => {
@@ -175,7 +194,11 @@ function failureDetailCount(task: ExportTask) {
 
             <!-- Progress bar -->
             <div v-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-              <div v-if="task.totalRows || (task.kind === 'database-export' && task.totalObjects) || (task.kind === 'data-transfer' && task.totalTables)" class="h-full bg-primary rounded-full transition-[width] duration-300" :style="{ width: `${progressValue(task)}%` }" />
+              <div
+                v-if="task.totalRows || (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) || (task.kind === 'data-transfer' && task.totalTables)"
+                class="h-full bg-primary rounded-full transition-[width] duration-300"
+                :style="{ width: `${progressValue(task)}%` }"
+              />
               <div v-else class="h-full w-full overflow-hidden rounded-full">
                 <div class="export-progress-indeterminate h-full rounded-full bg-primary" />
               </div>
@@ -186,6 +209,7 @@ function failureDetailCount(task: ExportTask) {
 
             <div class="min-w-0 text-muted-foreground">
               <span class="break-words tabular-nums">{{ rowsText(task) }}</span>
+              <span v-if="task.kind !== 'data-transfer' && task.startedAt !== undefined" class="ml-1 tabular-nums">{{ elapsedText(task) }}</span>
               <span v-if="task.status === 'Error' && task.errorMessage" class="mt-1 block whitespace-normal break-words text-destructive" :title="translateBackendError(t, task.errorMessage)">
                 {{ translateBackendError(t, task.errorMessage) }}
               </span>

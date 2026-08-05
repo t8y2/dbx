@@ -746,6 +746,119 @@ test("close other fixed tabs does not close regular tabs", () => {
   );
 });
 
+test("close right tabs only closes tabs to the right in the same group", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const fixedId = store.createTab("conn-1", "db", "fixed");
+  const targetId = store.createTab("conn-1", "db", "target");
+  const rightA = store.createTab("conn-1", "db", "right a");
+  const rightB = store.createTab("conn-1", "db", "right b");
+  store.togglePinnedTab(fixedId);
+  store.activeTabId = rightB;
+
+  store.closeRightTabs(targetId);
+
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [fixedId, targetId],
+  );
+  assert.equal(store.activeTabId, targetId);
+  assert.equal(
+    store.tabs.some((tab) => tab.id === rightA || tab.id === rightB),
+    false,
+  );
+
+  let completions = 0;
+  store.closeRightTabs(targetId, () => {
+    completions += 1;
+  });
+
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [fixedId, targetId],
+  );
+  assert.equal(store.activeTabId, targetId);
+  assert.equal(completions, 1);
+});
+
+test("close right fixed tabs keeps regular tabs and a retained active tab", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const targetId = store.createTab("conn-1", "db", "fixed target");
+  const rightFixedId = store.createTab("conn-1", "db", "fixed right");
+  const regularId = store.createTab("conn-1", "db", "regular");
+  store.togglePinnedTab(targetId);
+  store.togglePinnedTab(rightFixedId);
+  store.activeTabId = regularId;
+
+  store.closeRightTabs(targetId);
+
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId, regularId],
+  );
+  assert.equal(store.activeTabId, regularId);
+});
+
+test("close right tabs pauses before closing an unsaved query", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const targetId = store.createTab("conn-1", "db", "target");
+  const dirtyId = store.createTab("conn-1", "db", "dirty");
+  store.updateSql(dirtyId, "select 1;");
+
+  store.closeRightTabs(targetId);
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.equal(store.pendingCloseTabId, dirtyId);
+  assert.equal(store.closeConfirmContext, "batch");
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId, dirtyId],
+  );
+
+  store.forceClosePendingTab();
+
+  assert.equal(store.showCloseConfirm, false);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId],
+  );
+  assert.equal(store.activeTabId, targetId);
+});
+
+test("close right tabs only runs completion after the pending batch succeeds", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const targetId = store.createTab("conn-1", "db", "target");
+  const dirtyId = store.createTab("conn-1", "db", "dirty");
+  store.updateSql(dirtyId, "select 1;");
+  let completions = 0;
+
+  store.closeRightTabs(targetId, () => {
+    completions += 1;
+  });
+  assert.equal(completions, 0);
+
+  store.cancelClosePendingTab();
+  assert.equal(completions, 0);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId, dirtyId],
+  );
+
+  store.closeRightTabs(targetId, () => {
+    completions += 1;
+  });
+  store.forceClosePendingTab();
+
+  assert.equal(completions, 1);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId],
+  );
+});
+
 test("close other tabs pauses on restored unsaved query tabs", async () => {
   const restoreStorage = installMemoryStorage();
   try {
@@ -1060,6 +1173,26 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
   assert.equal(tab.resultSortColumn, undefined);
   assert.equal(tab.resultSortMode, undefined);
   assert.equal(tab.resultLocalSortOriginalMongoCopyDocuments, undefined);
+});
+
+test("sortTabResultLocally uses result column types for numeric strings", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.result = {
+    columns: ["QUANTITY_IN_STOCK"],
+    column_types: ["NUMBER"],
+    rows: [["-27700"], ["-78800"], ["297500"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+  };
+
+  store.sortTabResultLocally(tabId, "QUANTITY_IN_STOCK", 0, "asc");
+
+  assert.deepEqual(tab.result.rows, [["-78800"], ["-27700"], ["297500"]]);
 });
 
 test("selecting a result run restores its displayed result without changing SQL draft", async () => {
@@ -3390,7 +3523,7 @@ test("MongoDB query result export pages find commands through the document API",
   const originalFetch = globalThis.fetch;
   const findBodies: any[] = [];
   const progress: Array<{ rowsExported: number; totalRows: number | null }> = [];
-  const command = 'db.permissions.find({"role":"admin"},{"name":1,"active":1}).sort({"createdTime":-1}).skip(3).limit(205)';
+  const command = 'db.permissions.find({"role":"admin"},{"name":1,"active":1}).collation({locale:"en",strength:1}).sort({"createdTime":-1}).skip(3).limit(205)';
   const documents = Array.from({ length: 205 }, (_, index) => (index === 100 ? { _id: index + 4, active: true } : { _id: index + 4, name: `user-${index + 4}` }));
   const copyDocuments = documents.map((document) => ({ ...document, _id: { $numberInt: String(document._id) } }));
 
@@ -3439,7 +3572,7 @@ test("MongoDB query result export pages find commands through the document API",
         { skip: 203, limit: 5 },
       ],
     );
-    assert.ok(findBodies.every((body) => body.collection === "permissions" && body.filter === '{"role":"admin"}' && body.projection === '{"name":1,"active":1}' && body.sort === '{"createdTime":-1}'));
+    assert.ok(findBodies.every((body) => body.collection === "permissions" && body.filter === '{"role":"admin"}' && body.projection === '{"name":1,"active":1}' && body.sort === '{"createdTime":-1}' && JSON.stringify(JSON.parse(body.collation)) === JSON.stringify({ locale: "en", strength: 1 })));
     assert.equal(new Set(findBodies.map((body) => body.executionId)).size, 1);
     assert.ok(findBodies[0]?.executionId);
     assert.deepEqual(exported?.columns, ["_id", "name", "active"]);
@@ -3911,18 +4044,20 @@ test("mongo find execution uses editor page size and supports server pagination"
 
   try {
     const tabId = store.createTab("mongo-page-1", "dbx_test", "Query", "query", "");
-    await store.executeTabSql(tabId, "db.issue_4566.find({})");
+    const sql = 'db.issue_4566.find({name:"xxx"}).collation({locale:"en",strength:1})';
+    await store.executeTabSql(tabId, sql);
     const tab = store.tabs.find((item) => item.id === tabId);
 
     assert.equal(findBodies[0]?.collection, "issue_4566");
     assert.equal(findBodies[0]?.skip, 0);
     assert.equal(findBodies[0]?.limit, 100);
+    assert.deepEqual(JSON.parse(findBodies[0]?.collation), { locale: "en", strength: 1 });
     assert.equal(tab?.result?.rows.length, 100);
     assert.equal(tab?.resultPageLimit, 100);
     assert.equal(tab?.resultPageOffset, 0);
     assert.equal(tab?.resultTotalRowCount, 824);
 
-    await store.executeTabSql(tabId, "db.issue_4566.find({})", {
+    await store.executeTabSql(tabId, sql, {
       pagination: { offset: 100, limit: 100 },
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
@@ -3931,6 +4066,7 @@ test("mongo find execution uses editor page size and supports server pagination"
     assert.equal(findBodies[1]?.collection, "issue_4566");
     assert.equal(findBodies[1]?.skip, 100);
     assert.equal(findBodies[1]?.limit, 100);
+    assert.deepEqual(JSON.parse(findBodies[1]?.collation), { locale: "en", strength: 1 });
     assert.equal(tab?.result?.rows[0]?.[0], 101);
     assert.equal(tab?.resultPageOffset, 100);
     assert.equal(tab?.resultTotalRowCount, 824);
@@ -4462,18 +4598,58 @@ test("mongo dropIndex execution uses the dedicated drop-indexes endpoint", async
   }
 });
 
-test("mongo dropIndexes execution returns dropped index names", async () => {
+test("mongo dropIndexes execution exposes partial failures and refreshes loaded index metadata", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
   const store = useQueryStore();
   const originalFetch = globalThis.fetch;
   let dropIndexesBody: any;
+  let indexRefreshRequested = false;
 
   connectionStore.addEphemeralConnection({
     ...conn("mongo-1"),
     db_type: "mongodb",
     port: 27017,
+  });
+  connectionStore.treeNodes.push({
+    id: "mongo-1",
+    label: "Mongo",
+    type: "connection",
+    connectionId: "mongo-1",
+    isExpanded: true,
+    children: [
+      {
+        id: "mongo-1:accounting",
+        label: "accounting",
+        type: "mongo-db",
+        connectionId: "mongo-1",
+        database: "accounting",
+        isExpanded: true,
+        children: [
+          {
+            id: "mongo-1:accounting:users",
+            label: "users",
+            type: "mongo-collection",
+            connectionId: "mongo-1",
+            database: "accounting",
+            isExpanded: true,
+            children: [
+              {
+                id: "mongo-1:accounting:users:__indexes",
+                label: "tree.indexes",
+                type: "group-indexes",
+                connectionId: "mongo-1",
+                database: "accounting",
+                tableName: "users",
+                isExpanded: false,
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+    ],
   });
 
   globalThis.fetch = withConnectionHealthMock(async (input, init) => {
@@ -4487,10 +4663,14 @@ test("mongo dropIndexes execution returns dropped index names", async () => {
     }
     if (url === "/api/mongo/drop-indexes") {
       dropIndexesBody = JSON.parse(String(init?.body ?? "{}"));
-      return new Response(JSON.stringify({ dropped_names: ["a_1", "b_1"], affected_rows: 2 }), {
+      return new Response(JSON.stringify({ dropped_names: ["a_1"], affected_rows: 1, failures: [{ name: "b_1", message: "index not found" }] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
+    }
+    if (url.startsWith("/api/schema/indexes?")) {
+      indexRefreshRequested = true;
+      return Response.json([{ name: "_id_", columns: ["_id"], is_unique: true, is_primary: true }]);
     }
     return new Response("unexpected request", { status: 500 });
   });
@@ -4506,8 +4686,18 @@ test("mongo dropIndexes execution returns dropped index names", async () => {
       collection: "users",
       single: false,
     });
-    assert.deepEqual(tab?.result?.columns, ["name"]);
-    assert.deepEqual(tab?.result?.rows, [["a_1"], ["b_1"]]);
+    assert.deepEqual(tab?.result?.columns, ["name", "status", "message"]);
+    assert.deepEqual(tab?.result?.rows, [
+      ["a_1", "dropped", null],
+      ["b_1", "failed", "index not found"],
+    ]);
+    assert.equal(indexRefreshRequested, true);
+    const indexGroup = connectionStore.treeNodes[0]?.children?.[0]?.children?.[0]?.children?.[0];
+    assert.equal(indexGroup?.isExpanded, false);
+    assert.deepEqual(
+      indexGroup?.children?.map((node) => node.label),
+      ["_id_ (_id)"],
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -5857,6 +6047,7 @@ test("failed schema session reset blocks query and Oracle explain execution", as
     const queryTab = store.tabs.find((tab) => tab.id === queryTabId)!;
     assert.equal(executeRequests, 0);
     assert.equal(queryTab.result?.execution_error, true);
+    assert.equal(queryTab.result?.error?.detail, "reset failed");
     assert.match(String(queryTab.result?.rows[0]?.[0]), /reset failed/i);
 
     store.updateSchema(explainTabId, undefined);
@@ -6937,6 +7128,20 @@ test("table structure refresh versions are scoped by table target", () => {
   assert.equal(store.tableStructureRefreshVersion("conn-1", "db", "public", "users"), 2);
   assert.equal(store.tableStructureRefreshVersion("conn-1", "db", undefined, "users"), 1);
   assert.equal(store.tableStructureRefreshVersion("conn-1", "db", "public", "orders"), 0);
+});
+
+test("table structure invalidation refreshes matching query completion contexts", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const matchingTabId = store.createTab("conn-1", "db", "Query A", "query", "public");
+  const sameDatabaseTabId = store.createTab("conn-1", "db", "Query B", "query", "audit");
+  const otherDatabaseTabId = store.createTab("conn-1", "analytics", "Query C", "query", "public");
+
+  store.invalidateTableStructure("conn-1", "db", "public", "users");
+
+  assert.equal(store.tabs.find((tab) => tab.id === matchingTabId)?.completionContextVersion, 1);
+  assert.equal(store.tabs.find((tab) => tab.id === sameDatabaseTabId)?.completionContextVersion, 1);
+  assert.equal(store.tabs.find((tab) => tab.id === otherDatabaseTabId)?.completionContextVersion, undefined);
 });
 
 test("duplicating a table structure tab clones its unsaved draft", () => {

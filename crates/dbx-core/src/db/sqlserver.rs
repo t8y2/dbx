@@ -391,7 +391,7 @@ pub(crate) struct SqlServerBatchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SqlServerTdsEvent {
     Message(String),
-    RowsAffected(u64),
+    Done(Option<u64>),
 }
 
 #[derive(Clone, Default)]
@@ -454,18 +454,16 @@ fn sqlserver_done_trace_event(line: u32, message: &str) -> Option<SqlServerTdsEv
     if line == TIBERIUS_DONE_PROC_TOKEN_EVENT_LINE && message.contains("BitFlags<DoneStatus>(0b0)") {
         return None;
     }
-    if !message.contains("Count") {
-        return None;
-    }
-
-    let rows = if message.ends_with("(1 row left)") {
-        1
+    let rows = if !message.contains("Count") {
+        None
+    } else if message.ends_with("(1 row left)") {
+        Some(1)
     } else if let Some(prefix) = message.strip_suffix(" rows left)") {
-        prefix.rsplit_once('(').and_then(|(_, rows)| rows.parse::<u64>().ok()).unwrap_or(0)
+        Some(prefix.rsplit_once('(').and_then(|(_, rows)| rows.parse::<u64>().ok()).unwrap_or(0))
     } else {
-        0
+        Some(0)
     };
-    Some(SqlServerTdsEvent::RowsAffected(rows))
+    Some(SqlServerTdsEvent::Done(rows))
 }
 
 async fn capture_sqlserver_messages<F, T>(future: F) -> (T, Vec<String>)
@@ -482,7 +480,7 @@ where
         .into_iter()
         .filter_map(|event| match event {
             SqlServerTdsEvent::Message(message) => Some(message),
-            SqlServerTdsEvent::RowsAffected(_) => None,
+            SqlServerTdsEvent::Done(_) => None,
         })
         .collect();
     (output, messages)
@@ -1308,13 +1306,23 @@ fn push_sqlserver_ordered_events(
     if events.is_empty() {
         return;
     }
+    // The first DONE after an active result set closes that SELECT. Its row
+    // count is not a standalone DML result.
+    let mut result_set_done_pending = current.is_some();
     push_sqlserver_ordered_result_set(results, current.take(), start);
 
     let mut messages = Vec::new();
     for event in events {
         match event {
             SqlServerTdsEvent::Message(message) => messages.push(message),
-            SqlServerTdsEvent::RowsAffected(affected_rows) => {
+            SqlServerTdsEvent::Done(affected_rows) => {
+                if result_set_done_pending {
+                    result_set_done_pending = false;
+                    continue;
+                }
+                let Some(affected_rows) = affected_rows else {
+                    continue;
+                };
                 if let Some(message_result) = server_messages_query_result(std::mem::take(&mut messages), start) {
                     results.push(message_result);
                 }
@@ -3157,20 +3165,20 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_done_trace_events_keep_valid_update_counts() {
+    fn sqlserver_done_trace_events_keep_statement_boundaries_and_counts() {
         assert_eq!(
             sqlserver_done_trace_event(
                 super::TIBERIUS_DONE_TOKEN_EVENT_LINE,
                 "Done with status BitFlags<DoneStatus>(0b10001, More | Count) (2 rows left)",
             ),
-            Some(SqlServerTdsEvent::RowsAffected(2))
+            Some(SqlServerTdsEvent::Done(Some(2)))
         );
         assert_eq!(
             sqlserver_done_trace_event(
                 super::TIBERIUS_DONE_IN_PROC_TOKEN_EVENT_LINE,
                 "Done with status BitFlags<DoneStatus>(0b10000, Count)",
             ),
-            Some(SqlServerTdsEvent::RowsAffected(0))
+            Some(SqlServerTdsEvent::Done(Some(0)))
         );
         assert_eq!(
             sqlserver_done_trace_event(
@@ -3184,7 +3192,7 @@ mod tests {
                 super::TIBERIUS_DONE_TOKEN_EVENT_LINE,
                 "Done with status BitFlags<DoneStatus>(0b1, More)",
             ),
-            None
+            Some(SqlServerTdsEvent::Done(None))
         );
     }
 
@@ -3210,7 +3218,7 @@ mod tests {
         push_sqlserver_ordered_events(
             &mut results,
             &mut current,
-            vec![SqlServerTdsEvent::Message("between".to_string())],
+            vec![SqlServerTdsEvent::Done(Some(1)), SqlServerTdsEvent::Message("between".to_string())],
             start,
         );
         current = Some(SqlServerResultSet {
@@ -3224,9 +3232,10 @@ mod tests {
             &mut results,
             &mut current,
             vec![
+                SqlServerTdsEvent::Done(Some(1)),
                 SqlServerTdsEvent::Message("after one".to_string()),
                 SqlServerTdsEvent::Message("after two".to_string()),
-                SqlServerTdsEvent::RowsAffected(3),
+                SqlServerTdsEvent::Done(Some(3)),
             ],
             start,
         );
@@ -3245,6 +3254,54 @@ mod tests {
         );
         assert_eq!(results[5].result.affected_rows, 3);
         assert!(!results[5].server_message);
+    }
+
+    #[test]
+    fn sqlserver_ordered_events_drop_select_counts_and_keep_following_dml_counts() {
+        let start = Instant::now();
+        let mut results = Vec::new();
+        let mut current = Some(SqlServerResultSet {
+            columns: vec!["selected".to_string()],
+            column_types: vec!["int".to_string()],
+            rows: vec![vec![serde_json::json!(1)]],
+            truncated: false,
+            remaining_offset: 0,
+        });
+
+        push_sqlserver_ordered_events(
+            &mut results,
+            &mut current,
+            vec![SqlServerTdsEvent::Done(Some(1)), SqlServerTdsEvent::Done(Some(2))],
+            start,
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].result.columns, vec!["selected"]);
+        assert_eq!(results[1].result.affected_rows, 2);
+    }
+
+    #[test]
+    fn sqlserver_ordered_events_use_no_count_done_to_close_select_result() {
+        let start = Instant::now();
+        let mut results = Vec::new();
+        let mut current = Some(SqlServerResultSet {
+            columns: vec!["selected".to_string()],
+            column_types: vec!["int".to_string()],
+            rows: vec![vec![serde_json::json!(1)]],
+            truncated: false,
+            remaining_offset: 0,
+        });
+
+        push_sqlserver_ordered_events(
+            &mut results,
+            &mut current,
+            vec![SqlServerTdsEvent::Done(None), SqlServerTdsEvent::Done(Some(2))],
+            start,
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].result.columns, vec!["selected"]);
+        assert_eq!(results[1].result.affected_rows, 2);
     }
 
     #[test]

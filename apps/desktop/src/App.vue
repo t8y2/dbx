@@ -180,6 +180,7 @@ const connectionDialogInitialTab = ref<ConfigTab | undefined>(undefined);
 const settingsPageTabOpen = ref(false);
 const settingsInitialTab = ref("appearance");
 const settingsInitialSection = ref<string | undefined>(undefined);
+const settingsNavigationRequestId = ref(0);
 const showQueryEditorDdlDialog = ref(false);
 const showQueryEditorObjectSourceDialog = ref(false);
 const driverStoreTabOpen = ref(false);
@@ -369,6 +370,7 @@ const updateNotificationsEnabled = computed(() => settingsStore.editorSettings.u
 function openSettings(initialTab = "appearance", initialSection?: string) {
   settingsInitialTab.value = initialTab;
   settingsInitialSection.value = initialSection;
+  settingsNavigationRequestId.value += 1;
   if (!settingsStore.settingsPageActive) {
     settingsReturnSurface.value = showDriverStore.value ? "driverStore" : activeTab.value ? "query" : "welcome";
   }
@@ -2329,6 +2331,7 @@ onUnmounted(() => {
                 :open="settingsPageTabOpen"
                 :initial-tab="settingsInitialTab"
                 :initial-section="settingsInitialSection"
+                :navigation-request-id="settingsNavigationRequestId"
                 :app-version="appVersion"
                 class="flex-1 min-h-0"
                 @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"

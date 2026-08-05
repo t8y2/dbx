@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
+import { beginMcpStatusRequest } from "@/lib/mcp/mcpUpdateStatus";
 import type { McpServerStatus } from "@/lib/backend/tauri";
 
 const apiMock = vi.hoisted(() => ({
@@ -28,7 +29,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function makeStatus(update_available: boolean): McpServerStatus {
+function makeStatus(update_available: boolean, overrides: Partial<McpServerStatus> = {}): McpServerStatus {
   return {
     installed: true,
     npm_available: true,
@@ -44,6 +45,7 @@ function makeStatus(update_available: boolean): McpServerStatus {
     install_command: "",
     update_command: "",
     error: null,
+    ...overrides,
   };
 }
 
@@ -93,6 +95,31 @@ describe("useMcpUpdateBadge", () => {
     pending.resolve(makeStatus(true));
     await refreshA;
     expect(badge.mcpUpdateAvailable.value).toBe(false);
+  });
+
+  it("忽略早于当前根组件请求的设置页事件", async () => {
+    const settingsRequestId = beginMcpStatusRequest();
+    const pending = deferred<McpServerStatus>();
+    mockedCheck.mockReturnValueOnce(pending.promise);
+    const badge = makeBadge(true);
+    const refresh = badge.refreshMcpUpdateStatus();
+
+    badge.handleMcpStatusChanged(new CustomEvent("dbx-mcp-status-changed", { detail: { updateAvailable: true, requestId: settingsRequestId } }));
+    expect(badge.mcpUpdateAvailable.value).toBe(false);
+
+    pending.resolve(makeStatus(true));
+    await refresh;
+    expect(badge.mcpUpdateAvailable.value).toBe(true);
+  });
+
+  it("registry 结果未知时保留已知红点", async () => {
+    mockedCheck.mockResolvedValue(makeStatus(false, { latest_version: null }));
+    const badge = makeBadge(true);
+    badge.applyMcpStatus(true);
+
+    await badge.refreshMcpUpdateStatus();
+
+    expect(badge.mcpUpdateAvailable.value).toBe(true);
   });
 
   it("Web 端（非桌面）不发起检查", async () => {

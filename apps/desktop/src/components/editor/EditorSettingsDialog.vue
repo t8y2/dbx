@@ -101,6 +101,7 @@ import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
+import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
@@ -184,6 +185,7 @@ const props = defineProps<{
   variant?: "dialog" | "page";
   initialTab?: string;
   initialSection?: string;
+  navigationRequestId?: number;
   appVersion?: string;
 }>();
 
@@ -1778,12 +1780,13 @@ async function refreshMcpStatus() {
   if (mcpStatusLoading.value) return;
   mcpStatusLoading.value = true;
   mcpStatusError.value = "";
+  const requestId = beginMcpStatusRequest();
   try {
     mcpStatus.value = await checkMcpServerStatus();
     // 通知工具栏徽章同步：携带已获取的 update_available，避免根组件重复查询 npm registry。
     window.dispatchEvent(
       new CustomEvent("dbx-mcp-status-changed", {
-        detail: { updateAvailable: !!mcpStatus.value.update_available },
+        detail: { updateAvailable: mcpUpdateAvailability(mcpStatus.value), requestId },
       }),
     );
   } catch (e: any) {
@@ -2291,6 +2294,15 @@ watch(
   (tab) => {
     if (!settingsVisible.value || !tab) return;
     activeSettingsTab.value = tab;
+    void scrollToInitialSettingsSection();
+  },
+);
+
+watch(
+  () => props.navigationRequestId,
+  () => {
+    if (!settingsVisible.value || !props.initialTab) return;
+    activeSettingsTab.value = props.initialTab;
     void scrollToInitialSettingsSection();
   },
 );

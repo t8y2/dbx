@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import * as api from "@/lib/backend/api";
+import { beginMcpStatusRequest, isLatestMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 
 interface UseMcpUpdateBadgeOptions {
   isDesktop: boolean;
@@ -14,17 +15,16 @@ interface UseMcpUpdateBadgeOptions {
  */
 export function useMcpUpdateBadge(options: UseMcpUpdateBadgeOptions) {
   const mcpUpdateAvailable = ref(false);
-  // 失效令牌：每次发起检查递增；事件直接回传结果时也递增，使在途的过期响应被忽略。
-  let mcpCheckSeq = 0;
 
   async function refreshMcpUpdateStatus() {
     if (!options.isDesktop || !options.updateNotificationsEnabled()) return;
-    const seq = ++mcpCheckSeq;
+    const requestId = beginMcpStatusRequest();
     try {
       const status = await api.checkMcpServerStatus();
-      if (seq !== mcpCheckSeq) return; // 忽略过期响应，防止 stale 覆盖
+      if (!isLatestMcpStatusRequest(requestId)) return;
       if (!options.updateNotificationsEnabled()) return;
-      mcpUpdateAvailable.value = !!status.update_available;
+      const updateAvailable = mcpUpdateAvailability(status);
+      if (updateAvailable !== null) mcpUpdateAvailable.value = updateAvailable;
     } catch {
       // MCP 状态仅作徽章提示；取不到就保持原值，不打扰用户。
     }
@@ -34,15 +34,21 @@ export function useMcpUpdateBadge(options: UseMcpUpdateBadgeOptions) {
    * EditorSettingsDialog 刷新/升级后通过事件回传已获取的 update_available，
    * 避免根组件重复查询 npm registry，同时使在途的定时检查失效。
    */
-  function applyMcpStatus(updateAvailable: boolean) {
-    mcpCheckSeq++; // 使在途的定时检查失效
+  function applyMcpStatus(updateAvailable: boolean, requestId?: number) {
+    if (requestId !== undefined) {
+      if (!isLatestMcpStatusRequest(requestId)) return;
+    } else {
+      beginMcpStatusRequest();
+    }
     mcpUpdateAvailable.value = updateAvailable;
   }
 
   function handleMcpStatusChanged(event: Event) {
-    const detail = (event as CustomEvent<{ updateAvailable?: boolean } | null | undefined>).detail;
+    const detail = (event as CustomEvent<{ updateAvailable?: boolean | null; requestId?: number } | null | undefined>).detail;
     if (detail && typeof detail.updateAvailable === "boolean") {
-      applyMcpStatus(detail.updateAvailable);
+      applyMcpStatus(detail.updateAvailable, detail.requestId);
+    } else if (detail && typeof detail.requestId === "number") {
+      return;
     } else {
       void refreshMcpUpdateStatus();
     }

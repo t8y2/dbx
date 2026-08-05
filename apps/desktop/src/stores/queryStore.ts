@@ -103,6 +103,10 @@ interface OpenSavedSqlOptions {
   targetMode?: SavedSqlOpenTargetMode;
 }
 
+interface UpdateExecutionTargetOptions {
+  persistSavedSqlTarget?: boolean;
+}
+
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
 
 interface DroppedTableObjectTarget {
@@ -2566,12 +2570,13 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function applySavedSqlExecutionTarget(tab: QueryTab, target: SavedSqlExecutionTarget) {
-    updateConnection(tab.id, target.connectionId, target.database);
+    const options = { persistSavedSqlTarget: false };
+    updateConnection(tab.id, target.connectionId, target.database, options);
     if (tab.catalog !== target.catalog || tab.database !== target.database) {
-      if (tab.catalog !== undefined || target.catalog !== undefined) updateCatalog(tab.id, target.catalog, target.database);
-      else updateDatabase(tab.id, target.database);
+      if (tab.catalog !== undefined || target.catalog !== undefined) updateCatalog(tab.id, target.catalog, target.database, options);
+      else updateDatabase(tab.id, target.database, options);
     }
-    updateSchema(tab.id, target.schema);
+    updateSchema(tab.id, target.schema, options);
   }
 
   function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
@@ -2651,7 +2656,19 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value = orderPinnedFirst(tabs.value, (item) => !!item.pinned);
   }
 
-  function updateDatabase(id: string, database: string) {
+  function persistSavedSqlExecutionTarget(tab: QueryTab, options: UpdateExecutionTargetOptions) {
+    if (options.persistSavedSqlTarget === false || tab.mode !== "query" || !tab.savedSqlId) return;
+    const savedSqlStore = useSavedSqlStore();
+    void savedSqlStore
+      .updateFileExecutionTarget(tab.savedSqlId, {
+        connectionId: tab.connectionId,
+        database: tab.database,
+        schema: tab.schema,
+      })
+      .catch((error) => console.warn("[DBX][saved-sql:target:error]", error));
+  }
+
+  function updateDatabase(id: string, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
     rollbackTabTransaction(tab);
@@ -2666,9 +2683,10 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
-  function updateCatalog(id: string, catalog: string | undefined, database: string) {
+  function updateCatalog(id: string, catalog: string | undefined, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab || (tab.catalog === catalog && tab.database === database)) return;
     rollbackTabTransaction(tab);
@@ -2684,9 +2702,10 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
-  function updateSchema(id: string, schema: string | undefined) {
+  function updateSchema(id: string, schema: string | undefined, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.schema === schema) return;
     rollbackTabTransaction(tab);
@@ -2701,9 +2720,10 @@ export const useQueryStore = defineStore("query", () => {
     }
     tab.schema = schema;
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
-  function updateConnection(id: string, connectionId: string, database = "") {
+  function updateConnection(id: string, connectionId: string, database = "", options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.connectionId === connectionId) return;
     rollbackTabTransaction(tab, { resetAutoCommit: true });
@@ -2721,6 +2741,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
   function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {

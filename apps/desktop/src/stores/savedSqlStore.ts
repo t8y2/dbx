@@ -25,6 +25,12 @@ interface SaveFileInput {
   sql: string;
 }
 
+interface SavedSqlExecutionTargetInput {
+  connectionId: string;
+  database: string;
+  schema?: string;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -95,6 +101,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   let pendingSync: Promise<void> | null = null;
   let initFromStoragePromise: Promise<void> | null = null;
   const pendingFolderCreates = new Map<string, Promise<SavedSqlFolder>>();
+  const fileTargetRevisions = new Map<string, number>();
+  const pendingFileTargetSaves = new Map<string, Promise<SavedSqlFile | undefined>>();
+  const persistedFileTargets = new Map<string, SavedSqlExecutionTargetInput & { updatedAt: string }>();
 
   const version = ref(0);
   function bumpVersion() {
@@ -254,6 +263,79 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     bumpVersion();
     await syncToLocalDirectory();
     return saved;
+  }
+
+  function updateFileExecutionTarget(id: string, target: SavedSqlExecutionTargetInput): Promise<SavedSqlFile | undefined> {
+    const existing = getFile(id);
+    if (!existing) return Promise.resolve(undefined);
+    if (existing.connectionId === target.connectionId && existing.database === target.database && existing.schema === target.schema) {
+      return Promise.resolve(existing);
+    }
+
+    if (!persistedFileTargets.has(id)) {
+      persistedFileTargets.set(id, {
+        connectionId: existing.connectionId,
+        database: existing.database,
+        schema: existing.schema,
+        updatedAt: existing.updatedAt,
+      });
+    }
+    const revision = (fileTargetRevisions.get(id) ?? 0) + 1;
+    fileTargetRevisions.set(id, revision);
+    files.value = files.value.map((file) => (file.id === id ? { ...file, ...target, updatedAt: nowIso() } : file));
+    bumpVersion();
+
+    const previousSave = pendingFileTargetSaves.get(id) ?? Promise.resolve(undefined);
+    const save = previousSave
+      .catch(() => undefined)
+      .then(async () => {
+        if (fileTargetRevisions.get(id) !== revision) return getFile(id);
+
+        const loaded = await ensureFileContent(id);
+        if (!loaded || fileTargetRevisions.get(id) !== revision) return getFile(id);
+
+        const candidate: SavedSqlFile = {
+          ...loaded,
+          ...target,
+          sqlLoaded: true,
+          updatedAt: nowIso(),
+        };
+        files.value = files.value.map((file) => (file.id === id ? candidate : file));
+        bumpVersion();
+
+        try {
+          const saved = await api.saveSavedSqlFile(candidate);
+          persistedFileTargets.set(id, {
+            connectionId: saved.connectionId,
+            database: saved.database,
+            schema: saved.schema,
+            updatedAt: saved.updatedAt,
+          });
+          if (fileTargetRevisions.get(id) !== revision) return getFile(id);
+          const current = getFile(id);
+          const persisted = { ...saved, sql: current?.sql ?? saved.sql, sqlLoaded: current?.sqlLoaded ?? true };
+          files.value = files.value.map((file) => (file.id === id ? persisted : file));
+          bumpVersion();
+          await syncToLocalDirectory();
+          return persisted;
+        } catch (error) {
+          if (fileTargetRevisions.get(id) === revision) {
+            const persistedTarget = persistedFileTargets.get(id);
+            if (persistedTarget) files.value = files.value.map((file) => (file.id === id ? { ...file, ...persistedTarget } : file));
+            bumpVersion();
+          }
+          throw error;
+        }
+      });
+
+    pendingFileTargetSaves.set(id, save);
+    const cleanup = () => {
+      if (pendingFileTargetSaves.get(id) !== save) return;
+      pendingFileTargetSaves.delete(id);
+      persistedFileTargets.delete(id);
+    };
+    void save.then(cleanup, cleanup);
+    return save;
   }
 
   async function renameFile(id: string, name: string) {
@@ -555,10 +637,6 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return allFiles.value.filter((f) => !f.folderId);
   }
 
-  function orphanedFileIds(activeConnectionIds: Set<string>) {
-    return new Set(files.value.filter((f) => !activeConnectionIds.has(f.connectionId)).map((f) => f.id));
-  }
-
   return {
     folders,
     files,
@@ -574,6 +652,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     renameFolder,
     deleteFolder,
     saveFile,
+    updateFileExecutionTarget,
     renameFile,
     recordFileUsage,
     deleteFile,
@@ -588,6 +667,5 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     allFiles,
     filesInFolder,
     filesWithoutFolder,
-    orphanedFileIds,
   };
 });

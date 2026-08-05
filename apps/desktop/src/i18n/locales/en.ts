@@ -151,6 +151,8 @@ export default {
   },
   sqlLibrary: {
     title: "SQL Library",
+    unassociated: "Unassociated",
+    deletedConnection: "Connection deleted",
     openInCurrentDatabase: "Open in Current Database",
     empty: "No saved queries yet",
     emptyFolder: "Empty folder",

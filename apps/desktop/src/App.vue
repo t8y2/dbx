@@ -55,7 +55,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
-import type { ConnectionConfig, ObjectSourceKind, QueryTab, SavedSqlFile } from "@/types/database";
+import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
@@ -838,16 +838,13 @@ async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: bo
   }
 }
 
-function savedSqlTargetForSave(tab: QueryTab, existing?: SavedSqlFile) {
-  return savedSqlDefaultTargetForWrite(
-    {
-      connectionId: tab.connectionId,
-      database: tab.database,
-      schema: tab.schema,
-      catalog: tab.catalog,
-    },
-    existing,
-  );
+function savedSqlTargetForSave(tab: QueryTab) {
+  return savedSqlDefaultTargetForWrite({
+    connectionId: tab.connectionId,
+    database: tab.database,
+    schema: tab.schema,
+    catalog: tab.catalog,
+  });
 }
 
 async function saveTabForCloseAll(tabId: string): Promise<boolean> {
@@ -866,7 +863,7 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
   if (await saveExternalSqlPath(tab)) return !queryStore.isTabDirty(tab);
 
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
-  const target = savedSqlTargetForSave(tab, existing);
+  const target = savedSqlTargetForSave(tab);
   try {
     const saved = await savedSqlStore.saveFile({
       id: existing?.id,
@@ -933,7 +930,7 @@ async function handleSaveTab(tabId: string) {
   }
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
-    const target = savedSqlTargetForSave(tab, existing);
+    const target = savedSqlTargetForSave(tab);
     const updated = await savedSqlStore.saveFile({
       id: existing.id,
       connectionId: target.connectionId,
@@ -969,7 +966,7 @@ async function openSaveSqlDialog() {
   if (await saveExternalSqlPath(tab)) return;
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
-    const target = savedSqlTargetForSave(tab, existing);
+    const target = savedSqlTargetForSave(tab);
     const updated = await savedSqlStore.saveFile({
       id: existing.id,
       connectionId: target.connectionId,
@@ -1063,8 +1060,7 @@ async function confirmSaveSqlToLibrary() {
   const name = saveSqlName.value.trim();
   if (!tab || !tab.sql.trim() || !name) return;
   try {
-    const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
-    const target = savedSqlTargetForSave(tab, existing);
+    const target = savedSqlTargetForSave(tab);
     const saved = await savedSqlStore.saveFile({
       id: tab.savedSqlId,
       connectionId: target.connectionId,

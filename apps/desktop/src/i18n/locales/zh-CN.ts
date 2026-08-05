@@ -153,6 +153,8 @@ export default withEnglishFallback({
   },
   sqlLibrary: {
     title: "SQL 库",
+    unassociated: "未关联",
+    deletedConnection: "连接已删除",
     openInCurrentDatabase: "在当前库中打开",
     empty: "暂无已保存的查询",
     emptyFolder: "空文件夹",

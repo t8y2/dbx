@@ -1005,6 +1005,7 @@ export const useConnectionStore = defineStore("connection", () => {
       spark: "Apache Spark",
       db2: "DB2",
       informix: "Informix",
+      phoenix: "Apache Phoenix",
       neo4j: "Neo4j",
       cassandra: "Cassandra",
       bigquery: "BigQuery",

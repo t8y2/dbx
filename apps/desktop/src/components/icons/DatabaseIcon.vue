@@ -55,6 +55,7 @@ const assetIcons: Record<string, string> = {
   prestosql: "presto",
   hive: "hive",
   hbase: "hbase",
+  phoenix: "phoenix",
   spark: "spark-logo.png",
   apache_kylin: "apache_kylin",
   sundb: "sundb",

@@ -910,7 +910,6 @@ func buildDSNWithSSLMode(cp connectParams, sslMode string) string {
 		"password=" + quoteDSNValue(cp.Password),
 		"dbname=" + quoteDSNValue(cp.Database),
 		"sslmode=" + sslMode,
-		"connect_timeout=15",
 	}
 	if cp.CACertPath != "" {
 		parts = append(parts, "sslrootcert="+quoteDSNValue(cp.CACertPath))
@@ -921,11 +920,15 @@ func buildDSNWithSSLMode(cp connectParams, sslMode string) string {
 	if cp.ClientKeyPath != "" {
 		parts = append(parts, "sslkey="+quoteDSNValue(cp.ClientKeyPath))
 	}
-	for _, pair := range strings.FieldsFunc(cp.URLParams, func(r rune) bool { return r == '&' || r == ';' }) {
-		key, value, ok := strings.Cut(pair, "=")
-		if ok && isSafeParamKey(key) && !strings.EqualFold(strings.TrimSpace(key), "sslmode") {
-			parts = append(parts, strings.TrimSpace(key)+"="+quoteDSNValue(strings.TrimSpace(value)))
-		}
+	// Classify and de-duplicate the app-supplied url_params. The connect_timeout
+	// default is only applied when the user did not provide one (natively or via
+	// the connectTimeout alias), so the parameter is never emitted twice.
+	urlParams := normalizeURLParams(cp.URLParams)
+	if !hasDSNParam(urlParams, "connect_timeout") {
+		parts = append(parts, "connect_timeout=15")
+	}
+	for _, p := range urlParams {
+		parts = append(parts, p.key+"="+quoteDSNValue(p.value))
 	}
 	return strings.Join(parts, " ")
 }
@@ -1000,18 +1003,38 @@ func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 	if strings.HasPrefix(strings.ToLower(value), "kingbase://") {
 		baseAndQuery, fragment, hasFragment := strings.Cut(value, "#")
 		base, query, hasQuery := strings.Cut(baseAndQuery, "?")
-		pairs := make([]string, 0)
+		params := make([]dsnParam, 0)
 		if hasQuery {
 			for _, pair := range strings.Split(query, "&") {
-				key, _, _ := strings.Cut(pair, "=")
-				decodedKey, err := url.QueryUnescape(key)
-				if err == nil && strings.EqualFold(decodedKey, "sslmode") {
+				if pair == "" {
 					continue
 				}
-				if pair != "" {
-					pairs = append(pairs, pair)
+				rawKey, rawValue, _ := strings.Cut(pair, "=")
+				decodedKey, err := url.QueryUnescape(rawKey)
+				if err != nil {
+					decodedKey = rawKey
 				}
+				if strings.EqualFold(strings.TrimSpace(decodedKey), "sslmode") {
+					continue
+				}
+				decodedValue, err := url.QueryUnescape(rawValue)
+				if err != nil {
+					decodedValue = rawValue
+				}
+				nativeKey, keep := classifyDSNParam(decodedKey, decodedValue)
+				if !keep {
+					continue
+				}
+				params = append(params, dsnParam{
+					key:       nativeKey,
+					value:     rawValue, // preserve the original percent-encoding
+					fromAlias: !strings.EqualFold(strings.TrimSpace(decodedKey), nativeKey),
+				})
 			}
+		}
+		pairs := make([]string, 0, len(params)+1)
+		for _, p := range mergeDSNParams(params) {
+			pairs = append(pairs, url.QueryEscape(p.key)+"="+p.value)
 		}
 		pairs = append(pairs, "sslmode="+url.QueryEscape(sslMode))
 		result := base + "?" + strings.Join(pairs, "&")
@@ -1022,14 +1045,32 @@ func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 	}
 
 	fields := splitNativeDSNFields(value)
-	result := make([]string, 0, len(fields)+1)
+	params := make([]dsnParam, 0, len(fields))
+	passthrough := make([]string, 0)
 	for _, field := range fields {
-		key, _, ok := strings.Cut(field, "=")
-		if ok && strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+		key, rawValue, ok := strings.Cut(field, "=")
+		if !ok {
+			passthrough = append(passthrough, field)
 			continue
 		}
-		result = append(result, field)
+		if strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			continue
+		}
+		nativeKey, keep := classifyDSNParam(key, unquoteNativeDSNValue(rawValue))
+		if !keep {
+			continue
+		}
+		params = append(params, dsnParam{
+			key:       nativeKey,
+			value:     rawValue, // preserve the original quoting
+			fromAlias: !strings.EqualFold(strings.TrimSpace(key), nativeKey),
+		})
 	}
+	result := make([]string, 0, len(params)+len(passthrough)+1)
+	for _, p := range mergeDSNParams(params) {
+		result = append(result, p.key+"="+p.value)
+	}
+	result = append(result, passthrough...)
 	result = append(result, "sslmode="+sslMode)
 	return strings.Join(result, " ")
 }
@@ -1102,6 +1143,87 @@ func quoteDSNValue(value string) string {
 	return "'" + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), "'", `\'`) + "'"
 }
 
+// supportedDSNParams is the curated set of parameters known to be understood by
+// the gokb driver or the Kingbase server. It is no longer a strict allow-list:
+// classifyDSNParam also forwards unknown lower_snake_case names to the server as
+// run-time parameters, because gokb passes every non-driver-setting to the
+// startup packet (conn.go startup()). This set is what classifyDSNParam treats
+// as definitely native, which short-circuits the camelCase JDBC heuristic so
+// CamelCase GUCs such as DateStyle/TimeZone are still forwarded rather than
+// dropped.
+//
+// The list mirrors the driver's own surface:
+//   - gokb conn.go isDriverSetting(): host, port, password, sslmode, sslcert,
+//     sslkey, sslrootcert, fallback_application_name, connect_timeout,
+//     disable_prepared_binary_result, binary_parameters, krbsrvname, krbspn;
+//   - the standard startup keywords user and dbname;
+//   - connector.go special handling: client_encoding (must be UTF8),
+//     datestyle, extra_float_digits;
+//   - common Kingbase/PostgreSQL run-time parameters that can be set in the
+//     startup packet: application_name, options, search_path,
+//     statement_timeout, work_mem, timezone and friends.
+var supportedDSNParams = map[string]struct{}{
+	// gokb driver settings (conn.go isDriverSetting) and startup keywords
+	"host":                           {},
+	"port":                           {},
+	"user":                           {},
+	"password":                       {},
+	"dbname":                         {},
+	"sslmode":                        {},
+	"sslcert":                        {},
+	"sslkey":                         {},
+	"sslrootcert":                    {},
+	"fallback_application_name":      {},
+	"connect_timeout":                {},
+	"disable_prepared_binary_result": {},
+	"binary_parameters":              {},
+	"krbsrvname":                     {},
+	"krbspn":                         {},
+
+	// connector.go special handling
+	"client_encoding":    {},
+	"datestyle":          {},
+	"extra_float_digits": {},
+
+	// Common run-time parameters the Kingbase server accepts in the startup
+	// packet (PostgreSQL-compatible GUCs).
+	"application_name":                    {},
+	"options":                             {},
+	"search_path":                         {},
+	"statement_timeout":                   {},
+	"lock_timeout":                        {},
+	"idle_in_transaction_session_timeout": {},
+	"idle_session_timeout":                {},
+	"work_mem":                            {},
+	"maintenance_work_mem":                {},
+	"temp_buffers":                        {},
+	"effective_cache_size":                {},
+	"timezone":                            {},
+	"intervalstyle":                       {},
+	"lc_messages":                         {},
+	"lc_monetary":                         {},
+	"lc_numeric":                          {},
+	"lc_time":                             {},
+	"default_transaction_isolation":       {},
+	"default_transaction_read_only":       {},
+	"default_transaction_deferrable":      {},
+	"synchronous_commit":                  {},
+	"client_min_messages":                 {},
+	"standard_conforming_strings":         {},
+	"xmloption":                           {},
+	"role":                                {},
+	"session_replication_role":            {},
+	"default_tablespace":                  {},
+	"temp_tablespaces":                    {},
+	"default_table_access_method":         {},
+	"max_parallel_workers_per_gather":     {},
+}
+
+func isSupportedDSNParam(key string) bool {
+	_, ok := supportedDSNParams[strings.ToLower(strings.TrimSpace(key))]
+	return ok
+}
+
 func isSafeParamKey(value string) bool {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1113,6 +1235,189 @@ func isSafeParamKey(value string) bool {
 		}
 	}
 	return true
+}
+
+// dsnParam is a single normalized connection parameter ready to be emitted into
+// a DSN. value carries the surface-specific text (single-quoted for keyword
+// DSNs, percent-encoded for kingbase:// URLs, raw for url_params) so callers can
+// preserve the original quoting/encoding when only the key was rewritten.
+type dsnParam struct {
+	key       string
+	value     string
+	fromAlias bool
+}
+
+// jdbcAliasParams maps a lowercased JDBC property to the native gokb/server
+// parameter with equivalent semantics. clientEncoding is handled separately in
+// classifyDSNParam because it also has to validate the value.
+var jdbcAliasParams = map[string]string{
+	"connecttimeout":  "connect_timeout", // both measured in seconds
+	"currentschema":   "search_path",     // both accept a comma-separated list
+	"applicationname": "application_name",
+}
+
+// jdbcOnlyParams lists client-side JDBC/driver properties that have no meaning to
+// the Kingbase server. gokb forwards every non-driver-setting to the startup
+// packet, so a value the server does not recognize fails the whole connection
+// with "unrecognized configuration parameter". camelCase names are also caught by
+// the heuristic in classifyDSNParam; this set additionally covers the lowercase
+// JDBC properties the heuristic cannot detect and documents intent for the common
+// MySQL/JDBC-style names.
+var jdbcOnlyParams = map[string]struct{}{
+	"usessl":                   {},
+	"autoreconnect":            {},
+	"characterencoding":        {},
+	"servertimezone":           {},
+	"rewritebatchedstatements": {},
+	"useserverprepstmts":       {},
+	"sockettimeout":            {},
+	"usecompression":           {},
+	"zerodatetimebehavior":     {},
+	"useaffectedrows":          {},
+	"usecursorfetch":           {},
+	"defaultfetchsize":         {},
+	"allowmultiqueries":        {},
+	"useunicode":               {},
+	// Lowercase PgJDBC/Kingbase-JDBC client properties the camelCase heuristic
+	// would otherwise forward and break the connection.
+	"ssl":             {},
+	"sslfactory":      {},
+	"stringtype":      {},
+	"gsslib":          {},
+	"sspiservicename": {},
+	"protocolversion": {},
+	"loglevel":        {},
+}
+
+// classifyDSNParam decides how one connection parameter should be treated and
+// returns the native parameter name to emit plus whether to keep it. sslmode is
+// handled separately by the callers and must not be passed here. decodedValue is
+// the already-unquoted/decoded value, used only for the client_encoding check.
+func classifyDSNParam(key, decodedValue string) (nativeKey string, keep bool) {
+	trimmed := strings.TrimSpace(key)
+	if !isSafeParamKey(trimmed) {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+
+	// client_encoding (native, or via the clientEncoding alias): gokb only
+	// accepts UTF-8, so map compatible values and drop everything else — a
+	// non-UTF8 value would otherwise fail the whole connection.
+	if lower == "client_encoding" || lower == "clientencoding" {
+		if isUTF8Encoding(decodedValue) {
+			return "client_encoding", true
+		}
+		return "", false
+	}
+
+	// JDBC properties with a direct native equivalent.
+	if native, ok := jdbcAliasParams[lower]; ok {
+		return native, true
+	}
+
+	// Curated native/server parameters are always forwarded. Matching here also
+	// keeps CamelCase GUCs such as DateStyle/TimeZone from being mistaken for JDBC
+	// camelCase properties by the heuristic below.
+	if isSupportedDSNParam(lower) {
+		return lower, true
+	}
+
+	// Known JDBC-only client properties never reach the server.
+	if _, ok := jdbcOnlyParams[lower]; ok {
+		return "", false
+	}
+
+	// Unknown parameter. Server GUCs are conventionally lower_snake_case while
+	// JDBC properties are camelCase, so forward snake_case names as run-time
+	// parameters (gokb passes them to the startup packet) and drop names carrying
+	// an uppercase letter as presumed client-side JDBC settings.
+	if hasUpperASCII(trimmed) {
+		return "", false
+	}
+	return lower, true
+}
+
+// mergeDSNParams applies duplicate-parameter precedence: an explicit native
+// parameter beats a JDBC alias for the same key, and within the same class the
+// first occurrence wins to preserve gokb's existing DSN behavior. Output order
+// follows each key's first appearance.
+func mergeDSNParams(params []dsnParam) []dsnParam {
+	result := make([]dsnParam, 0, len(params))
+	pos := make(map[string]int, len(params))
+	for _, p := range params {
+		if i, ok := pos[p.key]; ok {
+			// A later explicit native parameter may replace an earlier alias, but
+			// same-class duplicates keep the first value just as gokb does.
+			if result[i].fromAlias && !p.fromAlias {
+				result[i] = p
+			}
+			continue
+		}
+		pos[p.key] = len(result)
+		result = append(result, p)
+	}
+	return result
+}
+
+// normalizeURLParams classifies and de-duplicates the app-supplied url_params
+// blob (a &/;-separated key=value list), excluding sslmode which is handled
+// separately. Values are kept raw for later single-quoting.
+func normalizeURLParams(raw string) []dsnParam {
+	params := make([]dsnParam, 0)
+	for _, pair := range strings.FieldsFunc(raw, func(r rune) bool { return r == '&' || r == ';' }) {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			continue
+		}
+		val := strings.TrimSpace(value)
+		nativeKey, keep := classifyDSNParam(key, val)
+		if !keep {
+			continue
+		}
+		params = append(params, dsnParam{
+			key:       nativeKey,
+			value:     val,
+			fromAlias: !strings.EqualFold(strings.TrimSpace(key), nativeKey),
+		})
+	}
+	return mergeDSNParams(params)
+}
+
+func hasDSNParam(params []dsnParam, key string) bool {
+	for _, p := range params {
+		if p.key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUpperASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 'A' && value[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+// isUTF8Encoding mirrors gokb's isUTF8: it recognizes fuzzy variants of "UTF-8"
+// (dropping non-alphanumerics, case-insensitively) as well as "unicode".
+func isUTF8Encoding(name string) bool {
+	var b strings.Builder
+	for _, ch := range name {
+		switch {
+		case ch >= 'A' && ch <= 'Z':
+			b.WriteRune(ch + ('a' - 'A'))
+		case ch >= 'a' && ch <= 'z', ch >= '0' && ch <= '9':
+			b.WriteRune(ch)
+		}
+	}
+	s := b.String()
+	return s == "utf8" || s == "unicode"
 }
 
 func normalizeValue(value any) any {

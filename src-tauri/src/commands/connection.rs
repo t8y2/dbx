@@ -1098,6 +1098,17 @@ async fn test_connection_with_info_inner(
                 Err("Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
                     .to_string())
             }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::Mqtt => {
+                let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
+                let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                client.disconnect().await;
+                Ok("Connection successful".to_string())
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::Mqtt => {
+                Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string())
+            }
             db_type if database_capabilities::is_agent_type(&db_type) => {
                 match test_agent_connection(state, &config, &host, port).await {
                     Ok(details) => {
@@ -1449,6 +1460,16 @@ pub async fn connect_db(
             state.external_driver_pool("jdbc", &jdbc_config).await?
         }
         DatabaseType::Jdbc => state.external_driver_pool("jdbc", &db_config).await?,
+        #[cfg(feature = "mq-admin")]
+        DatabaseType::Mqtt => {
+            let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&db_config)?;
+            let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+            PoolKind::Mqtt(client)
+        }
+        #[cfg(not(feature = "mq-admin"))]
+        DatabaseType::Mqtt => {
+            return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
+        }
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 

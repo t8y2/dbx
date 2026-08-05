@@ -44,6 +44,9 @@ export function buildProcedureExecutionSqlFromValues(options: BuildRoutineExecut
   if (options.databaseType === "sqlserver") {
     return buildSqlServerProcedureExecutionSql(routine, sortedParameters);
   }
+  if (options.databaseType === "mysql") {
+    return buildMySqlProcedureExecutionSql(routine, sortedParameters);
+  }
   const values = sortedParameters.filter((parameter) => shouldIncludeParameter(parameter));
   const useNamedArguments = shouldUseNamedArguments(options.databaseType, sortedParameters);
   if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
@@ -75,6 +78,34 @@ export function routineParameterSqlValue(databaseType: DatabaseType | undefined,
 
 function sqlServerParameterName(name: string): string {
   return name.startsWith("@") ? name : `@${name}`;
+}
+
+function buildMySqlProcedureExecutionSql(routine: string, sortedParameters: RoutineParameterValue[]): string {
+  const outputBindings = new Map<RoutineParameterValue, { variableName: string; alias: string }>();
+  const initializations: string[] = [];
+
+  sortedParameters.forEach((parameter, index) => {
+    if (!returnsRoutineOutput(parameter)) return;
+    const variableName = `@dbx_output_${index + 1}`;
+    const initialValue = parameter.mode === "INOUT" ? routineParameterSqlValue("mysql", parameter) : "NULL";
+    initializations.push(`SET ${variableName} = ${initialValue};`);
+    outputBindings.set(parameter, {
+      variableName,
+      alias: quoteTableIdentifier("mysql", parameter.name.replace(/^@/, "") || `output_${index + 1}`),
+    });
+  });
+
+  const args = sortedParameters.flatMap((parameter) => {
+    const outputBinding = outputBindings.get(parameter);
+    if (outputBinding) return [outputBinding.variableName];
+    if (!shouldIncludeParameter(parameter)) return [];
+    return [routineParameterSqlValue("mysql", parameter)];
+  });
+  const statements = [...initializations, `CALL ${routine}(${args.join(", ")});`];
+  if (outputBindings.size > 0) {
+    statements.push(`SELECT ${[...outputBindings.values()].map(({ variableName, alias }) => `${variableName} AS ${alias}`).join(", ")};`);
+  }
+  return statements.join("\n");
 }
 
 function buildSqlServerProcedureExecutionSql(routine: string, sortedParameters: RoutineParameterValue[]): string {

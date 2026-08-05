@@ -44,8 +44,12 @@ pub mod mongo_ops;
 pub mod mongo_shell;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
+#[cfg(feature = "mq-admin")]
+pub mod mqtt;
 pub(crate) mod mysql_ddl_normalize;
 pub mod nacos;
+#[cfg(all(target_os = "windows", target_env = "gnu"))]
+mod nanosleep_stub;
 pub mod object_source_sql;
 pub mod path_utils;
 pub mod plugins;

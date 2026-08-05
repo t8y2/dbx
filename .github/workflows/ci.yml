@@ -101,6 +101,7 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v5
 
@@ -118,35 +119,72 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup Rust for standard Windows
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Check standard Windows dependency path
+        run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
+
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
 
+      - name: Prepare Win7-compatible WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
+
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
+
       - name: Build frontend
         run: pnpm build
 
       - name: Build DBX for Windows 7
-        run: cargo build --locked --package dbx --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
-
-      - name: Prepare WebView2 109 offline runtime
         shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+        run: |
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
-      - name: Bundle Windows 7 offline installer
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
+      - name: Bundle Windows 7 fixed-runtime installer
         shell: pwsh
         run: |
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-offline.conf.json
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-fixed.conf.json
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
           if (!$installer) {
-            Write-Error "Missing Windows 7 WebView2 offline installer in ${bundleDir}"
+            Write-Error "Missing Windows 7 fixed-runtime installer in ${bundleDir}"
             exit 1
           }
           Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+
+      - name: Audit Windows 7 installer contents
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "target/x86_64-win7-windows-msvc/release/bundle/nsis" -Filter "*.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
+
+      - name: Upload Windows 7 test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBX-win7-fixed-runtime-test
+          path: target/x86_64-win7-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
 
   duckdb-windows-driver:
     needs: changes
@@ -453,6 +491,7 @@ jobs:
             rust:
               - 'crates/**'
               - 'src-tauri/**'
+              - 'vendor/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain*'
@@ -488,16 +527,27 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/update-nix-pnpm-hash.yml'
             windows_win7_bundle:
+              - '.github/scripts/assert-win7-pe-compat.ps1'
+              - '.github/scripts/assert-win7-installer-content.ps1'
+              - '.github/scripts/assert-webview2-win7-runtime.ps1'
+              - '.github/scripts/prepare-webview2-win7-loader.ps1'
               - '.github/scripts/prepare-webview2-win7-runtime.ps1'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'
-              - 'src-tauri/tauri.webview2-win7-offline.conf.json'
+              - 'src-tauri/tauri.webview2-win7-fixed.conf.json'
+              - 'src-tauri/build.rs'
+              - 'src-tauri/Cargo.toml'
               - 'src-tauri/windows/nsis/**'
               - 'src-tauri/src/commands/update.rs'
+              - 'crates/dbx-core/Cargo.toml'
+              - 'crates/dbx-core/src/db/postgres.rs'
               - 'crates/dbx-core/src/update.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'vendor/ctor/**'
+              - 'vendor/dirs-sys/**'
+              - 'vendor/pageant/**'
+              - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
               - '.github/workflows/ci.yml'
@@ -522,13 +572,13 @@ jobs:
 
             while IFS= read -r file; do
               case "$file" in
-                Cargo.toml|Cargo.lock|rust-toolchain*|.github/workflows/ci.yml|*/Cargo.toml)
+                Cargo.toml|Cargo.lock|rust-toolchain*|.github/workflows/ci.yml|*/Cargo.toml|vendor/*)
                   full=true
                   break
                   ;;
               esac
 
-            done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri .github/workflows/ci.yml)
+            done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri vendor .github/workflows/ci.yml)
           fi
 
           echo "full=$full" >> "$GITHUB_OUTPUT"
@@ -554,7 +604,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.24.x"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -574,6 +624,9 @@ jobs:
 
       - name: DuckDB driver tests
         run: cargo test --manifest-path drivers/duckdb/Cargo.toml --locked
+
+      - name: TDengine driver tests
+        run: cargo test --manifest-path drivers/tdengine/Cargo.toml --locked
 
       - name: Agent validation
         run: python3 scripts/validate_agents.py
@@ -598,6 +651,10 @@ jobs:
         run: go test ./...
         working-directory: agents/drivers/vastbase-go
 
+      - name: Neo4j native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/neo4j-go
+
       - name: Oracle native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-oracle-linux-x64 .
         working-directory: agents/drivers/oracle-go
@@ -617,6 +674,59 @@ jobs:
       - name: Vastbase native agent build
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-vastbase-linux-x64 .
         working-directory: agents/drivers/vastbase-go
+
+      - name: Neo4j native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-neo4j-linux-x64 .
+        working-directory: agents/drivers/neo4j-go
+
+      - name: TDengine native agent build
+        run: cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
+
+      - name: TDengine native agent integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r version image; do
+            name="dbx-tdengine-${version//./-}"
+            docker rm -fv "$name" >/dev/null 2>&1 || true
+            docker run -d --name "$name" \
+              --memory 4g \
+              --ulimit nofile=65535:65535 \
+              -p 6030:6030 \
+              -p 6041:6041 \
+              "$image"
+            cleanup() {
+              docker rm -fv "$name" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            ready=false
+            dnodes=""
+            for _ in $(seq 1 90); do
+              dnodes="$(docker exec "$name" taos -s 'SHOW DNODES' 2>/dev/null || true)"
+              if grep -Eq '\|[[:space:]]*ready[[:space:]]*\|' <<<"$dnodes"; then
+                ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != "true" ]; then
+              printf '%s\n' "$dnodes"
+              docker logs "$name"
+              exit 1
+            fi
+            TDENGINE_INTEGRATION=1 \
+              TDENGINE_TEST_HOST=127.0.0.1 \
+              TDENGINE_TEST_PORT=6041 \
+              cargo test --manifest-path drivers/tdengine/Cargo.toml --locked --test live -- --nocapture
+            cleanup
+            trap - EXIT
+          done <<'EOF'
+          2.4.0.14|tdengine/tdengine:2.4.0.14
+          2.6.0.34|tdengine/tdengine:2.6.0.34
+          3.0.7.1|tdengine/tdengine:3.0.7.1
+          3.3.6.13|tdengine/tdengine:3.3.6.13
+          3.4.2.2|tdengine/tsdb:3.4.2.2
+          EOF
 
       - name: Cassandra native agent integration tests
         shell: bash

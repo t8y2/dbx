@@ -84,6 +84,14 @@ type indexInfo struct {
 	Comment         *string  `json:"comment"`
 }
 
+type vastbaseCatalogIndex struct {
+	name          string
+	indexType     string
+	unique        bool
+	primary       bool
+	columnNumbers string
+}
+
 func (i indexInfo) MarshalJSON() ([]byte, error) {
 	type alias indexInfo
 	value := alias(i)
@@ -647,38 +655,92 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	byName := map[string]*indexInfo{}
-	order := []string{}
+	catalogIndexes := []vastbaseCatalogIndex{}
+	attributes := map[int]string{}
 	for rows.Next() {
-		var name, kind, column string
+		var rowKind, attributeNumber int
+		var name, kind, columnNumbers, column string
 		var unique, primary bool
-		var ordinal int
-		if err := rows.Scan(&name, &kind, &unique, &primary, &column, &ordinal); err != nil {
+		if err := rows.Scan(&rowKind, &name, &kind, &unique, &primary, &columnNumbers, &attributeNumber, &column); err != nil {
 			return nil, err
 		}
-		item := byName[name]
-		if item == nil {
-			item = &indexInfo{Name: name, IsUnique: unique, IsPrimary: primary, IndexType: stringPtr(kind), Columns: []string{}, IncludedColumns: []string{}}
-			byName[name] = item
-			order = append(order, name)
+		if rowKind == 0 {
+			catalogIndexes = append(catalogIndexes, vastbaseCatalogIndex{name: name, indexType: kind, unique: unique, primary: primary, columnNumbers: columnNumbers})
+		} else if attributeNumber > 0 && column != "" {
+			attributes[attributeNumber] = column
 		}
-		item.Columns = append(item.Columns, column)
 	}
-	result := make([]indexInfo, 0, len(order))
-	for _, name := range order {
-		result = append(result, *byName[name])
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	return result, rows.Err()
+	return buildVastbaseIndexInfos(catalogIndexes, attributes), nil
 }
 
 func vastbaseListIndexesQuery(catalog, prefix, schema, table string) string {
-	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, a.attname, pos.n
+	return fmt.Sprintf(`SELECT 0 AS row_kind, i.relname AS index_name, am.amname AS index_type,
+ix.indisunique AS is_unique, ix.indisprimary AS is_primary,
+CAST(ix.indkey AS VARCHAR) AS column_numbers, 0 AS attribute_number, '' AS column_name
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
 JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
 JOIN %s.%s_am am ON am.oid = i.relam
-JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum,n) ON true
-JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
-WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname, pos.n`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE n.nspname = %s AND t.relname = %s
+UNION ALL
+SELECT 1 AS row_kind, '' AS index_name, '' AS index_type,
+false AS is_unique, false AS is_primary, '' AS column_numbers,
+a.attnum AS attribute_number, a.attname AS column_name
+FROM %s.%s_attribute a JOIN %s.%s_class t ON t.oid = a.attrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname = %s AND t.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY row_kind, index_name, attribute_number`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table), catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+}
+
+func buildVastbaseIndexInfos(catalogIndexes []vastbaseCatalogIndex, attributes map[int]string) []indexInfo {
+	result := make([]indexInfo, 0, len(catalogIndexes))
+	for _, catalogIndex := range catalogIndexes {
+		columns := mapVastbaseIndexColumns(catalogIndex.columnNumbers, attributes)
+		if len(columns) == 0 {
+			continue
+		}
+		result = append(result, indexInfo{
+			Name:            catalogIndex.name,
+			Columns:         columns,
+			IsUnique:        catalogIndex.unique,
+			IsPrimary:       catalogIndex.primary,
+			IndexType:       stringPtr(catalogIndex.indexType),
+			IncludedColumns: []string{},
+		})
+	}
+	return result
+}
+
+func mapVastbaseIndexColumns(rawColumnNumbers string, attributes map[int]string) []string {
+	columnNumbers := parseVastbaseAttributeNumbers(rawColumnNumbers)
+	if len(columnNumbers) == 0 {
+		return nil
+	}
+	columns := make([]string, 0, len(columnNumbers))
+	for _, columnNumber := range columnNumbers {
+		column, ok := attributes[columnNumber]
+		if columnNumber <= 0 || !ok {
+			return nil
+		}
+		columns = append(columns, column)
+	}
+	return columns
+}
+
+func parseVastbaseAttributeNumbers(raw string) []int {
+	fields := strings.FieldsFunc(raw, func(char rune) bool {
+		return char != '-' && (char < '0' || char > '9')
+	})
+	result := make([]int, 0, len(fields))
+	for _, field := range fields {
+		value, err := strconv.Atoi(field)
+		if err == nil {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func vastbaseCatalogFunction(catalog, sysFunction, postgresFunction string) string {

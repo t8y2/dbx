@@ -4,7 +4,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, FileArchive } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -156,6 +156,10 @@ const selectedMemberContext = ref<RedisMemberContext | null>(null);
 const isEditingMember = ref(false);
 const savingMember = ref(false);
 const memberEditValue = ref("");
+const editingZsetMemberKey = ref<string | null>(null);
+const savingZsetMember = ref(false);
+const zsetInlineMember = ref("");
+const zsetInlineScore = ref("");
 const hashTableRef = ref<HTMLElement | null>(null);
 const hashFieldWidth = ref(280);
 const isResizingHashColumns = ref(false);
@@ -358,6 +362,7 @@ function handleDocumentVisibilityChange() {
 
 const hashSortBy = ref<"field" | "value" | null>(null);
 const hashSortDir = ref<"asc" | "desc">("asc");
+const zsetSortDir = ref<"asc" | "desc">("asc");
 /**
  * In-content find (Ctrl+F) for:
  * - Redis STRING keys
@@ -388,6 +393,18 @@ function toggleHashSort(column: "field" | "value") {
   } else {
     hashSortBy.value = column;
     hashSortDir.value = "asc";
+  }
+}
+
+async function toggleZsetSort() {
+  if (redisKind.value !== "zset" || loading.value || loadingMore.value || editingZsetMemberKey.value !== null) return;
+  const previousDirection = zsetSortDir.value;
+  zsetSortDir.value = previousDirection === "asc" ? "desc" : "asc";
+  try {
+    await load({ notifyParent: false });
+  } catch (error) {
+    zsetSortDir.value = previousDirection;
+    toast(errorMessage(error), 3000);
   }
 }
 
@@ -480,14 +497,14 @@ const hasRetainedMemberDraft = computed(() => {
   }
   return memberEditValue.value !== original;
 });
-const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value);
+const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value || editingZsetMemberKey.value !== null);
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const collectionTotal = computed(() => (data.value ? redisValueCollectionTotal(data.value) : null));
 const hashGridStyle = computed(() => ({
   gridTemplateColumns: `${hashFieldWidth.value}px minmax(12rem, 1fr) 84px`,
 }));
 const zsetGridStyle = computed(() => ({
-  gridTemplateColumns: `${zsetScoreWidth.value}px minmax(0, 1fr) 84px`,
+  gridTemplateColumns: `60px ${zsetScoreWidth.value}px minmax(0, 1fr) 104px`,
 }));
 const metadataSizeLabel = computed(() => {
   const metadata = props.metadata;
@@ -548,14 +565,33 @@ const setRows = computed<RedisCollectionRow<RedisSetItem>[]>(() =>
       }))
     : [],
 );
+function zsetScoreValue(score: string): number {
+  const normalized = score.toLowerCase();
+  if (normalized === "-inf") return -Infinity;
+  if (normalized === "inf" || normalized === "+inf") return Infinity;
+  return Number(score);
+}
+
+function isValidZsetScore(score: string): boolean {
+  const normalized = score.toLowerCase();
+  return normalized === "-inf" || normalized === "inf" || normalized === "+inf" || Number.isFinite(Number(score));
+}
+
+const sortedZsetItems = computed<RedisZsetItem[]>(() => {
+  if (redisKind.value !== "zset") return [];
+  const multiplier = zsetSortDir.value === "asc" ? 1 : -1;
+  return [...(collectionItems.value as RedisZsetItem[])].sort((a, b) => {
+    const difference = zsetScoreValue(a.score) - zsetScoreValue(b.score);
+    return Number.isNaN(difference) ? a.score.localeCompare(b.score) * multiplier : difference * multiplier;
+  });
+});
+
 const zsetRows = computed<RedisCollectionRow<RedisZsetItem>[]>(() =>
-  redisKind.value === "zset"
-    ? (collectionItems.value as RedisZsetItem[]).map((value, index) => ({
-        id: collectionRowId(value, index),
-        index,
-        value,
-      }))
-    : [],
+  sortedZsetItems.value.map((value, index) => ({
+    id: collectionRowId(value, index),
+    index,
+    value,
+  })),
 );
 
 const usesJsonEditorForMain = computed(() => (isStringLikeKind.value && stringValueView.value === "json" && Boolean(stringValueDetail.value?.json)) || redisKind.value === "json");
@@ -607,7 +643,7 @@ let zsetResizeStartWidth = 0;
 function shouldPauseAutoValueRefresh(): boolean {
   const loadedPageSize = data.value ? redisValueCollectionItems(data.value).length : 0;
   const hasExpandedCollectionPage = collectionItems.value.length > loadedPageSize;
-  return showMemberDetail.value || valueSearchOpen.value || Boolean(hashSearchQuery.value.trim()) || Boolean(activeHashSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
+  return showMemberDetail.value || editingZsetMemberKey.value !== null || valueSearchOpen.value || Boolean(hashSearchQuery.value.trim()) || Boolean(activeHashSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
 }
 
 type PendingDelete = { kind: "key" } | { kind: "hash"; field: string } | { kind: "list"; index: number } | { kind: "set"; member: string } | { kind: "zset"; member: string };
@@ -1168,7 +1204,20 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
   const requestId = ++loadRequestId;
   if (!background) loading.value = true;
   try {
-    const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
+    let loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
+    if (loadedValue.data.kind === "zset" && zsetSortDir.value === "desc") {
+      const sortedPage = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, "zset", 0, 200, undefined, "desc");
+      if (sortedPage.kind === "zset") {
+        loadedValue = {
+          ...loadedValue,
+          data: {
+            ...loadedValue.data,
+            items: sortedPage.items,
+            scan_cursor: sortedPage.scan_cursor,
+          },
+        };
+      }
+    }
     if (requestId !== loadRequestId || (options.shouldApply && !options.shouldApply())) return false;
 
     // Redis reports a key that expired between refreshes as a `none` value.
@@ -1178,6 +1227,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       // the draft and defer even a missing-key update until the user decides
       // whether to save or discard it.
       if (background && options.preserveDraft && hasUnsavedRedisDraft.value) return false;
+      resetZsetInlineEdit();
       data.value = null;
       collectionItems.value = [];
       scanCursor.value = undefined;
@@ -1211,6 +1261,9 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
     if (notifyParent) emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
     collectionItems.value = redisValueCollectionItems(loadedValue);
+    if (editingZsetMemberKey.value !== null && (loadedValue.data.kind !== "zset" || !loadedValue.data.items.some((item) => zsetInlineEditKey(item) === editingZsetMemberKey.value))) {
+      resetZsetInlineEdit();
+    }
     replaceStreamEntries(loadedValue);
     if (loadedValue.data.kind !== "stream") resetStreamMonitoring();
 
@@ -1260,7 +1313,8 @@ async function loadMore() {
   const requestId = hashSearchRequestId;
   loadingMore.value = true;
   try {
-    const result = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, keyType, scanCursor.value!, 200, hashFilter);
+    const sortDirection = keyType === "zset" ? zsetSortDir.value : undefined;
+    const result = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, keyType, scanCursor.value!, 200, hashFilter, sortDirection);
     if (keyType === "hash" && requestId !== hashSearchRequestId) return;
     const newItems = redisCollectionPageItems(result);
     collectionItems.value = [...collectionItems.value, ...newItems];
@@ -1515,6 +1569,7 @@ function stopResizeHashColumns() {
   isResizingHashColumns.value = false;
   window.removeEventListener("pointermove", resizeHashColumns);
   window.removeEventListener("pointerup", stopResizeHashColumns);
+  window.removeEventListener("pointercancel", stopResizeHashColumns);
 }
 
 function resizeHashColumns(event: PointerEvent) {
@@ -1529,12 +1584,13 @@ function startResizeHashColumns(event: PointerEvent) {
   hashResizeStartWidth = hashFieldWidth.value;
   window.addEventListener("pointermove", resizeHashColumns);
   window.addEventListener("pointerup", stopResizeHashColumns);
+  window.addEventListener("pointercancel", stopResizeHashColumns);
 }
 
 function clampZsetScoreWidth(width: number) {
   const containerWidth = zsetTableRef.value?.clientWidth ?? 900;
   const min = 120;
-  const max = Math.max(min, containerWidth - 220);
+  const max = Math.max(min, containerWidth - 300);
   return Math.min(max, Math.max(min, width));
 }
 
@@ -1542,6 +1598,7 @@ function stopResizeZsetColumns() {
   isResizingZsetColumns.value = false;
   window.removeEventListener("pointermove", resizeZsetColumns);
   window.removeEventListener("pointerup", stopResizeZsetColumns);
+  window.removeEventListener("pointercancel", stopResizeZsetColumns);
 }
 
 function resizeZsetColumns(event: PointerEvent) {
@@ -1556,6 +1613,68 @@ function startResizeZsetColumns(event: PointerEvent) {
   zsetResizeStartWidth = zsetScoreWidth.value;
   window.addEventListener("pointermove", resizeZsetColumns);
   window.addEventListener("pointerup", stopResizeZsetColumns);
+  window.addEventListener("pointercancel", stopResizeZsetColumns);
+}
+
+function zsetInlineEditKey(item: RedisZsetItem): string {
+  return item.member.raw_base64;
+}
+
+function isEditingZsetRow(item: RedisZsetItem): boolean {
+  return editingZsetMemberKey.value === zsetInlineEditKey(item);
+}
+
+function startZsetInlineEdit(item: RedisZsetItem) {
+  const member = redisBlobText(item.member);
+  if (member == null || savingZsetMember.value) return;
+  editingZsetMemberKey.value = zsetInlineEditKey(item);
+  zsetInlineMember.value = member;
+  zsetInlineScore.value = item.score;
+}
+
+function resetZsetInlineEdit() {
+  editingZsetMemberKey.value = null;
+  zsetInlineMember.value = "";
+  zsetInlineScore.value = "";
+}
+
+function cancelZsetInlineEdit() {
+  if (savingZsetMember.value) return;
+  resetZsetInlineEdit();
+}
+
+async function saveZsetInlineEdit(item: RedisZsetItem) {
+  const originalMember = redisBlobText(item.member);
+  const scoreText = zsetInlineScore.value.trim();
+  if (originalMember == null || savingZsetMember.value) return;
+  if (!scoreText || !isValidZsetScore(scoreText)) {
+    toast(t("redis.createScoreInvalid"), 3000);
+    return;
+  }
+  if (!zsetInlineMember.value.trim()) {
+    toast(t("redis.memberRequired"), 3000);
+    return;
+  }
+
+  savingZsetMember.value = true;
+  try {
+    try {
+      const usedAclCompatibility = await api.redisZsetUpdate(props.connectionId, props.db, props.keyRaw, originalMember, item.score, zsetInlineMember.value, scoreText);
+      if (usedAclCompatibility) toast(t("redis.zsetAclCompatibilityWarning"), 5000);
+    } catch (error) {
+      toast(errorMessage(error), 3000);
+      return;
+    }
+
+    resetZsetInlineEdit();
+    try {
+      await load();
+    } catch (error) {
+      toast(t("redis.updateAppliedRefreshFailed", { message: errorMessage(error) }), 5000);
+    }
+  } finally {
+    savingZsetMember.value = false;
+  }
 }
 
 function startEditMember() {
@@ -1608,8 +1727,13 @@ async function saveMemberEdit() {
       nextContext = { kind: "set", member: writeValue, canEdit: true };
     } else if (context.kind === "zset") {
       if (!context.member) return;
-      await api.redisZrem(props.connectionId, props.db, props.keyRaw, context.member);
-      await api.redisZadd(props.connectionId, props.db, props.keyRaw, writeValue, Number(context.score));
+      try {
+        const usedAclCompatibility = await api.redisZsetUpdate(props.connectionId, props.db, props.keyRaw, context.member, context.score, writeValue, context.score);
+        if (usedAclCompatibility) toast(t("redis.zsetAclCompatibilityWarning"), 5000);
+      } catch (error) {
+        toast(errorMessage(error), 3000);
+        return;
+      }
       nextContext = { kind: "zset", member: writeValue, score: context.score, canEdit: true };
     }
     const editedValue = writeValue;
@@ -2445,17 +2569,14 @@ defineExpose({ focusSearch });
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="hashSet"><Plus class="w-3 h-3 mr-1" />Set</Button>
         </div>
         <div class="grid border-b bg-muted/50 shrink-0" :style="hashGridStyle">
-          <div
-            class="relative px-3 py-1 text-xs font-medium text-muted-foreground border-r select-none cursor-pointer hover:bg-accent/50 flex items-center gap-1"
-            role="columnheader"
-            :aria-sort="hashSortBy === 'field' ? (hashSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"
-            @click="toggleHashSort('field')"
-          >
-            Field
-            <ArrowUp v-if="hashSortBy === 'field' && hashSortDir === 'asc'" class="h-3 w-3 shrink-0" />
-            <ArrowDown v-else-if="hashSortBy === 'field' && hashSortDir === 'desc'" class="h-3 w-3 shrink-0" />
-            <ArrowUpDown v-else class="h-3 w-3 shrink-0 text-muted-foreground/40" />
-            <div class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none" @pointerdown.prevent="startResizeHashColumns" />
+          <div class="relative border-r text-xs font-medium text-muted-foreground select-none" role="columnheader" :aria-sort="hashSortBy === 'field' ? (hashSortDir === 'asc' ? 'ascending' : 'descending') : 'none'">
+            <button type="button" class="flex h-full w-full cursor-pointer items-center gap-1 px-3 py-1 text-left hover:bg-accent/50" @click="toggleHashSort('field')">
+              Field
+              <ArrowUp v-if="hashSortBy === 'field' && hashSortDir === 'asc'" class="h-3 w-3 shrink-0" />
+              <ArrowDown v-else-if="hashSortBy === 'field' && hashSortDir === 'desc'" class="h-3 w-3 shrink-0" />
+              <ArrowUpDown v-else class="h-3 w-3 shrink-0 text-muted-foreground/40" />
+            </button>
+            <div class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none" @pointerdown.stop.prevent="startResizeHashColumns" />
           </div>
           <div class="px-3 py-1 text-xs font-medium text-muted-foreground cursor-pointer hover:bg-accent/50 flex items-center gap-1 select-none" role="columnheader" :aria-sort="hashSortBy === 'value' ? (hashSortDir === 'asc' ? 'ascending' : 'descending') : 'none'" @click="toggleHashSort('value')">
             Value
@@ -2511,39 +2632,57 @@ defineExpose({ focusSearch });
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="zsetAdd"><Plus class="w-3 h-3 mr-1" />Add</Button>
         </div>
         <div class="grid border-b bg-muted/50 shrink-0" :style="zsetGridStyle">
-          <div class="relative px-3 py-1 text-xs font-medium text-muted-foreground border-r select-none">
-            Score
-            <div class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none" @pointerdown.prevent="startResizeZsetColumns" />
+          <div class="px-3 py-1 text-center text-xs font-medium text-muted-foreground border-r" role="columnheader">#</div>
+          <div class="relative border-r text-xs font-medium text-muted-foreground select-none" role="columnheader" :aria-sort="zsetSortDir === 'asc' ? 'ascending' : 'descending'">
+            <button type="button" class="flex h-full w-full cursor-pointer items-center gap-1 px-3 py-1 text-left hover:bg-accent/50" @click="toggleZsetSort">
+              Score
+              <ArrowUp v-if="zsetSortDir === 'asc'" class="h-3 w-3 shrink-0" />
+              <ArrowDown v-else class="h-3 w-3 shrink-0" />
+            </button>
+            <div class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none" @pointerdown.stop.prevent="startResizeZsetColumns" />
           </div>
           <div class="px-3 py-1 text-xs font-medium text-muted-foreground min-w-0">Member</div>
           <div />
         </div>
         <RecycleScroller class="flex-1 overflow-y-auto" :items="zsetRows" :item-size="REDIS_COLLECTION_ROW_HEIGHT" :buffer="600" :skip-hover="true" key-field="id">
           <template #default="{ item: row }">
-            <div
-              data-redis-value-row
-              class="dbx-editor-font-family grid border-b text-sm hover:bg-accent/50 group cursor-pointer"
-              :class="{ 'bg-accent/60': isSelectedMember(String(row.value.score), row.value.member) }"
-              :style="{ ...zsetGridStyle, height: `${REDIS_COLLECTION_ROW_HEIGHT}px` }"
-              @click="viewMember(row.value.score, row.value.member, { kind: 'zset', member: redisBlobText(row.value.member), score: row.value.score, canEdit: redisBlobText(row.value.member) != null && canEditRedisMemberDetail('zset', row.value.member) })"
-            >
-              <div class="px-3 py-1.5 text-muted-foreground text-xs border-r min-w-0 truncate" :title="String(row.value.score)">
-                {{ row.value.score }}
+            <div data-redis-value-row class="dbx-editor-font-family grid border-b text-sm hover:bg-accent/50 group" :class="{ 'bg-accent/60': isEditingZsetRow(row.value) }" :style="{ ...zsetGridStyle, height: `${REDIS_COLLECTION_ROW_HEIGHT}px` }">
+              <div class="px-3 py-1.5 text-center text-xs text-muted-foreground border-r tabular-nums">{{ row.index + 1 }}</div>
+              <div class="flex min-w-0 items-center border-r px-3 py-1.5 text-xs text-muted-foreground">
+                <Input v-if="isEditingZsetRow(row.value)" v-model="zsetInlineScore" aria-label="Score" class="h-6 min-w-0 text-xs tabular-nums" :disabled="savingZsetMember" inputmode="decimal" @keydown.enter.prevent="saveZsetInlineEdit(row.value)" />
+                <span v-else class="min-w-0 truncate" :title="String(row.value.score)">{{ row.value.score }}</span>
               </div>
-              <div class="px-3 py-1.5 min-w-0 truncate" :title="formatValue(row.value.member)">
-                {{ formatValue(row.value.member) }}
+              <div class="flex min-w-0 items-center px-3 py-1.5">
+                <Input v-if="isEditingZsetRow(row.value)" v-model="zsetInlineMember" aria-label="Member" class="dbx-editor-font-family h-6 min-w-0 text-sm" :disabled="savingZsetMember" @keydown.enter.prevent="saveZsetInlineEdit(row.value)" />
+                <span v-else class="min-w-0 truncate" :title="formatValue(row.value.member)">{{ formatValue(row.value.member) }}</span>
               </div>
               <div class="flex items-center justify-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-5 w-5 opacity-0 group-hover:opacity-100"
-                  :title="t('redis.viewMember')"
-                  @click.stop="viewMember(row.value.score, row.value.member, { kind: 'zset', member: redisBlobText(row.value.member), score: row.value.score, canEdit: redisBlobText(row.value.member) != null && canEditRedisMemberDetail('zset', row.value.member) })"
-                  ><Eye class="w-3 h-3"
-                /></Button>
-                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click.stop="copyMember(row.value.member)"><Copy class="w-3 h-3" /></Button>
-                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteZsetItem(row.value)" @click.stop="requestZsetRemove(redisBlobText(row.value.member))"><Trash2 class="w-3 h-3" /></Button>
+                <template v-if="isEditingZsetRow(row.value)">
+                  <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="savingZsetMember" :title="t('grid.save')" @click="saveZsetInlineEdit(row.value)"><Loader2 v-if="savingZsetMember" class="h-3 w-3 animate-spin" /><Save v-else class="h-3 w-3" /></Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="savingZsetMember" :title="t('grid.discard')" @click="cancelZsetInlineEdit"><X class="h-3 w-3" /></Button>
+                </template>
+                <template v-else>
+                  <Button
+                    data-redis-zset-view-member
+                    variant="ghost"
+                    size="icon"
+                    class="h-5 w-5 opacity-0 group-hover:opacity-100"
+                    :title="t('redis.viewMember')"
+                    @click.stop="viewMember(row.value.score, row.value.member, { kind: 'zset', member: redisBlobText(row.value.member), score: row.value.score, canEdit: redisBlobText(row.value.member) != null && canEditRedisMemberDetail('zset', row.value.member) })"
+                    ><Eye class="w-3 h-3"
+                  /></Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-5 w-5 opacity-0 group-hover:opacity-100"
+                    :disabled="editingZsetMemberKey !== null || redisBlobText(row.value.member) == null || !canEditRedisMemberDetail('zset', row.value.member)"
+                    :title="t('redis.editMember')"
+                    @click="startZsetInlineEdit(row.value)"
+                    ><Pencil class="w-3 h-3"
+                  /></Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click="copyMember(row.value.member)"><Copy class="w-3 h-3" /></Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteZsetItem(row.value)" @click="requestZsetRemove(redisBlobText(row.value.member))"><Trash2 class="w-3 h-3" /></Button>
+                </template>
               </div>
             </div>
           </template>

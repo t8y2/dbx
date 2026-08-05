@@ -25,6 +25,13 @@ test("displays the configured GaussDB protocol in connection URLs", () => {
   assert.equal(connectionDisplayUrlScheme({ db_type: "gaussdb", driver_profile: "gaussdb-m" }), "jdbc:gaussdb");
 });
 
+test("normalizes legacy single-host GaussDB endpoint labels", () => {
+  const connection = { ...baseConnection, db_type: "gaussdb" as const, host: "db.example.com:5433", port: 5432 };
+
+  assert.equal(connectionEndpointLabel(connection), "db.example.com:5433");
+  assert.equal(connectionRedactedEndpointLabel(connection), "db.***.com:****");
+});
+
 test("builds a compact subtitle for duplicate connection names", () => {
   assert.equal(connectionDriverLabel(baseConnection), "TiDB");
   assert.equal(connectionEndpointLabel(baseConnection), "127.0.0.1:4000");

@@ -2329,8 +2329,10 @@ where
         }
         "zset" => {
             let len: u64 = redis::cmd("ZCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let (cursor, items) = zscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
-            RedisValueData::Zset { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
+            let end = (COLLECTION_PAGE_SIZE as i64) - 1;
+            let items = zrange_page_raw(con, key, 0, end, false).await?;
+            let cursor = if len > COLLECTION_PAGE_SIZE as u64 { Some(COLLECTION_PAGE_SIZE as u64) } else { None };
+            RedisValueData::Zset { items, total: len, scan_cursor: cursor }
         }
         "hash" => {
             let len: u64 = redis::cmd("HLEN").arg(key).query_async(con).await.unwrap_or(0);
@@ -2927,6 +2929,77 @@ where
     redis::cmd("ZREM").arg(key).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
+pub async fn zset_update<C>(
+    con: &mut C,
+    key: &[u8],
+    original_member: &str,
+    expected_score: &str,
+    member: &str,
+    score: &str,
+) -> Result<bool, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    // Keep the source check, duplicate check, score write, and optional rename
+    // in one Redis operation so a failed save cannot delete the original member.
+    const SCRIPT: &str = r#"
+        local current_score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+        if current_score == false then
+            return 0
+        end
+        if current_score ~= ARGV[3] then
+            return -2
+        end
+        if ARGV[1] ~= ARGV[2] and redis.call('ZSCORE', KEYS[1], ARGV[2]) ~= false then
+            return -1
+        end
+        redis.call('ZADD', KEYS[1], ARGV[4], ARGV[2])
+        if ARGV[1] ~= ARGV[2] then
+            redis.call('ZREM', KEYS[1], ARGV[1])
+        end
+        return 1
+    "#;
+
+    let result = redis::cmd("EVAL")
+        .arg(SCRIPT)
+        .arg(1)
+        .arg(key)
+        .arg(original_member)
+        .arg(member)
+        .arg(expected_score)
+        .arg(score)
+        .query_async::<i64>(con)
+        .await;
+
+    let result = match result {
+        Ok(result) => result,
+        Err(error) if is_zset_update_acl_compatibility_error(&error) => {
+            return Err(
+                "Atomic ZSet updates require the Redis EVAL and ZSCORE permissions. Ask an administrator to grant them."
+                    .to_string(),
+            );
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+
+    match result {
+        1 => Ok(false),
+        0 => Err("The ZSet member no longer exists. Refresh and try again.".to_string()),
+        -1 => Err("A ZSet member with the new value already exists.".to_string()),
+        -2 => Err("The ZSet score changed after it was loaded. Refresh and try again.".to_string()),
+        _ => Err("Unexpected result while updating ZSet member.".to_string()),
+    }
+}
+
+fn is_zset_update_acl_compatibility_error(error: &redis::RedisError) -> bool {
+    if error.code() != Some("NOPERM") {
+        return false;
+    }
+
+    let detail = error.detail().unwrap_or_default().to_ascii_lowercase();
+    detail.contains("eval") || detail.contains("zscore")
+}
+
 pub async fn stream_add<C>(
     con: &mut C,
     key: &[u8],
@@ -3023,6 +3096,7 @@ pub async fn load_more_collection<C>(
     cursor: u64,
     count: usize,
     filter_query: Option<&str>,
+    sort_direction: Option<&str>,
 ) -> Result<RedisCollectionPage, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -3045,8 +3119,18 @@ where
             Ok(RedisCollectionPage::Set { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
         "zset" => {
-            let (next_cursor, items) = zscan_page_raw(con, key, cursor, count).await?;
-            Ok(RedisCollectionPage::Zset { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
+            let descending = match sort_direction.unwrap_or("asc") {
+                "asc" => false,
+                "desc" => true,
+                direction => return Err(format!("Invalid ZSet sort direction: {direction}")),
+            };
+            let start = cursor as i64;
+            let end = start + count as i64;
+            let mut items = zrange_page_raw(con, key, start, end, descending).await?;
+            let has_more = items.len() > count;
+            items.truncate(count);
+            let next = cursor + count as u64;
+            Ok(RedisCollectionPage::Zset { items, scan_cursor: has_more.then_some(next) })
         }
         "hash" => {
             let (next_cursor, items) = if let Some(query) = filter_query.filter(|query| !query.is_empty()) {
@@ -3137,56 +3221,42 @@ where
     parse_scan_members(raw)
 }
 
-async fn zscan_page_raw<C>(
+async fn zrange_page_raw<C>(
     con: &mut C,
     key: &[u8],
-    cursor: u64,
-    count: usize,
-) -> Result<(u64, Vec<RedisZsetItem>), String>
+    start: i64,
+    end: i64,
+    descending: bool,
+) -> Result<Vec<RedisZsetItem>, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let raw: RedisRawValue = redis::cmd("ZSCAN")
+    let command = if descending { "ZREVRANGE" } else { "ZRANGE" };
+    let raw: RedisRawValue = redis::cmd(command)
         .arg(key)
-        .arg(cursor)
-        .arg("COUNT")
-        .arg(count)
+        .arg(start)
+        .arg(end)
+        .arg("WITHSCORES")
         .query_async(con)
         .await
         .map_err(|e| e.to_string())?;
-    let (next_cursor, items) = parse_scan_pairs(raw)?;
-    Ok((next_cursor, items.into_iter().map(|(member, score)| RedisZsetItem { score, member }).collect()))
-}
 
-fn parse_scan_pairs(raw: RedisRawValue) -> Result<(u64, Vec<(RedisBlob, String)>), String> {
-    let RedisRawValue::Array(parts) = raw else {
-        return Err("Invalid SCAN response".to_string());
+    let RedisRawValue::Array(entries) = raw else {
+        return Err("Invalid ZRANGE response".to_string());
     };
-    if parts.len() != 2 {
-        return Err("Invalid SCAN response".to_string());
+    if entries.len() % 2 != 0 {
+        return Err("Invalid ZRANGE response".to_string());
     }
 
-    let cursor = redis_value_to_string(parts[0].clone())
-        .ok_or("Invalid cursor")?
-        .parse::<u64>()
-        .map_err(|_| "Invalid cursor".to_string())?;
-
-    let RedisRawValue::Array(entries) = &parts[1] else {
-        return Err("Invalid SCAN entries".to_string());
-    };
-
-    let mut items = Vec::new();
-    let mut iter = entries.iter();
-    while let Some(a) = iter.next() {
-        let Some(b) = iter.next() else { break };
-        let member = redis_value_to_bytes(a.clone())
+    let mut items = Vec::with_capacity(entries.len() / 2);
+    for pair in entries.chunks_exact(2) {
+        let member = redis_value_to_bytes(pair[0].clone())
             .map(|bytes| redis_blob_from_bytes(&bytes))
-            .ok_or_else(|| "Invalid SCAN member payload".to_string())?;
-        let value = redis_value_to_string(b.clone()).unwrap_or_default();
-        items.push((member, value));
+            .ok_or_else(|| "Invalid ZRANGE member payload".to_string())?;
+        let score = redis_value_to_string(pair[1].clone()).ok_or_else(|| "Invalid ZRANGE score".to_string())?;
+        items.push(RedisZsetItem { score, member });
     }
-
-    Ok((cursor, items))
+    Ok(items)
 }
 
 fn parse_scan_hash_entries(raw: RedisRawValue) -> Result<(u64, Vec<RedisHashItem>), String> {
@@ -3270,7 +3340,7 @@ mod tests {
         redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
         RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint,
         RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamField,
-        RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData,
+        RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData, RedisZsetItem,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -3377,6 +3447,17 @@ mod tests {
     fn hscan_response(cursor: &str, pairs: Vec<(&str, &str)>) -> RedisRawValue {
         let entries = pairs.into_iter().flat_map(|(field, value)| [bulk(field), bulk(value)]).collect();
         RedisRawValue::Array(vec![bulk(cursor), RedisRawValue::Array(entries)])
+    }
+
+    fn zrange_response(pairs: Vec<(&str, &str)>) -> RedisRawValue {
+        RedisRawValue::Array(pairs.into_iter().flat_map(|(member, score)| [bulk(member), bulk(score)]).collect())
+    }
+
+    fn noperm(command: &str) -> redis::RedisError {
+        redis::make_extension_error(
+            "NOPERM".to_string(),
+            Some(format!("this user has no permissions to run the '{command}' command")),
+        )
     }
 
     fn text_blob(value: &str) -> RedisBlob {
@@ -4545,7 +4626,8 @@ mod tests {
             hscan_response("0", vec![("user:2", "Bob")]),
         ]);
 
-        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 1, Some("user")).await.unwrap();
+        let result =
+            super::load_more_collection(&mut con, b"hash-key", "hash", 0, 1, Some("user"), None).await.unwrap();
 
         let RedisCollectionPage::Hash { items, scan_cursor } = result else {
             panic!("expected hash collection page");
@@ -4561,7 +4643,8 @@ mod tests {
         let mut con =
             FakeRedisConnection::new(vec![hscan_response("0", vec![("status", "Ada Lovelace"), ("name", "Bob")])]);
 
-        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("lovelace")).await.unwrap();
+        let result =
+            super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("lovelace"), None).await.unwrap();
 
         let RedisCollectionPage::Hash { items, scan_cursor } = result else {
             panic!("expected hash collection page");
@@ -4579,7 +4662,8 @@ mod tests {
             .collect();
         let mut con = FakeRedisConnection::new(responses);
 
-        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("missing")).await.unwrap();
+        let result =
+            super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("missing"), None).await.unwrap();
 
         let RedisCollectionPage::Hash { items, scan_cursor } = result else {
             panic!("expected hash collection page");
@@ -4587,6 +4671,127 @@ mod tests {
         assert_eq!(scan_cursor, Some(super::HASH_FILTER_SCAN_MAX_ITERATIONS as u64));
         assert!(items.is_empty());
         assert_eq!(con.command_count("HSCAN"), super::HASH_FILTER_SCAN_MAX_ITERATIONS);
+    }
+
+    #[tokio::test]
+    async fn zset_update_passes_expected_score_to_the_atomic_script() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        let used_acl_compatibility =
+            super::zset_update(&mut con, b"scores", "alice", "10", "alice", "20").await.unwrap();
+
+        assert!(!used_acl_compatibility);
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.command_count("ZADD"), 0);
+        assert!(con.commands[0].contains("\r\n$2\r\n10\r\n"));
+        assert!(con.commands[0].contains("\r\n$2\r\n20\r\n"));
+    }
+
+    #[tokio::test]
+    async fn zset_update_rejects_a_second_writer_with_a_stale_score() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(-2)]);
+
+        let error = super::zset_update(&mut con, b"scores", "alice", "10", "alice", "30").await.unwrap_err();
+
+        assert!(error.contains("score changed"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zset_update_rejects_a_second_writer_renaming_a_member_with_a_stale_score() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(-2)]);
+
+        let error = super::zset_update(&mut con, b"scores", "alice", "10", "alicia", "20").await.unwrap_err();
+
+        assert!(error.contains("score changed"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.command_count("ZADD"), 0);
+        assert_eq!(con.command_count("ZREM"), 0);
+        assert_eq!(con.commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zset_update_rejects_restricted_acl_score_edits_without_writing() {
+        let mut con = FakeRedisConnection::with_results(vec![Err(noperm("eval"))]);
+
+        let error = super::zset_update(&mut con, b"scores", "alice", "10", "alice", "20").await.unwrap_err();
+
+        assert!(error.contains("EVAL and ZSCORE permissions"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.command_count("ZADD"), 0);
+        assert_eq!(con.command_count("ZREM"), 0);
+        assert_eq!(con.commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zset_update_rejects_restricted_acl_renames_without_writing() {
+        let mut con = FakeRedisConnection::with_results(vec![Err(noperm("zscore"))]);
+
+        let error = super::zset_update(&mut con, b"scores", "alice", "10", "alicia", "20").await.unwrap_err();
+
+        assert!(error.contains("EVAL and ZSCORE permissions"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.command_count("ZADD"), 0);
+        assert_eq!(con.command_count("ZREM"), 0);
+        assert_eq!(con.commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zset_update_does_not_fallback_for_unrelated_acl_errors() {
+        let mut con = FakeRedisConnection::with_results(vec![Err(noperm("zrem"))]);
+
+        let error = super::zset_update(&mut con, b"scores", "alice", "10", "alicia", "20").await.unwrap_err();
+
+        assert!(error.contains("NOPERM"));
+        assert_eq!(con.command_count("EVAL"), 1);
+        assert_eq!(con.commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zset_load_more_uses_ranked_ascending_pages() {
+        let mut con =
+            FakeRedisConnection::new(vec![zrange_response(vec![("alice", "1"), ("bob", "2"), ("carol", "3")])]);
+
+        let result = super::load_more_collection(&mut con, b"scores", "zset", 0, 2, None, Some("asc")).await.unwrap();
+
+        let RedisCollectionPage::Zset { items, scan_cursor } = result else {
+            panic!("expected zset collection page");
+        };
+        assert_eq!(
+            items,
+            vec![
+                RedisZsetItem { score: "1".to_string(), member: text_blob("alice") },
+                RedisZsetItem { score: "2".to_string(), member: text_blob("bob") },
+            ]
+        );
+        assert_eq!(scan_cursor, Some(2));
+        assert_eq!(con.command_count("ZRANGE"), 1);
+        assert_eq!(con.command_count("ZREVRANGE"), 0);
+        assert_eq!(con.command_count("ZSCAN"), 0);
+    }
+
+    #[tokio::test]
+    async fn zset_load_more_uses_ranked_descending_pages() {
+        let mut con =
+            FakeRedisConnection::new(vec![zrange_response(vec![("carol", "3"), ("bob", "2"), ("alice", "1")])]);
+
+        let result = super::load_more_collection(&mut con, b"scores", "zset", 0, 2, None, Some("desc")).await.unwrap();
+
+        let RedisCollectionPage::Zset { items, scan_cursor } = result else {
+            panic!("expected zset collection page");
+        };
+        assert_eq!(
+            items,
+            vec![
+                RedisZsetItem { score: "3".to_string(), member: text_blob("carol") },
+                RedisZsetItem { score: "2".to_string(), member: text_blob("bob") },
+            ]
+        );
+        assert_eq!(scan_cursor, Some(2));
+        assert_eq!(con.command_count("ZRANGE"), 0);
+        assert_eq!(con.command_count("ZREVRANGE"), 1);
+        assert_eq!(con.command_count("ZSCAN"), 0);
     }
 
     #[test]

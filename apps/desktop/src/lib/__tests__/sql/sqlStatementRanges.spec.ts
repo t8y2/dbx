@@ -1095,6 +1095,15 @@ describe("buildExecutionCandidates", () => {
     expect(candidates[0].sql).toBe(hintedSql);
   });
 
+  it("preserves leading tenant routing hints in current statement candidates", () => {
+    const hintedSql = "/*@global:true*/\nSELECT * FROM tenant_table";
+    const sql = `SELECT 1;\n${hintedSql};`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");
+
+    expect(candidates[0].sql).toBe(hintedSql);
+    expect(splitSqlStatementRanges("/*@global:true*/", "mysql")).toEqual([]);
+  });
+
   it("uses the cursor statement for the first candidate when there is no selection", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "users"));

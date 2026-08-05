@@ -1943,6 +1943,8 @@ func TestXuguQueryKeywordBoundariesUseResultSetPath(t *testing.T) {
 		{name: "parenthesized select", sqlText: "SELECT(1);", wantQuery: "SELECT(1)", wantColumns: []string{"VALUE"}, wantValue: int64(1)},
 		{name: "select hint", sqlText: "SELECT/*+ index */1;", wantQuery: "SELECT/*+ index */1", wantColumns: []string{"VALUE"}, wantValue: int64(1)},
 		{name: "show comment", sqlText: "SHOW/* metadata */ DB_INFO;", wantQuery: "SHOW/* metadata */ DB_INFO", wantColumns: []string{"DB_NAME", "DB_ID", "DB_OWNER", "DB_CHARSET", "DB_TIMEZ"}, wantValue: "SYSTEM"},
+		{name: "explain", sqlText: "EXPLAIN SELECT 1;", wantQuery: "EXPLAIN SELECT 1", wantColumns: []string{"PLAN"}, wantValue: "SeqScan"},
+		{name: "explain verbose", sqlText: "EXPLAIN VERBOSE SELECT 1;", wantQuery: "EXPLAIN VERBOSE SELECT 1", wantColumns: []string{"PLAN"}, wantValue: "SeqScan cost=1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			resetXuguShowResultDriver()
@@ -1976,6 +1978,40 @@ func TestXuguQueryKeywordBoundariesUseResultSetPath(t *testing.T) {
 	}
 }
 
+func TestXuguExplainStatementsUseResultSetQueryPagePath(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		sqlText string
+		want    string
+	}{
+		{name: "explain", sqlText: "EXPLAIN SELECT 1;", want: "SeqScan"},
+		{name: "explain verbose", sqlText: "EXPLAIN VERBOSE SELECT 1;", want: "SeqScan cost=1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetXuguShowResultDriver()
+			db, err := sql.Open("xugu-test-show-result", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			s := newServer()
+			s.db = db
+			page, err := s.executeQueryPage(queryOptions{SQL: test.sqlText}, 10)
+			if err != nil {
+				t.Fatalf("executeQueryPage(%q): %v", test.sqlText, err)
+			}
+			if len(page.Rows) != 1 || len(page.Rows[0]) == 0 || page.Rows[0][0] != test.want {
+				t.Fatalf("rows = %#v, want first value %q", page.Rows, test.want)
+			}
+			_, execs := recordedXuguShowStatements()
+			if len(execs) != 0 {
+				t.Fatalf("EXPLAIN statements must not use ExecContext, got %v", execs)
+			}
+		})
+	}
+}
+
 func TestIsQuerySQLRecognizesQueryKeywordBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		sqlText string
@@ -1990,9 +2026,13 @@ func TestIsQuerySQLRecognizesQueryKeywordBoundaries(t *testing.T) {
 		{sqlText: "/* Xugu metadata */ SHOW CHARSETS", want: true},
 		{sqlText: "SHOW/* metadata */ DB_INFO", want: true},
 		{sqlText: "-- leading comment\nSELECT(1)", want: true},
+		{sqlText: "EXPLAIN SELECT 1", want: true},
+		{sqlText: "EXPLAIN VERBOSE SELECT 1", want: true},
+		{sqlText: "/* leading comment */ explain verbose SELECT 1", want: true},
 		{sqlText: "SELECTIVE settings", want: false},
 		{sqlText: "SHOWCASE settings", want: false},
 		{sqlText: "SHOW_CURRENT_SCHEMA", want: false},
+		{sqlText: "EXPLAINATION SELECT 1", want: false},
 		{sqlText: "CREATE TABLE items (id INTEGER)", want: false},
 	} {
 		t.Run(test.sqlText, func(t *testing.T) {
@@ -2409,6 +2449,10 @@ func (c *xuguShowResultConn) QueryContext(_ context.Context, query string, _ []d
 			columns: []string{"DB_NAME", "DB_ID", "DB_OWNER", "DB_CHARSET", "DB_TIMEZ"},
 			values:  [][]driver.Value{{"SYSTEM", int64(1), "SYS", "UTF8.UTF8_GENERAL_CI", "GMT+08:00"}},
 		}, nil
+	case "EXPLAIN SELECT 1":
+		return &xuguStaticRows{columns: []string{"PLAN"}, values: [][]driver.Value{{"SeqScan"}}}, nil
+	case "EXPLAIN VERBOSE SELECT 1":
+		return &xuguStaticRows{columns: []string{"PLAN"}, values: [][]driver.Value{{"SeqScan cost=1"}}}, nil
 	default:
 		return nil, fmt.Errorf("unexpected query: %s", query)
 	}

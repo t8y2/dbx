@@ -79,7 +79,7 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { reuseDataTab: true } }),
+  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: "same-table" } }),
 }));
 
 vi.mock("@/lib/table/tableSelectSql", () => ({

@@ -83,7 +83,6 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
 import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
-import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -259,7 +258,7 @@ let stopColumnResize: (() => void) | null = null;
 let preserveObjectFilterScrollOnce = false;
 
 // Export via background tracker
-const { addTask: addExportTask } = useExportTracker();
+const { addTask: addExportTask, updateTableExportTask } = useExportTracker();
 
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
 const canDropTargetCascade = computed(() => dropTarget.value?.type === "TABLE" && supportsDropTableCascade(effectiveDatabaseType.value));
@@ -1749,11 +1748,10 @@ function tableDdlObjectType(type: ObjectBrowserRow["type"]): ObjectSourceKind | 
   return undefined;
 }
 
-async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
+async function exportDataLegacy(row: ObjectBrowserRow, format: "json") {
   try {
     const schema = row.schema || selectedSchema.value;
-    const tableColumns = format === "sql" ? await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog) : undefined;
-    const queryColumns = props.connection.db_type === "neo4j" ? (tableColumns ?? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog))).map((column) => column.name) : undefined;
+    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog)).map((column) => column.name) : undefined;
     const result = await fetchTableDataForExport({
       databaseType: effectiveDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
@@ -1776,35 +1774,15 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
       }
       await api.exportQueryResultJson(outputPath, result.columns, result.rows);
       toast(t("grid.exported"));
-      return;
     }
-
-    const content = await formatSqlInsert({
-      databaseType: effectiveDatabaseType.value,
-      schema,
-      tableName: row.name,
-      columns: result.columns,
-      columnTypes: tableColumns ? columnTypesForResultColumns(result.columns, tableColumns) : undefined,
-      rows: result.rows,
-    });
-    await saveFileContent(content, `${row.name}.sql`, "SQL", "sql");
-    toast(t("grid.exported"));
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
 }
 
-function columnTypesForResultColumns(columns: string[], tableColumns: Array<{ name: string; data_type: string }>): Array<string | undefined> {
-  const typesByName = new Map(tableColumns.map((column) => [column.name.toLocaleLowerCase(), column.data_type]));
-  return columns.map((column) => typesByName.get(column.toLocaleLowerCase()));
-}
-
 async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql") {
-  if (format === "csv") {
-    await exportTableData(row, "csv");
-    return;
-  }
-  await exportDataLegacy(row, format);
+  if (format === "json") await exportDataLegacy(row, format);
+  else await exportTableData(row, format);
 }
 
 function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<boolean | null> {
@@ -1850,7 +1828,7 @@ async function exportDataXlsx(row: ObjectBrowserRow) {
   await exportTableData(row, "xlsx", columnInfos, useCommentHeader);
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", columnInfos?: ColumnInfo[], useCommentHeader = false) {
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], useCommentHeader = false) {
   const schema = row.schema || selectedSchema.value;
 
   // Save dialog first
@@ -1860,7 +1838,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", co
   if (isTauriRuntime()) {
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const filter = format === "csv" ? { name: "CSV", extensions: ["csv"] } : { name: "Excel", extensions: ["xlsx"] };
+      const filter = format === "csv" ? { name: "CSV", extensions: ["csv"] } : format === "xlsx" ? { name: "Excel", extensions: ["xlsx"] } : { name: "SQL", extensions: ["sql"] };
       const path = await save({
         defaultPath: defaultName,
         filters: [filter],
@@ -1906,14 +1884,12 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", co
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,
       batchSize: settingsStore.editorSettings.exportBatchSize,
+      skipCount: format === "sql",
       rowLimit,
     };
 
     const terminalProgress = await api.startTableExport(request, (progress) => {
-      currentTask.rowsExported = progress.rowsExported;
-      currentTask.totalRows = progress.totalRows;
-      currentTask.status = progress.status;
-      currentTask.errorMessage = progress.errorMessage || null;
+      updateTableExportTask(currentTask.exportId, progress);
     });
     if (terminalProgress.status === "Done") {
       toast(t("grid.exported"));
@@ -2160,7 +2136,7 @@ async function confirmPasteTable() {
         await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
         toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
       } catch (e: any) {
-        toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+        toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e) }), 5000);
       }
     }
     return;

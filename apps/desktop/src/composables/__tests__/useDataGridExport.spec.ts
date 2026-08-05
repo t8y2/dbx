@@ -111,9 +111,10 @@ function createExportState(
   hasColumnSelection = false,
   visibleColumnIndexes?: number[],
   isSyntheticContext = false,
+  contextRowId?: number | null,
 ) {
   const rows = (rowDataList ?? [rowData ?? columns.map((column, index) => (column === "id" ? 1 : `value-${index}`))]).map((data, index) => ({ ...row(data), id: index + 1 }));
-  const item = rows[0]!;
+  const resolvedContextRowId = contextRowId === undefined ? (rows[0]?.id ?? null) : contextRowId;
   const selectedRowIds = ref(new Set(selectedRowIdValues));
   const options: UseDataGridExportOptions = {
     columns: computed(() => columns),
@@ -136,7 +137,7 @@ function createExportState(
     selectedCells: computed(() => selectedCellMatrix ?? selectedCellsOverride ?? { columns: [], rows: [] }),
     selectedCellMatrix: computed(() => selectedCellMatrix ?? null),
     selectedRange: computed(() => null),
-    contextCell: ref({ rowId: item.id, rowIndex: 0, col: isSyntheticContext ? 0 : -1 }),
+    contextCell: ref(resolvedContextRowId === null ? null : { rowId: resolvedContextRowId, rowIndex: 0, col: isSyntheticContext ? 0 : -1 }),
     contextSelectionIsSynthetic: ref(isSyntheticContext),
     getRowItem: (rowId) => rows.find((candidate) => candidate.id === rowId),
     selectedRowIds,
@@ -158,6 +159,42 @@ describe("useDataGridExport prepared row statements", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearDataGridClipboardCopy();
+  });
+
+  it("disables row copy when the result has no rows", () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [], [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, null);
+
+    expect(state.canCopyRow.value).toBe(false);
+  });
+
+  it("disables row copy when rows exist but none is selected or targeted", () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [1, "Ada"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, null);
+
+    expect(state.canCopyRow.value).toBe(false);
+  });
+
+  it("enables row copy for a valid context row without a prior selection", () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [1, "Ada"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1);
+
+    expect(state.canCopyRow.value).toBe(true);
+  });
+
+  it("counts only visible non-draft rows selected for copying", () => {
+    const first = { ...row([1, "Ada"]), sourceIndex: 0 };
+    const draft = { ...row([2, "Draft"]), id: 2, sourceIndex: 1, isDraft: true };
+    const state = createMongoExportState({
+      columns: ["id", "name"],
+      item: first,
+      items: [first, draft],
+      mongoDocuments: [
+        { id: 1, name: "Ada" },
+        { id: 2, name: "Draft" },
+      ],
+      selectedRowIds: new Set([1, 2, 999]),
+    });
+
+    expect(state.copyRowCount.value).toBe(1);
+    expect(state.canCopyRow.value).toBe(true);
   });
 
   it("builds SQL UPDATE from only selected writable columns while retaining a hidden primary key", async () => {

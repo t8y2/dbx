@@ -12,6 +12,7 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type Sql
 import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } from "@/lib/sql/sqlVariableSyntax";
 import type { SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
+import { DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode, type DataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import type { SqlSnippet, TableInfoTab } from "@/types/database";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
@@ -22,6 +23,7 @@ import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLe
 
 export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem, AiChatSelectionState, AiEffortSelection };
 export type { SavedSqlOpenTargetMode };
+export type { DataTabReuseMode };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -500,7 +502,7 @@ export interface EditorSettings {
   autoSelectActiveSidebarNode: boolean;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
-  reuseDataTab: boolean;
+  dataTabReuseMode: DataTabReuseMode;
   prefillNewQueryWithSelect: boolean;
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
@@ -678,7 +680,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   autoSelectActiveSidebarNode: false,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
-  reuseDataTab: false,
+  dataTabReuseMode: DEFAULT_DATA_TAB_REUSE_MODE,
   prefillNewQueryWithSelect: true,
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
@@ -1001,7 +1003,14 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
         }
       ).closeQueryTabsOnDisconnect,
     ),
-    reuseDataTab: settings.reuseDataTab ?? DEFAULT_EDITOR_SETTINGS.reuseDataTab,
+    dataTabReuseMode: normalizeDataTabReuseMode(
+      settings.dataTabReuseMode,
+      (
+        settings as Partial<EditorSettings> & {
+          reuseDataTab?: boolean;
+        }
+      ).reuseDataTab,
+    ),
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
@@ -1473,7 +1482,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
-    if (partial.reuseDataTab !== undefined) editorSettings.value.reuseDataTab = partial.reuseDataTab;
+    if (partial.dataTabReuseMode !== undefined) editorSettings.value.dataTabReuseMode = normalizeDataTabReuseMode(partial.dataTabReuseMode);
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);

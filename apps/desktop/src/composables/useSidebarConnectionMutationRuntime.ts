@@ -114,7 +114,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       await copyToClipboard(String(port));
       toast(t("contextMenu.finalProxyPortCopied", { port }), 2000);
     } catch (error: any) {
-      toast(t("grid.copyFailed", { message: translateBackendError(t, error?.message || String(error)) }), 5000);
+      toast(t("grid.copyFailed", { message: translateBackendError(t, error) }), 5000);
     }
   }
 
@@ -150,7 +150,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     try {
       await revealPathInFileManager(path);
     } catch (error: any) {
-      toast(translateBackendError(t, typeof error === "string" ? error : error?.message || String(error)), 5000);
+      toast(translateBackendError(t, error), 5000);
     }
   }
 

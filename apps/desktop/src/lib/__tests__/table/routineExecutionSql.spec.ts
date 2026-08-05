@@ -7,6 +7,70 @@ function queryResult(columns: string[], rows: unknown[][]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 0 };
 }
 
+describe("MySQL routine execution SQL", () => {
+  it("binds OUT parameters without requiring user input", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "mysql",
+      schema: "app",
+      routineName: "double_value",
+      parameters: [
+        { name: "p_input", dataType: "int", mode: "IN", ordinal: 1, value: "5" },
+        { name: "p_output", dataType: "int", mode: "OUT", ordinal: 2, value: "ignored" },
+      ],
+    });
+
+    expect(sql).toBe(["SET @dbx_output_2 = NULL;", "CALL `double_value`(5, @dbx_output_2);", "SELECT @dbx_output_2 AS `p_output`;"].join("\n"));
+  });
+
+  it("initializes INOUT variables and returns all output values", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "mysql",
+      schema: "app",
+      routineName: "adjust_values",
+      parameters: [
+        { name: "p_delta", dataType: "int", mode: "IN", ordinal: 1, value: "5" },
+        { name: "p_total", dataType: "int", mode: "INOUT", ordinal: 2, value: "10" },
+        { name: "p_status", dataType: "varchar(16)", mode: "OUT", ordinal: 3, value: "" },
+      ],
+    });
+
+    expect(sql).toBe(["SET @dbx_output_2 = 10;", "SET @dbx_output_3 = NULL;", "CALL `adjust_values`(5, @dbx_output_2, @dbx_output_3);", "SELECT @dbx_output_2 AS `p_total`, @dbx_output_3 AS `p_status`;"].join("\n"));
+  });
+
+  it("keeps input-only procedure calls unchanged", () => {
+    expect(
+      buildProcedureExecutionSqlFromValues({
+        databaseType: "mysql",
+        schema: "app",
+        routineName: "save_value",
+        parameters: [{ name: "p_value", dataType: "varchar(32)", mode: "IN", ordinal: 1, value: "O'Reilly" }],
+      }),
+    ).toBe("CALL `save_value`('O''Reilly');");
+  });
+
+  it("uses MySQL parameter modes to generate output bindings", () => {
+    const parameters = routineParametersFromResult(
+      queryResult(
+        ["name", "data_type", "mode", "ordinal", "has_default"],
+        [
+          ["p_input", "int", "IN", 1, false],
+          ["p_output", "int", "OUT", 2, false],
+        ],
+      ),
+      "mysql",
+    );
+
+    expect(parameters.map((parameter) => parameter.mode)).toEqual(["IN", "OUT"]);
+    expect(
+      buildProcedureExecutionSqlFromValues({
+        databaseType: "mysql",
+        routineName: "double_value",
+        parameters: parameters.map((parameter) => ({ ...parameter, value: parameter.mode === "IN" ? "5" : "" })),
+      }),
+    ).toContain("CALL `double_value`(5, @dbx_output_2);");
+  });
+});
+
 describe("SQL Server routine execution SQL", () => {
   it("declares and selects OUT parameters", () => {
     const sql = buildProcedureExecutionSqlFromValues({

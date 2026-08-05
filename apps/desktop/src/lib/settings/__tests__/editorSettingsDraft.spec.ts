@@ -45,6 +45,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes the regular expression match limit", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("regexMaxMatchCount");
   });
+
+  it("includes the data-tab reuse mode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {
@@ -115,6 +119,14 @@ describe("editorSettingsDraftChanged", () => {
     draft.savedSqlOpenTargetMode = "current";
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
   });
+
+  it("detects a data-tab reuse mode change", () => {
+    const settings = makeSettings({ dataTabReuseMode: "same-table" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.dataTabReuseMode = "active-tab";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
 });
 
 describe("editorSettingsPatchFromDraft", () => {
@@ -149,6 +161,14 @@ describe("editorSettingsPatchFromDraft", () => {
     const base = editorSettingsDraftFromSettings(settings);
     draft.savedSqlOpenTargetMode = "current";
     expect(editorSettingsPatchFromDraft(draft, base).savedSqlOpenTargetMode).toBe("current");
+  });
+
+  it("includes the data-tab reuse mode when changed", () => {
+    const settings = makeSettings({ dataTabReuseMode: "same-table" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.dataTabReuseMode = "always-new";
+    expect(editorSettingsPatchFromDraft(draft, base).dataTabReuseMode).toBe("always-new");
   });
 });
 

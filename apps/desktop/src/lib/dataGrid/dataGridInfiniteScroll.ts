@@ -9,6 +9,11 @@ export interface DataGridScrollMetrics {
   clientHeight: number;
 }
 
+export interface DataGridAppendResult {
+  rows: readonly unknown[];
+  appended_from_row_count?: number;
+}
+
 export function dataGridScrollPosition(top: number, left: number): DataGridScrollPosition {
   return {
     top: Math.max(0, top),
@@ -28,6 +33,11 @@ export function shouldCheckInfiniteScrollAfterScroll(previous: DataGridScrollPos
 
 export function isDataGridNearScrollBottom(metrics: DataGridScrollMetrics, threshold = 100): boolean {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight < threshold;
+}
+
+export function isDataGridPrefixAppend(previous: DataGridAppendResult | undefined, next: DataGridAppendResult): boolean {
+  if (!previous || next.appended_from_row_count !== previous.rows.length || next.rows.length < previous.rows.length) return false;
+  return previous.rows.every((row, index) => row === next.rows[index]);
 }
 
 export function isDataGridAtScrollBottom(metrics: DataGridScrollMetrics, tolerance = 1): boolean {

@@ -351,23 +351,27 @@ function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode, cust
 }
 
 function buildVectorModePromptLines(context: AiContext, mode: AiAssistantMode, isZh: boolean): string[] {
+  const currentTimeGuidance = currentTimeToolGuidance();
   if (mode === "agent") {
-    return [isZh ? "你处于 Agent 模式。你有以下工具可用：list_collections、browse_collection。" : "You are in Agent mode. You have the following tools available: list_collections, browse_collection."];
+    return [isZh ? "你处于 Agent 模式。你有以下工具可用：list_collections、browse_collection、get_current_time。" : "You are in Agent mode. You have the following tools available: list_collections, browse_collection, get_current_time.", currentTimeGuidance];
   }
   return [
     isZh
       ? `你处于 Ask 模式。你只能使用 list_collections 确认集合清单；不要浏览集合数据。${dbLabel(context.databaseType)} 的查询格式为 REST API（METHOD /path + JSON body），具体格式因数据库类型而异。只生成查询请求文本和说明，不要暗示已经执行。`
       : `You are in Ask mode. You may only use list_collections to inspect collection names; do not browse collection data. ${dbLabel(context.databaseType)} uses a REST API query format (METHOD /path + JSON body) that varies by database type. Generate query strings and explanations only; do not imply execution.`,
+    currentTimeGuidance,
   ];
 }
 
 function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
+  const currentTimeGuidance = currentTimeToolGuidance();
   if (mode === "agent") {
     return [
-      isZh ? "你处于 Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_sample_data。" : "You are in Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_sample_data.",
+      isZh ? "你处于 Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_sample_data、get_current_time。" : "You are in Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_sample_data, get_current_time.",
       isZh
         ? "用户提出数据查询意图时，必须调用 execute_query 工具执行 SQL，不要只输出 SQL 文本后停止。先用 list_tables/get_columns 了解 schema，再调用 execute_query 获取真实结果，最后基于结果回答用户。"
         : "When the user expresses a data query intent, you MUST call the execute_query tool to run the SQL — do NOT just output SQL text and stop. Use list_tables/get_columns to understand the schema first, then call execute_query to get real results, then answer based on the actual data.",
+      currentTimeGuidance,
       isZh
         ? "当用户要求写入操作（INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE 等）时，先在一个 ```sql 代码块中给出精确的写 SQL，再在回复末尾用问句明确询问用户是否确认执行（例如'需要我执行这条 CREATE TABLE 语句吗？'）。待用户明确确认后再调用 execute_query，并原样使用该代码块中的 SQL，不得改写、重新格式化或补充语句。禁止不经确认直接执行写入。"
         : "When the user requests a write operation (INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE, etc.), first put the exact proposed write SQL in one ```sql code block, then ask for explicit confirmation at the end of your reply with a question that names the specific operation (e.g., 'Should I execute this CREATE TABLE?'). Only call execute_query for writes after the user explicitly confirms, and use the exact SQL from that code block without rewriting, reformatting, or adding statements. Never execute writes without confirmation.",
@@ -375,7 +379,13 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
     ];
   }
 
-  return [isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run."];
+  return [isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run.", currentTimeGuidance];
+}
+
+function currentTimeToolGuidance(): string {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const utcOffsetMinutes = -new Date().getTimezoneOffset();
+  return `When a request needs a relative time expression such as yesterday, last 7 days, this month, or today, call get_current_time first with {"timezone":"${timezone}","utc_offset_minutes":${utcOffsetMinutes}}; do not guess the current date or timezone.`;
 }
 
 function schemaCoverageLine(context: AiContext, isZh: boolean): string {

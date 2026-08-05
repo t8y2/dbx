@@ -413,6 +413,7 @@ export const redisSetAdd = forward("redisSetAdd");
 export const redisSetRemove = forward("redisSetRemove");
 export const redisZadd = forward("redisZadd");
 export const redisZrem = forward("redisZrem");
+export const redisZsetUpdate = forward("redisZsetUpdate");
 export const redisStreamAdd = forward("redisStreamAdd");
 export const redisJsonSet = forward("redisJsonSet");
 export const redisCheckJsonModule = forward("redisCheckJsonModule");
@@ -748,3 +749,13 @@ export type {
   AgentEvent,
   SqlFileEntry,
 } from "@/lib/backend/tauri";
+
+// MQTT
+export const mqttGetBrokerInfo = forward("mqttGetBrokerInfo");
+export const mqttSubscribe = forward("mqttSubscribe");
+export const mqttUnsubscribe = forward("mqttUnsubscribe");
+export const mqttPublish = forward("mqttPublish");
+export const mqttListTopics = forward("mqttListTopics");
+export const mqttGetTopicTree = forward("mqttGetTopicTree");
+export const mqttGetMessages = forward("mqttGetMessages");
+export const mqttClearMessages = forward("mqttClearMessages");

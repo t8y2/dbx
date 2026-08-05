@@ -34,6 +34,20 @@ test("bumps DuckDB after its initial release", () => {
   assert.equal(result.versions.duckdb, "0.1.1");
 });
 
+test("classifies TDengine Rust changes as native-only", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { tdengine: "0.1.39" },
+    changedFiles: ["agents/drivers/tdengine/src/driver.rs"],
+    moduleExists: (path) => path === "agents/drivers/tdengine",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.tdengine, "0.1.40");
+  assert.deepEqual(result.changedModules, ["tdengine"]);
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["tdengine"]);
+});
+
 test("bumps the native RabbitMQ agent from its Go directory", () => {
   const result = evaluateAgentVersionBump({
     versions: { rabbitmq: "0.1.0" },
@@ -67,6 +81,19 @@ test("bumps Cassandra from its native Go source directory", () => {
 
   assert.equal(result.versions.cassandra, "0.1.38");
   assert.deepEqual(result.nativeModules, ["cassandra"]);
+});
+
+test("bumps Neo4j from its native Go source directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { neo4j: "0.1.39" },
+    changedFiles: ["agents/drivers/neo4j-go/main.go"],
+    moduleExists: (path) => path === "agents/drivers/neo4j-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.neo4j, "0.1.40");
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["neo4j"]);
 });
 
 test("builds a manually versioned module even without runtime file changes", () => {

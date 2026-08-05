@@ -1,6 +1,9 @@
-import { test } from "vitest";
+import { afterAll, beforeAll, test, vi } from "vitest";
 import assert from "node:assert/strict";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "../../apps/desktop/src/lib/sidebar/treeNodeClick.ts";
+
+beforeAll(() => vi.stubGlobal("navigator", { platform: "Linux x86_64" }));
+afterAll(() => vi.unstubAllGlobals());
 
 test("table and view rows open data without toggling structure groups", () => {
   assert.equal(treeNodeRowAction("table", true), "open-data");
@@ -119,13 +122,13 @@ test("double click does not open object browser for non-browsable rows", () => {
 });
 
 test("double click navigation mode copies the selected sidebar row name", () => {
-  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }), "copy-name");
-  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }, "MacIntel"), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }, "Win32"), "copy-name");
 });
 
 test("single click navigation mode copies the selected sidebar row name", () => {
-  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }), "copy-name");
-  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "c", metaKey: true }, "MacIntel"), "copy-name");
+  assert.equal(sidebarSelectionCopyAction({ key: "C", ctrlKey: true }, "Win32"), "copy-name");
 });
 
 test("copying table child group rows uses the parent table name", () => {

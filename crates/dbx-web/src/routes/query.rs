@@ -1012,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_multi_response_preserves_nested_filtered_error_detail() {
+    fn execute_multi_response_preserves_nested_original_error_detail() {
         let result = dbx_core::query::ExecuteMultiResult {
             result: dbx_core::db::QueryResult {
                 columns: vec!["Error".to_string()],
@@ -1033,6 +1033,7 @@ mod tests {
             error: Some(dbx_core::backend_error::BackendError::from_sql_detail(
                 "relation customer_orders does not exist",
             )),
+            server_message: false,
         };
 
         let payload = serde_json::to_value(execute_multi_response(vec![result]).0).unwrap();

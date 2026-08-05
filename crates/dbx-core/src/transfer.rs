@@ -1292,7 +1292,8 @@ pub(crate) fn is_mysql_generated_column_extra(extra: Option<&str>) -> bool {
     })
 }
 
-pub(crate) fn selected_columns_include_identity_extras(columns: &[String], column_extras: &[Option<String>]) -> bool {
+#[cfg(test)]
+fn selected_columns_include_identity_extras(columns: &[String], column_extras: &[Option<String>]) -> bool {
     columns
         .iter()
         .enumerate()
@@ -1344,7 +1345,8 @@ fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) ->
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
 }
 
-pub(crate) fn wrap_dameng_identity_insert_sql(insert_sql: &str, table: &str, schema: &str) -> String {
+#[cfg(test)]
+fn wrap_dameng_identity_insert_sql(insert_sql: &str, table: &str, schema: &str) -> String {
     let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
     wrap_dameng_identity_insert_sql_for_table(insert_sql, &full_table)
 }

@@ -746,6 +746,119 @@ test("close other fixed tabs does not close regular tabs", () => {
   );
 });
 
+test("close right tabs only closes tabs to the right in the same group", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const fixedId = store.createTab("conn-1", "db", "fixed");
+  const targetId = store.createTab("conn-1", "db", "target");
+  const rightA = store.createTab("conn-1", "db", "right a");
+  const rightB = store.createTab("conn-1", "db", "right b");
+  store.togglePinnedTab(fixedId);
+  store.activeTabId = rightB;
+
+  store.closeRightTabs(targetId);
+
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [fixedId, targetId],
+  );
+  assert.equal(store.activeTabId, targetId);
+  assert.equal(
+    store.tabs.some((tab) => tab.id === rightA || tab.id === rightB),
+    false,
+  );
+
+  let completions = 0;
+  store.closeRightTabs(targetId, () => {
+    completions += 1;
+  });
+
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [fixedId, targetId],
+  );
+  assert.equal(store.activeTabId, targetId);
+  assert.equal(completions, 1);
+});
+
+test("close right fixed tabs keeps regular tabs and a retained active tab", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const targetId = store.createTab("conn-1", "db", "fixed target");
+  const rightFixedId = store.createTab("conn-1", "db", "fixed right");
+  const regularId = store.createTab("conn-1", "db", "regular");
+  store.togglePinnedTab(targetId);
+  store.togglePinnedTab(rightFixedId);
+  store.activeTabId = regularId;
+
+  store.closeRightTabs(targetId);
+
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId, regularId],
+  );
+  assert.equal(store.activeTabId, regularId);
+});
+
+test("close right tabs pauses before closing an unsaved query", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const targetId = store.createTab("conn-1", "db", "target");
+  const dirtyId = store.createTab("conn-1", "db", "dirty");
+  store.updateSql(dirtyId, "select 1;");
+
+  store.closeRightTabs(targetId);
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.equal(store.pendingCloseTabId, dirtyId);
+  assert.equal(store.closeConfirmContext, "batch");
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId, dirtyId],
+  );
+
+  store.forceClosePendingTab();
+
+  assert.equal(store.showCloseConfirm, false);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId],
+  );
+  assert.equal(store.activeTabId, targetId);
+});
+
+test("close right tabs only runs completion after the pending batch succeeds", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const targetId = store.createTab("conn-1", "db", "target");
+  const dirtyId = store.createTab("conn-1", "db", "dirty");
+  store.updateSql(dirtyId, "select 1;");
+  let completions = 0;
+
+  store.closeRightTabs(targetId, () => {
+    completions += 1;
+  });
+  assert.equal(completions, 0);
+
+  store.cancelClosePendingTab();
+  assert.equal(completions, 0);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId, dirtyId],
+  );
+
+  store.closeRightTabs(targetId, () => {
+    completions += 1;
+  });
+  store.forceClosePendingTab();
+
+  assert.equal(completions, 1);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [targetId],
+  );
+});
+
 test("close other tabs pauses on restored unsaved query tabs", async () => {
   const restoreStorage = installMemoryStorage();
   try {
@@ -1060,6 +1173,26 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
   assert.equal(tab.resultSortColumn, undefined);
   assert.equal(tab.resultSortMode, undefined);
   assert.equal(tab.resultLocalSortOriginalMongoCopyDocuments, undefined);
+});
+
+test("sortTabResultLocally uses result column types for numeric strings", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.result = {
+    columns: ["QUANTITY_IN_STOCK"],
+    column_types: ["NUMBER"],
+    rows: [["-27700"], ["-78800"], ["297500"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+  };
+
+  store.sortTabResultLocally(tabId, "QUANTITY_IN_STOCK", 0, "asc");
+
+  assert.deepEqual(tab.result.rows, [["-78800"], ["-27700"], ["297500"]]);
 });
 
 test("selecting a result run restores its displayed result without changing SQL draft", async () => {
@@ -4561,7 +4694,10 @@ test("mongo dropIndexes execution exposes partial failures and refreshes loaded 
     assert.equal(indexRefreshRequested, true);
     const indexGroup = connectionStore.treeNodes[0]?.children?.[0]?.children?.[0]?.children?.[0];
     assert.equal(indexGroup?.isExpanded, false);
-    assert.deepEqual(indexGroup?.children?.map((node) => node.label), ["_id_ (_id)"]);
+    assert.deepEqual(
+      indexGroup?.children?.map((node) => node.label),
+      ["_id_ (_id)"],
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -341,17 +341,31 @@ class DamengAgentMetadataTest {
     }
 
     @Test
-    void listSchemasFallsBackToAllUsersWithoutSysObjectsPrivilege() {
+    void listSchemasFallsBackToJdbcMetadataWithoutSysObjectsPrivilege() {
         DamengAgent agent = new DamengAgent();
         List<String> sqls = new ArrayList<>();
-        TestSupport.setPrivateConnection(agent, restrictedSchemaConnection(sqls));
+        List<String> jdbcMetadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedSchemaConnection(sqls, jdbcMetadataCalls, null));
 
         List<String> schemas = agent.listSchemas();
 
-        Assertions.assertEquals(List.of("APP", "REPORTING", "SYSDBA"), schemas);
-        Assertions.assertEquals(2, sqls.size(), String.join("\n", sqls));
+        Assertions.assertEquals(List.of("APP", "REPORTING", "REPORTING_ARCHIVE", "SYSDBA"), schemas);
+        Assertions.assertEquals(1, sqls.size(), String.join("\n", sqls));
         Assertions.assertTrue(sqls.get(0).contains("SYS.SYSOBJECTS"), sqls.get(0));
-        Assertions.assertTrue(sqls.get(1).contains("ALL_USERS"), sqls.get(1));
+        Assertions.assertEquals(List.of("getSchemas"), jdbcMetadataCalls);
+    }
+
+    @Test
+    void listSchemasPreservesCatalogErrorWhenJdbcMetadataFails() {
+        DamengAgent agent = new DamengAgent();
+        SQLException metadataError = new SQLException("JDBC metadata getSchemas failed");
+        TestSupport.setPrivateConnection(agent, restrictedSchemaConnection(new ArrayList<>(), new ArrayList<>(), metadataError));
+
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, agent::listSchemas);
+
+        Assertions.assertEquals("no SYS.SYSOBJECTS privilege", error.getCause().getMessage());
+        Assertions.assertEquals(1, error.getCause().getSuppressed().length);
+        Assertions.assertSame(metadataError, error.getCause().getSuppressed()[0]);
     }
 
     @Test
@@ -1087,7 +1101,11 @@ class DamengAgentMetadataTest {
         });
     }
 
-    private static Connection restrictedSchemaConnection(List<String> sqls) {
+    private static Connection restrictedSchemaConnection(
+        List<String> sqls,
+        List<String> jdbcMetadataCalls,
+        SQLException jdbcMetadataError
+    ) {
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
             if ("prepareStatement".equals(name)) {
@@ -1096,16 +1114,35 @@ class DamengAgentMetadataTest {
                 if (sql.contains("SYS.SYSOBJECTS")) {
                     return failingMetadataStatement("no SYS.SYSOBJECTS privilege");
                 }
-                if (sql.contains("ALL_USERS")) {
-                    return metadataStatement(List.of(List.of("APP"), List.of("REPORTING"), List.of("SYSDBA")));
-                }
                 throw new AssertionError("Unexpected SQL: " + sql);
+            }
+            if ("getMetaData".equals(name)) {
+                return jdbcSchemaMetadata(jdbcMetadataCalls, jdbcMetadataError);
             }
             if ("close".equals(name)) {
                 return null;
             }
             if ("isClosed".equals(name)) {
                 return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static DatabaseMetaData jdbcSchemaMetadata(List<String> calls, SQLException failure) {
+        return proxy(DatabaseMetaData.class, (method, args) -> {
+            if ("getSchemas".equals(method.getName())) {
+                calls.add("getSchemas");
+                if (failure != null) {
+                    throw failure;
+                }
+                return metadataResultSet(List.of(
+                    List.of("REPORTING_ARCHIVE"),
+                    List.of("APP"),
+                    List.of("REPORTING"),
+                    List.of("SYSDBA"),
+                    List.of("APP")
+                ));
             }
             return defaultValue(method.getReturnType());
         });
@@ -1183,7 +1220,7 @@ class DamengAgentMetadataTest {
                     return value == null ? null : value.toString();
                 }
                 return switch (((String) args[0]).toUpperCase()) {
-                    case "TABLE_NAME", "OBJECT_NAME" -> string(rows, index[0], 0);
+                    case "TABLE_NAME", "TABLE_SCHEM", "OBJECT_NAME" -> string(rows, index[0], 0);
                     case "TABLE_TYPE", "OBJECT_TYPE" -> string(rows, index[0], 1);
                     case "COLUMN_NAME" -> string(rows, index[0], 0);
                     case "DATA_TYPE" -> string(rows, index[0], 1);

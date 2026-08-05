@@ -512,6 +512,7 @@ async fn main() {
         .route("/redis/set-add", post(routes::redis::set_add))
         .route("/redis/set-remove", post(routes::redis::set_remove))
         .route("/redis/zadd", post(routes::redis::zadd))
+        .route("/redis/zset-update", post(routes::redis::zset_update))
         .route("/redis/stream-add", post(routes::redis::stream_add))
         .route("/redis/json-set", post(routes::redis::json_set))
         .route("/redis/check-json-module", post(routes::redis::check_json_module))

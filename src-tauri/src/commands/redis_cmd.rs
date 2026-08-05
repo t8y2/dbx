@@ -291,6 +291,31 @@ pub async fn redis_zrem(
 }
 
 #[tauri::command]
+pub async fn redis_zset_update(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    original_member: String,
+    expected_score: String,
+    member: String,
+    score: String,
+) -> Result<bool, String> {
+    ensure_connection_writable(&state, &connection_id, "ZADD/ZREM").await?;
+    dbx_core::redis_ops::redis_zset_update_in_db_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        &original_member,
+        &expected_score,
+        &member,
+        &score,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn redis_stream_add(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -407,6 +432,7 @@ pub async fn redis_load_more(
     cursor: u64,
     count: usize,
     filter: Option<String>,
+    sort_direction: Option<String>,
 ) -> Result<RedisCollectionPage, String> {
     dbx_core::redis_ops::redis_load_more_in_db_core(
         &state,
@@ -417,6 +443,7 @@ pub async fn redis_load_more(
         cursor,
         count,
         filter.as_deref(),
+        sort_direction.as_deref(),
     )
     .await
 }

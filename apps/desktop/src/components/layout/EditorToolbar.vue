@@ -229,6 +229,7 @@ async function changeCatalog(selectedCatalog: string) {
             class="h-6 w-6"
             :class="executeButtonClass"
             :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !executableSql.trim())"
+            @mousedown.prevent
             @click="activeTab.isExecuting ? emit('cancel') : emit('execute')"
           >
             <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />

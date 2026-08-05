@@ -1,6 +1,6 @@
 import { effectScope } from "vue";
 import { describe, expect, it, vi } from "vitest";
-import { useDataGridCanvasRuntime, type DataGridAnimationFrameDriver } from "@/composables/useDataGridCanvasRuntime";
+import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridAnimationFrameDriver } from "@/composables/useDataGridCanvasRuntime";
 import { useDataGridScrollbars } from "@/composables/useDataGridScrollbars";
 
 function createFrameDriver() {
@@ -26,6 +26,34 @@ function createObserver() {
 }
 
 describe("data grid visual runtimes", () => {
+  it("reads the exact device-pixel content box reported for a canvas", () => {
+    const size = dataGridCanvasDevicePixelSize({
+      contentRect: { width: 801, height: 399 },
+      devicePixelContentBoxSize: [{ inlineSize: 1001, blockSize: 499 }],
+    } as unknown as ResizeObserverEntry);
+
+    expect(size).toEqual({ cssWidth: 801, cssHeight: 399, pixelWidth: 1001, pixelHeight: 499 });
+  });
+
+  it("observes the canvas device-pixel box together with its viewport", () => {
+    const resize = createObserver();
+    const viewport = { children: [] } as unknown as Element;
+    const surface = { children: [] } as unknown as Element;
+    const runtime = useDataGridCanvasRuntime({
+      draw: vi.fn(),
+      syncViewport: vi.fn(),
+      getViewport: () => viewport,
+      getSurface: () => surface,
+      createResizeObserver: () => resize.observer,
+    });
+
+    runtime.observeViewport();
+
+    expect(resize.observe).toHaveBeenNthCalledWith(1, viewport);
+    expect(resize.observe).toHaveBeenNthCalledWith(2, surface, { box: "device-pixel-content-box" });
+    runtime.dispose();
+  });
+
   it("coalesces canvas frames and cancels all resources on dispose", () => {
     const frames = createFrameDriver();
     const resize = createObserver();

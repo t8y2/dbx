@@ -35,3 +35,32 @@ describe("AppTabBar objects presentation", () => {
     expect(tabBarSource.match(/tabMenuIcon\(tab\).*tabIconClass\(tab\)/g)).toHaveLength(2);
   });
 });
+
+describe("AppTabBar right-side close action", () => {
+  it("places the action after close-other and disables it when the target has no tabs to its right", () => {
+    expect(tabBarSource).toContain('label: t("contextMenu.closeRightTabs")');
+    expect(tabBarSource).toContain("action: () => closeTabsToRightFromTab(tab)");
+    expect(tabBarSource).toContain("disabled: !hasTabsToRight(tab)");
+
+    const closeOtherPositions = [...tabBarSource.matchAll(/label: closeOtherLabel,/g)].map((match) => match.index);
+    const closeRightPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeRightTabs"\),/g)].map((match) => match.index);
+    const closeAllPositions = [...tabBarSource.matchAll(/label: closeAllLabel,/g)].map((match) => match.index);
+    expect(closeOtherPositions).toHaveLength(2);
+    expect(closeRightPositions).toHaveLength(2);
+    expect(closeAllPositions).toHaveLength(2);
+    closeRightPositions.forEach((position, index) => {
+      expect(position).toBeGreaterThan(closeOtherPositions[index]);
+      expect(position).toBeLessThan(closeAllPositions[index]);
+    });
+  });
+
+  it("waits for query tab confirmation before closing special surfaces", () => {
+    expect(tabBarSource).toMatch(/queryStore\.closeRightTabs\(tab\.id, \(\) => \{[\s\S]*closeSpecialRegularSurfaces\(\);/);
+    expect(tabBarSource).toContain("if (shouldActivateTarget) activateTab(tab.id)");
+  });
+
+  it("reactivates settings after closing an active driver store to its right", () => {
+    expect(tabBarSource).toContain("const shouldActivateSettings = !!props.driverStoreActive");
+    expect(tabBarSource).toMatch(/emit\("close-driver-store"\);\s*if \(shouldActivateSettings\) emit\("activate-settings-page"\);/);
+  });
+});

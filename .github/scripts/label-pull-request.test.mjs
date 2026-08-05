@@ -20,6 +20,7 @@ const knownDatabaseTypes = new Set([
   "mongodb",
   "mq",
   "mysql",
+  "neo4j",
   "oceanbase-oracle",
   "oracle",
   "postgres",
@@ -57,12 +58,13 @@ test("maps agent and dialect paths to existing database types", () => {
     inferDatabaseTypes([
       "agents/drivers/oracle-go/go.mod",
       "agents/drivers/cassandra-go/go.mod",
+      "agents/drivers/neo4j-go/go.mod",
       "agents/drivers/vastbase-go/go.mod",
       "agents/drivers/kafka/build.gradle",
       "plugins/dialects/postgresql.yaml",
       "plugins/dialects/oceanbase.yaml",
     ], knownDatabaseTypes),
-    ["cassandra", "mq", "oceanbase-oracle", "oracle", "postgres", "vastbase"],
+    ["cassandra", "mq", "neo4j", "oceanbase-oracle", "oracle", "postgres", "vastbase"],
   );
 });
 

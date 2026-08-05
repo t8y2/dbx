@@ -1,12 +1,22 @@
 [workspace]
 resolver = "2"
 members = ["src-tauri", "crates/dbx-core", "crates/dbx-web", "crates/dbx-mcp", "crates/dbx-cli"]
-exclude = ["vendor/ctor"]
+exclude = ["vendor/ctor", "vendor/dirs-sys", "vendor/pageant", "vendor/rumqttc", "vendor/wry"]
 
 [patch.crates-io]
 # Tauri 2.11 uses ctor 0.8, which excludes Rust's win7 vendor. This vendors
 # upstream rust-ctor#443 until tauri-utils moves to ctor 1.x.
 ctor = { path = "vendor/ctor" }
+# rumqttc 0.24 hardcodes MQTT 3.1.1; this patch adds MQTT 3.1 CONNECT encoding.
+rumqttc = { path = "vendor/rumqttc" }
+# Keep two small upstream crates on Win7-compatible API calls. Their current
+# Windows bindings otherwise import COMBASE or WinRT APIs unavailable on Win7.
+dirs-sys = { path = "vendor/dirs-sys" }
+pageant = { path = "vendor/pageant" }
+# Wry 0.55 probes and creates WebView2 with a null browser folder. Pass the
+# bundled Fixed Runtime path explicitly so Windows 7 does not fall back to an
+# unavailable system Runtime.
+wry = { path = "vendor/wry" }
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
 postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }

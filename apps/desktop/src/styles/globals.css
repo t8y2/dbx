@@ -2088,9 +2088,6 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
   color: var(--sidebar-foreground);
   background: var(--sidebar);
 }
-.app-layout-classic > .app-sidebar-panel {
-  border-right: 1px solid var(--sidebar-border);
-}
 .app-sidebar-toolbar,
 .connection-tree-search,
 .sticky-database-header {

@@ -260,4 +260,12 @@ describe("native RedisJSON editor", () => {
     expect(directiveExpression(memberTextarea, "bind", "readonly")).toBe("savingMember");
     expect(directiveExpression(refreshButton, "bind", "disabled")).toBe("loading || refreshingValue || hasUnsavedRedisDraft");
   });
+
+  it("passes the loaded ZSet score into both update entry points", () => {
+    const inlineSave = findFunction("saveZsetInlineEdit").getText();
+    const detailSave = findFunction("saveMemberEdit").getText();
+
+    expect(inlineSave).toContain("originalMember, item.score, zsetInlineMember.value, scoreText");
+    expect(detailSave).toContain("context.member, context.score, writeValue, context.score");
+  });
 });

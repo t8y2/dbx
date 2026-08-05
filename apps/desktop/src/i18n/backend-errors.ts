@@ -128,7 +128,10 @@ function translateStructuredBackendError(t: BackendErrorTranslate, error: Backen
   const translated = t(error.messageKey, error.messageParams);
   const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
   const detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : undefined;
-  return detail && detail !== summary ? `${summary}\n\n${detail}` : summary;
+  const rawAdapterCode = error.diagnostics?.adapterCode;
+  const adapterCode = typeof rawAdapterCode === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawAdapterCode) ? rawAdapterCode : undefined;
+  const diagnosticDetail = detail && adapterCode ? `[${adapterCode}] ${detail}` : (detail ?? adapterCode);
+  return diagnosticDetail && diagnosticDetail !== summary ? `${summary}\n\n${diagnosticDetail}` : summary;
 }
 
 export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {

@@ -258,7 +258,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
   const { openData } = useSidebarDataOpenRuntime();
 
   async function openObjectBrowserTableTarget(target: NavigationTarget) {
-    if (!settingsStore.editorSettings.reuseDataTab) {
+    if (settingsStore.editorSettings.dataTabReuseMode === "always-new") {
       await openTableTarget(target);
       return;
     }
@@ -278,7 +278,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
       },
       undefined,
       "default",
-      { reuseScope: "same-table" },
+      { reuseMode: settingsStore.editorSettings.dataTabReuseMode },
     );
   }
 

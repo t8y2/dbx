@@ -14,6 +14,10 @@ use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
+static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:AUTO_INCREMENT_MODE|REPLICA_NUM|USE_BLOOM_FILTER|TABLET_SIZE|PCTFREE)\s*=")
+        .expect("valid OceanBase MySQL table option regex")
+});
 
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
 const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
@@ -3153,11 +3157,29 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
     }
 }
 
+fn is_oceanbase_mysql_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+    matches!(db_type, DatabaseType::Mysql)
+        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("oceanbase"))
+}
+
+fn contains_oceanbase_mysql_table_options(sql: &str) -> bool {
+    let (sql_without_literals_or_comments, _) = protect_sql_literals(sql, true);
+    OCEANBASE_MYSQL_TABLE_OPTION_RE.is_match(&sql_without_literals_or_comments)
+}
+
 fn can_reuse_source_table_ddl(
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
+    source_driver_profile: Option<&str>,
+    target_driver_profile: Option<&str>,
     preserves_target_table_name: bool,
 ) -> bool {
+    if is_oceanbase_mysql_profile(source_db_type, source_driver_profile)
+        && !is_oceanbase_mysql_profile(target_db_type, target_driver_profile)
+    {
+        return false;
+    }
+
     preserves_target_table_name
         && !matches!(target_db_type, DatabaseType::ClickHouse)
         && (source_db_type == target_db_type
@@ -5953,8 +5975,20 @@ where
                 target_table_preexisting,
             )
             .await?;
-            let can_reuse_source_ddl =
-                can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
+            let (source_driver_profile, target_driver_profile) = {
+                let configs = state.configs.read().await;
+                (
+                    configs.get(&request.source_connection_id).and_then(|config| config.driver_profile.clone()),
+                    configs.get(&request.target_connection_id).and_then(|config| config.driver_profile.clone()),
+                )
+            };
+            let can_reuse_source_ddl = can_reuse_source_table_ddl(
+                source_db_type,
+                target_db_type,
+                source_driver_profile.as_deref(),
+                target_driver_profile.as_deref(),
+                preserves_target_table_name,
+            );
             let ddl = if can_reuse_source_ddl {
                 let source_ddl = if let Some(catalog) =
                     resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type)
@@ -6008,13 +6042,28 @@ where
                         )
                     })
                 };
-                rewrite_transfer_source_table_ddl(
-                    &source_ddl,
-                    &request.source_schema,
-                    &request.target_schema,
-                    source_db_type,
-                    target_db_type,
-                )
+                if contains_oceanbase_mysql_table_options(&source_ddl)
+                    && !is_oceanbase_mysql_profile(target_db_type, target_driver_profile.as_deref())
+                {
+                    generate_create_table_ddl(
+                        &columns,
+                        &target_table,
+                        &request.source_schema,
+                        &request.target_schema,
+                        target_db_type,
+                        source_db_type,
+                        table_comment.as_deref(),
+                        request.target_catalog.as_deref(),
+                    )
+                } else {
+                    rewrite_transfer_source_table_ddl(
+                        &source_ddl,
+                        &request.source_schema,
+                        &request.target_schema,
+                        source_db_type,
+                        target_db_type,
+                    )
+                }
             } else {
                 generate_create_table_ddl(
                     &columns,
@@ -8186,9 +8235,42 @@ mod tests {
 
     #[test]
     fn transfer_reuses_source_table_ddl_only_when_target_shape_matches() {
-        assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, true));
-        assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, true));
-        assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, false));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, None, None, true,));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, true,));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, false,));
+    }
+
+    #[test]
+    fn oceanbase_mysql_transfer_only_reuses_ddl_for_an_oceanbase_target() {
+        assert!(
+            !can_reuse_source_table_ddl(&DatabaseType::Mysql, &DatabaseType::Mysql, Some("oceanbase"), None, true,)
+        );
+        assert!(can_reuse_source_table_ddl(
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            Some("OceanBase"),
+            Some("oceanbase"),
+            true,
+        ));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Mysql, &DatabaseType::Mysql, None, None, true,));
+    }
+
+    #[test]
+    fn detects_oceanbase_mysql_table_options_outside_literals_and_comments() {
+        let ddl = r#"CREATE TABLE `items` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  KEY `idx_name` (`name`) BLOCK_SIZE 16384 LOCAL
+) AUTO_INCREMENT = 42 AUTO_INCREMENT_MODE = 'ORDER'
+  DEFAULT CHARSET = utf8mb4 REPLICA_NUM = 1 USE_BLOOM_FILTER = FALSE
+  TABLET_SIZE = 134217728 PCTFREE = 0"#;
+        assert!(contains_oceanbase_mysql_table_options(ddl));
+
+        let portable = r#"CREATE TABLE `items` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `note` varchar(255) COMMENT 'AUTO_INCREMENT_MODE and PCTFREE',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='USE_BLOOM_FILTER'"#;
+        assert!(!contains_oceanbase_mysql_table_options(portable));
     }
 
     #[test]

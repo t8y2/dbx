@@ -17,8 +17,8 @@ import (
 const metadataTimeout = 15 * time.Second
 
 const (
-	kingbaseListDatabasesSQL         = "SELECT datname FROM sys_catalog.sys_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1', 'template2') ORDER BY datname"
-	kingbaseListDatabasesPostgresSQL = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1', 'template2') ORDER BY datname"
+	kingbaseListDatabasesSQL         = "SELECT datname FROM sys_catalog.sys_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
+	kingbaseListDatabasesPostgresSQL = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
 )
 
 // Escape '_' so only Kingbase internal SYS_/XLOG_ prefixes are hidden; names

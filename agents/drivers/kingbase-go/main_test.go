@@ -1015,8 +1015,11 @@ func TestListDatabasesKeepsConnectableCustomTemplates(t *testing.T) {
 		if strings.Contains(lowerQuery, "not datistemplate") {
 			t.Fatalf("database query must not hide connectable custom templates: %s", query)
 		}
-		if !strings.Contains(lowerQuery, "lower(datname) not in ('template0', 'template1', 'template2')") {
+		if !strings.Contains(lowerQuery, "lower(datname) not in ('template0', 'template1')") {
 			t.Fatalf("database query must hide only the standard template databases: %s", query)
+		}
+		if strings.Contains(lowerQuery, "'template2'") {
+			t.Fatalf("database query must keep a connectable database named template2: %s", query)
 		}
 	}
 

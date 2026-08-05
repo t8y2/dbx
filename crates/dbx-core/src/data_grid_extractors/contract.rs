@@ -197,6 +197,7 @@ pub struct DataGridExtractResult {
 pub enum DataGridExtractErrorCode {
     UnsupportedVersion,
     EmptySelection,
+    InvalidRawSelection,
     InvalidColumnIndex,
     InvalidColumnMapping,
     MissingTableMetadata,

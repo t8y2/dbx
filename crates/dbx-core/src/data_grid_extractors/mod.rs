@@ -254,6 +254,12 @@ fn write_extraction(
     let extractor = context.request.extractor;
     match extractor {
         DataGridExtractorId::Raw => {
+            if context.request.rows.len() != 1 || context.selected_source_indexes.len() != 1 {
+                return Err(DataGridExtractError::new(
+                    DataGridExtractErrorCode::InvalidRawSelection,
+                    "The raw extractor supports exactly one selected cell.",
+                ));
+            }
             write_raw(context, output)?;
             Ok(text_metadata("text/plain", "txt"))
         }

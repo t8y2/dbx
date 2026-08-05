@@ -64,6 +64,14 @@ fn extracts_raw_values_without_escaping_quotes() {
 }
 
 #[test]
+fn raw_rejects_multiple_selected_cells() {
+    let error =
+        extract_data_grid_selection(request(DataGridExtractorId::Raw)).expect_err("raw must reject multiple cells");
+
+    assert_eq!(error.code, DataGridExtractErrorCode::InvalidRawSelection);
+}
+
+#[test]
 fn csv_distinguishes_null_from_null_string() {
     let mut request = request(DataGridExtractorId::Csv);
     request.rows = vec![vec![json!(1), Value::Null], vec![json!(2), json!("NULL")]];

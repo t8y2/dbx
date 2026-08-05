@@ -10,7 +10,9 @@ import {
   DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
   extractorUnavailableForDatabase,
   normalizeDataGridExtractorOptions,
+  resolveDataGridCopyPreference,
   type DataGridCopyExtractorId,
+  type DataGridCopyPreference,
   type DataGridExtractPreview,
   type DataGridExtractRequest,
   type DataGridExtractorOptions,
@@ -133,9 +135,9 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       sourceName: sourceNames?.[sourceIndex],
       sourceIndex: compactIndex,
     }));
-    const selectedColumnIndexes = selectedSourceIndexes.map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
-    const rows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => normalizeCellValue(row[sourceIndex], columnTypesBySource.get(sourceIndex))));
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
+    const selectedColumnIndexes = selectedSourceIndexes.map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
+    const rows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => (descriptor.category === "json" || descriptor.category === "sql" ? normalizeCellValue(row[sourceIndex], columnTypesBySource.get(sourceIndex)) : row[sourceIndex])));
     const tableMeta =
       descriptor.category === "sql"
         ? compactTableMeta(
@@ -190,7 +192,17 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       }
       return canBuildSqlUpdateRequest();
     }
+    if (extractor === "raw") {
+      const request = buildRequest(extractor, extractorOptions);
+      return request !== null && request.rows.length * request.selectedColumnIndexes.length === 1;
+    }
     return selectionData() !== null;
+  }
+
+  function resolveCopyPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions): DataGridCopyExtractorId | null {
+    const request = buildRequest("raw", extractorOptions);
+    if (!request) return null;
+    return resolveDataGridCopyPreference(preference, request.rows.length * request.selectedColumnIndexes.length);
   }
 
   async function resolveMongoExtractorResult(extractor: DataGridCopyExtractorId, request: DataGridExtractRequest, rowLimit?: number) {
@@ -250,6 +262,22 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return { ...result, sourceRowCount, truncated: sourceRowCount > result.rowCount };
   }
 
+  async function copyWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+    if (hasUnsupportedDiscreteSelection.value) {
+      toast(t("grid.copyExtractorUnsupportedSelection"), 5000);
+      return false;
+    }
+    const extractor = resolveCopyPreference(preference, extractorOptions);
+    return extractor ? copyWithExtractor(extractor, extractorOptions) : false;
+  }
+
+  async function previewWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions): Promise<DataGridExtractPreview> {
+    if (hasUnsupportedDiscreteSelection.value) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
+    const extractor = resolveCopyPreference(preference, extractorOptions);
+    if (!extractor) throw new Error(t("grid.copyExtractorEmptySelection"));
+    return previewWithExtractor(extractor, extractorOptions);
+  }
+
   function showWarnings(warnings: Array<{ code: DataGridExtractWarningCode; message: string }> | undefined, omittedColumns: string[] | undefined) {
     if (!warnings?.length) return;
     for (const warning of warnings) {
@@ -258,7 +286,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
   }
 
-  return { copyWithExtractor, previewWithExtractor, canCopyWithExtractor };
+  return { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor };
 }
 
 function compactTableMeta(tableMeta: DataGridTableMeta | undefined, requiredColumns: string[]): DataGridTableMeta | undefined {

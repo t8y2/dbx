@@ -554,7 +554,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  const { copyWithExtractor, previewWithExtractor, canCopyWithExtractor } = useDataGridExtractor({
+  const { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
     columns,
     displayItems,
     allColumns,
@@ -1310,7 +1310,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyRow,
     copyAll,
     copyWithExtractor,
+    copyWithPreference,
     previewWithExtractor,
+    previewWithPreference,
     canCopyWithExtractor,
     exportCsv,
     exportCurrentPageCsv,

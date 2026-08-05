@@ -189,7 +189,7 @@ import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/use
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
-import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, extractorUnavailableForDatabase, type DataGridCopyExtractorId } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_COPY_PREFERENCES, extractorUnavailableForDatabase, type DataGridCopyExtractorId, type DataGridCopyPreference } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
@@ -5534,7 +5534,8 @@ const {
   copyRow,
   copyAll,
   copyWithExtractor,
-  previewWithExtractor,
+  copyWithPreference,
+  previewWithPreference,
   canCopyWithExtractor,
   exportCsv,
   exportCurrentPageCsv,
@@ -5625,28 +5626,34 @@ function copyExtractorLabel(extractor: DataGridCopyExtractorId): string {
   return labels[extractor];
 }
 
-const selectedCopyExtractor = computed(() => settingsStore.editorSettings.dataGridCopyExtractor);
-const defaultCopyExtractorLabel = computed(() => {
-  if (selectedCopyExtractor.value !== "sql-inserts") return copyExtractorLabel(selectedCopyExtractor.value);
+function copyPreferenceLabel(preference: DataGridCopyPreference): string {
+  if (preference === "smart") return t("grid.copyExtractorSmart");
+  if (preference !== "sql-inserts") return copyExtractorLabel(preference);
   return t(settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert ? "grid.copyExtractorSqlInsertsWithoutPrimaryKeys" : "grid.copyExtractorSqlInsertsWithPrimaryKeys");
-});
+}
+
+const selectedCopyPreference = computed(() => settingsStore.editorSettings.dataGridCopyExtractor);
+const defaultCopyPreferenceLabel = computed(() => copyPreferenceLabel(selectedCopyPreference.value));
 const extractorConfigOpen = ref(false);
-const extractorMenuItems = computed(() =>
-  DATA_GRID_COPY_EXTRACTOR_IDS.map((extractor) => ({
-    value: extractor,
-    label: copyExtractorLabel(extractor),
-    disabled: extractorUnavailableForDatabase(extractor, props.databaseType) || (extractor === "sql-updates" && !props.tableMeta?.primaryKeys.length),
-    separatorBefore: DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].separatorBefore,
-  })),
+const copyPreferenceMenuItems = computed(() =>
+  DATA_GRID_DEFAULT_COPY_PREFERENCES.map((preference) => {
+    const extractor = preference === "smart" ? undefined : preference;
+    return {
+      value: preference,
+      label: copyPreferenceLabel(preference),
+      disabled: extractor ? extractorUnavailableForDatabase(extractor, props.databaseType) || (extractor === "sql-updates" && !props.tableMeta?.primaryKeys.length) : false,
+      separatorBefore: extractor ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].separatorBefore : false,
+    };
+  }),
 );
 function openExtractorConfiguration() {
   extractorConfigOpen.value = true;
 }
 
-function setDefaultCopyExtractor(value: string) {
-  const item = extractorMenuItems.value.find((candidate) => candidate.value === value);
+function setDefaultCopyPreference(value: string) {
+  const item = copyPreferenceMenuItems.value.find((candidate) => candidate.value === value);
   if (!item || item.disabled) return;
-  settingsStore.updateEditorSettings({ dataGridCopyExtractor: item.value });
+  settingsStore.updateEditorSettings({ dataGridCopyExtractor: item.value as DataGridCopyPreference });
 }
 
 function sqlInsertExtractorOptions(excludePrimaryKeysFromInsert: boolean) {
@@ -5657,8 +5664,8 @@ function sqlInsertExtractorOptions(excludePrimaryKeysFromInsert: boolean) {
   };
 }
 
-function saveExtractorConfiguration(value: { extractor: DataGridCopyExtractorId; options: typeof settingsStore.editorSettings.dataGridExtractorOptions }) {
-  settingsStore.updateEditorSettings({ dataGridCopyExtractor: value.extractor, dataGridExtractorOptions: value.options });
+function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; options: typeof settingsStore.editorSettings.dataGridExtractorOptions }) {
+  settingsStore.updateEditorSettings({ dataGridCopyExtractor: value.preference, dataGridExtractorOptions: value.options });
 }
 
 const pageSizeMenuItems = computed(() =>
@@ -6605,7 +6612,7 @@ async function onGridKeydown(event: KeyboardEvent) {
   if (clipboardShortcut(event, "c")) {
     if (!hasCellSelection.value && !hasRowSelection.value) return;
     event.preventDefault();
-    await copyWithExtractor(selectedCopyExtractor.value);
+    await copyWithPreference(selectedCopyPreference.value);
     return;
   }
   if (clipboardShortcut(event, "a")) {
@@ -8215,10 +8222,10 @@ defineExpose({
   exportSql,
   exportXlsx,
   exportTxt,
-  defaultCopyExtractor: selectedCopyExtractor,
-  defaultCopyExtractorLabel,
-  copyExtractorMenuItems: extractorMenuItems,
-  setDefaultCopyExtractor,
+  defaultCopyPreference: selectedCopyPreference,
+  defaultCopyPreferenceLabel,
+  copyPreferenceMenuItems,
+  setDefaultCopyPreference,
   openExtractorConfiguration,
 });
 
@@ -8255,11 +8262,12 @@ function filterSubmenu(): ContextMenuItem {
 function buildExtractorContextItems(): ContextMenuItem[] {
   const items: ContextMenuItem[] = [];
   for (const extractor of DATA_GRID_COPY_EXTRACTOR_IDS) {
+    if (extractor === "raw" && !canCopyWithExtractor(extractor)) continue;
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
     if (descriptor.separatorBefore) {
       items.push({ label: "", separator: true });
     }
-    const selected = extractor === selectedCopyExtractor.value;
+    const selected = extractor === selectedCopyPreference.value;
     if (extractor === "sql-inserts") {
       for (const excludePrimaryKeysFromInsert of [false, true]) {
         const options = sqlInsertExtractorOptions(excludePrimaryKeysFromInsert);
@@ -10054,7 +10062,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     <DataGridBulkEditDialog v-if="bulkEditDialogMounted" v-model:open="bulkEditDialogOpen" v-model:value="bulkEditValue" :selected-cell-count="selectedCellCount" @apply="applyBulkEditValue" />
     <DataGridInsertRowsDialog v-if="insertRowsDialogMounted" v-model:open="insertRowsDialogOpen" :can-place-at-selection="canPlaceInsertAtSelection" :initial-position="insertPosition" @insert="insertRows" />
 
-    <DataGridExtractorDialog v-model:open="extractorConfigOpen" :extractor="selectedCopyExtractor" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="extractorMenuItems" :preview="previewWithExtractor" @save="saveExtractorConfiguration" />
+    <DataGridExtractorDialog v-model:open="extractorConfigOpen" :preference="selectedCopyPreference" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="copyPreferenceMenuItems" :preview="previewWithPreference" @save="saveExtractorConfiguration" />
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
 
     <Dialog v-model:open="generateIncrementDialogOpen">

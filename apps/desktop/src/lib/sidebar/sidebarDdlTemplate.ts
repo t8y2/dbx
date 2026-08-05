@@ -7,9 +7,7 @@ interface SidebarDdlExecutionTarget {
 }
 
 export function sidebarDdlTargetsForExecutionContext<T extends SidebarDdlExecutionTarget>(activeTarget: SidebarDdlExecutionTarget, targets: readonly T[]): T[] {
-  return targets.filter(
-    (target) => target.connectionId === activeTarget.connectionId && target.database === activeTarget.database && (target.catalog ?? "") === (activeTarget.catalog ?? ""),
-  );
+  return targets.filter((target) => target.connectionId === activeTarget.connectionId && target.database === activeTarget.database && (target.catalog ?? "") === (activeTarget.catalog ?? ""));
 }
 
 export async function buildSidebarDdlTemplateSql<T>(targets: readonly T[], loadDdl: (target: T) => Promise<string>, formatDdl: (ddl: string, target: T) => Promise<string>): Promise<string> {

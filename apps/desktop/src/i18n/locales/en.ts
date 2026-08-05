@@ -3967,6 +3967,7 @@ export default {
     sourceDataCompare: "Data compare",
     sourceExtension: "Extension manager",
     sourceSidebar: "Object tree",
+    sourceMq: "Message queue",
     sourceObjectSource: "Object source editor",
     sourceDataGenerate: "Data generator",
     sourceQueryHistory: "Query history rollback",

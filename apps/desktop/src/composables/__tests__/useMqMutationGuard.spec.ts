@@ -69,7 +69,7 @@ describe("useMqMutationGuard", () => {
     expect(requestConfirmation).toHaveBeenCalledWith({
       sql: "send",
       connectionName: "prod-mq",
-      source: "mq",
+      source: "production.sourceMq",
     });
   });
 });

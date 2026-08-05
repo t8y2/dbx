@@ -6506,6 +6506,7 @@ export default withEnglishFallback({
     sourceDataCompare: "資料比對",
     sourceExtension: "擴充功能管理",
     sourceSidebar: "物件樹",
+    sourceMq: "訊息佇列",
     sourceObjectSource: "物件原始碼編輯器",
     sourceDataGenerate: "資料產生器",
     sourceQueryHistory: "查詢歷史回復",

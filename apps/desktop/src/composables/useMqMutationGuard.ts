@@ -32,7 +32,7 @@ export function useMqMutationGuard(connectionId: MaybeRefOrGetter<string>) {
     return productionSafetyStore.requestConfirmation({
       sql: operation,
       connectionName: config.name,
-      source: "mq",
+      source: t("production.sourceMq"),
     });
   }
 

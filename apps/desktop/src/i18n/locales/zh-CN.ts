@@ -3967,6 +3967,7 @@ export default withEnglishFallback({
     sourceDataCompare: "数据对比",
     sourceExtension: "扩展管理",
     sourceSidebar: "对象树",
+    sourceMq: "消息队列",
     sourceObjectSource: "对象源码编辑器",
     sourceDataGenerate: "数据生成器",
     sourceQueryHistory: "查询历史回滚",

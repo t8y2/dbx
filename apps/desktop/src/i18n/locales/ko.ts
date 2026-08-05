@@ -148,6 +148,8 @@ export default withEnglishFallback({
   },
   sqlLibrary: {
     title: "SQL 라이브러리",
+    unassociated: "연결되지 않음",
+    deletedConnection: "삭제된 연결",
     openInCurrentDatabase: "현재 데이터베이스에서 열기",
     empty: "아직 저장된 쿼리가 없습니다",
     emptyFolder: "빈 폴더",

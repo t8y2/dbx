@@ -153,6 +153,8 @@ export default withEnglishFallback({
   },
   sqlLibrary: {
     title: "SQL 庫",
+    unassociated: "未關聯",
+    deletedConnection: "連線已刪除",
     openInCurrentDatabase: "在目前資料庫中開啟",
     empty: "暫無已儲存的查詢",
     emptyFolder: "空資料夾",

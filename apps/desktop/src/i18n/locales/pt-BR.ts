@@ -153,6 +153,8 @@ export default withEnglishFallback({
   },
   sqlLibrary: {
     title: "Biblioteca SQL",
+    unassociated: "Sem associação",
+    deletedConnection: "Conexão excluída",
     openInCurrentDatabase: "Abrir no banco de dados atual",
     empty: "Nenhuma consulta salva",
     emptyFolder: "Pasta vazia",

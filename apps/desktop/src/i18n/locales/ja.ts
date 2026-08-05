@@ -153,6 +153,8 @@ export default withEnglishFallback({
   },
   sqlLibrary: {
     title: "SQLライブラリ",
+    unassociated: "未関連付け",
+    deletedConnection: "削除された接続",
     openInCurrentDatabase: "現在のデータベースで開く",
     empty: "保存されたクエリはまだありません",
     emptyFolder: "空のフォルダ",

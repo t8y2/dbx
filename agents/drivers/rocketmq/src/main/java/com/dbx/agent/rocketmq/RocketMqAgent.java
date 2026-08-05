@@ -1130,19 +1130,27 @@ public final class RocketMqAgent {
     }
 
     /**
-     * Topic-filtered lists skip full-cluster collect for speed; still load configs from the first
-     * reachable master so FIFO/{@code consumeMessageOrderly} typing stays accurate.
+     * Topic-filtered lists skip full-cluster collect for speed. Merge subscription dumps from
+     * masters until the table stops growing (or brokers are exhausted) so FIFO groups that only
+     * exist on a later broker are not mis-typed as NORMAL.
      */
-    private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigsFromFirstBroker(
+    private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigsForTopicFilter(
         DefaultMQAdminExt admin, JsonObject conn) {
         long timeoutMs = Math.max(1_000L, intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS));
+        Map<String, SubscriptionGroupConfig> configs = new TreeMap<>();
         try {
             for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
                 try {
                     SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, timeoutMs);
-                    if (wrapper != null && wrapper.getSubscriptionGroupTable() != null
-                        && !wrapper.getSubscriptionGroupTable().isEmpty()) {
-                        return new TreeMap<>(wrapper.getSubscriptionGroupTable());
+                    if (wrapper == null || wrapper.getSubscriptionGroupTable() == null
+                        || wrapper.getSubscriptionGroupTable().isEmpty()) {
+                        continue;
+                    }
+                    int before = configs.size();
+                    configs.putAll(wrapper.getSubscriptionGroupTable());
+                    // First non-empty dump often has the full table; stop if nothing new arrived.
+                    if (before > 0 && configs.size() == before) {
+                        break;
                     }
                 } catch (Exception ignored) {
                     // Try next master.
@@ -1151,7 +1159,7 @@ public final class RocketMqAgent {
         } catch (Exception ignored) {
             // No reachable masters.
         }
-        return Collections.emptyMap();
+        return configs;
     }
 
     /**
@@ -1417,8 +1425,8 @@ public final class RocketMqAgent {
         if (!topicFilter.isBlank()) {
             // Dashboard-style: discover groups via topic; skip full-cluster subscription dump.
             groups.addAll(queryTopicConsumeByWhoRemapped(admin, conn, topicFilter));
-            // One master dump restores FIFO typing without reintroducing N-broker collect latency.
-            configs = collectConsumerGroupConfigsFromFirstBroker(admin, conn);
+            // Merge master dumps (early-exit) so FIFO typing is not stuck on the first broker.
+            configs = collectConsumerGroupConfigsForTopicFilter(admin, conn);
         } else {
             configs = collectConsumerGroupConfigs(admin, conn);
             groups.addAll(configs.keySet());
@@ -1476,7 +1484,7 @@ public final class RocketMqAgent {
             thread.setDaemon(true);
             return thread;
         });
-        // Nullable Long: omit totalLag when probe fails so list does not show healthy zero lag.
+        // Nullable Long: omit totalLag on failure; mark totalLagFailed so list UI does not show 0.
         List<Callable<Long>> tasks = new ArrayList<>(page.size());
         for (Map<String, Object> row : page) {
             String groupId = String.valueOf(row.get("groupId"));
@@ -1498,19 +1506,27 @@ public final class RocketMqAgent {
             for (int i = 0; i < page.size(); i++) {
                 Future<Long> future = i < results.size() ? results.get(i) : null;
                 if (future == null || future.isCancelled()) {
+                    page.get(i).put("totalLagFailed", true);
                     continue;
                 }
                 try {
                     Long lag = future.get();
                     if (lag != null) {
                         page.get(i).put("totalLag", lag);
+                    } else {
+                        page.get(i).put("totalLagFailed", true);
                     }
                 } catch (Exception ignored) {
-                    // Leave totalLag unset; Rust/UI treat missing lag as unknown rather than 0.
+                    page.get(i).put("totalLagFailed", true);
                 }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            for (Map<String, Object> row : page) {
+                if (!row.containsKey("totalLag")) {
+                    row.put("totalLagFailed", true);
+                }
+            }
         } finally {
             executor.shutdownNow();
         }
@@ -2381,6 +2397,7 @@ public final class RocketMqAgent {
         if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
             return addrs;
         }
+        LinkedHashSet<String> remappedSeen = new LinkedHashSet<>();
         for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
             if (brokerNameFilter != null && !brokerNameFilter.isBlank()
                 && !brokerNameFilter.equals(broker.getBrokerName())) {
@@ -2393,8 +2410,16 @@ public final class RocketMqAgent {
             if (masterAddr == null || masterAddr.isBlank()) {
                 masterAddr = broker.selectBrokerAddr();
             }
-            if (masterAddr != null && !masterAddr.isBlank()) {
-                addrs.add(remapBrokerAddrForClient(masterAddr, conn));
+            if (masterAddr == null || masterAddr.isBlank()) {
+                continue;
+            }
+            String remapped = remapBrokerAddrForClient(masterAddr, conn);
+            // Multi-broker Docker often remaps every master to the same host:port. Keep the
+            // original address for collisions so in-network agents can still reach each broker.
+            if (remappedSeen.add(remapped)) {
+                addrs.add(remapped);
+            } else if (!remapped.equals(masterAddr)) {
+                addrs.add(masterAddr);
             }
         }
         return addrs;
@@ -2833,18 +2858,47 @@ public final class RocketMqAgent {
         return true;
     }
 
-    private static boolean isLikelyUnreachableBrokerHost(String host) {
+    /** Package-visible for tests; RFC1918 + common Docker DNS names. */
+    static boolean isLikelyUnreachableBrokerHost(String host) {
         if (host == null || host.isBlank()) {
             return false;
         }
         if ("127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host) || "::1".equals(host)) {
             return false;
         }
-        return host.startsWith("172.")
-            || host.startsWith("10.")
-            || host.startsWith("192.168.")
+        // RFC1918: 10/8, 172.16/12, 192.168/16 — not every 172.* address.
+        return isRfc1918PrivateIpv4(host)
             || host.endsWith(".docker")
             || host.contains(".docker.");
+    }
+
+    static boolean isRfc1918PrivateIpv4(String host) {
+        if (host == null || host.isBlank()) {
+            return false;
+        }
+        String[] parts = host.split("\\.");
+        if (parts.length != 4) {
+            return false;
+        }
+        int[] octets = new int[4];
+        for (int i = 0; i < 4; i++) {
+            try {
+                octets[i] = Integer.parseInt(parts[i]);
+            } catch (NumberFormatException e) {
+                return false;
+            }
+            if (octets[i] < 0 || octets[i] > 255) {
+                return false;
+            }
+        }
+        if (octets[0] == 10) {
+            return true;
+        }
+        if (octets[0] == 192 && octets[1] == 168) {
+            return true;
+        }
+        // 172.16.0.0 – 172.31.255.255
+        return octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31;
     }
 
     private static List<Map<String, Object>> brokerNodes(ClusterInfo clusterInfo) {

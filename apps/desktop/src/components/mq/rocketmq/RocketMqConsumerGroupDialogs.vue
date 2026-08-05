@@ -220,12 +220,20 @@ async function saveConfig() {
 }
 
 watch(
-  // Reload when enrich fills topics after the dialog was opened on a fast-list row.
+  // Detail reloads when enrich fills topics; config must not reset the form on topics-only updates.
   () => [props.dialog, props.group?.name, (props.group?.topics ?? []).join("\0")] as const,
   () => {
     if (props.dialog === "detail") {
       void loadDetail();
-    } else if (props.dialog === "config") {
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [props.dialog, props.group?.name] as const,
+  () => {
+    if (props.dialog === "config") {
       void loadConfig();
     }
   },

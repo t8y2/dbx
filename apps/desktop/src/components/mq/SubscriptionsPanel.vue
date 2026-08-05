@@ -553,7 +553,8 @@ watch(
                 <span v-else class="text-muted">-</span>
               </td>
               <td v-if="!isClusterWideMode">
-                <span :class="{ 'text-warning': sub.msgBacklog > 1000 }">
+                <span v-if="sub.backlogUnavailable" class="text-muted">-</span>
+                <span v-else :class="{ 'text-warning': sub.msgBacklog > 1000 }">
                   {{ sub.msgBacklog.toLocaleString() }}
                 </span>
               </td>
@@ -977,6 +978,10 @@ td {
 .text-warning {
   color: var(--color-warning);
   font-weight: 500;
+}
+
+.text-muted {
+  color: var(--color-text-secondary);
 }
 
 .actions {

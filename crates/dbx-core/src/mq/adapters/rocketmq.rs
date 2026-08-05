@@ -913,6 +913,7 @@ fn rocketmq_subscription_for_topic(
         online_members: None,
         consumer_group_type: None,
         message_model: None,
+        backlog_unavailable: None,
     })
 }
 
@@ -926,12 +927,13 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
         .unwrap_or_default();
+    let lag_failed = group.get("totalLagFailed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let total_lag = group.get("totalLag").and_then(|v| v.as_i64());
     SubscriptionInfo {
         name: group_id.to_string(),
         sub_type: group_type.clone(),
-        // Missing totalLag means lag was not loaded (or probe failed); SubscriptionInfo
-        // cannot express unknown, so keep 0 and rely on detail/backlog RPC for truth.
-        msg_backlog: group.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0),
+        // Probe failure: keep 0 but set backlog_unavailable so topic-list UI shows "-".
+        msg_backlog: total_lag.unwrap_or(0),
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
         consumers: Vec::new(),
@@ -939,6 +941,11 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
         online_members,
         consumer_group_type: Some(group_type),
         message_model,
+        backlog_unavailable: if lag_failed || (group.get("totalLag").is_some() && total_lag.is_none()) {
+            Some(true)
+        } else {
+            None
+        },
     }
 }
 
@@ -1124,6 +1131,18 @@ mod tests {
 
         assert_eq!(sub.name, "orders-service");
         assert_eq!(sub.msg_backlog, 7);
+    }
+
+    #[test]
+    fn rocketmq_subscription_from_group_marks_failed_lag_unavailable() {
+        let group = serde_json::json!({
+            "groupId": "lag-fail",
+            "groupType": "NORMAL",
+            "totalLagFailed": true
+        });
+        let sub = rocketmq_subscription_from_group(&group);
+        assert_eq!(sub.msg_backlog, 0);
+        assert_eq!(sub.backlog_unavailable, Some(true));
     }
 
     #[test]

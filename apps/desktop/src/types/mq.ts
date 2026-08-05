@@ -192,6 +192,8 @@ export interface SubscriptionInfo {
   consumerGroupType?: string;
   /** RocketMQ consumer group message model: CLUSTERING / BROADCASTING. */
   messageModel?: string;
+  /** When true, backlog probe failed — do not render msgBacklog as healthy zero. */
+  backlogUnavailable?: boolean;
 }
 
 export interface RocketMqConsumerGroupConfig {

@@ -415,6 +415,9 @@ pub struct SubscriptionInfo {
     /// RocketMQ: CLUSTERING / BROADCASTING.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_model: Option<String>,
+    /// When true, backlog probe failed — UI must not treat `msg_backlog` as healthy zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog_unavailable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

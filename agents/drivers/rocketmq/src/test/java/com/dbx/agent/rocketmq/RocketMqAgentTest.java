@@ -133,6 +133,21 @@ class RocketMqAgentTest {
         assertEquals("127.0.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.18.0.3:10911", conn));
         assertEquals("127.0.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("10.0.0.5:10911", conn));
         assertEquals("broker.example.com:10911", RocketMqAgent.remapBrokerAddrForClient("broker.example.com:10911", conn));
+        // 172.15/172.32 are not RFC1918 — leave reachable public/non-private hosts alone.
+        assertEquals("172.15.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.15.0.1:10911", conn));
+        assertEquals("172.32.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.32.0.1:10911", conn));
+    }
+
+    @Test
+    void isRfc1918PrivateIpv4MatchesOnlyPrivateRanges() {
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("10.0.0.1"));
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("172.16.0.1"));
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("172.31.255.255"));
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("192.168.1.1"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("172.15.0.1"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("172.32.0.1"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("8.8.8.8"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("broker.example.com"));
     }
 
     @Test

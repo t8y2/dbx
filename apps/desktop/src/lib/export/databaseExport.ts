@@ -129,10 +129,12 @@ export async function runWithDatabaseBackupSnapshot<T>(options: DatabaseBackupSn
 }
 
 export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput): AllDatabaseExportPlanItem[] {
-  // 对于单数据库架构（达梦、Oracle 等），选中的"数据库"实际上就是 schema 本身，
-  // 不应再对每个"数据库"展开所有 schema 做笛卡尔积，直接将选中项作为 schema 导出。
+  // 对于 schema-aware 的单库类型（达梦、Oracle、OceanBase-Oracle 等），选中的"数据库"
+  // 实际上就是 schema 本身，不应再展开所有 schema 做笛卡尔积，直接将选中项作为 schema 导出。
+  // firebird/questdb/access 等单库但非 schema-aware 类型必须走 flatMap 保留真实 database，
+  // 否则 database:"" 会覆盖后端 db_config.database 破坏连接。
   const singleDatabase = options.dbType ? SINGLE_DATABASE_TYPES.has(options.dbType) : false;
-  if (singleDatabase) {
+  if (singleDatabase && options.schemaAware) {
     return options.databases.map((schema) => ({
       database: "",
       schema,

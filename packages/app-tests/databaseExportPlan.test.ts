@@ -51,3 +51,18 @@ test("all-database export treats selected items as schemas for single-database t
     { database: "", schema: "DATAMANAGE", fileStem: "DATAMANAGE", displayName: "DATAMANAGE" },
   ]);
 });
+
+test("all-database export preserves real database for non-schema-aware single-database types (firebird)", () => {
+  // firebird/questdb/access 是单库但非 schema-aware：不能短路成 database:"",
+  // 否则空 database 会覆盖后端 db_config.database 破坏连接。
+  const plan = buildAllDatabaseExportPlan({
+    databases: ["inventory", "archive"],
+    schemaAware: false,
+    dbType: "firebird",
+  });
+
+  assert.deepEqual(plan, [
+    { database: "inventory", schema: "inventory", fileStem: "inventory", displayName: "inventory" },
+    { database: "archive", schema: "archive", fileStem: "archive", displayName: "archive" },
+  ]);
+});

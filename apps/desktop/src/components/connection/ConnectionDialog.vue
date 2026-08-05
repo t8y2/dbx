@@ -33,6 +33,7 @@ import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnecti
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
+import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
 import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
@@ -472,40 +473,6 @@ const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
     resetTestState();
   },
 });
-
-interface GaussdbHostEntry {
-  host: string;
-  port: number;
-}
-
-function parseGaussdbHosts(host: string, port: number): GaussdbHostEntry[] {
-  if (!host) return [{ host: "127.0.0.1", port: port || 5432 }];
-  // Check if host contains comma-separated entries (host1:port1,host2:port2)
-  if (host.includes(",")) {
-    return host.split(",").map((part) => {
-      const trimmed = part.trim();
-      const colonIdx = trimmed.lastIndexOf(":");
-      if (colonIdx > 0) {
-        return { host: trimmed.slice(0, colonIdx), port: Number(trimmed.slice(colonIdx + 1)) || port || 5432 };
-      }
-      return { host: trimmed, port: port || 5432 };
-    });
-  }
-  return [{ host, port: port || 5432 }];
-}
-
-function serializeGaussdbHosts(entries: GaussdbHostEntry[]): { host: string; port: number } {
-  if (entries.length === 0) return { host: "", port: 5432 };
-  const host = entries
-    .map((e) => {
-      const h = e.host.trim();
-      if (!h) return "";
-      return `${h}:${e.port || 5432}`;
-    })
-    .filter(Boolean)
-    .join(",");
-  return { host, port: entries[0]?.port || 5432 };
-}
 
 const gaussdbHostEntries = ref<GaussdbHostEntry[]>(parseGaussdbHosts(form.value.host, form.value.port));
 

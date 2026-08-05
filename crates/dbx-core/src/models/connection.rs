@@ -1037,7 +1037,8 @@ impl ConnectionConfig {
                 if is_multi_host(raw_host) {
                     format!("gaussdb://{raw_host}{db_part}")
                 } else {
-                    format!("gaussdb://{host}:{port}{db_part}")
+                    let (gaussdb_host, gaussdb_port) = gaussdb_single_host_port(raw_host, port);
+                    format!("gaussdb://{gaussdb_host}:{gaussdb_port}{db_part}")
                 }
             }
             DatabaseType::Kwdb => format!("kwdb://{host}:{port}{db_part}"),
@@ -1211,7 +1212,8 @@ impl ConnectionConfig {
                     // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
                     format!("gaussdb://{}:{}@{raw_host}{db_part}", username, password)
                 } else {
-                    format!("gaussdb://{}:{}@{host}:{port}{db_part}", username, password)
+                    let (gaussdb_host, gaussdb_port) = gaussdb_single_host_port(raw_host, port);
+                    format!("gaussdb://{}:{}@{gaussdb_host}:{gaussdb_port}{db_part}", username, password)
                 }
             }
             DatabaseType::Kwdb => {
@@ -2172,6 +2174,29 @@ fn bracket_ipv6(host: &str) -> String {
 fn is_multi_host(host: &str) -> bool {
     let count = host.split(',').count();
     count >= 2
+}
+
+fn gaussdb_single_host_port(host: &str, default_port: u16) -> (String, u16) {
+    let host = host.trim();
+    if let Some(close) = host.strip_prefix('[').and_then(|value| value.find(']').map(|index| index + 1)) {
+        let bracketed_host = &host[..=close];
+        if let Some(port) = host
+            .get(close + 1..)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .and_then(|value| value.parse::<u16>().ok())
+        {
+            return (bracketed_host.to_string(), port);
+        }
+        return (bracketed_host.to_string(), default_port);
+    }
+    if host.matches(':').count() == 1 {
+        if let Some((single_host, raw_port)) = host.rsplit_once(':') {
+            if let Ok(port) = raw_port.parse::<u16>() {
+                return (bracket_ipv6(single_host), port);
+            }
+        }
+    }
+    (bracket_ipv6(host), default_port)
 }
 
 #[cfg(test)]
@@ -3215,6 +3240,28 @@ mod tests {
         config.db_type = DatabaseType::Gaussdb;
 
         assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@10.1.2.3:2883/postgres");
+    }
+
+    #[test]
+    fn gaussdb_url_normalizes_legacy_single_host_port() {
+        let mut config = mysql_config("gaussdb", "secret", None);
+        config.db_type = DatabaseType::Gaussdb;
+        config.host = "db.example.com:5433".to_string();
+        config.port = 5432;
+
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@db.example.com:5433/postgres");
+        assert_eq!(config.redacted_connection_url(), "gaussdb://db.example.com:5433/postgres");
+    }
+
+    #[test]
+    fn gaussdb_url_supports_single_and_multi_host_ipv6() {
+        let mut config = mysql_config("gaussdb", "secret", None);
+        config.db_type = DatabaseType::Gaussdb;
+        config.host = "[2001:db8::1]:5433".to_string();
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@[2001:db8::1]:5433/postgres");
+
+        config.host = "[2001:db8::1]:5433,[2001:db8::2]:5434".to_string();
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@[2001:db8::1]:5433,[2001:db8::2]:5434/postgres");
     }
 
     #[test]

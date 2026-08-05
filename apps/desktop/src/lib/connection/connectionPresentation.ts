@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
+import { parseGaussdbHosts, serializeGaussdbHosts } from "@/lib/connection/gaussdbHosts";
 
 type ConnectionPresentationConfig = Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "host" | "port" | "database">;
 type ConnectionNamePresentationConfig = ConnectionPresentationConfig & Pick<ConnectionConfig, "name">;
@@ -22,12 +23,19 @@ export function connectionEndpointLabel(connection?: ConnectionPresentationConfi
   if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connection.host || connection.database || "local";
   }
-  if (connection.host && connection.port) {
+  const endpoint = normalizedPresentationEndpoint(connection);
+  if (endpoint.host && endpoint.port) {
     // Multi-host format: host1:port1,host2:port2 — already includes ports
-    if (connection.host.includes(",")) return connection.host;
-    return `${connection.host}:${connection.port}`;
+    if (endpoint.host.includes(",")) return endpoint.host;
+    const endpointHost = endpoint.host.includes(":") ? `[${endpoint.host}]` : endpoint.host;
+    return `${endpointHost}:${endpoint.port}`;
   }
-  return connection.host || connection.database || "";
+  return endpoint.host || connection.database || "";
+}
+
+function normalizedPresentationEndpoint(connection: ConnectionPresentationConfig): { host: string; port: number } {
+  if (connection.db_type !== "gaussdb") return { host: connection.host, port: connection.port };
+  return serializeGaussdbHosts(parseGaussdbHosts(connection.host, connection.port));
 }
 
 function redactConnectionHost(host: string): string {
@@ -76,8 +84,9 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
     return connectionEndpointLabel(connection);
   }
 
-  const redactedHost = connection.host ? redactConnectionHost(connection.host) : "";
-  if (redactedHost && connection.port) {
+  const endpoint = normalizedPresentationEndpoint(connection);
+  const redactedHost = endpoint.host ? redactConnectionHost(endpoint.host) : "";
+  if (redactedHost && endpoint.port) {
     // Multi-host format already includes ports
     if (redactedHost.includes(",")) return redactedHost;
     const endpointHost = redactedHost.includes(":") ? `[${redactedHost}]` : redactedHost;

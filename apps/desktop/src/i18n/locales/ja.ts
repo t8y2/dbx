@@ -64,6 +64,7 @@ export default withEnglishFallback({
     sqlSaveFailed: "ファイルの保存に失敗しました: {message}",
     driverManager: "ドライバーマネージャー",
     updatableDriverCount: "更新可能なドライバー数",
+    mcpUpdateAvailable: "MCPサーバーの更新があります",
     blockDangerousRedisCommands: "危険なコマンドをブロック",
   },
   updates: {

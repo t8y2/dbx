@@ -62,6 +62,7 @@ export default {
     sqlSaveFailed: "Failed to save file: {message}",
     driverManager: "Driver Manager",
     updatableDriverCount: "Updatable driver count",
+    mcpUpdateAvailable: "MCP server update available",
     blockDangerousRedisCommands: "Block dangerous commands",
   },
   updates: {

@@ -64,6 +64,7 @@ export default withEnglishFallback({
     sqlSaveFailed: "Falha ao salvar o arquivo: {message}",
     driverManager: "Gerenciador de Drivers",
     updatableDriverCount: "Quantidade de drivers atualizáveis",
+    mcpUpdateAvailable: "Atualização do servidor MCP disponível",
     blockDangerousRedisCommands: "Bloquear comandos perigosos",
   },
   updates: {

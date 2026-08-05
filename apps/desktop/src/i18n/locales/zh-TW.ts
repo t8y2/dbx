@@ -64,6 +64,7 @@ export default withEnglishFallback({
     sqlSaveFailed: "儲存檔案失敗：{message}",
     driverManager: "驅動程式管理器",
     updatableDriverCount: "可更新驅動程式數量",
+    mcpUpdateAvailable: "MCP 服務有可用更新",
     blockDangerousRedisCommands: "攔截危險命令",
   },
   updates: {

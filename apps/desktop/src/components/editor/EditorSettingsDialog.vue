@@ -1780,6 +1780,12 @@ async function refreshMcpStatus() {
   mcpStatusError.value = "";
   try {
     mcpStatus.value = await checkMcpServerStatus();
+    // 通知工具栏徽章同步：携带已获取的 update_available，避免根组件重复查询 npm registry。
+    window.dispatchEvent(
+      new CustomEvent("dbx-mcp-status-changed", {
+        detail: { updateAvailable: !!mcpStatus.value.update_available },
+      }),
+    );
   } catch (e: any) {
     mcpStatusError.value = e?.message || String(e);
   } finally {

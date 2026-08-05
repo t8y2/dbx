@@ -64,6 +64,7 @@ export default withEnglishFallback({
     sqlSaveFailed: "파일을 저장하는 데 실패했습니다: {message}",
     driverManager: "드라이버 관리자",
     updatableDriverCount: "업데이트 가능한 드라이버 수",
+    mcpUpdateAvailable: "MCP 서버 업데이트 가능",
     blockDangerousRedisCommands: "위험한 명령 차단",
   },
   updates: {

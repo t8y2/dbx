@@ -344,6 +344,30 @@ fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
     linux_drm_render_devices_from_paths(std::path::Path::new("/sys/class/drm"), std::path::Path::new("/dev/dri"))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const LINUX_SOFTWARE_ONLY_DRM_DRIVERS: &[&str] = &[
+    "virtio-pci", // QEMU/KVM virtio-gpu: 2D dumb-buffer only, GL falls back to llvmpipe
+    "virtio_gpu", // virtio-gpu on virtio-mmio/platform buses
+    "qxl",        // QEMU/SPICE 2D display adapter
+    "bochs",      // QEMU/BOCHS VGA (2D only)
+    "cirrus",     // legacy Cirrus VGA (2D only)
+    "vmwgfx",     // VMware SVGA
+    "vboxvideo",  // VirtualBox graphics
+    "xen",        // Xen virtual GPU
+    "udl",        // DisplayLink 2D framebuffer
+    "mgag200",    // Matrox server BMC
+    "ast",        // ASPEED server BMC
+    "hibmc",      // Huawei HiBMC server BMC
+];
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_drm_driver_is_software_only(driver: Option<&str>) -> bool {
+    // 2D-only/virtual drivers leave GL rendering to llvmpipe, where WebKitGTK's
+    // DMABuf compositing drives the gallivm LLVM JIT that can fail to
+    // materialize compositing shaders (blank window on GPU-less VMs).
+    driver.is_none_or(|driver| LINUX_SOFTWARE_ONLY_DRM_DRIVERS.contains(&driver))
+}
+
 #[cfg(target_os = "linux")]
 fn linux_nvidia_driver() -> LinuxNvidiaDriver {
     let devices = linux_drm_render_devices();
@@ -364,7 +388,7 @@ fn linux_nvidia_driver() -> LinuxNvidiaDriver {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_webkit_rendering_workarounds(
     driver: LinuxNvidiaDriver,
-    has_render_device: bool,
+    has_hardware_render_device: bool,
 ) -> &'static [(&'static str, &'static str)] {
     match driver {
         LinuxNvidiaDriver::Proprietary => {
@@ -377,12 +401,12 @@ fn linux_webkit_rendering_workarounds(
             // Nouveau while the DOM remains interactive.
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         }
-        LinuxNvidiaDriver::None if !has_render_device => {
-            // No DRM render node means Mesa can only render through llvmpipe.
-            // WebKitGTK's DMABuf compositing then drives llvmpipe's gallivm
-            // LLVM JIT, which can fail to materialize the compositing shaders
-            // (blank/white window on GPU-less VMs and servers), so disable the
-            // DMABuf renderer there as well.
+        LinuxNvidiaDriver::None if !has_hardware_render_device => {
+            // No hardware render device means Mesa can only render through
+            // llvmpipe. WebKitGTK's DMABuf compositing then drives llvmpipe's
+            // gallivm LLVM JIT, which can fail to materialize the compositing
+            // shaders (blank/white window on GPU-less VMs and servers), so
+            // disable the DMABuf renderer there as well.
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         }
         LinuxNvidiaDriver::None => {
@@ -449,8 +473,11 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    let has_render_device = !linux_drm_render_devices().is_empty();
-    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver(), has_render_device) {
+    let render_devices = linux_drm_render_devices();
+    let has_hardware_render_device = render_devices
+        .iter()
+        .any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
+    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver(), has_hardware_render_device) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -850,12 +877,13 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_system_gtk_immodules_cache,
-        linux_appimage_wayland_backend_override, linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state,
-        linux_selected_drm_render_device, linux_webkit_rendering_workarounds, native_window_decorations_override,
-        should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
-        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        linux_appimage_wayland_backend_override, linux_drm_driver_is_software_only,
+        linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_selected_drm_render_device,
+        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
+        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
+        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
+        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
+        LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1101,12 +1129,25 @@ mod tests {
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
         assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, true), &[]);
-        // Without any DRM render node (GPU-less VM / server) Mesa falls back to
-        // llvmpipe, whose DMABuf compositing path can crash the WebKit process.
+        // Without any hardware render device (GPU-less VM / server) Mesa falls
+        // back to llvmpipe, whose DMABuf compositing path can crash the WebKit
+        // process.
         assert_eq!(
             linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, false),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
+    }
+
+    #[test]
+    fn treats_virtual_and_2d_drm_drivers_as_software_rendering() {
+        assert!(linux_drm_driver_is_software_only(Some("virtio-pci")));
+        assert!(linux_drm_driver_is_software_only(Some("virtio_gpu")));
+        assert!(linux_drm_driver_is_software_only(Some("qxl")));
+        assert!(linux_drm_driver_is_software_only(Some("bochs")));
+        assert!(linux_drm_driver_is_software_only(None));
+        assert!(!linux_drm_driver_is_software_only(Some("amdgpu")));
+        assert!(!linux_drm_driver_is_software_only(Some("i915")));
+        assert!(!linux_drm_driver_is_software_only(Some("nouveau")));
     }
 
     #[test]

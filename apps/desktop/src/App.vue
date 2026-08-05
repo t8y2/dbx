@@ -43,7 +43,7 @@ import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
-import { isSqlObjectNavigationRoutineType, sqlObjectNavigationSourceKind, sqlObjectNavigationSourceName, sqlObjectNavigationSourceSchema, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { isSqlObjectNavigationRoutineType, normalizeOracleNavigationTarget, sqlObjectNavigationSourceKind, sqlObjectNavigationSourceName, sqlObjectNavigationSourceSchema, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
@@ -1515,19 +1515,24 @@ function onEditTableStructure(table: SqlObjectNavigationTarget) {
 }
 
 async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
-  const target = tableTargetFromActiveTab(table);
-  const objectType = sqlObjectNavigationSourceKind(table);
+  const provisionalTarget = tableTargetFromActiveTab(table);
+  if (!provisionalTarget) return;
+  const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(provisionalTarget.connectionId));
+  // Oracle-family: unquoted → UPPER; quoted mixed-case keeps written case for ALL_SOURCE lookup.
+  const navigation = databaseType === "oracle" || databaseType === "dameng" || databaseType === "oceanbase-oracle" || databaseType === "yashandb" || databaseType === "oscar" ? normalizeOracleNavigationTarget(table) : table;
+  const target = tableTargetFromActiveTab(navigation);
+  const objectType = sqlObjectNavigationSourceKind(navigation);
   if (!target || !objectType) return;
-  const sourceName = sqlObjectNavigationSourceName(table);
-  const sourceSchema = sqlObjectNavigationSourceSchema(table, target.schema || target.database);
+  const sourceName = sqlObjectNavigationSourceName(navigation);
+  const sourceSchema = sqlObjectNavigationSourceSchema(navigation, target.schema || target.database);
   try {
     await connectionStore.ensureConnected(target.connectionId);
     connectionStore.activeConnectionId = target.connectionId;
     // Align Ctrl/Cmd+click with sidebar "view source" (dialog vs data tab).
     if (settingsStore.editorSettings.routineSourceOpenMode === "query-tab") {
       try {
-        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
-        if (!databaseType) throw new Error("Connection type is unavailable.");
+        const resolvedDatabaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
+        if (!resolvedDatabaseType) throw new Error("Connection type is unavailable.");
         // Wrap Oracle bare ALL_SOURCE (`procedure name is ...`) as CREATE OR REPLACE for the editor.
         const {
           raw,
@@ -1539,8 +1544,8 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
           schema: sourceSchema || target.database,
           name: sourceName,
           objectType,
-          databaseType,
-          signature: table.signature,
+          databaseType: resolvedDatabaseType,
+          signature: navigation.signature,
         });
         const tabId = queryStore.createTab(target.connectionId, target.database, `Source - ${sourceName}`, "query", sourceSchema, editableSource, target.catalog, { forceNew: true });
         const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
@@ -1549,7 +1554,7 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
             schema: sourceSchema || target.database,
             name: sourceName,
             objectType: resolvedType,
-            signature: table.signature,
+            signature: navigation.signature,
           });
         }
       } catch (e: any) {
@@ -1564,7 +1569,7 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
       name: sourceName,
       objectType,
       initialEditing,
-      signature: table.signature,
+      signature: navigation.signature,
     };
     showQueryEditorObjectSourceDialog.value = true;
   } catch (e: any) {

@@ -5,9 +5,14 @@ import {
   isSqlCallSiteIdentifierAt,
   isSqlKeyword,
   isSqlObjectNavigationRoutineType,
+  isSqlRelationColumnListContext,
+  isSqlRoutineCallNavigationCandidate,
   matchSqlObject,
   matchTable,
   mergeSqlObjectNavigationType,
+  normalizeOracleNavigationIdentityName,
+  normalizeOracleNavigationTarget,
+  resolveSqlObjectNavigationIdentity,
   splitQualifiedIdentifier,
   sqlObjectHoverDetail,
   sqlObjectNavigationSourceKind,
@@ -16,6 +21,7 @@ import {
   sqlObjectNavigationTableType,
   sqlObjectNavigationTarget,
   sqlObjectNavigationTargetFromIdentifier,
+  sqlObjectNavigationTargetFromIdentity,
   sqlObjectNavigationTypeFromCompletionObjectType,
   sqlObjectNavigationTypeFromTableType,
 } from "@/lib/sql/sqlNavigation";
@@ -195,26 +201,101 @@ describe("call-site navigation helpers", () => {
     const sql = "BEGIN\n  PROC_STATIC_DATA_IMPORT()\nEND;";
     const pos = sql.indexOf("PROC_STATIC_DATA_IMPORT") + 3;
     expect(isSqlCallSiteIdentifierAt(sql, pos)).toBe(true);
-    expect(isSqlCallSiteIdentifierAt("SELECT * FROM users", sql.indexOf("users") >= 0 ? 0 : 0)).toBe(false);
+    expect(isSqlRoutineCallNavigationCandidate(sql, pos)).toBe(true);
     expect(isSqlCallSiteIdentifierAt("SELECT * FROM users", "SELECT * FROM users".indexOf("users"))).toBe(false);
   });
 
-  it("builds optimistic targets from qualified identifiers", () => {
-    expect(sqlObjectNavigationTargetFromIdentifier("PROC_STATIC_DATA_IMPORT", { fallbackSchema: "APP" })).toEqual({
-      name: "PROC_STATIC_DATA_IMPORT",
-      schema: "APP",
-      type: "procedure",
-    });
-    expect(sqlObjectNavigationTargetFromIdentifier("HR.CALC_TAX")).toEqual({
+  it("does not treat INSERT INTO relation(column list) as a routine call", () => {
+    const sql = "INSERT INTO ORDERS(ID, AMT) VALUES (1, 2);";
+    const pos = sql.indexOf("ORDERS") + 2;
+    expect(isSqlCallSiteIdentifierAt(sql, pos)).toBe(true);
+    expect(isSqlRelationColumnListContext(sql.slice(0, sql.indexOf("ORDERS")))).toBe(true);
+    expect(isSqlRoutineCallNavigationCandidate(sql, pos)).toBe(false);
+
+    const identity = resolveSqlObjectNavigationIdentity(sql, pos);
+    expect(identity?.role).toBe("relation_column_list");
+    expect(identity?.name).toBe("ORDERS");
+  });
+
+  it("does not treat CREATE TABLE column lists as routine calls", () => {
+    const sql = "CREATE TABLE ORDERS(id number);";
+    const pos = sql.indexOf("ORDERS") + 1;
+    expect(isSqlRoutineCallNavigationCandidate(sql, pos)).toBe(false);
+    expect(resolveSqlObjectNavigationIdentity(sql, pos)?.role).toBe("relation_column_list");
+  });
+
+  it("builds optimistic targets preferring package.member for ambiguous two-part calls", () => {
+    const sql = "BEGIN\n  PAYROLL.CALC_TAX();\nEND;";
+    const identity = resolveSqlObjectNavigationIdentity(sql, sql.indexOf("CALC_TAX"));
+    expect(identity?.role).toBe("routine_call");
+    expect(identity?.twoPartAmbiguous).toBe(true);
+    expect(sqlObjectNavigationTargetFromIdentity(identity!, { fallbackSchema: "APP" })).toEqual({
       name: "CALC_TAX",
-      schema: "HR",
+      schema: "APP",
+      parentName: "PAYROLL",
+      parentSchema: "APP",
       type: "procedure",
     });
-    expect(sqlObjectNavigationTargetFromIdentifier("HR.PAYROLL.CALC_TAX")).toEqual({
+    // Metadata can force schema.routine when confirmed.
+    expect(sqlObjectNavigationTargetFromIdentity(identity!, { asSchemaRoutine: true })).toEqual({
+      name: "CALC_TAX",
+      schema: "PAYROLL",
+      type: "procedure",
+    });
+  });
+
+  it("builds three-part package member targets", () => {
+    const sql = "BEGIN\n  HR.PAYROLL.CALC_TAX();\nEND;";
+    const identity = resolveSqlObjectNavigationIdentity(sql, sql.indexOf("CALC_TAX"));
+    expect(sqlObjectNavigationTargetFromIdentity(identity!)).toEqual({
       name: "CALC_TAX",
       schema: "HR",
       parentName: "PAYROLL",
       parentSchema: "HR",
+      type: "procedure",
+    });
+  });
+
+  it("preserves quoted mixed-case identities for Oracle normalization", () => {
+    const sql = 'BEGIN\n  "MiXeDProc"();\nEND;';
+    const identity = resolveSqlObjectNavigationIdentity(sql, sql.indexOf("MiXeD") + 1);
+    expect(identity?.name).toBe("MiXeDProc");
+    expect(identity?.nameQuoted).toBe(true);
+    expect(normalizeOracleNavigationIdentityName(identity!.name, identity!.nameQuoted)).toBe("MiXeDProc");
+    expect(normalizeOracleNavigationIdentityName("mixedproc", false)).toBe("MIXEDPROC");
+
+    const target = sqlObjectNavigationTargetFromIdentity(identity!, { fallbackSchema: "APP" });
+    expect(normalizeOracleNavigationTarget(target!)).toEqual({
+      name: "MiXeDProc",
+      nameQuoted: true,
+      schema: "APP",
+      type: "procedure",
+    });
+  });
+
+  it("preserves quoted package.member mixed-case identities", () => {
+    const sql = 'BEGIN\n  "Pkg"."Member"();\nEND;';
+    const identity = resolveSqlObjectNavigationIdentity(sql, sql.indexOf("Member"));
+    expect(identity?.name).toBe("Member");
+    expect(identity?.nameQuoted).toBe(true);
+    expect(identity?.qualifier).toBe("Pkg");
+    expect(identity?.qualifierQuoted).toBe(true);
+    const target = normalizeOracleNavigationTarget(sqlObjectNavigationTargetFromIdentity(identity!, { fallbackSchema: "APP", asPackageMember: true })!);
+    expect(target).toEqual({
+      name: "Member",
+      nameQuoted: true,
+      schema: "APP",
+      parentName: "Pkg",
+      parentNameQuoted: true,
+      parentSchema: "APP",
+      type: "procedure",
+    });
+  });
+
+  it("keeps legacy string helper for simple identifiers", () => {
+    expect(sqlObjectNavigationTargetFromIdentifier("PROC_STATIC_DATA_IMPORT", { fallbackSchema: "APP" })).toEqual({
+      name: "PROC_STATIC_DATA_IMPORT",
+      schema: "APP",
       type: "procedure",
     });
   });

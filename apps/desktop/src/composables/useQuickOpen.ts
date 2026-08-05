@@ -440,7 +440,8 @@ export function useQuickOpen() {
   }
 
   function remoteTableItem(table: SqlCompletionTable, conn: ConnectionConfig, database: string): QuickOpenItem {
-    const type = table.type ?? "table";
+    // Completion "tables" may carry routine navigation types; quick-open relation entries only accept relation kinds.
+    const type = table.type === "view" || table.type === "materialized_view" ? table.type : "table";
     const prefix = type === "materialized_view" ? "mview" : type;
     return {
       id: `${prefix}-${conn.id}-${database}-${table.schema || ""}-${table.name}`,

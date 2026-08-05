@@ -251,7 +251,7 @@ async function put<T>(url: string, body: unknown): Promise<T> {
   return res.json();
 }
 
-async function backendResponseError(response: Response): Promise<BackendErrorException> {
+export async function backendResponseError(response: Response): Promise<BackendErrorException> {
   const text = await response.text();
   let payload: unknown = text;
   try {
@@ -287,7 +287,7 @@ export async function testConnectionWithInfo(config: ConnectionConfig): Promise<
   if (response.status === 404) {
     return normalizeConnectionTestResult(await testConnection(config), config);
   }
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   return normalizeConnectionTestResult(await response.json(), config);
 }
 
@@ -406,7 +406,7 @@ export async function importJdbcDrivers(pathsOrFiles: (string | File)[]): Promis
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
@@ -455,7 +455,7 @@ export async function installJdbcPluginLocal(pathOrFile: string | File): Promise
     method: "POST",
     body: formData,
   });
-  if (!uploadRes.ok) throw new Error(await uploadRes.text());
+  if (!uploadRes.ok) throw await backendResponseError(uploadRes);
   return uploadRes.json();
 }
 
@@ -534,7 +534,7 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   const result: { count: number } = await res.json();
   return result.count;
 }
@@ -556,7 +556,7 @@ export async function importAgentDriver(dbType: string, pathOrFile: string | Fil
     method: "POST",
     body: formData,
   });
-  if (!uploadRes.ok) throw new Error(await uploadRes.text());
+  if (!uploadRes.ok) throw await backendResponseError(uploadRes);
 }
 
 export const importAgentJar = importAgentDriver;
@@ -1293,7 +1293,7 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
@@ -1389,7 +1389,7 @@ export async function aiAgentStream(
     }),
     signal,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
@@ -1492,7 +1492,7 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(policy),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 }
 
 export async function loadMaxAgentTurns(): Promise<number> {
@@ -1505,7 +1505,7 @@ export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ maxAgentTurns }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 }
 
 export async function loadMaxRetries(): Promise<number> {
@@ -1518,7 +1518,7 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ maxRetries }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 }
 
 export interface OpenTabsStatePayload {
@@ -1820,7 +1820,7 @@ export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFile
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
@@ -1890,7 +1890,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -1952,7 +1952,7 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
         previewLimit: options.previewLimit,
       }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw await backendResponseError(res);
     return res.json();
   }
   const formData = new FormData();
@@ -1964,7 +1964,7 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
@@ -1975,7 +1975,7 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -2029,7 +2029,7 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -2691,7 +2691,7 @@ export async function nacosSearchConfigContent(connectionId: string, req: NacosC
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ connectionId, req }),
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   if (!response.body) throw new Error("Nacos content search did not return a response stream");
 
   const reader = response.body.getReader();
@@ -2738,7 +2738,7 @@ export async function nacosExportConfigs(connectionId: string, selector: NacosCo
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ connectionId, selector, fileName }),
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -2758,7 +2758,7 @@ export async function nacosPreviewConfigImport(connectionId: string, targetNames
     method: "POST",
     body: formData,
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   return response.json();
 }
 
@@ -3039,7 +3039,7 @@ export async function documentDownloadGridFsFile(connectionId: string, database:
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ connectionId, database, bucket, fileId }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   const data = (await res.json()) as number[];
   return new Uint8Array(data);
 }
@@ -3058,7 +3058,7 @@ export async function documentUploadGridFsFile(connectionId: string, database: s
     method: "POST",
     body,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 

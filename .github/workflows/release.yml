@@ -378,18 +378,9 @@ jobs:
           toolchain: nightly-2026-07-22
           components: rust-src
 
-      - name: Prepare Win7-compatible WebView2 loader
-        shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
-
-      - name: Prepare WebView2 109 fixed runtime
-        shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
-
-      - name: Probe WebView2 109 fixed runtime
-        shell: pwsh
-        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
-
+      # sccache must be set up before the WebView2 loader/runtime scripts: they
+      # run `cargo fetch` under the job-wide RUSTC_WRAPPER=sccache, so installing
+      # sccache only after them made cargo abort with "program not found".
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
@@ -415,6 +406,18 @@ jobs:
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
           } >> "$GITHUB_ENV"
+
+      - name: Prepare Win7-compatible WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
+
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2

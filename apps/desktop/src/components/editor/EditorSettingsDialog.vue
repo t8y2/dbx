@@ -3008,7 +3008,7 @@ async function aiTestConn() {
     aiTestResult.value = "success";
   } catch (e: any) {
     aiTestResult.value = "error";
-    aiTestError.value = translateBackendError(t, e?.message || String(e));
+    aiTestError.value = translateBackendError(t, e);
   } finally {
     aiTesting.value = false;
   }

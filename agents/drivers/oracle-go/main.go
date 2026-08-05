@@ -2293,7 +2293,7 @@ func oracleTriggerBody(source, description string) (string, bool) {
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
 	var err error
-	schema, err = s.normalizeSchema(schema)
+	schema, err = s.normalizeSchemaForIdentity(schema)
 	if err != nil {
 		return nil, err
 	}
@@ -2306,24 +2306,69 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 	}
 
+	// Unquoted Oracle identifiers are stored uppercase; quoted mixed-case names must stay exact.
+	// Try caller-provided identity first, then uppercase fallback (same pattern as column metadata).
+	for _, candidate := range oracleObjectIdentityNameCandidates(name) {
+		source, found, queryErr := s.loadObjectSourceText(schema, candidate, upperType)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		if found {
+			return map[string]any{"name": candidate, "object_type": objectType, "schema": schema, "source": source}, nil
+		}
+	}
+	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
+}
+
+func (s *server) loadObjectSourceText(schema, name, objectType string) (string, bool, error) {
 	rows, err := s.queryRows(`
 SELECT TEXT
 FROM ALL_SOURCE
 WHERE OWNER = :1 AND NAME = :2 AND TYPE = :3
-ORDER BY LINE`, []any{schema, strings.ToUpper(name), upperType})
+ORDER BY LINE`, []any{schema, name, objectType})
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
 	defer s.closeRows(rows)
 	var builder strings.Builder
+	var anyLine bool
 	for rows.Next() {
 		var line string
 		if err := rows.Scan(&line); err != nil {
-			return nil, err
+			return "", false, err
 		}
 		builder.WriteString(line)
+		anyLine = true
 	}
-	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	return builder.String(), anyLine, nil
+}
+
+// oracleObjectIdentityNameCandidates returns ALL_SOURCE name variants.
+// Exact form first (quoted mixed-case), then uppercase for unquoted identifiers.
+func oracleObjectIdentityNameCandidates(name string) []string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return nil
+	}
+	upper := strings.ToUpper(trimmed)
+	if trimmed == upper {
+		return []string{upper}
+	}
+	return []string{trimmed, upper}
+}
+
+// normalizeSchemaForIdentity preserves mixed-case schema owners (quoted identities)
+// and uppercases already-uppercase / empty-resolved session schemas.
+func (s *server) normalizeSchemaForIdentity(schema string) (string, error) {
+	trimmed := strings.TrimSpace(schema)
+	if trimmed != "" && trimmed != strings.ToUpper(trimmed) {
+		// Mixed or lower case from a quoted click-site identity — keep exact OWNER.
+		return trimmed, nil
+	}
+	return s.normalizeSchema(schema)
 }
 
 func (s *server) getTableDDL(schema, table, objectType string) (string, error) {

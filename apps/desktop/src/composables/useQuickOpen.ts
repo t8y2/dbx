@@ -7,6 +7,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import i18n from "@/i18n";
 
 const REMOTE_SEARCH_DEBOUNCE_MS = 180;
 const REMOTE_SEARCH_MIN_QUERY_LENGTH = 2;
@@ -18,7 +19,7 @@ const QUICK_OPEN_MAX_RESULTS = 200;
 const INITIAL_SQL_LIBRARY_LIMIT = 20;
 const INITIAL_SQL_FILE_LIMIT = 20;
 
-const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "etcd", "zookeeper", "mq", "nacos"]);
+const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "victoriametrics", "etcd", "zookeeper", "mq", "nacos"]);
 
 export interface QuickOpenItem {
   id: string;
@@ -118,25 +119,22 @@ export function useQuickOpen() {
   let sqlFilesLoadGeneration = 0;
 
   function getConnectionLabel(connectionId: string): string {
+    if (!connectionId) return i18n.global.t("sqlLibrary.unassociated");
     const conn = connectionStore.connections.find((c) => c.id === connectionId);
-    return conn?.name || connectionId;
+    return conn?.name || i18n.global.t("sqlLibrary.deletedConnection");
   }
 
   const sqlLibraryAllItems = computed<QuickOpenItem[]>(() => {
-    const activeConnectionIds = new Set(connectionStore.connections.map((c) => c.id));
-    const orphanedIds = savedSqlStore.orphanedFileIds(activeConnectionIds);
-    return savedSqlStore.allFiles
-      .filter((file) => !orphanedIds.has(file.id))
-      .map((file) => ({
-        id: `sqllib-${file.id}`,
-        type: "sql_library_file" as const,
-        label: file.name,
-        description: getConnectionLabel(file.connectionId),
-        connectionId: file.connectionId,
-        connectionName: getConnectionLabel(file.connectionId),
-        sqlFileId: file.id,
-        searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
-      }));
+    return savedSqlStore.allFiles.map((file) => ({
+      id: `sqllib-${file.id}`,
+      type: "sql_library_file" as const,
+      label: file.name,
+      description: getConnectionLabel(file.connectionId),
+      connectionId: file.connectionId,
+      connectionName: getConnectionLabel(file.connectionId),
+      sqlFileId: file.id,
+      searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
+    }));
   });
 
   const sqlLibraryRecentItems = computed<QuickOpenItem[]>(() => {
@@ -441,7 +439,8 @@ export function useQuickOpen() {
   }
 
   function remoteTableItem(table: SqlCompletionTable, conn: ConnectionConfig, database: string): QuickOpenItem {
-    const type = table.type ?? "table";
+    // Completion "tables" may carry routine navigation types; quick-open relation entries only accept relation kinds.
+    const type = table.type === "view" || table.type === "materialized_view" ? table.type : "table";
     const prefix = type === "materialized_view" ? "mview" : type;
     return {
       id: `${prefix}-${conn.id}-${database}-${table.schema || ""}-${table.name}`,

@@ -40,16 +40,17 @@ describe("saved SQL execution targets", () => {
     expect(savedSqlExecutionTargetFromTab(undefined)).toBeUndefined();
   });
 
-  it("preserves the saved default target when an existing file is updated", () => {
+  it("uses the current execution target when a file is saved", () => {
     expect(
-      savedSqlDefaultTargetForWrite(
-        {
-          connectionId: "runtime-connection",
-          database: "runtime_database",
-          schema: "runtime_schema",
-        },
-        savedTarget,
-      ),
-    ).toEqual(savedTarget);
+      savedSqlDefaultTargetForWrite({
+        connectionId: "runtime-connection",
+        database: "runtime_database",
+        schema: "runtime_schema",
+      }),
+    ).toEqual({
+      connectionId: "runtime-connection",
+      database: "runtime_database",
+      schema: "runtime_schema",
+    });
   });
 });

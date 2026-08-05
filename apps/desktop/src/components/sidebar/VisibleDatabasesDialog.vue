@@ -84,6 +84,7 @@ async function loadDatabases() {
   searchText.value = "";
   try {
     const names = await loadObjectNames();
+    connectionStore.recordPrimaryVisibleObjectNames(props.connectionId, names);
     objectNames.value = names;
     showSystemDatabases.value = false;
     const configured = isSchemaFilterMode.value ? connection.value?.visible_schemas?.[databaseKey.value] : connection.value?.visible_databases;

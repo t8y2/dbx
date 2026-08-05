@@ -148,7 +148,7 @@ async function loadTopics(force = false) {
   try {
     await topicSelectRef.value?.loadTopics();
   } catch (e: unknown) {
-    error.value = translateBackendError(t, formatError(e));
+    error.value = translateBackendError(t, e);
   } finally {
     topicsLoading.value = false;
   }
@@ -261,7 +261,7 @@ async function loadRuntimeClients() {
     }
   } catch (e: unknown) {
     if (isRuntimeLoadCurrent(loadSeq, currentKey)) {
-      error.value = translateBackendError(t, formatError(e)) || String(e);
+      error.value = translateBackendError(t, e);
     }
   } finally {
     if (loadSeq === runtimeLoadSeq) {

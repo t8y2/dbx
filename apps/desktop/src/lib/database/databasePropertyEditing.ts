@@ -81,6 +81,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   zookeeper: { deferred: "key-value namespaces are not databases" },
   iris: { deferred: "schema properties need product-specific handling" },
   influxdb: { deferred: "database retention policies need a dedicated workflow" },
+  victoriametrics: { deferred: "metric and retention settings are managed by VictoriaMetrics deployment configuration" },
   jdbc: { deferred: "generic JDBC does not expose reliable dialect-specific properties" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace editing already uses the Nacos admin flow" },

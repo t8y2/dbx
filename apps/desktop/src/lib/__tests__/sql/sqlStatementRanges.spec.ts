@@ -1276,6 +1276,7 @@ describe("supportsExecutionTargetPicker", () => {
     expect(supportsExecutionTargetPicker("zookeeper")).toBe(false);
     expect(supportsExecutionTargetPicker("mq")).toBe(false);
     expect(supportsExecutionTargetPicker("neo4j")).toBe(false);
+    expect(supportsExecutionTargetPicker("victoriametrics")).toBe(false);
     expect(supportsExecutionTargetPicker(undefined)).toBe(false);
   });
 });

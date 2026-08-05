@@ -1012,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_multi_response_preserves_nested_filtered_error_detail() {
+    fn execute_multi_response_preserves_nested_original_error_detail() {
         let result = dbx_core::query::ExecuteMultiResult {
             result: dbx_core::db::QueryResult {
                 columns: vec!["Error".to_string()],

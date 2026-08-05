@@ -34,7 +34,9 @@ COPY crates/dbx-web/Cargo.toml crates/dbx-web/
 COPY crates/dbx-mcp/Cargo.toml crates/dbx-mcp/
 COPY crates/dbx-cli/Cargo.toml crates/dbx-cli/
 COPY src-tauri/Cargo.toml src-tauri/
-COPY vendor/ctor/ vendor/ctor/
+# Copy every vendored crate: root Cargo.toml [patch.crates-io] points at
+# vendor/{ctor,rumqttc,dirs-sys,pageant,wry}; omitting any breaks the offline build.
+COPY vendor/ vendor/
 RUN mkdir -p crates/dbx-core/src && echo '' > crates/dbx-core/src/lib.rs \
     && mkdir -p crates/dbx-web/src && echo 'fn main() {}' > crates/dbx-web/src/main.rs \
     && mkdir -p crates/dbx-mcp/src && echo '' > crates/dbx-mcp/src/lib.rs && echo 'fn main() {}' > crates/dbx-mcp/src/main.rs \

@@ -916,7 +916,8 @@ fn rocketmq_subscription_for_topic(
 
 fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionInfo {
     let group_id = group.get("groupId").and_then(|v| v.as_str()).unwrap_or_default();
-    let group_type = group.get("groupType").and_then(|v| v.as_str()).unwrap_or("NORMAL").to_string();
+    // Match agent classify: missing dump → UNKNOWN, not silent NORMAL (FIFO hide risk).
+    let group_type = group.get("groupType").and_then(|v| v.as_str()).unwrap_or("UNKNOWN").to_string();
     let message_model = group.get("messageModel").and_then(|v| v.as_str()).map(String::from);
     let online_members = group.get("memberCount").and_then(|v| v.as_u64()).map(|v| v as u32);
     let topics = group
@@ -1146,6 +1147,14 @@ mod tests {
         let sub = rocketmq_subscription_from_group(&group);
         assert_eq!(sub.msg_backlog, 0);
         assert_eq!(sub.backlog_unavailable, Some(true));
+    }
+
+    #[test]
+    fn rocketmq_subscription_from_group_defaults_missing_type_to_unknown() {
+        let group = serde_json::json!({ "groupId": "no-type" });
+        let sub = rocketmq_subscription_from_group(&group);
+        assert_eq!(sub.sub_type, "UNKNOWN");
+        assert_eq!(sub.consumer_group_type.as_deref(), Some("UNKNOWN"));
     }
 
     #[test]

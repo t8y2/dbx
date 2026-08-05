@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.MixAll;
@@ -316,6 +317,86 @@ class RocketMqAgentTest {
             assertEquals(0, row.get("memberCount"));
             assertEquals(List.of(), row.get("topics"));
         }
+    }
+
+    @Test
+    void requireConsumerConnectionProbeResultFailsClosedWhenNoMasterAnswers() {
+        assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.requireConsumerConnectionProbeResult(
+                1, 0, 0, 0, null, new IllegalStateException("timeout"), "g1")
+        );
+        ConsumerConnection offline = new ConsumerConnection();
+        assertSame(
+            offline,
+            RocketMqAgent.requireConsumerConnectionProbeResult(1, 1, 0, 0, offline, null, "g1")
+        );
+    }
+
+    @Test
+    void requireConsumerConnectionProbeResultFailsClosedOnRemapped206WithUnreachableFallback() {
+        Exception cause = new IllegalStateException("fallback unreachable");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.requireConsumerConnectionProbeResult(
+                1, 1, 1, 0, new ConsumerConnection(), cause, "g1")
+        );
+        assertTrue(err.getMessage().contains("Docker remap address collision"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void requireConsumerConnectionProbeResultFailsClosedOnPartialRemappedOffline() {
+        Exception cause = new IllegalStateException("broker-b timeout");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.requireConsumerConnectionProbeResult(
+                2, 1, 0, 0, new ConsumerConnection(), cause, "g1")
+        );
+        assertTrue(err.getMessage().contains("partial remapped probe"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void requireConsumerConnectionProbeResultAllowsFullOfflineCoverage() throws Exception {
+        ConsumerConnection offline = new ConsumerConnection();
+        assertSame(
+            offline,
+            RocketMqAgent.requireConsumerConnectionProbeResult(2, 2, 0, 0, offline, null, "g1")
+        );
+        assertSame(
+            offline,
+            RocketMqAgent.requireConsumerConnectionProbeResult(1, 1, 1, 1, offline, null, "g1")
+        );
+    }
+
+    @Test
+    void isConsumerGroupNotOnlineDetectsBrokerCode206() {
+        assertTrue(RocketMqAgent.isConsumerGroupNotOnline(
+            new MQBrokerException(206, "the consumer group[g1] not online")));
+        assertTrue(RocketMqAgent.isConsumerGroupNotOnline(
+            new MQClientException(206, "the consumer group[g1] not online")));
+        assertTrue(RocketMqAgent.isConsumerGroupNotOnline(
+            new RuntimeException(new MQBrokerException(206, "not online"))));
+        assertFalse(RocketMqAgent.isConsumerGroupNotOnline(
+            new MQBrokerException(1, "system error")));
+        assertFalse(RocketMqAgent.isConsumerGroupNotOnline(new IllegalStateException("timeout")));
+    }
+
+    @Test
+    void enrichConsumerGroupRowsOmitsMemberCountWhenConnectionProbeFails() {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("groupId", "unreachable-group");
+        rows.add(row);
+
+        RocketMqAgent.enrichConsumerGroupRows(rows, groupId -> {
+            throw new MQClientException("Failed to examine consumer connection on all masters", null);
+        }, 1, 1_000);
+
+        // All-master connection probe failure must not look like offline 0.
+        assertFalse(row.containsKey("memberCount"));
+        assertEquals(List.of(), row.get("topics"));
     }
 
     @Test
@@ -739,6 +820,42 @@ class RocketMqAgentTest {
         assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(false, 1, 0));
         assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 0, 0));
         assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 2, 2));
+    }
+
+    @Test
+    void shouldFailClosedOnCollisionPartialMutationWhenSiblingFallbacksUnreachable() {
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(1, 0));
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(2, 1));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(0, 0));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(2, 2));
+    }
+
+    @Test
+    void ensureSubscriptionGroupMutationSucceededRejectsCollisionPartialUpdate() {
+        Exception cause = new RuntimeException("fallback unreachable");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(
+                1, 1, 1, 0, cause, "delete", "GID_A"));
+        assertTrue(err.getMessage().contains("Docker remap address collision"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void ensureSubscriptionGroupMutationSucceededRejectsPartialRemappedUpdate() {
+        Exception cause = new RuntimeException("broker-b down");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(
+                2, 1, 0, 0, cause, "update", "GID_A"));
+        assertTrue(err.getMessage().contains("partial remapped update"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void ensureSubscriptionGroupMutationSucceededAllowsFullCoverage() throws Exception {
+        RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(2, 2, 0, 0, null, "delete", "GID_A");
+        RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(1, 1, 1, 1, null, "update", "GID_A");
     }
 
     @Test

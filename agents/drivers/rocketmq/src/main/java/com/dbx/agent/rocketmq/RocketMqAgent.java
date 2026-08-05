@@ -4,6 +4,7 @@ import com.google.gson.*;
 import org.apache.rocketmq.acl.common.AclClientRPCHook;
 import org.apache.rocketmq.acl.common.SessionCredentials;
 import org.apache.rocketmq.client.QueryResult;
+import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.client.consumer.DefaultLitePullConsumer;
 import org.apache.rocketmq.client.consumer.DefaultMQPullConsumer;
@@ -1253,24 +1254,115 @@ public final class RocketMqAgent {
     /**
      * DefaultMQAdminExt.examineConsumerConnectionInfo(group) picks a broker from route using
      * NameServer-registered addresses. Remap to the client-reachable host before querying.
+     * Live members short-circuit. Empty / 206 offline claims require full remapped coverage and
+     * complete collision fallbacks (same class of gate as lag/mutate) so a single remapped 206
+     * cannot paint memberCount 0 while consumers may be online on an unreached sibling.
      */
     private static ConsumerConnection examineConsumerConnectionInfoRemapped(
-        DefaultMQAdminExt admin, JsonObject conn, String groupId) {
-        try {
-            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
-                try {
-                    ConsumerConnection connection = admin.examineConsumerConnectionInfo(groupId, brokerAddr);
-                    if (connection.getConnectionSet() != null && !connection.getConnectionSet().isEmpty()) {
-                        return connection;
-                    }
-                } catch (Exception ignored) {
-                    // Try next broker; offline groups return an empty connection below.
-                }
-            }
-        } catch (Exception ignored) {
-            // No reachable broker addresses.
+        DefaultMQAdminExt admin, JsonObject conn, String groupId) throws Exception {
+        MasterBrokerAddrPlan plan = resolveMasterBrokerAddrPlan(admin, conn);
+        if (plan.isEmpty()) {
+            throw new MQClientException(
+                "No reachable RocketMQ master brokers for consumer connection of group " + groupId, null);
         }
-        return new ConsumerConnection();
+        Exception lastError = null;
+        int remappedSuccess = 0;
+        int fallbackSuccess = 0;
+        ConsumerConnection emptySuccess = null;
+        for (String brokerAddr : plan.allAddrs()) {
+            boolean collisionFallback = plan.isCollisionFallback(brokerAddr);
+            try {
+                ConsumerConnection connection = admin.examineConsumerConnectionInfo(groupId, brokerAddr);
+                if (connection.getConnectionSet() != null && !connection.getConnectionSet().isEmpty()) {
+                    return connection;
+                }
+                emptySuccess = connection != null ? connection : new ConsumerConnection();
+                if (collisionFallback) {
+                    fallbackSuccess++;
+                } else {
+                    remappedSuccess++;
+                }
+            } catch (Exception e) {
+                // 206 = group has no live clients on that broker — count as probed offline.
+                if (isConsumerGroupNotOnline(e)) {
+                    if (emptySuccess == null) {
+                        emptySuccess = new ConsumerConnection();
+                    }
+                    if (collisionFallback) {
+                        fallbackSuccess++;
+                    } else {
+                        remappedSuccess++;
+                    }
+                    continue;
+                }
+                lastError = e;
+            }
+        }
+        return requireConsumerConnectionProbeResult(
+            plan.remappedCount(),
+            remappedSuccess,
+            plan.fallbackCount(),
+            fallbackSuccess,
+            emptySuccess,
+            lastError,
+            groupId
+        );
+    }
+
+    /**
+     * RocketMQ broker/client code 206: consumer group has no online clients (definitive offline).
+     */
+    static boolean isConsumerGroupNotOnline(Throwable error) {
+        Throwable cursor = error;
+        while (cursor != null) {
+            if (cursor instanceof MQBrokerException brokerEx && brokerEx.getResponseCode() == 206) {
+                return true;
+            }
+            if (cursor instanceof MQClientException clientEx && clientEx.getResponseCode() == 206) {
+                return true;
+            }
+            cursor = cursor.getCause();
+        }
+        return false;
+    }
+
+    /**
+     * Accept empty/206 offline only when every remapped master (and every collision fallback)
+     * answered. Partial coverage must throw so enrich omits memberCount instead of fake 0.
+     */
+    static ConsumerConnection requireConsumerConnectionProbeResult(
+        int remappedCount,
+        int remappedSuccess,
+        int fallbackCount,
+        int fallbackSuccess,
+        ConsumerConnection emptySuccess,
+        Exception lastError,
+        String groupId
+    ) throws MQClientException {
+        if (remappedCount <= 0 && fallbackCount <= 0) {
+            throw new MQClientException(
+                "No reachable RocketMQ master brokers for consumer connection of group " + groupId, null);
+        }
+        if (remappedSuccess <= 0 && fallbackSuccess <= 0) {
+            throw new MQClientException(
+                "Failed to examine consumer connection for group " + groupId + " on all masters",
+                lastError);
+        }
+        if (remappedCount > 0 && remappedSuccess < remappedCount) {
+            throw new MQClientException(
+                "Failed to examine consumer connection for group " + groupId
+                    + " on some masters (partial remapped probe)",
+                lastError);
+        }
+        // Docker remap collisions: remapped host:port 206/empty is not enough — sibling masters
+        // may still have online consumers on unreachable internal addresses.
+        if (shouldFailClosedOnCollisionPartialMutation(fallbackCount, fallbackSuccess)) {
+            throw new MQClientException(
+                "Failed to examine consumer connection for group " + groupId
+                    + " after Docker remap address collision (unreachable sibling masters)",
+                lastError);
+        }
+        return emptySuccess != null ? emptySuccess : new ConsumerConnection();
     }
 
     private static ConsumeStats examineConsumeStatsRemapped(
@@ -1788,8 +1880,10 @@ public final class RocketMqAgent {
     }
 
     /**
-     * Apply a subscription-group mutation on every remapped master. Require at least one success
-     * so Docker remap / unreachable siblings cannot report ok while nothing changed.
+     * Apply a subscription-group mutation on every remapped master (and collision fallbacks).
+     * Require full coverage of remapped addrs; Docker remap collisions must also succeed on
+     * fallback originals — a single published host:port hit must not report ok while sibling
+     * masters still hold the old group/config.
      */
     static void mutateSubscriptionGroupOnMasters(
         DefaultMQAdminExt admin,
@@ -1798,21 +1892,74 @@ public final class RocketMqAgent {
         String action,
         BrokerSubscriptionMutation mutation
     ) throws Exception {
-        int success = 0;
+        MasterBrokerAddrPlan plan = resolveMasterBrokerAddrPlan(admin, conn);
+        int remappedSuccess = 0;
+        int fallbackSuccess = 0;
         Exception lastError = null;
-        for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
+        for (String brokerAddr : plan.allAddrs()) {
             try {
                 mutation.apply(brokerAddr);
-                success++;
+                if (plan.isCollisionFallback(brokerAddr)) {
+                    fallbackSuccess++;
+                } else {
+                    remappedSuccess++;
+                }
             } catch (Exception e) {
                 lastError = e;
             }
         }
-        if (success <= 0) {
+        ensureSubscriptionGroupMutationSucceeded(
+            plan.remappedCount(),
+            remappedSuccess,
+            plan.fallbackCount(),
+            fallbackSuccess,
+            lastError,
+            action,
+            groupId
+        );
+    }
+
+    /**
+     * Gate subscription-group mutate/delete. Partial remapped updates and Docker collision
+     * fallbacks that never answered must fail closed (group would otherwise reappear / diverge).
+     */
+    static void ensureSubscriptionGroupMutationSucceeded(
+        int remappedCount,
+        int remappedSuccess,
+        int fallbackCount,
+        int fallbackSuccess,
+        Exception lastError,
+        String action,
+        String groupId
+    ) throws MQClientException {
+        if (remappedCount <= 0 && fallbackCount <= 0) {
+            throw new MQClientException(
+                "No reachable RocketMQ master brokers for " + action + " of group " + groupId, null);
+        }
+        if (remappedSuccess <= 0 && fallbackSuccess <= 0) {
             throw new MQClientException(
                 "Failed to " + action + " consumer group " + groupId + " on all masters",
                 lastError);
         }
+        if (remappedCount > 0 && remappedSuccess < remappedCount) {
+            throw new MQClientException(
+                "Failed to " + action + " consumer group " + groupId
+                    + " on some masters (partial remapped update)",
+                lastError);
+        }
+        // Remap collisions collapse N masters onto one published addr. Updating that addr once
+        // leaves sibling masters untouched unless collision-fallback originals also succeed.
+        if (shouldFailClosedOnCollisionPartialMutation(fallbackCount, fallbackSuccess)) {
+            throw new MQClientException(
+                "Failed to " + action + " consumer group " + groupId
+                    + " after Docker remap address collision (unreachable sibling masters)",
+                lastError);
+        }
+    }
+
+    /** True when collision fallbacks exist but were not all successfully mutated. */
+    static boolean shouldFailClosedOnCollisionPartialMutation(int fallbackCount, int fallbackSuccess) {
+        return fallbackCount > 0 && fallbackSuccess < fallbackCount;
     }
 
     private static Map<String, Object> subscriptionGroupConfigToMap(SubscriptionGroupConfig config) {

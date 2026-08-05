@@ -11,12 +11,20 @@ describe("GaussDB hosts", () => {
   });
 
   it("serializes multiple hosts with embedded ports", () => {
-    expect(serializeGaussdbHosts([{ host: "db1", port: 5432 }, { host: "db2", port: 5433 }])).toEqual({ host: "db1:5432,db2:5433", port: 5432 });
+    expect(
+      serializeGaussdbHosts([
+        { host: "db1", port: 5432 },
+        { host: "db2", port: 5433 },
+      ]),
+    ).toEqual({ host: "db1:5432,db2:5433", port: 5432 });
   });
 
   it("round-trips bracketed IPv6 endpoints", () => {
     const entries = parseGaussdbHosts("[2001:db8::1]:5433,[2001:db8::2]:5434", 5432);
-    expect(entries).toEqual([{ host: "2001:db8::1", port: 5433 }, { host: "2001:db8::2", port: 5434 }]);
+    expect(entries).toEqual([
+      { host: "2001:db8::1", port: 5433 },
+      { host: "2001:db8::2", port: 5434 },
+    ]);
     expect(serializeGaussdbHosts(entries).host).toBe("[2001:db8::1]:5433,[2001:db8::2]:5434");
   });
 });

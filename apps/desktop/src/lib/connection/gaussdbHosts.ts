@@ -30,7 +30,10 @@ function parseEndpoint(value: string, fallbackPort: number): GaussdbHostEntry {
 export function parseGaussdbHosts(host: string, port: number): GaussdbHostEntry[] {
   const fallbackPort = validPort(port, DEFAULT_GAUSSDB_PORT);
   if (!host.trim()) return [{ host: "127.0.0.1", port: fallbackPort }];
-  const entries = host.split(",").map((part) => parseEndpoint(part, fallbackPort)).filter((entry) => entry.host);
+  const entries = host
+    .split(",")
+    .map((part) => parseEndpoint(part, fallbackPort))
+    .filter((entry) => entry.host);
   return entries.length ? entries : [{ host: "127.0.0.1", port: fallbackPort }];
 }
 

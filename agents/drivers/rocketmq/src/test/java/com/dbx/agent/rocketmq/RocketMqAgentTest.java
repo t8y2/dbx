@@ -320,7 +320,7 @@ class RocketMqAgentTest {
     }
 
     @Test
-    void requireConsumerConnectionProbeResultFailsClosedWhenNoMasterAnswers() {
+    void requireConsumerConnectionProbeResultFailsClosedWhenNoMasterAnswers() throws Exception {
         assertThrows(
             MQClientException.class,
             () -> RocketMqAgent.requireConsumerConnectionProbeResult(

@@ -474,9 +474,8 @@ fn linux_appimage_system_gtk_immodules_cache(
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
     let render_devices = linux_drm_render_devices();
-    let has_hardware_render_device = render_devices
-        .iter()
-        .any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
+    let has_hardware_render_device =
+        render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
     for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver(), has_hardware_render_device) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);

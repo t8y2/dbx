@@ -2567,6 +2567,7 @@ export default withEnglishFallback({
     name: "Nombre",
     type: "Tipo",
     rows: "Filas",
+    series: "Series",
     size: "Tamaño",
     statisticsHint: "Estimado desde estadísticas de la base de datos; no se ejecuta COUNT(*).",
     createdAt: "Creado",

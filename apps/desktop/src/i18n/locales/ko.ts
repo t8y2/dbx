@@ -2596,6 +2596,7 @@ export default withEnglishFallback({
     name: "이름",
     type: "유형",
     rows: "행",
+    series: "시계열 수",
     size: "크기",
     statisticsHint: "데이터베이스 통계에서 추정한 값이며, COUNT(*)는 실행되지 않습니다.",
     createdAt: "생성일",

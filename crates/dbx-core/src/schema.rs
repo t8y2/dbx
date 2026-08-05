@@ -4548,6 +4548,10 @@ async fn list_object_statistics_once(
             .await;
         }
     }
+    if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
+        drop(connections);
+        return db::victoriametrics_driver::list_object_statistics(&client).await;
+    }
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     match pool {
         PoolKind::Mysql(p, mode) => {

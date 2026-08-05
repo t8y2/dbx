@@ -199,6 +199,8 @@ const isResizingSidePanel = ref(false);
 const sidePanelGuard = createSidePanelRequestGuard();
 const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
+const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
+const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const sourceEditableText = ref("");
 const sourceDraft = ref("");
@@ -439,7 +441,8 @@ function toggleCheckboxColumn() {
 const objectBrowserColumns = computed<ObjectBrowserColumnKey[]>(() => {
   const columns: ObjectBrowserColumnKey[] = [];
   if (showCheckboxColumn.value) columns.push("select");
-  columns.push("name", "type", "estimatedRows", "totalBytes");
+  columns.push("name", "type", "estimatedRows");
+  if (!isVictoriaMetrics.value) columns.push("totalBytes");
   if (hasCreatedAt.value) columns.push("created_at");
   if (hasUpdatedAt.value) columns.push("updated_at");
   columns.push("comment");
@@ -601,7 +604,8 @@ function toggleSort(key: ObjectBrowserSortKey) {
 }
 
 const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
-  const options: ObjectBrowserSortKey[] = ["name", "type", "estimatedRows", "totalBytes"];
+  const options: ObjectBrowserSortKey[] = ["name", "type", "estimatedRows"];
+  if (!isVictoriaMetrics.value) options.push("totalBytes");
   if (hasCreatedAt.value) options.push("created_at");
   if (hasUpdatedAt.value) options.push("updated_at");
   options.push("comment");
@@ -618,7 +622,7 @@ watch(sortKeyOptions, (options) => {
 function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
-  if (key === "estimatedRows") return t("objects.rows");
+  if (key === "estimatedRows") return objectRowsLabel.value;
   if (key === "totalBytes") return t("objects.size");
   if (key === "created_at") return t("objects.createdAt");
   if (key === "updated_at") return t("objects.updatedAt");
@@ -1993,7 +1997,7 @@ function copySelectedTablesToClipboard() {
 }
 
 function canPasteTableClipboard(): boolean {
-  return tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
+  return !isVictoriaMetrics.value && tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
 }
 
 function normalizedObjectBrowserTableClipboardEntries() {
@@ -2006,6 +2010,7 @@ function normalizedObjectBrowserTableClipboardEntries() {
 }
 
 function canTransferTableClipboard(): boolean {
+  if (isVictoriaMetrics.value) return false;
   const entries = normalizedObjectBrowserTableClipboardEntries();
   const target = pasteTableTargetContext();
   if (entries.length === 0 || props.connection.read_only) return false;
@@ -2572,15 +2577,16 @@ watch(
 // ---- CustomContextMenu helpers ----
 
 function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
+  const formats: ContextMenuItem[] = [
+    { label: "CSV", action: () => exportData(item, "csv") },
+    { label: "JSON", action: () => exportData(item, "json") },
+  ];
+  if (!isVictoriaMetrics.value) formats.push({ label: "SQL INSERT", action: () => exportData(item, "sql") });
+  formats.push({ label: "XLSX", action: () => exportDataXlsx(item) });
   return {
     label: t("contextMenu.exportData"),
     icon: Upload,
-    children: [
-      { label: "CSV", action: () => exportData(item, "csv") },
-      { label: "JSON", action: () => exportData(item, "json") },
-      { label: "SQL INSERT", action: () => exportData(item, "sql") },
-      { label: "XLSX", action: () => exportDataXlsx(item) },
-    ],
+    children: formats,
   };
 }
 
@@ -2598,6 +2604,7 @@ function objectBrowserTableClipboardMenuState(item: ObjectBrowserRow) {
 }
 
 function tableClipboardMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (isVictoriaMetrics.value) return [];
   const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy };
   const state = objectBrowserTableClipboardMenuState(item);
   if (state === "copy") return [copyItem];
@@ -2614,6 +2621,16 @@ function selectedBatchTableCountLabel(key: "batchDrop" | "batchTruncate" | "batc
 }
 
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (isVictoriaMetrics.value) {
+    return [
+      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+      { label: "", separator: true },
+      exportDataSubmenu(item),
+      { label: "", separator: true },
+      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    ];
+  }
   const useBatchActions = isSelectedBatchTableContext(item);
   return [
     { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
@@ -2813,23 +2830,23 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>
-      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
+      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
       </Button>
-      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
+      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.copyTableSelected") }}
       </Button>
-      <Button v-if="supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
+      <Button v-if="!isVictoriaMetrics && supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
         <Scissors class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.truncateSelected") }}
       </Button>
-      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
+      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
         <Eraser class="mr-1.5 h-3.5 w-3.5" />
         {{ t("contextMenu.batchEmpty", { count: selectedTableCount }) }}
       </Button>
-      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
+      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.dropSelected") }}
       </Button>
@@ -2882,7 +2899,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </div>
             <div class="relative flex min-w-0 items-center">
               <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
-                <span class="truncate">{{ t("objects.rows") }}</span>
+                <span class="truncate">{{ objectRowsLabel }}</span>
                 <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
               </button>
               <div
@@ -2893,7 +2910,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 <GripVertical class="h-3 w-3" />
               </div>
             </div>
-            <div class="relative flex min-w-0 items-center">
+            <div v-if="!isVictoriaMetrics" class="relative flex min-w-0 items-center">
               <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
                 <span class="truncate">{{ t("objects.size") }}</span>
                 <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
@@ -2986,7 +3003,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                     {{ formatObjectBrowserCount(item.estimatedRows) }}
                   </div>
-                  <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
+                  <div v-if="!isVictoriaMetrics" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
                     {{ formatObjectBrowserBytes(item.totalBytes) }}
                   </div>
                   <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
@@ -3032,7 +3049,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <span v-if="item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
                         formatObjectBrowserCount(item.estimatedRows)
                       }}</span>
-                      <span v-if="item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{ formatObjectBrowserBytes(item.totalBytes) }}</span>
+                      <span v-if="!isVictoriaMetrics && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
+                        formatObjectBrowserBytes(item.totalBytes)
+                      }}</span>
                     </div>
                     <!-- Always reserve timestamp/comment slots when the dataset has them so every card shares one height. -->
                     <div v-if="hasCreatedAt || hasUpdatedAt" class="flex min-h-[15px] items-center gap-1 text-[10px] leading-[15px] text-muted-foreground/70">
@@ -3058,7 +3077,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
             <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
             <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ sidePanelRow?.name }}</span>
-            <div v-if="tableInfoTab === 'ddl'" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
+            <div v-if="tableInfoTab === 'ddl' && tableMetadataCapabilities.ddl" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
               <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyTableDdl">
                 <Copy class="w-3 h-3" />
                 <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>

@@ -2721,6 +2721,7 @@ export default withEnglishFallback({
     name: "名称",
     type: "类型",
     rows: "行数",
+    series: "序列数",
     size: "大小",
     statisticsHint: "来自数据库统计信息的估算值，不执行 COUNT(*)。",
     createdAt: "创建时间",

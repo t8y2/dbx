@@ -2436,6 +2436,7 @@ export default withEnglishFallback({
     name: "名稱",
     type: "類型",
     rows: "列數",
+    series: "序列數",
     size: "大小",
     statisticsHint: "來自資料庫統計資訊的估算值，不執行 COUNT(*)。",
     createdAt: "建立時間",

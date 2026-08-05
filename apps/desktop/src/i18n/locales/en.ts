@@ -2721,6 +2721,7 @@ export default {
     name: "Name",
     type: "Type",
     rows: "Rows",
+    series: "Series",
     size: "Size",
     statisticsHint: "Estimated from database statistics; no COUNT(*) is executed.",
     createdAt: "Created",

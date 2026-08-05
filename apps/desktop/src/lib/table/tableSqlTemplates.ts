@@ -1,5 +1,5 @@
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import { qualifiedTableName, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { metricRangeQuery, qualifiedTableName, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 
 export interface TableSqlTemplateOptions {
   databaseType?: DatabaseType;
@@ -13,6 +13,7 @@ export interface TableSqlTemplateOptions {
 }
 
 export function buildTableSelectTemplate(options: TableSqlTemplateOptions): string {
+  if (options.databaseType === "victoriametrics") return metricRangeQuery(options.tableName);
   const tableName = templateTableName(options);
   const columns = options.columns ?? [];
   if (!columns.length) {

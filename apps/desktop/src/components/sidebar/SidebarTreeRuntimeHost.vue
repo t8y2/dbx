@@ -890,7 +890,7 @@ function normalizedTreeClipboardTableEntries(): TableClipboardTableContext[] {
 }
 
 function canPasteTreeClipboardToCurrentNode(): boolean {
-  return tableClipboardMatchesTarget(normalizedTreeClipboardTableEntries(), pasteTableTargetContext());
+  return currentDatabaseType() !== "victoriametrics" && tableClipboardMatchesTarget(normalizedTreeClipboardTableEntries(), pasteTableTargetContext());
 }
 
 function canTransferTreeClipboardToCurrentNode(): boolean {
@@ -923,6 +923,7 @@ function openTransferFromTreeClipboard(): boolean {
 }
 
 function requestPasteTreeClipboard(): boolean {
+  if (currentDatabaseType() === "victoriametrics") return false;
   claimTreeItemDialogOwnership();
   ensureDangerDialogRouting();
   routeTreeItemDialogController();
@@ -3824,16 +3825,17 @@ const shortcutRefresh = "F5";
 
 const shortcutDelete = "Delete";
 
-function exportDataSubmenu(): ContextMenuItem {
+function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
+  const children: ContextMenuItem[] = [
+    { label: "CSV", action: () => exportData("csv") },
+    { label: "JSON", action: () => exportData("json") },
+  ];
+  if (includeSqlInsert) children.push({ label: "SQL INSERT", action: () => exportData("sql") });
+  children.push({ label: "XLSX", action: () => exportDataXlsx() });
   return {
     label: t("contextMenu.exportData"),
     icon: Upload,
-    children: [
-      { label: "CSV", action: () => exportData("csv") },
-      { label: "JSON", action: () => exportData("json") },
-      { label: "SQL INSERT", action: () => exportData("sql") },
-      { label: "XLSX", action: () => exportDataXlsx() },
-    ],
+    children,
   };
 }
 
@@ -4333,6 +4335,17 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items, deleteMenuLabel, deleteMenuAction, truncateMenuLabel, truncateMenuAction, emptyMenuLabel, emptyMenuAction } = context;
   // 6. Table / View / Materialized View
   if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
+    if (currentDatabaseType() === "victoriametrics" && node.type === "table") {
+      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+      items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus });
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: "", separator: true });
+      items.push(exportDataSubmenu(false));
+      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      return true;
+    }
     const destructiveActions: ContextMenuItem[] = [];
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
@@ -4552,6 +4565,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 }
 
 function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
+  if (currentDatabaseType() === "victoriametrics") return [];
   const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
   if (!node.connectionId || !node.database) return [copyItem];
   const state = tableClipboardMenuState(

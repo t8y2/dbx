@@ -169,6 +169,10 @@ describe("resolveNewQueryTable", () => {
 });
 
 describe("buildSelectAllSql", () => {
+  it("builds a MetricsQL range query for VictoriaMetrics metrics", () => {
+    expect(buildSelectAllSql("victoriametrics", { tableName: "flag" })).toBe('{__name__="flag"}[1h]');
+  });
+
   it("quotes a MySQL table with backticks", () => {
     expect(buildSelectAllSql("mysql", { tableName: "users" })).toBe("SELECT * FROM `users`");
   });

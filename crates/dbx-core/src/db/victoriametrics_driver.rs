@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::with_connection_timeout;
 use crate::models::connection::ConnectionConfig;
-use crate::types::{ColumnInfo, DatabaseInfo, QueryResult, TableInfo};
+use crate::types::{ColumnInfo, DatabaseInfo, ObjectStatistics, QueryResult, TableInfo};
 
 const DEFAULT_API_PATH: &str = "/prometheus";
 const DEFAULT_LOOKBACK: &str = "1h";
@@ -51,6 +51,18 @@ struct SeriesResult {
     value: Option<(f64, String)>,
     #[serde(default)]
     values: Vec<(f64, String)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TsdbStatus {
+    #[serde(rename = "seriesCountByMetricName", default)]
+    series_count_by_metric_name: Vec<TsdbMetricStatistic>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TsdbMetricStatistic {
+    name: String,
+    value: i64,
 }
 
 impl VictoriaMetricsClient {
@@ -214,12 +226,32 @@ pub async fn get_columns(client: &VictoriaMetricsClient, metric_name: &str) -> R
         .cloned()
         .collect::<BTreeSet<_>>();
 
+    let label_names = label_names.into_iter().collect::<Vec<_>>();
+    let (timestamp_name, value_name, metric_name) = result_column_names(&label_names);
     let mut columns = vec![
-        column("timestamp", "timestamp", false, true, Some("Sample timestamp")),
-        column("value", "double", false, false, Some("Sample value")),
+        column(&timestamp_name, "timestamp", false, true, Some("Sample timestamp")),
+        column(&value_name, "double", false, false, Some("Sample value")),
+        column(&metric_name, "string", false, true, Some("Metric name")),
     ];
     columns.extend(label_names.into_iter().map(|name| column(&name, "string", true, true, Some("Metric label"))));
     Ok(columns)
+}
+
+pub async fn list_object_statistics(client: &VictoriaMetricsClient) -> Result<Vec<ObjectStatistics>, String> {
+    let request = client.request(client.http.get(client.endpoint("/api/v1/status/tsdb"))).query(&[("topN", "100000")]);
+    let status = parse_api_response::<TsdbStatus>(request.send().await.map_err(request_error)?).await?;
+    Ok(status
+        .series_count_by_metric_name
+        .into_iter()
+        .filter(|item| !item.name.trim().is_empty())
+        .map(|item| ObjectStatistics {
+            name: item.name,
+            schema: None,
+            estimated_rows: Some(item.value),
+            // VictoriaMetrics exposes series counts here, but no per-metric storage size.
+            total_bytes: None,
+        })
+        .collect())
 }
 
 fn column(name: &str, data_type: &str, is_nullable: bool, is_primary_key: bool, comment: Option<&str>) -> ColumnInfo {
@@ -274,7 +306,8 @@ fn series_result_to_query_result(series: Vec<SeriesResult>, start: Instant) -> Q
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let mut columns = vec!["timestamp".to_string(), "value".to_string(), "metric".to_string()];
+    let (timestamp_name, value_name, metric_name) = result_column_names(&labels);
+    let mut columns = vec![timestamp_name, value_name, metric_name];
     columns.extend(labels.iter().cloned());
     let mut rows = Vec::new();
 
@@ -307,6 +340,25 @@ fn series_result_to_query_result(series: Vec<SeriesResult>, start: Instant) -> Q
         has_more: false,
         elasticsearch_raw_body: None,
     }
+}
+
+fn result_column_names(labels: &[String]) -> (String, String, String) {
+    let mut used = labels.iter().cloned().collect::<BTreeSet<_>>();
+    let timestamp = unique_result_column_name("timestamp", "sample_timestamp", &mut used);
+    let value = unique_result_column_name("value", "sample_value", &mut used);
+    let metric = unique_result_column_name("metric", "metric_name", &mut used);
+    (timestamp, value, metric)
+}
+
+fn unique_result_column_name(preferred: &str, fallback: &str, used: &mut BTreeSet<String>) -> String {
+    let mut candidate = if used.contains(preferred) { fallback.to_string() } else { preferred.to_string() };
+    let mut suffix = 2;
+    while used.contains(&candidate) {
+        candidate = format!("{fallback}_{suffix}");
+        suffix += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
 }
 
 fn simple_result(rows: Vec<Vec<Value>>, value_type: &str, start: Instant) -> QueryResult {
@@ -410,6 +462,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_metric_statistics() {
+        let status: TsdbStatus = serde_json::from_value(json!({
+            "seriesCountByMetricName": [{"name": "flag", "value": 276}]
+        }))
+        .unwrap();
+        assert_eq!(status.series_count_by_metric_name[0].name, "flag");
+        assert_eq!(status.series_count_by_metric_name[0].value, 276);
+    }
+
+    #[test]
     fn parses_matrix_results_into_rows() {
         let data = QueryData {
             result_type: "matrix".to_string(),
@@ -426,6 +488,32 @@ mod tests {
         assert_eq!(result.rows[0][1], json!(23.5));
         assert_eq!(result.rows[0][2], json!("temperature"));
         assert_eq!(result.rows[0][3], json!("shanghai"));
+    }
+
+    #[test]
+    fn keeps_reserved_label_names_unique() {
+        let data = QueryData {
+            result_type: "vector".to_string(),
+            result: json!([
+                {
+                    "metric": {
+                        "__name__": "flag",
+                        "metric": "label-metric",
+                        "timestamp": "label-timestamp",
+                        "value": "label-value"
+                    },
+                    "value": [1720000000.0, "1"]
+                }
+            ]),
+        };
+        let result = query_data_to_result(data, Instant::now()).unwrap();
+        assert_eq!(
+            result.columns,
+            vec!["sample_timestamp", "sample_value", "metric_name", "metric", "timestamp", "value"]
+        );
+        assert_eq!(result.rows[0].len(), result.columns.len());
+        assert_eq!(result.rows[0][3], json!("label-metric"));
+        assert_eq!(result.rows[0][5], json!("label-value"));
     }
 
     #[test]
@@ -472,6 +560,9 @@ mod tests {
         let columns = get_columns(&client, &metric).await.unwrap();
         assert!(columns.iter().any(|column| column.name == "timestamp"));
         assert!(columns.iter().any(|column| column.name == "value"));
+        assert!(columns.iter().any(|column| column.name == "metric"));
+        let statistics = list_object_statistics(&client).await.unwrap();
+        assert!(statistics.iter().any(|stat| stat.name == metric && stat.estimated_rows.unwrap_or_default() > 0));
         let result = execute_query(&client, &metric_range_query(&metric, "1h")).await.unwrap();
         assert!(!result.rows.is_empty());
     }

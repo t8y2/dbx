@@ -2626,6 +2626,7 @@ export default withEnglishFallback({
     name: "名前",
     type: "タイプ",
     rows: "行数",
+    series: "系列数",
     size: "サイズ",
     statisticsHint: "データベース統計からの推定値です。COUNT(*) は実行しません。",
     createdAt: "作成日時",

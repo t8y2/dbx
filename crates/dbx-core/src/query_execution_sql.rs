@@ -141,7 +141,7 @@ pub fn is_safe_explain_sql(sql: &str) -> bool {
 }
 
 /// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
-/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, Neo4j, etcd) are excluded.
+/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, VictoriaMetrics, Neo4j, etcd) are excluded.
 pub fn supports_sql_query(database_type: DatabaseType) -> bool {
     !matches!(
         database_type,
@@ -154,6 +154,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::Weaviate
             | DatabaseType::ChromaDb
             | DatabaseType::InfluxDb
+            | DatabaseType::VictoriaMetrics
             | DatabaseType::Neo4j
             | DatabaseType::Etcd
     )
@@ -228,6 +229,11 @@ pub fn is_write_sql(sql: &str) -> bool {
 /// executable comments and file exports, plus PostgreSQL-family/SQL Server
 /// `SELECT ... INTO` table creation.
 pub fn is_write_sql_for_database(sql: &str, database_type: DatabaseType) -> bool {
+    // VictoriaMetrics execution is hard-wired to the read-only query API; MetricsQL
+    // does not use SQL verbs and must not be rejected by SQL write classification.
+    if database_type == DatabaseType::VictoriaMetrics {
+        return false;
+    }
     if let Some(risk) = classify_search_engine_query_risk(sql, database_type) {
         return risk != SearchEngineQueryRisk::ReadOnly;
     }
@@ -1529,5 +1535,19 @@ mod tests {
             "PUT /products/_doc/1?refresh=true\n{\"name\":\"Notebook\"}",
             DatabaseType::Easysearch
         ));
+    }
+
+    #[test]
+    fn excludes_victoriametrics_from_sql_query_paths() {
+        assert!(!supports_sql_query(DatabaseType::VictoriaMetrics));
+        assert!(supports_sql_query(DatabaseType::Postgres));
+        assert_eq!(
+            check_read_only(
+                r#"{__name__="dbx_issue_5352_temperature_celsius"}[5m]"#,
+                "VictoriaMetrics",
+                DatabaseType::VictoriaMetrics,
+            ),
+            Ok(())
+        );
     }
 }

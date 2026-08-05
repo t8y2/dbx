@@ -16,6 +16,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, IdentifierCase, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
+import type { VictoriaMetricsExternalConfig } from "@/types/victoriametrics";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { MqttConnectionConfig } from "@/types/mqtt";
 import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
@@ -1025,6 +1026,7 @@ const driverProfiles: Record<
   mqtt: { type: "mqtt", port: 1883, user: "", label: "MQTT", icon: "mqtt", host: "127.0.0.1" },
   iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
   influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
+  victoriametrics: { type: "victoriametrics", port: 8428, user: "", label: "VictoriaMetrics", icon: "victoriametrics" },
   custom_mysql: {
     type: "mysql",
     port: 3306,
@@ -1291,6 +1293,8 @@ function buildMqttExternalConfig(): MqttConnectionConfig {
 
 const influxDbVersion = ref<InfluxDbVersion>("1");
 const influxDbOrg = ref("");
+const victoriaMetricsApiPath = ref("/prometheus");
+const victoriaMetricsLookback = ref("1h");
 
 function resetInfluxDbFields(config?: Partial<InfluxDbExternalConfig>) {
   influxDbVersion.value = config?.version === "2" ? "2" : "1";
@@ -1326,6 +1330,33 @@ function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
   if (!form.value.password.trim()) throw new Error("InfluxDB 2.x token is required");
   if (!form.value.database?.trim()) throw new Error("InfluxDB 2.x bucket is required");
   return { version: "2", org };
+}
+
+function resetVictoriaMetricsFields(config?: Partial<VictoriaMetricsExternalConfig>) {
+  victoriaMetricsApiPath.value = config?.apiPath?.trim() || "/prometheus";
+  victoriaMetricsLookback.value = config?.lookback?.trim() || "1h";
+}
+
+function hydrateVictoriaMetricsFields(value: unknown) {
+  if (!value || typeof value !== "object") {
+    resetVictoriaMetricsFields();
+    return;
+  }
+  const config = value as Partial<VictoriaMetricsExternalConfig> & { api_path?: string };
+  resetVictoriaMetricsFields({
+    apiPath: config.apiPath || config.api_path,
+    lookback: config.lookback,
+  });
+}
+
+function buildVictoriaMetricsExternalConfig(): VictoriaMetricsExternalConfig {
+  const apiPath = victoriaMetricsApiPath.value.trim().replace(/\/+$/, "");
+  if (apiPath && !apiPath.startsWith("/")) throw new Error(t("connection.victoriametricsInvalidApiPath"));
+  const lookback = victoriaMetricsLookback.value.trim();
+  if (!/^\d+(?:ms|[smhdwy])$/.test(lookback) || lookback.startsWith("0")) {
+    throw new Error(t("connection.victoriametricsInvalidLookback"));
+  }
+  return { apiPath, lookback };
 }
 
 watch(influxDbVersion, (version) => {
@@ -2070,6 +2101,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.password = "";
       form.value.connection_string = undefined;
     }
+    if (profile.type === "victoriametrics") {
+      resetVictoriaMetricsFields();
+      form.value.database = "metrics";
+      form.value.password = "";
+      form.value.connection_string = undefined;
+      form.value.url_params = "";
+    }
     resetHiveKerberosFields(profile.type === "hive" ? form.value : undefined);
   }
 }
@@ -2176,6 +2214,11 @@ watch(
         hydrateInfluxDbFields(config.external_config);
       } else {
         resetInfluxDbFields();
+      }
+      if (config.db_type === "victoriametrics") {
+        hydrateVictoriaMetricsFields(config.external_config);
+      } else {
+        resetVictoriaMetricsFields();
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
       resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
@@ -2436,6 +2479,7 @@ const iconTypeMap: Record<string, string> = {
   sundb: "sundb",
   oscar: "oscar",
   influxdb: "influxdb",
+  victoriametrics: "victoriametrics",
   jdbc: "jdbc",
   custom_mysql: "mysql",
   custom_postgres: "postgres",
@@ -2519,6 +2563,7 @@ const dbOptions: DbOption[] = [
   { value: "mqtt", label: "MQTT" },
   { value: "nacos", label: "Nacos" },
   { value: "influxdb", label: "InfluxDB" },
+  { value: "victoriametrics", label: "VictoriaMetrics" },
   { value: "iris", label: "IRIS" },
   { value: "jdbcx", label: "JDBCX" },
   { value: "manticoresearch", label: "Manticore Search" },
@@ -2565,7 +2610,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "timeseries",
     titleKey: "connection.databaseCategoryTimeseries",
-    optionValues: ["questdb", "tdengine", "iotdb", "influxdb"],
+    optionValues: ["questdb", "tdengine", "iotdb", "influxdb", "victoriametrics"],
   },
   {
     key: "mq",
@@ -2670,9 +2715,31 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "dameng", "redis", "etcd", "clickhouse", "elasticsearch", "easysearch", "hbase", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>([
+  "mysql",
+  "starrocks",
+  "postgres",
+  "redshift",
+  "gaussdb",
+  "kwdb",
+  "opengauss",
+  "questdb",
+  "dameng",
+  "redis",
+  "etcd",
+  "clickhouse",
+  "elasticsearch",
+  "easysearch",
+  "hbase",
+  "qdrant",
+  "milvus",
+  "weaviate",
+  "chromadb",
+  "influxdb",
+  "victoriametrics",
+]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
-const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
+const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
@@ -3117,6 +3184,9 @@ function applyConnectionUrlToForm(input: string): boolean {
 
     const parsed = parseConnectionUrl(input, selectedType.value);
     form.value = applyParsedConnectionUrl(form.value, parsed);
+    if (form.value.db_type === "victoriametrics") {
+      hydrateVictoriaMetricsFields(form.value.external_config);
+    }
     oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
     selectedType.value = parsed.driverProfile;
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
@@ -3405,6 +3475,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       config.password = config.password.trim();
       config.database = config.database?.trim() || undefined;
     }
+  } else if (config.db_type === "victoriametrics") {
+    config.external_config = buildVictoriaMetricsExternalConfig();
+    config.connection_string = undefined;
+    config.database = "metrics";
+    config.username = config.username.trim();
   } else if (config.db_type === "elasticsearch") {
     config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
   } else if (config.db_type === "sqlserver") {
@@ -3518,7 +3593,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "starrocks" && config.db_type !== "mongodb") {
+  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "starrocks" && config.db_type !== "mongodb" && config.db_type !== "victoriametrics") {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -6056,6 +6131,43 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">最大报文（字节）</Label>
                     <Input v-model.number="mqttMaxPacketSizeBytes" type="number" class="col-span-3 w-40" min="1024" max="268435455" />
+                  </div>
+                </template>
+
+                <template v-else-if="form.db_type === 'victoriametrics'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
+                    <Input v-model="form.host" class="col-span-2" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input type="checkbox" v-model="form.ssl" />
+                      <span>{{ t("connection.sslEnable") }}</span>
+                    </label>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
+                    <Input v-model="form.username" class="col-span-3" autocomplete="username" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" />
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.victoriametricsApiPath") }}</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <Input v-model="victoriaMetricsApiPath" placeholder="/prometheus" />
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.victoriametricsApiPathHint") }}</p>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.victoriametricsLookback") }}</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <Input v-model="victoriaMetricsLookback" class="w-28" placeholder="1h" />
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.victoriametricsLookbackHint") }}</p>
+                    </div>
                   </div>
                 </template>
 

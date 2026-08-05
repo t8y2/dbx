@@ -106,6 +106,7 @@ pub enum PoolKind {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     ExternalDriver {
         driver_id: String,
@@ -1950,6 +1951,15 @@ impl AppState {
                 db::influxdb_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::InfluxDb(client)
             }
+            DatabaseType::VictoriaMetrics => {
+                let client = db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(
+                    &url,
+                    &db_config,
+                    connect_timeout,
+                )?;
+                db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::VictoriaMetrics(client)
+            }
             DatabaseType::Nacos => {
                 let admin_config = self.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = self.nacos_registry.build_transient_config(admin_config).await?;
@@ -2892,6 +2902,18 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::VictoriaMetrics(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::victoriametrics_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("VictoriaMetrics connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::Rqlite(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -3788,6 +3810,15 @@ impl AppState {
                         false
                     }
                 },
+                PoolKind::VictoriaMetrics(client) => {
+                    match db::victoriametrics_driver::test_connection(client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("VictoriaMetrics connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::Rqlite(client) => match db::rqlite_driver::test_connection(client, timeout).await {
                     Ok(()) => true,
                     Err(e) => {
@@ -4060,6 +4091,7 @@ enum KeepaliveTarget {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
 }
 
@@ -4153,6 +4185,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
+        PoolKind::VictoriaMetrics(client) => Some(KeepaliveTarget::VictoriaMetrics(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
         _ => None,
     }
@@ -4198,6 +4231,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         }
         KeepaliveTarget::InfluxDb(client) => {
             db::influxdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::VictoriaMetrics(client) => {
+            db::victoriametrics_driver::test_connection(client, timeout).await.map_err(Into::into)
         }
         KeepaliveTarget::Agent(client) => {
             let Ok(mut client) = client.try_lock() else {
@@ -4429,6 +4465,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
+        PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
         PoolKind::ExternalDriver { driver_id, config, session } => {
             PoolKind::ExternalDriver { driver_id: driver_id.clone(), config: config.clone(), session: session.clone() }
@@ -4482,6 +4519,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             drop(client);
         }
         PoolKind::InfluxDb(client) => {
+            drop(client);
+        }
+        PoolKind::VictoriaMetrics(client) => {
             drop(client);
         }
         PoolKind::Agent(client) => {

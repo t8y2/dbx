@@ -538,6 +538,8 @@ pub enum DatabaseType {
     CloudflareD1,
     #[serde(rename = "influxdb")]
     InfluxDb,
+    #[serde(rename = "victoriametrics")]
+    VictoriaMetrics,
     #[serde(rename = "questdb")]
     Questdb,
     Jdbc,
@@ -890,6 +892,7 @@ impl ConnectionConfig {
             DatabaseType::H2 => Some("test"),
             DatabaseType::Informix => Some("sysmaster"),
             DatabaseType::Neo4j => Some("neo4j"),
+            DatabaseType::VictoriaMetrics => Some("metrics"),
             _ => None,
         }
     }
@@ -1100,7 +1103,7 @@ impl ConnectionConfig {
                 format!("zookeeper://{host}:{port}")
             }
             DatabaseType::Iris => format!("iris://{host}:{port}{db_part}"),
-            DatabaseType::InfluxDb => {
+            DatabaseType::InfluxDb | DatabaseType::VictoriaMetrics => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
@@ -1340,7 +1343,7 @@ impl ConnectionConfig {
             DatabaseType::Iris => {
                 format!("iris://{}:{}@{host}:{port}{db_part}", username, password)
             }
-            DatabaseType::InfluxDb => {
+            DatabaseType::InfluxDb | DatabaseType::VictoriaMetrics => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }

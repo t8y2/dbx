@@ -1475,7 +1475,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 
 function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
   const databaseType = props.databaseType;
-  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" ? "text" : "sql";
+  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "victoriametrics" ? "text" : "sql";
   return extendQueryEditorSelection(currentView, {
     databaseType,
     dialect: props.syntaxDialect ?? props.dialect,
@@ -1674,7 +1674,7 @@ function getInsertValueHintTableColumns(table: string, schema?: string, database
 
 function requestInsertValueHintTableColumns(table: string, schema?: string, database?: string) {
   if (!props.connectionId || props.database == null) return;
-  if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") return;
+  if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "victoriametrics") return;
   const cacheKey = insertHintCacheKey({ name: table, schema, database });
   const hasCachedColumns = props.databaseType === "sqlserver" ? cachedInsertValueHintColumnsByTable.has(cacheKey) : cachedColumnsByTable.has(cacheKey);
   if (hasCachedColumns || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
@@ -2108,7 +2108,7 @@ function invalidateSemanticDiagnosticsForDocumentChange() {
 }
 
 function shouldSkipSqlSemanticDiagnostics() {
-  return props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
+  return props.databaseType === "victoriametrics" || (props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 }
 
 function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {
@@ -2234,7 +2234,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     setSemanticDiagnostics([]);
     return;
   }
-  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
+  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "victoriametrics") {
     setSemanticDiagnostics([]);
     return;
   }
@@ -2349,6 +2349,7 @@ function scheduleSemanticDiagnostics(delay = 500, options: { preserveOutsideRang
 
 async function formatCurrentSql() {
   if (props.readOnly) return;
+  if (props.databaseType === "victoriametrics") return;
   const currentView = view.value;
   if (!currentView) return;
 
@@ -2567,7 +2568,7 @@ function localCompletionSchemasForDatabaseDisambiguation(completionContext: Retu
 }
 
 function shouldInsertSqlCompletionSpace(): boolean {
-  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch";
+  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics";
 }
 
 function completionOptionForItem(item: QueryCompletionItem) {
@@ -2750,6 +2751,7 @@ async function provideSqlCompletions(context: CompletionContext) {
   if (props.databaseType === "redis") {
     return provideRedisCompletions(currentState, position, explicit);
   }
+  if (props.databaseType === "victoriametrics") return null;
   const hasDatabase = props.database != null;
 
   const epoch = ++completionEpoch;
@@ -2957,6 +2959,7 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   if (props.databaseType === "mongodb") {
     return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
   }
+  if (props.databaseType === "victoriametrics") return false;
   if (!insertedText && removedText) {
     const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
     return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
@@ -3996,7 +3999,7 @@ onMounted(async () => {
         const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
         let insertValueHints: Array<{ from: number; column: string }> = [];
         try {
-          if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch") {
+          if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics") {
             const statementSql = view.state.doc.sliceString(range.from, range.to);
             if (/\binsert\b/i.test(statementSql)) {
               insertValueHints = parseInsertValueHints(statementSql, { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
@@ -4149,7 +4152,7 @@ onMounted(async () => {
       sqlSignatureComp.of(buildSqlSignatureExtension()),
       diagnosticComp.of(buildSqlDiagnosticExtension()),
       createInsertValueHintsExtension({
-        isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch",
+        isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics",
         getTableColumns: getInsertValueHintTableColumns,
         requestTableColumns: requestInsertValueHintTableColumns,
       }),
@@ -4641,7 +4644,7 @@ watch(
 watch(
   () => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled,
   (enabled) => {
-    if (props.databaseType === "redis") return;
+    if (props.databaseType === "redis" || props.databaseType === "victoriametrics") return;
     if (!shouldSkipSqlSemanticDiagnostics() && enabled) {
       scheduleSemanticDiagnostics(0);
       return;

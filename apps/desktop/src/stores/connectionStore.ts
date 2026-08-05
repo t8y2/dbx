@@ -1011,6 +1011,7 @@ export const useConnectionStore = defineStore("connection", () => {
       sundb: "SunDB",
       oscar: "神通 OSCAR",
       influxdb: "InfluxDB",
+      victoriametrics: "VictoriaMetrics",
     };
 
     const profile = config.driver_profile || config.db_type;

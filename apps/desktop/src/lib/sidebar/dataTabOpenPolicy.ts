@@ -45,17 +45,7 @@ function isSameTable(tab: DataTabLike, target: DataTabTarget): boolean {
 }
 
 export function canReuseActiveDataTab(tab: DataTabLike | undefined, target: DataTabTarget): boolean {
-  return (
-    tab !== undefined &&
-    isSameDatabase(tab, target) &&
-    dataTabCatalog(tab) === (target.catalog || "") &&
-    !tab.pinned &&
-    !tab.isExecuting &&
-    !tab.isCancelling &&
-    !tab.isExplaining &&
-    !tab.txnSessionId &&
-    !tab.pendingDataChangeCount
-  );
+  return tab !== undefined && isSameDatabase(tab, target) && dataTabCatalog(tab) === (target.catalog || "") && !tab.pinned && !tab.isExecuting && !tab.isCancelling && !tab.isExplaining && !tab.txnSessionId && !tab.pendingDataChangeCount;
 }
 
 export function canApplyDataTabMetadata(tab: DataTabLike | undefined, target: DataTabTarget, signal?: AbortSignal): boolean {

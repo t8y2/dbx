@@ -13,6 +13,9 @@ use super::types::{
 };
 
 pub fn build_count_table_sql(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return format!("count({})", victoriametrics_metric_selector(table_name));
+    }
     format!("SELECT COUNT(*) AS row_count FROM {}", qualified_table_name(database_type, schema, table_name))
 }
 
@@ -21,6 +24,9 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let limit = options.limit.unwrap_or(100);
     if database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_table_select_sql(&options, limit);
+    }
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return format!("{}[1h]", victoriametrics_metric_selector(&options.table_name));
     }
 
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
@@ -214,6 +220,9 @@ fn is_view_table_type(table_type: Option<&str>) -> bool {
 
 pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
     let database_type = options.database_type;
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return format!("{}[1h]", victoriametrics_metric_selector(options.table_name));
+    }
     let table = qualified_table_name(database_type, options.schema, options.table_name);
     let select_columns = quoted_table_columns_or_star(database_type, options.columns);
     let order_by = if options.order_columns.is_empty() {
@@ -255,6 +264,11 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
             format!("SELECT {select_columns} FROM {table}{order_by} LIMIT {limit};")
         }
     }
+}
+
+fn victoriametrics_metric_selector(metric_name: &str) -> String {
+    let escaped = metric_name.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    format!(r#"{{__name__="{escaped}"}}"#)
 }
 
 fn informix_row_limit_clause(limit: usize, offset: usize) -> String {
@@ -554,5 +568,17 @@ mod tests {
             build_table_data_select_sql(opts(DatabaseType::Postgres, Some("iceberg_catalog"), Some("sales"), "orders"));
         assert!(!sql.contains("iceberg_catalog"), "sql was: {sql}");
         assert!(sql.contains("orders"), "sql was: {sql}");
+    }
+
+    #[test]
+    fn victoriametrics_builds_metric_queries_without_sql_identifiers() {
+        assert_eq!(
+            build_table_data_select_sql(opts(DatabaseType::VictoriaMetrics, None, None, "rack_temperature")),
+            r#"{__name__="rack_temperature"}[1h]"#
+        );
+        assert_eq!(
+            build_count_table_sql(Some(DatabaseType::VictoriaMetrics), None, "rack\\\"temperature"),
+            r#"count({__name__="rack\\\"temperature"})"#
+        );
     }
 }

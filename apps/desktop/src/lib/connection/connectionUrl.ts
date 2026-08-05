@@ -18,6 +18,7 @@ export interface ParsedConnectionUrl {
   oracleConnectionType?: "service_name" | "sid";
   useMongoUrl?: boolean;
   portExplicit?: boolean;
+  apiPath?: string;
 }
 
 export type ConnectionProfile = {
@@ -68,6 +69,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   xugu: { type: "xugu", profile: "xugu", label: "XuguDB", defaultPort: 5138 },
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
   iris: { type: "iris", profile: "iris", label: "IRIS", defaultPort: 1972 },
+  victoriametrics: { type: "victoriametrics", profile: "victoriametrics", label: "VictoriaMetrics", defaultPort: 8428 },
 };
 
 const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
@@ -78,6 +80,7 @@ const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   milvus: SCHEME_PROFILES.milvus,
   weaviate: SCHEME_PROFILES.weaviate,
   chromadb: SCHEME_PROFILES.chromadb,
+  victoriametrics: SCHEME_PROFILES.victoriametrics,
 };
 
 function decodeUrlPart(value: string): string {
@@ -640,9 +643,10 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
     password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : databaseFromPath(parsed.pathname),
     urlParams: effectiveUrlParams,
     ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
+    ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
   };
 }
 
@@ -678,7 +682,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function sqlServerExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): unknown {
+function parsedExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): unknown {
+  if (parsed.dbType === "victoriametrics") {
+    const next = isRecord(existing) ? { ...existing } : {};
+    next.apiPath = parsed.apiPath || "/prometheus";
+    return next;
+  }
   if (parsed.dbType !== "sqlserver") return existing;
 
   const next = isRecord(existing) ? { ...existing } : {};
@@ -707,6 +716,6 @@ export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, p
     ssl: parsed.ssl,
     connection_string: parsed.connectionString,
     oracle_connection_type: parsed.oracleConnectionType,
-    external_config: sqlServerExternalConfig(config.external_config, parsed),
+    external_config: parsedExternalConfig(config.external_config, parsed),
   };
 }

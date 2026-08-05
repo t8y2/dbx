@@ -1130,9 +1130,9 @@ public final class RocketMqAgent {
     }
 
     /**
-     * Topic-filtered lists skip full-cluster collect for speed. Merge subscription dumps from
-     * masters until the table stops growing (or brokers are exhausted) so FIFO groups that only
-     * exist on a later broker are not mis-typed as NORMAL.
+     * Topic-filtered lists skip the parallel full-cluster collect for speed, but must still
+     * walk every reachable master. An intermediate broker can return a duplicate dump (map size
+     * unchanged) while a later master still holds FIFO-only groups.
      */
     private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigsForTopicFilter(
         DefaultMQAdminExt admin, JsonObject conn) {
@@ -1146,12 +1146,7 @@ public final class RocketMqAgent {
                         || wrapper.getSubscriptionGroupTable().isEmpty()) {
                         continue;
                     }
-                    int before = configs.size();
-                    configs.putAll(wrapper.getSubscriptionGroupTable());
-                    // First non-empty dump often has the full table; stop if nothing new arrived.
-                    if (before > 0 && configs.size() == before) {
-                        break;
-                    }
+                    mergeSubscriptionGroupConfigs(configs, wrapper.getSubscriptionGroupTable());
                 } catch (Exception ignored) {
                     // Try next master.
                 }
@@ -1160,6 +1155,33 @@ public final class RocketMqAgent {
             // No reachable masters.
         }
         return configs;
+    }
+
+    /**
+     * Merge broker subscription dumps. Prefer {@code consumeMessageOrderly=true} so a NORMAL
+     * stub on an earlier master cannot hide a FIFO group that exists on another broker.
+     */
+    static void mergeSubscriptionGroupConfigs(
+        Map<String, SubscriptionGroupConfig> target,
+        Map<String, SubscriptionGroupConfig> incoming
+    ) {
+        if (incoming == null || incoming.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, SubscriptionGroupConfig> entry : incoming.entrySet()) {
+            String groupId = entry.getKey();
+            SubscriptionGroupConfig next = entry.getValue();
+            if (groupId == null || next == null) {
+                continue;
+            }
+            target.merge(groupId, next, (existing, candidate) -> {
+                if (candidate != null && candidate.isConsumeMessageOrderly()
+                    && (existing == null || !existing.isConsumeMessageOrderly())) {
+                    return candidate;
+                }
+                return existing != null ? existing : candidate;
+            });
+        }
     }
 
     /**
@@ -1209,11 +1231,7 @@ public final class RocketMqAgent {
                 }
                 try {
                     Map<String, SubscriptionGroupConfig> partial = future.get();
-                    if (partial != null) {
-                        for (Map.Entry<String, SubscriptionGroupConfig> entry : partial.entrySet()) {
-                            configs.putIfAbsent(entry.getKey(), entry.getValue());
-                        }
-                    }
+                    mergeSubscriptionGroupConfigs(configs, partial);
                 } catch (Exception ignored) {
                     // Partial page is better than failing the whole list.
                 }
@@ -1425,7 +1443,7 @@ public final class RocketMqAgent {
         if (!topicFilter.isBlank()) {
             // Dashboard-style: discover groups via topic; skip full-cluster subscription dump.
             groups.addAll(queryTopicConsumeByWhoRemapped(admin, conn, topicFilter));
-            // Merge master dumps (early-exit) so FIFO typing is not stuck on the first broker.
+            // Merge every reachable master dump so FIFO typing is not stuck on the first broker.
             configs = collectConsumerGroupConfigsForTopicFilter(admin, conn);
         } else {
             configs = collectConsumerGroupConfigs(admin, conn);

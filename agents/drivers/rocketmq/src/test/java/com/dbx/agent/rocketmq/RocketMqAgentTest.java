@@ -643,6 +643,53 @@ class RocketMqAgentTest {
     }
 
     @Test
+    void mergeSubscriptionGroupConfigsPrefersFifoAndKeepsLaterOnlyGroups() {
+        Map<String, SubscriptionGroupConfig> merged = new LinkedHashMap<>();
+
+        SubscriptionGroupConfig normalA = new SubscriptionGroupConfig();
+        normalA.setGroupName("group-a");
+        normalA.setConsumeMessageOrderly(false);
+
+        SubscriptionGroupConfig fifoA = new SubscriptionGroupConfig();
+        fifoA.setGroupName("group-a");
+        fifoA.setConsumeMessageOrderly(true);
+
+        SubscriptionGroupConfig onlyOnLater = new SubscriptionGroupConfig();
+        onlyOnLater.setGroupName("group-b");
+        onlyOnLater.setConsumeMessageOrderly(true);
+
+        // Intermediate broker repeats group-a as NORMAL (size would not grow), then later adds FIFO-only group-b.
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("group-a", normalA));
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("group-a", normalA));
+        RocketMqAgent.mergeSubscriptionGroupConfigs(
+            merged,
+            Map.of("group-a", fifoA, "group-b", onlyOnLater)
+        );
+
+        assertEquals(2, merged.size());
+        assertTrue(merged.get("group-a").isConsumeMessageOrderly());
+        assertTrue(merged.get("group-b").isConsumeMessageOrderly());
+        assertEquals("FIFO", RocketMqAgent.classifyConsumerGroupType("group-a", merged.get("group-a")));
+        assertEquals("FIFO", RocketMqAgent.classifyConsumerGroupType("group-b", merged.get("group-b")));
+    }
+
+    @Test
+    void mergeSubscriptionGroupConfigsDoesNotDowngradeFifoToNormal() {
+        Map<String, SubscriptionGroupConfig> merged = new LinkedHashMap<>();
+        SubscriptionGroupConfig fifo = new SubscriptionGroupConfig();
+        fifo.setGroupName("ordered");
+        fifo.setConsumeMessageOrderly(true);
+        SubscriptionGroupConfig normal = new SubscriptionGroupConfig();
+        normal.setGroupName("ordered");
+        normal.setConsumeMessageOrderly(false);
+
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("ordered", fifo));
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("ordered", normal));
+
+        assertTrue(merged.get("ordered").isConsumeMessageOrderly());
+    }
+
+    @Test
     void ensureConsumeStatsProbeSucceededRejectsAllBrokerFailures() {
         MQClientException noMasters = assertThrows(
             MQClientException.class,

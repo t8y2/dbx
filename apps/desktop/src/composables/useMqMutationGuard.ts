@@ -1,4 +1,4 @@
-import { unref, type MaybeRef } from "vue";
+import { toValue, type MaybeRefOrGetter } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -9,14 +9,16 @@ import { useToast } from "@/composables/useToast";
  * Read-only is enforced by the backend; production connections require an
  * explicit confirmation (same dialog as SQL production writes).
  */
-export function useMqMutationGuard(connectionId: MaybeRef<string>) {
+export function useMqMutationGuard(connectionId: MaybeRefOrGetter<string>) {
   const connectionStore = useConnectionStore();
   const productionSafetyStore = useProductionSafetyStore();
   const { toast } = useToast();
   const { t } = useI18n();
 
   async function confirmMqWrite(operation: string): Promise<boolean> {
-    const id = unref(connectionId);
+    // Call sites pass () => props.connectionId — must use toValue (not unref)
+    // so getters resolve to the real connection id.
+    const id = toValue(connectionId);
     const config = connectionStore.getConfig(id);
     if (!config) {
       toast(t("mqAdmin.connectionMissing"));

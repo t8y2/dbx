@@ -57,6 +57,12 @@ describe("useMqMutationGuard", () => {
     expect(requestConfirmation).not.toHaveBeenCalled();
   });
 
+  it("resolves getter connection ids used by MQ panels", async () => {
+    const guard = useMqMutationGuard(() => "dev");
+    await expect(guard.confirmMqWrite("send")).resolves.toBe(true);
+    expect(toast).not.toHaveBeenCalledWith("mqAdmin.connectionMissing");
+  });
+
   it("prompts for production writes", async () => {
     const guard = useMqMutationGuard("prod");
     await expect(guard.confirmMqWrite("send")).resolves.toBe(true);

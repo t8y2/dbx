@@ -767,7 +767,7 @@
     },
     {
       "dbType": "vastbase",
-      "label": "Vastbase",
+      "label": "海量 Vastbase",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "vastbase",
@@ -797,7 +797,7 @@
     },
     {
       "dbType": "goldendb",
-      "label": "GoldenDB",
+      "label": "金篆 GoldenDB",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "goldendb",
@@ -1213,7 +1213,7 @@
     },
     {
       "dbType": "gbase",
-      "label": "GBase 8a",
+      "label": "南大通用 GBase 8a",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "gbase8a",
@@ -1224,12 +1224,12 @@
       "driverProfiles": [
         {
           "profile": "gbase8s",
-          "label": "GBase 8s",
+          "label": "南大通用 GBase 8s",
           "agentKey": "gbase8s"
         },
         {
           "profile": "gbase8a",
-          "label": "GBase 8a",
+          "label": "南大通用 GBase 8a",
           "agentKey": "gbase8a"
         }
       ],
@@ -1612,7 +1612,7 @@
     },
     {
       "dbType": "sundb",
-      "label": "SunDB",
+      "label": "科蓝 SUNDB",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "sundb",

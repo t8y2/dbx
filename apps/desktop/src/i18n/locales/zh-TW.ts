@@ -1438,6 +1438,7 @@ export default withEnglishFallback({
     },
     sortUnsupported: "目前 SQL 不支援完整排序，請改為單條 SELECT 查詢後再嘗試。",
     truncatedHint: "結果已截斷，已載入前 {count} 筆。可透過底部分頁瀏覽已載入資料；匯出完整結果時會重新查詢資料庫。",
+    victoriaMetricsTruncatedHint: "結果超過載入上限，僅載入前 {count} 筆。右下角每頁筆數只調整已載入資料的分頁顯示；請縮短查詢時間範圍或增加篩選條件以取得完整結果。",
     filterBuilderSearchColumns: "搜尋欄位...",
     filterBuilderNoMatchingColumns: "沒有匹配的欄位",
     copyExtractorWithHeaders: "{format}（含表頭）",

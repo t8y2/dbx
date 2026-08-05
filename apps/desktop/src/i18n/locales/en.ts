@@ -1564,6 +1564,7 @@ export default {
     },
     sortUnsupported: "This SQL does not support full-result sorting. Try again with a single SELECT query.",
     truncatedHint: "Results were truncated after loading {count} rows. Use the footer pagination to browse loaded data; exporting the full result reruns the database query.",
+    victoriaMetricsTruncatedHint: "Results exceeded the loading limit, so only the first {count} rows were loaded. Rows per page only paginates loaded data; shorten the time range or add filters to retrieve a complete result.",
   },
   exportProgress: {
     streamingUnsupported: "Streaming export is unsupported for this query. Simplify it or use a supported driver.",

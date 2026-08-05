@@ -1565,6 +1565,7 @@ export default withEnglishFallback({
     },
     sortUnsupported: "当前 SQL 不支持全量排序，请改为单条 SELECT 查询后再尝试。",
     truncatedHint: "结果已截断，已加载前 {count} 行。可通过底部分页浏览已加载数据；导出完整结果时会重新查询数据库。",
+    victoriaMetricsTruncatedHint: "结果超过加载上限，仅加载前 {count} 行。右下角每页行数只调整已加载数据的分页显示；请缩短查询时间范围或增加筛选条件以获取完整结果。",
   },
   exportProgress: {
     streamingUnsupported: "当前查询暂不支持流式导出，请简化查询或使用受支持的驱动。",

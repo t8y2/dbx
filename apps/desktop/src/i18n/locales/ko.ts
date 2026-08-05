@@ -1453,6 +1453,7 @@ export default withEnglishFallback({
     },
     sortUnsupported: "이 SQL은 전체 결과 정렬을 지원하지 않습니다. 단일 SELECT 쿼리로 다시 시도하세요.",
     truncatedHint: "{count}행 로드 후 결과가 잘렸습니다. 로드된 데이터를 탐색하려면 푸터 페이지 매김을 사용하세요. 전체 결과를 내보내면 데이터베이스 쿼리를 다시 실행합니다.",
+    victoriaMetricsTruncatedHint: "결과가 로드 한도를 초과하여 처음 {count}행만 로드했습니다. 페이지당 행 수는 로드된 데이터만 나눠 표시합니다. 전체 결과를 가져오려면 시간 범위를 줄이거나 필터를 추가하세요.",
   },
   exportProgress: {
     streamingUnsupported: "이 쿼리는 스트리밍 내보내기를 지원하지 않습니다. 쿼리를 단순화하거나 지원되는 드라이버를 사용하세요.",

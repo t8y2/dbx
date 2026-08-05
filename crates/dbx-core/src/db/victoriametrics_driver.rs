@@ -202,7 +202,7 @@ pub async fn list_tables(client: &VictoriaMetricsClient) -> Result<Vec<TableInfo
         .map(|name| TableInfo {
             name,
             table_type: "TABLE".to_string(),
-            comment: Some("VictoriaMetrics metric".to_string()),
+            comment: None,
             parent_schema: None,
             parent_name: None,
         })

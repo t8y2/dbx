@@ -1439,6 +1439,7 @@ export default withEnglishFallback({
     },
     sortUnsupported: "Este SQL no admite ordenamiento del resultado completo. Intenta con una consulta SELECT simple.",
     truncatedHint: "Los resultados se truncaron después de cargar {count} filas. Usa la paginación inferior para explorar los datos cargados; al exportar el resultado completo se vuelve a consultar la base de datos.",
+    victoriaMetricsTruncatedHint: "Los resultados superaron el límite de carga, por lo que solo se cargaron las primeras {count} filas. Las filas por página solo paginan los datos cargados; reduce el intervalo de tiempo o añade filtros para obtener el resultado completo.",
     filterBuilderSearchColumns: "Buscar columnas...",
     filterBuilderNoMatchingColumns: "Sin columnas coincidentes",
     copyExtractorWithHeaders: "{format} (con encabezados)",

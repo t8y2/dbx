@@ -6603,88 +6603,86 @@ onUnmounted(() => {
   opacity: 1 !important;
 }
 
-@supports not (color: oklch(0.5 0.1 180)) {
-  .settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7) {
-    height: 2rem !important;
-    min-height: 2rem !important;
-    box-sizing: border-box !important;
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"][data-size="default"]:not(.h-7) {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  box-sizing: border-box !important;
+}
+
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"].h-9 {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  box-sizing: border-box !important;
+}
+
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"][data-size="sm"],
+html.dbx-legacy-webview .settings-layout [data-slot="select-trigger"].h-7 {
+  height: 1.75rem !important;
+  min-height: 1.75rem !important;
+  box-sizing: border-box !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-row {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  column-gap: 0.75rem !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-label {
+  align-self: center !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-actions {
+  justify-self: end !important;
+  align-self: center !important;
+  text-align: right !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-shortcut-controls {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 0.375rem !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-export-number-input {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  line-height: 1.25rem !important;
+}
+
+html.dbx-legacy-webview .settings-layout .settings-export-number-input::-webkit-inner-spin-button,
+html.dbx-legacy-webview .settings-layout .settings-export-number-input::-webkit-outer-spin-button {
+  min-height: 1.5rem !important;
+  opacity: 1 !important;
+}
+
+html.dbx-legacy-webview .settings-about-section-header {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  justify-content: space-between !important;
+  gap: 0.75rem !important;
+}
+
+html.dbx-legacy-webview .settings-about-section-actions {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  margin-left: auto !important;
+  gap: 0.5rem !important;
+}
+
+@media (max-width: 640px) {
+  html.dbx-legacy-webview .settings-about-section-header {
+    flex-direction: column !important;
   }
 
-  .settings-layout [data-slot="select-trigger"].h-9 {
-    height: 2rem !important;
-    min-height: 2rem !important;
-    box-sizing: border-box !important;
-  }
-
-  .settings-layout [data-slot="select-trigger"][data-size="sm"],
-  .settings-layout [data-slot="select-trigger"].h-7 {
-    height: 1.75rem !important;
-    min-height: 1.75rem !important;
-    box-sizing: border-box !important;
-  }
-
-  .settings-layout .settings-shortcut-row {
-    grid-template-columns: minmax(0, 1fr) auto !important;
-    align-items: center !important;
-    column-gap: 0.75rem !important;
-  }
-
-  .settings-layout .settings-shortcut-label {
-    align-self: center !important;
-  }
-
-  .settings-layout .settings-shortcut-actions {
-    justify-self: end !important;
-    align-self: center !important;
-    text-align: right !important;
-  }
-
-  .settings-layout .settings-shortcut-controls {
-    display: flex !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    justify-content: flex-end !important;
-    gap: 0.375rem !important;
-  }
-
-  .settings-layout .settings-export-number-input {
-    height: 2rem !important;
-    min-height: 2rem !important;
-    line-height: 1.25rem !important;
-  }
-
-  .settings-layout .settings-export-number-input::-webkit-inner-spin-button,
-  .settings-layout .settings-export-number-input::-webkit-outer-spin-button {
-    min-height: 1.5rem !important;
-    opacity: 1 !important;
-  }
-
-  .settings-about-section-header {
-    display: flex !important;
-    flex-direction: row !important;
-    align-items: flex-start !important;
-    justify-content: space-between !important;
-    gap: 0.75rem !important;
-  }
-
-  .settings-about-section-actions {
-    display: flex !important;
-    flex-wrap: wrap !important;
-    align-items: center !important;
-    justify-content: flex-end !important;
-    margin-left: auto !important;
-    gap: 0.5rem !important;
-  }
-
-  @media (max-width: 640px) {
-    .settings-about-section-header {
-      flex-direction: column !important;
-    }
-
-    .settings-about-section-actions {
-      justify-content: flex-start !important;
-      margin-left: 0 !important;
-    }
+  html.dbx-legacy-webview .settings-about-section-actions {
+    justify-content: flex-start !important;
+    margin-left: 0 !important;
   }
 }
 

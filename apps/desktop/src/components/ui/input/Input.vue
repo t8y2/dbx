@@ -3,6 +3,7 @@ import type { HTMLAttributes } from "vue";
 import { computed, ref, useAttrs } from "vue";
 import { Minus, Plus } from "@lucide/vue";
 import { useVModel } from "@vueuse/core";
+import { useI18n } from "vue-i18n";
 import { cn } from "@/lib/common/utils";
 
 defineOptions({ inheritAttrs: false });
@@ -11,6 +12,9 @@ const props = defineProps<{
   defaultValue?: string | number;
   modelValue?: string | number;
   class?: HTMLAttributes["class"];
+  stepper?: boolean;
+  increaseLabel?: string;
+  decreaseLabel?: string;
 }>();
 
 const emits = defineEmits<{
@@ -25,7 +29,11 @@ const modelValue = useVModel(props, "modelValue", emits, {
 const attrs = useAttrs();
 const inputRef = ref<HTMLInputElement | null>(null);
 const isNumberInput = computed(() => attrs.type === "number");
+const isStepperEnabled = computed(() => isNumberInput.value && props.stepper === true);
 const isStepperDisabled = computed(() => booleanAttrEnabled(attrs.disabled) || booleanAttrEnabled(attrs.readonly));
+const { t } = useI18n();
+const increaseLabel = computed(() => props.increaseLabel ?? t("common.increase"));
+const decreaseLabel = computed(() => props.decreaseLabel ?? t("common.decrease"));
 
 const baseClass =
   "dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 disabled:bg-input/50 dark:disabled:bg-input/80 h-8 rounded-md border bg-transparent px-2.5 py-1 text-base transition-colors file:h-6 file:text-sm file:font-medium focus-visible:ring-3 aria-invalid:ring-3 md:text-sm w-full min-w-0 outline-none file:inline-flex file:border-0 file:bg-transparent file:text-foreground placeholder:text-muted-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50";
@@ -90,13 +98,13 @@ function stepNumber(direction: 1 | -1) {
 </script>
 
 <template>
-  <div v-if="isNumberInput" :class="numberInputWrapperClass">
+  <div v-if="isStepperEnabled" :class="numberInputWrapperClass">
     <input ref="inputRef" v-bind="attrs" v-model="modelValue" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" data-slot="input" :class="cn(baseClass, props.class, 'dbx-number-input-field pr-10')" />
     <div class="dbx-number-stepper">
-      <button type="button" tabindex="-1" class="dbx-number-stepper-button" :disabled="isStepperDisabled" aria-label="Increase" title="Increase" @mousedown.prevent @click.stop="stepNumber(1)">
+      <button type="button" tabindex="-1" class="dbx-number-stepper-button" :disabled="isStepperDisabled" :aria-label="increaseLabel" :title="increaseLabel" @mousedown.prevent @click.stop="stepNumber(1)">
         <Plus class="dbx-number-stepper-icon" aria-hidden="true" />
       </button>
-      <button type="button" tabindex="-1" class="dbx-number-stepper-button" :disabled="isStepperDisabled" aria-label="Decrease" title="Decrease" @mousedown.prevent @click.stop="stepNumber(-1)">
+      <button type="button" tabindex="-1" class="dbx-number-stepper-button" :disabled="isStepperDisabled" :aria-label="decreaseLabel" :title="decreaseLabel" @mousedown.prevent @click.stop="stepNumber(-1)">
         <Minus class="dbx-number-stepper-icon" aria-hidden="true" />
       </button>
     </div>

@@ -7553,46 +7553,44 @@ function openExternalUrl(url: string) {
 
 /* Legacy responsive layout rules live in public/connection-dialog-legacy.css
  * so the production build cannot rewrite their classic media queries. */
-@supports not (color: oklch(0.5 0.1 180)) {
-  .connection-db-category-option--selected {
-    color: rgb(23, 23, 23) !important;
-    background-color: rgba(23, 23, 23, 0.08) !important;
-  }
+html.dbx-legacy-webview .connection-db-category-option--selected {
+  color: rgb(23, 23, 23) !important;
+  background-color: rgba(23, 23, 23, 0.08) !important;
+}
 
-  .connection-db-category-option--selected:hover {
-    color: rgb(23, 23, 23) !important;
-    background-color: rgba(23, 23, 23, 0.12) !important;
-  }
+html.dbx-legacy-webview .connection-db-category-option--selected:hover {
+  color: rgb(23, 23, 23) !important;
+  background-color: rgba(23, 23, 23, 0.12) !important;
+}
 
-  .connection-transport-layer-option--selected {
-    color: rgb(23, 23, 23) !important;
-    border-color: rgb(23, 23, 23) !important;
-    background-color: rgba(23, 23, 23, 0.08) !important;
-  }
+html.dbx-legacy-webview .connection-transport-layer-option--selected {
+  color: rgb(23, 23, 23) !important;
+  border-color: rgb(23, 23, 23) !important;
+  background-color: rgba(23, 23, 23, 0.08) !important;
+}
 
-  .connection-transport-layer-option--selected:hover {
-    background-color: rgba(23, 23, 23, 0.12) !important;
-  }
+html.dbx-legacy-webview .connection-transport-layer-option--selected:hover {
+  background-color: rgba(23, 23, 23, 0.12) !important;
+}
 
-  .dark .connection-db-category-option--selected {
-    color: rgb(244, 244, 245) !important;
-    background-color: rgba(255, 255, 255, 0.1) !important;
-  }
+html.dbx-legacy-webview.dark .connection-db-category-option--selected {
+  color: rgb(244, 244, 245) !important;
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
 
-  .dark .connection-db-category-option--selected:hover {
-    color: rgb(244, 244, 245) !important;
-    background-color: rgba(255, 255, 255, 0.14) !important;
-  }
+html.dbx-legacy-webview.dark .connection-db-category-option--selected:hover {
+  color: rgb(244, 244, 245) !important;
+  background-color: rgba(255, 255, 255, 0.14) !important;
+}
 
-  .dark .connection-transport-layer-option--selected {
-    color: rgb(244, 244, 245) !important;
-    border-color: rgb(244, 244, 245) !important;
-    background-color: rgba(255, 255, 255, 0.1) !important;
-  }
+html.dbx-legacy-webview.dark .connection-transport-layer-option--selected {
+  color: rgb(244, 244, 245) !important;
+  border-color: rgb(244, 244, 245) !important;
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
 
-  .dark .connection-transport-layer-option--selected:hover {
-    background-color: rgba(255, 255, 255, 0.14) !important;
-  }
+html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover {
+  background-color: rgba(255, 255, 255, 0.14) !important;
 }
 
 .connection-db-picker-option {

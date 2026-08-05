@@ -14,27 +14,19 @@ const changelogPanelSource = readFileSync(new URL("../../components/settings/Cha
 const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
+const legacyWebViewSource = readFileSync(new URL("../../lib/ui/legacyWebView.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("../../main.ts", import.meta.url), "utf8");
 
 describe("legacy WebView CSS fallbacks", () => {
-  it("scopes component overrides to WebViews without OKLCH support", () => {
-    const fallbackStart = globalsCss.indexOf("@supports not (color: oklch(0.5 0.1 180))");
-    const tabsOverride = globalsCss.indexOf('[data-slot="tabs-trigger"]');
+  it("scopes component overrides to the runtime legacy WebView class", () => {
+    const fallbackStart = globalsCss.indexOf("html.dbx-legacy-webview .sm\\:block");
+    const tabsOverride = globalsCss.indexOf('html.dbx-legacy-webview [data-slot="tabs-trigger"]');
     const splitpanesStart = globalsCss.indexOf("/* Splitpanes */");
 
     expect(fallbackStart).toBeGreaterThan(-1);
     expect(tabsOverride).toBeGreaterThan(fallbackStart);
     expect(splitpanesStart).toBeGreaterThan(tabsOverride);
-
-    let nestingDepth = 0;
-    let tabsNestingDepth = 0;
-    for (let index = globalsCss.indexOf("{", fallbackStart); index < splitpanesStart; index++) {
-      if (globalsCss[index] === "{") nestingDepth++;
-      if (globalsCss[index] === "}") nestingDepth--;
-      if (index === tabsOverride) tabsNestingDepth = nestingDepth;
-    }
-
-    expect(tabsNestingDepth).toBeGreaterThan(0);
-    expect(nestingDepth).toBe(0);
+    expect(globalsCss.slice(fallbackStart, splitpanesStart)).toContain('html.dbx-legacy-webview [data-slot="tabs-trigger"]');
   });
 
   it("falls back to the legacy viewport height when dynamic viewport units are unavailable", () => {
@@ -51,7 +43,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("centralizes legacy dialog positioning and layout utility fallbacks", () => {
-    const fallbackStart = globalsCss.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackStart = globalsCss.indexOf("html.dbx-legacy-webview .sm\\:block");
     const splitpanesStart = globalsCss.indexOf("/* Splitpanes */");
     const fallback = globalsCss.slice(fallbackStart, splitpanesStart);
 
@@ -106,8 +98,8 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(desktopIndexSource).toContain('href="/connection-dialog-legacy.css"');
     expect(connectionDialogLegacyCss).toContain("@media (min-width: 640px)");
     expect(connectionDialogLegacyCss).toContain("@media (min-width: 1024px)");
-    expect(connectionDialogLegacyCss).toContain("@supports (color: oklch(0.5 0.1 180))");
-    expect(connectionDialogLegacyCss).toContain("@supports not (color: oklch(0.5 0.1 180))");
+    expect(connectionDialogLegacyCss).toContain("html.dbx-legacy-webview .connection-db-picker-grid");
+    expect(connectionDialogLegacyCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config');
     expect(connectionDialogLegacyCss).toContain("min-width: 38rem !important;");
     expect(connectionDialogLegacyCss).toContain("width: 0 !important;");
     expect(connectionDialogLegacyCss).toContain("grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)) !important;");
@@ -150,7 +142,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the driver manager category navigation scoped to legacy WebViews", () => {
-    const fallbackStart = driverStoreDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackStart = driverStoreDialogSource.indexOf("html.dbx-legacy-webview .driver-store-tab");
     const fallbackEnd = driverStoreDialogSource.indexOf("@media (max-width: 900px)", fallbackStart);
     const fallback = driverStoreDialogSource.slice(fallbackStart, fallbackEnd);
 
@@ -176,7 +168,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps driver manager local import buttons large enough to target", () => {
-    const fallbackStart = driverStoreDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackStart = driverStoreDialogSource.indexOf("html.dbx-legacy-webview .driver-store-local-import-button");
     const fallbackEnd = driverStoreDialogSource.indexOf("@media (max-width: 900px)", fallbackStart);
     const fallback = driverStoreDialogSource.slice(fallbackStart, fallbackEnd);
 
@@ -200,7 +192,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps transport layer selection readable in legacy WebViews", () => {
-    const fallbackStart = connectionDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackStart = connectionDialogSource.indexOf("html.dbx-legacy-webview .connection-db-category-option--selected");
     const fallbackEnd = connectionDialogSource.indexOf(".connection-db-picker-option", fallbackStart);
     const fallback = connectionDialogSource.slice(fallbackStart, fallbackEnd);
 
@@ -222,7 +214,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps settings field stacks spaced in legacy WebViews", () => {
-    const fallbackStart = editorSettingsDialogSource.indexOf("@supports not (color: oklch(0.5 0.1 180))");
+    const fallbackStart = editorSettingsDialogSource.indexOf("html.dbx-legacy-webview .settings-layout");
     const fallbackEnd = editorSettingsDialogSource.indexOf("@media (max-width: 760px)", fallbackStart);
     const fallback = editorSettingsDialogSource.slice(fallbackStart, fallbackEnd);
 
@@ -264,5 +256,14 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain("justify-content: space-between !important;");
     expect(fallback).toContain(".settings-about-section-actions");
     expect(fallback).toContain("margin-left: auto !important;");
+  });
+
+  it("uses a runtime capability check instead of an OKLCH-only CSS proxy", () => {
+    expect(legacyWebViewSource).toContain("color-mix");
+    expect(legacyWebViewSource).toContain("has-selector");
+    expect(legacyWebViewSource).toContain("dynamic-viewport");
+    expect(legacyWebViewSource).toContain("min-function");
+    expect(legacyWebViewSource).toContain("dbx-legacy-webview");
+    expect(mainSource).toContain("applyLegacyWebViewClass();");
   });
 });

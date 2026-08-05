@@ -2,6 +2,7 @@
 
 import { createApp, nextTick, ref } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
+import { createI18n } from "vue-i18n";
 import Input from "@/components/ui/input/Input.vue";
 
 const mountedApps: Array<ReturnType<typeof createApp>> = [];
@@ -16,6 +17,20 @@ async function mountInput(template: string) {
     },
     template,
   });
+  app.use(
+    createI18n({
+      legacy: false,
+      locale: "en",
+      messages: {
+        en: {
+          common: {
+            increase: "Increase",
+            decrease: "Decrease",
+          },
+        },
+      },
+    }),
+  );
   app.mount(host);
   mountedApps.push(app);
   await nextTick();
@@ -35,8 +50,17 @@ describe("Input", () => {
     expect(host.querySelectorAll("input")).toHaveLength(1);
   });
 
-  it("uses large custom steppers for number fields", async () => {
-    const host = await mountInput('<Input v-model="value" type="number" step="2" /><span data-value>{{ value }}</span>');
+  it("keeps number fields plain unless the custom stepper is opted into", async () => {
+    const host = await mountInput('<Input v-model="value" type="number" step="2" class="w-14" />');
+
+    expect(host.querySelector(".dbx-number-stepper")).toBeNull();
+    expect(host.querySelector(".dbx-number-input-wrapper")).toBeNull();
+    expect(host.querySelector("input")?.className).not.toContain("pr-10");
+    expect(host.querySelector("input")?.className).toContain("w-14");
+  });
+
+  it("uses custom steppers only when enabled and keeps labels localizable", async () => {
+    const host = await mountInput('<Input v-model="value" type="number" step="2" :stepper="true" increase-label="Up" decrease-label="Down" /><span data-value>{{ value }}</span>');
     const input = host.querySelector("input") as HTMLInputElement;
     const buttons = Array.from(host.querySelectorAll(".dbx-number-stepper-button")) as HTMLButtonElement[];
 
@@ -55,6 +79,8 @@ describe("Input", () => {
 
     expect(buttons).toHaveLength(2);
     expect(host.querySelector(".dbx-number-stepper-icon")).not.toBeNull();
+    expect(buttons[0]?.getAttribute("aria-label")).toBe("Up");
+    expect(buttons[1]?.getAttribute("aria-label")).toBe("Down");
 
     buttons[0].click();
     await nextTick();
@@ -65,8 +91,8 @@ describe("Input", () => {
     expect(host.querySelector("[data-value]")?.textContent).toBe("1");
   });
 
-  it("keeps layout classes on the number input wrapper without moving input-only classes there", async () => {
-    const host = await mountInput('<Input v-model="value" type="number" class="settings-export-number-input h-8 w-28 text-xs" />');
+  it("keeps layout classes on the number input wrapper when the stepper is enabled", async () => {
+    const host = await mountInput('<Input v-model="value" type="number" :stepper="true" class="settings-export-number-input h-8 w-28 text-xs" />');
     const wrapper = host.querySelector(".dbx-number-input-wrapper") as HTMLElement;
     const input = host.querySelector("input") as HTMLInputElement;
 

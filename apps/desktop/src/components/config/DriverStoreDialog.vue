@@ -2140,70 +2140,68 @@ watch(driverStoreTab, (tab) => {
   height: 2rem !important;
 }
 
-@supports not (color: oklch(0.5 0.1 180)) {
-  .driver-store-tab {
-    margin-top: 1.25rem !important;
-  }
+html.dbx-legacy-webview .driver-store-tab {
+  margin-top: 1.25rem !important;
+}
 
-  .driver-store-agent-tab:not([hidden]),
-  .driver-store-jdbc-tab:not([hidden]),
-  .driver-store-storage-tab:not([hidden]) {
-    display: flex !important;
+html.dbx-legacy-webview .driver-store-agent-tab:not([hidden]),
+html.dbx-legacy-webview .driver-store-jdbc-tab:not([hidden]),
+html.dbx-legacy-webview .driver-store-storage-tab:not([hidden]) {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1.25rem !important;
+}
+
+html.dbx-legacy-webview .driver-store-agent-tab > :not([hidden]) ~ :not([hidden]),
+html.dbx-legacy-webview .driver-store-jdbc-tab > :not([hidden]) ~ :not([hidden]),
+html.dbx-legacy-webview .driver-store-storage-tab > :not([hidden]) ~ :not([hidden]) {
+  margin-top: 0 !important;
+}
+
+html.dbx-legacy-webview .driver-store-local-import-button {
+  width: 2rem !important;
+  height: 2rem !important;
+  padding: 0 !important;
+}
+
+html.dbx-legacy-webview .driver-store-local-import-button svg {
+  width: 1rem !important;
+  height: 1rem !important;
+}
+
+@media (min-width: 640px) {
+  html.dbx-legacy-webview [data-driver-category-nav] {
+    width: 10rem !important;
     flex-direction: column !important;
-    gap: 1.25rem !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    border-right-width: 1px !important;
+    border-bottom-width: 0 !important;
+    padding-top: 0.125rem !important;
+    padding-right: 0.875rem !important;
+    padding-bottom: 0.125rem !important;
   }
 
-  .driver-store-agent-tab > :not([hidden]) ~ :not([hidden]),
-  .driver-store-jdbc-tab > :not([hidden]) ~ :not([hidden]),
-  .driver-store-storage-tab > :not([hidden]) ~ :not([hidden]) {
-    margin-top: 0 !important;
+  html.dbx-legacy-webview [data-driver-category-nav] > button {
+    width: 100% !important;
+    align-self: stretch !important;
   }
 
-  .driver-store-local-import-button {
-    width: 2rem !important;
-    height: 2rem !important;
-    padding: 0 !important;
+  html.dbx-legacy-webview [data-driver-category-nav] > button[aria-current="page"] {
+    background-color: rgba(23, 23, 23, 0.08) !important;
+    color: rgb(23, 23, 23) !important;
   }
 
-  .driver-store-local-import-button svg {
-    width: 1rem !important;
-    height: 1rem !important;
+  html.dbx-legacy-webview.dark [data-driver-category-nav] > button[aria-current="page"] {
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    color: rgb(244, 244, 245) !important;
   }
 
-  @media (min-width: 640px) {
-    [data-driver-category-nav] {
-      width: 10rem !important;
-      flex-direction: column !important;
-      overflow-x: hidden !important;
-      overflow-y: auto !important;
-      border-right-width: 1px !important;
-      border-bottom-width: 0 !important;
-      padding-top: 0.125rem !important;
-      padding-right: 0.875rem !important;
-      padding-bottom: 0.125rem !important;
-    }
-
-    [data-driver-category-nav] > button {
-      width: 100% !important;
-      align-self: stretch !important;
-    }
-
-    [data-driver-category-nav] > button[aria-current="page"] {
-      background-color: rgba(23, 23, 23, 0.08) !important;
-      color: rgb(23, 23, 23) !important;
-    }
-
-    .dark [data-driver-category-nav] > button[aria-current="page"] {
-      background-color: rgba(255, 255, 255, 0.1) !important;
-      color: rgb(244, 244, 245) !important;
-    }
-
-    .driver-store-agent-results {
-      width: 0 !important;
-      min-width: 0 !important;
-      flex: 1 1 0% !important;
-      padding-left: 1rem !important;
-    }
+  html.dbx-legacy-webview .driver-store-agent-results {
+    width: 0 !important;
+    min-width: 0 !important;
+    flex: 1 1 0% !important;
+    padding-left: 1rem !important;
   }
 }
 

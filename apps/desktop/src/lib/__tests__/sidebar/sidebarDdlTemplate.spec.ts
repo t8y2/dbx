@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildSidebarDdlTemplateSql } from "@/lib/sidebar/sidebarDdlTemplate";
+import { buildSidebarDdlTemplateSql, sidebarDdlTargetsForExecutionContext } from "@/lib/sidebar/sidebarDdlTemplate";
 
 describe("sidebar DDL template", () => {
   it("preserves the single-target SQL", async () => {
@@ -24,5 +24,15 @@ describe("sidebar DDL template", () => {
       ["CREATE TABLE two (id INT)", "two"],
     ]);
     expect(sql).toBe("CREATE TABLE one (id INT) /* one */;\n\nCREATE TABLE two (id INT) /* two */;\n");
+  });
+
+  it("keeps DDL targets in the active SQL execution context", () => {
+    const active = { id: "active", connectionId: "c1", database: "db1", catalog: "catalog1" };
+    const sameContext = { id: "same", connectionId: "c1", database: "db1", catalog: "catalog1" };
+    const otherDatabase = { id: "database", connectionId: "c1", database: "db2", catalog: "catalog1" };
+    const otherConnection = { id: "connection", connectionId: "c2", database: "db1", catalog: "catalog1" };
+    const otherCatalog = { id: "catalog", connectionId: "c1", database: "db1", catalog: "catalog2" };
+
+    expect(sidebarDdlTargetsForExecutionContext(active, [active, otherDatabase, sameContext, otherConnection, otherCatalog])).toEqual([active, sameContext]);
   });
 });

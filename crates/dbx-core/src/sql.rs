@@ -674,6 +674,9 @@ fn split_statement_range_at_blank_lines(
     if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&statement.text) {
         return vec![statement.clone()];
     }
+    if starts_with_tsql_if_block(&statement.text) {
+        return vec![statement.clone()];
+    }
 
     let mut ranges = Vec::new();
     let mut scanner = SqlScanner::with_profile(options.profile);
@@ -2046,6 +2049,14 @@ fn oracle_plsql_block_is_complete(sql: &str) -> bool {
 
 fn starts_with_hana_do_block(sql: &str) -> bool {
     HanaDoBlock::parse(sql).starts_block()
+}
+
+fn starts_with_tsql_if_block(sql: &str) -> bool {
+    let tokens = first_sql_tokens(sql, 4);
+    if tokens.first().is_some_and(|t| t.eq_ignore_ascii_case("IF")) && sql.to_uppercase().contains("BEGIN") {
+        return true;
+    }
+    false
 }
 
 fn hana_do_block_is_complete(sql: &str) -> bool {
@@ -3871,6 +3882,25 @@ END";
         assert_eq!(
             super::find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SqlServer),
             "ALTER PROC dbo.usp_demo\nAS\nBEGIN\n  UPDATE dbo.users SET name = name;\nEND"
+        );
+    }
+
+    #[test]
+    fn sqlserver_keeps_tsql_if_begin_end_block_together() {
+        let sql = "\
+IF OBJECT_ID ('CATEGORIA') IS NOT NULL
+BEGIN
+DROP TABLE CATEGORIA
+END
+CREATE TABLE CATEGORIA
+(
+  COD_CATE CHAR(3) NOT NULL PRIMARY KEY,
+  NOMBRE VARCHAR(25) NOT NULL
+)";
+        let cursor = sql[..sql.find("BEGIN").unwrap()].encode_utf16().count();
+        assert_eq!(
+            super::find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SqlServer),
+            sql
         );
     }
 

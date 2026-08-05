@@ -112,18 +112,30 @@ pub fn is_vector_db(db_type: DatabaseType) -> bool {
 }
 
 /// `get_current_time` tool definition — DB-independent utility that returns
-/// the current UTC and local time with timezone information.
+/// the current UTC time plus a caller-provided local offset.
 fn get_current_time_tool() -> ToolDefinition {
     ToolDefinition {
         name: "get_current_time",
         description: "Get the current date and time with timezone information. \
-                      Returns UTC and local timestamps. Use this to resolve \
+                      Pass the client UTC offset from the system prompt; when \
+                      omitted, local time safely falls back to UTC. Use this to resolve \
                       relative time expressions like \"last 7 days\", \
                       \"yesterday\", \"this month\" into concrete dates \
                       for constructing SQL queries.",
         parameters: json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "utc_offset_minutes": {
+                    "type": "integer",
+                    "minimum": -1439,
+                    "maximum": 1439,
+                    "description": "Client UTC offset in minutes from the system prompt"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Client IANA timezone name from the system prompt"
+                }
+            },
             "required": []
         }),
         read_only: true,
@@ -132,16 +144,30 @@ fn get_current_time_tool() -> ToolDefinition {
 }
 
 /// Execute `get_current_time` — returns a JSON payload with utc, local,
-/// utc_offset_minutes, and readable fields.
-fn execute_get_current_time() -> Result<String, String> {
+/// utc_offset_minutes, timezone, and readable fields.
+fn execute_get_current_time(tool_call: &ToolCall) -> Result<String, String> {
     let utc = chrono::Utc::now();
-    let local = chrono::Local::now();
-    let offset = local.offset().local_minus_utc() / 60; // minutes
-    let readable = local.format("%Y-%m-%d %H:%M:%S (UTC%:z)").to_string();
+    let offset_minutes = tool_call.arguments.get("utc_offset_minutes").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let offset_minutes = i32::try_from(offset_minutes).map_err(|_| "utc_offset_minutes is out of range".to_string())?;
+    let offset_seconds =
+        offset_minutes.checked_mul(60).ok_or_else(|| "utc_offset_minutes is out of range".to_string())?;
+    let offset = chrono::FixedOffset::east_opt(offset_seconds)
+        .ok_or_else(|| "utc_offset_minutes must be between -1439 and 1439".to_string())?;
+    let local = utc.with_timezone(&offset);
+    let timezone = tool_call
+        .arguments
+        .get("timezone")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| if offset_minutes == 0 { "UTC".to_string() } else { format!("UTC{}", local.format("%:z")) });
+    let readable = format!("{} ({timezone}, UTC{})", local.format("%Y-%m-%d %H:%M:%S"), local.format("%:z"));
     Ok(serde_json::json!({
         "utc": utc.to_rfc3339(),
         "local": local.to_rfc3339(),
-        "utc_offset_minutes": offset,
+        "utc_offset_minutes": offset_minutes,
+        "timezone": timezone,
         "readable": readable,
     })
     .to_string())
@@ -394,7 +420,7 @@ pub async fn execute_tool(
                 }
             }
         }
-        "get_current_time" => execute_get_current_time(),
+        "get_current_time" => execute_get_current_time(tool_call),
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -1550,7 +1576,13 @@ for line in sys.stdin:
     #[test]
     fn execute_get_current_time_returns_valid_timestamps() {
         let before_secs = chrono::Utc::now().timestamp();
-        let result = execute_get_current_time().expect("get_current_time should succeed");
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": 480, "timezone": "Asia/Shanghai" }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
         let after_secs = chrono::Utc::now().timestamp();
 
         let parsed: serde_json::Value =
@@ -1591,10 +1623,43 @@ for line in sys.stdin:
             "utc_offset_minutes {offset_minutes} does not match local offset {}",
             local_offset_secs / 60
         );
+        assert_eq!(offset_minutes, 480);
+        assert_eq!(parsed["timezone"], "Asia/Shanghai");
 
         // readable should be a non-empty string.
         let readable = parsed["readable"].as_str().expect("readable field should be a string");
         assert!(!readable.is_empty(), "readable should not be empty");
+    }
+
+    #[test]
+    fn execute_get_current_time_defaults_to_utc_without_client_context() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({}),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["utc_offset_minutes"], 0);
+        assert_eq!(parsed["timezone"], "UTC");
+        assert!(parsed["local"].as_str().unwrap().ends_with("+00:00"));
+    }
+
+    #[test]
+    fn execute_get_current_time_labels_offset_when_timezone_name_is_missing() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": -300 }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["timezone"], "UTC-05:00");
+        assert!(parsed["local"].as_str().unwrap().ends_with("-05:00"));
     }
 
     #[test]

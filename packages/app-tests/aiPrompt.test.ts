@@ -73,6 +73,9 @@ test("ask mode prompt forbids auto-execution assumptions", () => {
   assert.match(prompt, /Ask 模式/);
   assert.match(prompt, /只生成 SQL 和说明/);
   assert.match(prompt, /不要暗示已经执行或即将自动执行/);
+  assert.match(prompt, /get_current_time/);
+  assert.match(prompt, /utc_offset_minutes/);
+  assert.match(prompt, /timezone/);
 });
 
 test("prompt gives explicit guidance for truncated schema context", () => {

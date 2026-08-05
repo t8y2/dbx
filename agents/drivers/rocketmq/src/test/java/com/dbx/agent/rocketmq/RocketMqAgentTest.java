@@ -274,6 +274,8 @@ class RocketMqAgentTest {
         SubscriptionGroupConfig normal = new SubscriptionGroupConfig();
         normal.setConsumeMessageOrderly(false);
         assertEquals("NORMAL", RocketMqAgent.classifyConsumerGroupType("MyGroup", normal));
+        // Missing dump must not look like NORMAL (FIFO groups would be mislabeled).
+        assertEquals("UNKNOWN", RocketMqAgent.classifyConsumerGroupType("MissingConfigGroup", null));
     }
 
     @Test
@@ -310,13 +312,14 @@ class RocketMqAgentTest {
 
         assertTrue(maxActive.get() > 1);
         for (Map<String, Object> row : rows) {
+            // Successful empty connection probe → genuine offline 0.
             assertEquals(0, row.get("memberCount"));
             assertEquals(List.of(), row.get("topics"));
         }
     }
 
     @Test
-    void enrichConsumerGroupRowsReturnsDefaultsWhenBudgetExpires() {
+    void enrichConsumerGroupRowsOmitsMemberCountWhenBudgetExpires() {
         List<Map<String, Object>> rows = IntStream.range(0, 4)
             .mapToObj(index -> {
                 Map<String, Object> row = new LinkedHashMap<>();
@@ -335,7 +338,8 @@ class RocketMqAgentTest {
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
         assertTrue(elapsedMs < 1_000, "enrichment exceeded its response budget: " + elapsedMs + "ms");
         for (Map<String, Object> row : rows) {
-            assertEquals(0, row.get("memberCount"));
+            // Cancelled probes must not look offline (0); UI shows '-' when memberCount is absent.
+            assertFalse(row.containsKey("memberCount"));
             assertEquals(List.of(), row.get("topics"));
         }
     }

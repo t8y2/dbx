@@ -5,13 +5,15 @@ describe("rocketmqConsumerGroupTypes", () => {
   it("resolves group type from consumerGroupType or subType", () => {
     expect(resolveRocketMqConsumerGroupType({ consumerGroupType: "FIFO", subType: "NORMAL" })).toBe("FIFO");
     expect(resolveRocketMqConsumerGroupType({ subType: "SYSTEM" })).toBe("SYSTEM");
+    expect(resolveRocketMqConsumerGroupType({ consumerGroupType: "UNKNOWN" })).toBe("UNKNOWN");
     expect(resolveRocketMqConsumerGroupType({ subType: "CONSUME_PASSIVELY ? CLUSTERING" })).toBe("NORMAL");
   });
 
   it("filters by dashboard group types", () => {
-    const filters = { NORMAL: true, FIFO: true, SYSTEM: false };
+    const filters = { NORMAL: true, FIFO: true, SYSTEM: false, UNKNOWN: true };
     expect(matchesRocketMqConsumerGroupTypeFilters({ consumerGroupType: "NORMAL", subType: "NORMAL" }, filters)).toBe(true);
     expect(matchesRocketMqConsumerGroupTypeFilters({ consumerGroupType: "SYSTEM", subType: "SYSTEM" }, filters)).toBe(false);
+    expect(matchesRocketMqConsumerGroupTypeFilters({ consumerGroupType: "UNKNOWN", subType: "UNKNOWN" }, filters)).toBe(true);
   });
 
   it("resolves message model", () => {

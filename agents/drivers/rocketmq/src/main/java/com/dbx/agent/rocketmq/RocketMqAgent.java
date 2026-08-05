@@ -100,12 +100,17 @@ public final class RocketMqAgent {
 
     /**
      * Align with rocketmq-dashboard ConsumerServiceImpl group type: SYSTEM / FIFO / NORMAL.
+     * When the subscription dump is missing for a discovered group, return UNKNOWN instead of
+     * silently labeling FIFO groups as NORMAL.
      */
     static String classifyConsumerGroupType(String groupId, SubscriptionGroupConfig config) {
         if (isSystemConsumerGroup(groupId)) {
             return "SYSTEM";
         }
-        if (config != null && config.isConsumeMessageOrderly()) {
+        if (config == null) {
+            return "UNKNOWN";
+        }
+        if (config.isConsumeMessageOrderly()) {
             return "FIFO";
         }
         return "NORMAL";
@@ -1507,7 +1512,8 @@ public final class RocketMqAgent {
             row.put("groupId", groupId);
             row.put("state", "UNKNOWN");
             row.put("simpleGroup", false);
-            row.put("groupType", "NORMAL");
+            // Placeholder until config classify runs; missing dump → UNKNOWN, not NORMAL.
+            row.put("groupType", "UNKNOWN");
             row.put("messageModel", "CLUSTERING");
             rows.add(row);
         }
@@ -1658,7 +1664,7 @@ public final class RocketMqAgent {
                     // Keep the base group row when enrichment fails.
                 }
             }
-            row.putIfAbsent("memberCount", 0);
+            // Omit memberCount on cancel/timeout/failure so UI shows '-' instead of fake offline 0.
             row.putIfAbsent("topics", Collections.emptyList());
         }
     }
@@ -1684,7 +1690,7 @@ public final class RocketMqAgent {
             }
             enrichment.put("topics", topics);
         } catch (Exception ignored) {
-            enrichment.put("memberCount", 0);
+            // Leave memberCount unset — probe did not finish; list UI must not show 0.
             enrichment.put("topics", Collections.emptyList());
         }
         return enrichment;
@@ -1731,8 +1737,16 @@ public final class RocketMqAgent {
 
     private static Object deleteConsumerGroup(JsonObject params) throws Exception {
         DefaultMQAdminExt admin = requireAdmin();
+        JsonObject conn = connectionObject(params);
         String groupId = requireString(params, "groupId");
-        admin.deleteSubscriptionGroup(brokerAddr(params, admin), groupId);
+        // Dashboard deletes per broker; wipe every reachable master so the group does not reappear.
+        mutateSubscriptionGroupOnMasters(
+            admin,
+            conn,
+            groupId,
+            "delete",
+            brokerAddr -> admin.deleteSubscriptionGroup(brokerAddr, groupId)
+        );
         return Collections.singletonMap("ok", true);
     }
 
@@ -1757,14 +1771,48 @@ public final class RocketMqAgent {
             config.setGroupName(groupId);
         }
         applySubscriptionGroupConfigUpdates(config, params);
+        SubscriptionGroupConfig toWrite = config;
+        mutateSubscriptionGroupOnMasters(
+            admin,
+            conn,
+            groupId,
+            "update",
+            brokerAddr -> admin.createAndUpdateSubscriptionGroupConfig(brokerAddr, toWrite)
+        );
+        return Collections.singletonMap("ok", true);
+    }
+
+    @FunctionalInterface
+    interface BrokerSubscriptionMutation {
+        void apply(String brokerAddr) throws Exception;
+    }
+
+    /**
+     * Apply a subscription-group mutation on every remapped master. Require at least one success
+     * so Docker remap / unreachable siblings cannot report ok while nothing changed.
+     */
+    static void mutateSubscriptionGroupOnMasters(
+        DefaultMQAdminExt admin,
+        JsonObject conn,
+        String groupId,
+        String action,
+        BrokerSubscriptionMutation mutation
+    ) throws Exception {
+        int success = 0;
+        Exception lastError = null;
         for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
             try {
-                admin.createAndUpdateSubscriptionGroupConfig(brokerAddr, config);
-            } catch (Exception ignored) {
-                // Try next broker when Docker/internal broker addresses are unreachable.
+                mutation.apply(brokerAddr);
+                success++;
+            } catch (Exception e) {
+                lastError = e;
             }
         }
-        return Collections.singletonMap("ok", true);
+        if (success <= 0) {
+            throw new MQClientException(
+                "Failed to " + action + " consumer group " + groupId + " on all masters",
+                lastError);
+        }
     }
 
     private static Map<String, Object> subscriptionGroupConfigToMap(SubscriptionGroupConfig config) {

@@ -115,7 +115,7 @@ function consumerGroupTypeLabel(sub: SubscriptionInfo): string {
 function consumerGroupTypeBadgeClass(sub: SubscriptionInfo): string {
   const type = resolveRocketMqConsumerGroupType(sub);
   if (type === "FIFO") return "badge badge-info";
-  if (type === "SYSTEM") return "badge badge-muted";
+  if (type === "SYSTEM" || type === "UNKNOWN") return "badge badge-muted";
   return "badge";
 }
 

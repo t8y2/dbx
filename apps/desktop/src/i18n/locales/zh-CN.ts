@@ -6366,6 +6366,7 @@ export default withEnglishFallback({
       normal: "普通",
       fifo: "顺序",
       system: "系统",
+      unknown: "未知",
     },
     rocketmqGroupMode: {
       clustering: "集群",

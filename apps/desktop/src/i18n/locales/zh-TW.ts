@@ -6267,6 +6267,7 @@ export default withEnglishFallback({
       normal: "普通",
       fifo: "順序",
       system: "系統",
+      unknown: "未知",
     },
     rocketmqGroupMode: {
       clustering: "集群",

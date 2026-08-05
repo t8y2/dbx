@@ -6327,6 +6327,7 @@ export default withEnglishFallback({
       normal: "通常",
       fifo: "FIFO",
       system: "システム",
+      unknown: "不明",
     },
     rocketmqGroupMode: {
       clustering: "クラスタリング",

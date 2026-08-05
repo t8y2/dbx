@@ -5894,6 +5894,7 @@ export default withEnglishFallback({
       normal: "일반",
       fifo: "순서 보장",
       system: "시스템",
+      unknown: "알 수 없음",
     },
     rocketmqGroupMode: {
       clustering: "클러스터",

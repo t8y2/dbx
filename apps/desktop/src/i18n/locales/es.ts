@@ -6272,6 +6272,7 @@ export default withEnglishFallback({
       normal: "Normal",
       fifo: "FIFO",
       system: "Sistema",
+      unknown: "Desconocido",
     },
     rocketmqGroupMode: {
       clustering: "Cluster",

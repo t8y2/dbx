@@ -6367,6 +6367,7 @@ export default {
       normal: "Normal",
       fifo: "Ordered",
       system: "System",
+      unknown: "Unknown",
     },
     rocketmqGroupMode: {
       clustering: "Cluster",

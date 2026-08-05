@@ -1376,6 +1376,7 @@ async function newDeleteTemplate() {
 }
 
 async function generateDdlTemplate() {
+  if (currentDatabaseType() === "victoriametrics") return;
   const targets = selectedDdlTargets();
   if (!targets.length) return;
   const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
@@ -1411,6 +1412,7 @@ function selectedDdlTargets() {
 }
 
 async function openDdl() {
+  if (currentDatabaseType() === "victoriametrics") return;
   const targets = selectedDdlTargets();
   if (!targets.length) return;
   if (targets.length > 1) {
@@ -1468,6 +1470,10 @@ async function copySelectedNames() {
 function updateTreeClipboardForNodes(nodes: TreeNode[]) {
   const tableNodes = nodes.filter((node): node is DuplicateStructureSource => node.type === "table" && !!node.connectionId && !!node.database && typeof node.label === "string");
   if (tableNodes.length === 0) {
+    connectionStore.treeClipboard = null;
+    return;
+  }
+  if (tableNodes.some((node) => databaseTypeForNode(node) === "victoriametrics")) {
     connectionStore.treeClipboard = null;
     return;
   }
@@ -3068,6 +3074,7 @@ async function confirmDropSchema() {
 
 function duplicateStructure(source: TreeNode = activeNode.value) {
   if (!isDuplicateStructureSource(source)) return;
+  if (databaseTypeForNode(source) === "victoriametrics") return;
   duplicateStructureSource.value = source;
   duplicateTableName.value = `${source.label}_copy`;
   showDuplicateDialog.value = true;
@@ -3081,6 +3088,7 @@ async function confirmDuplicateStructure() {
   const node = duplicateStructureSource.value || (isDuplicateStructureSource(activeNode.value) ? activeNode.value : null);
   const newName = duplicateTableName.value.trim();
   if (!newName || !node) return;
+  if (databaseTypeForNode(node) === "victoriametrics") return;
   showDuplicateDialog.value = false;
   try {
     await connectionStore.ensureConnected(node.connectionId);

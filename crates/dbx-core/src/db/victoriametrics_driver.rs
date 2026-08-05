@@ -62,7 +62,7 @@ struct TsdbStatus {
 #[derive(Debug, Deserialize)]
 struct TsdbMetricStatistic {
     name: String,
-    value: i64,
+    value: Value,
 }
 
 impl VictoriaMetricsClient {
@@ -247,7 +247,7 @@ pub async fn list_object_statistics(client: &VictoriaMetricsClient) -> Result<Ve
         .map(|item| ObjectStatistics {
             name: item.name,
             schema: None,
-            estimated_rows: Some(item.value),
+            estimated_rows: item.value.as_i64().or_else(|| item.value.as_str().and_then(|value| value.parse().ok())),
             // VictoriaMetrics exposes series counts here, but no per-metric storage size.
             total_bytes: None,
         })
@@ -464,11 +464,11 @@ mod tests {
     #[test]
     fn parses_metric_statistics() {
         let status: TsdbStatus = serde_json::from_value(json!({
-            "seriesCountByMetricName": [{"name": "flag", "value": 276}]
+            "seriesCountByMetricName": [{"name": "flag", "value": "276"}]
         }))
         .unwrap();
         assert_eq!(status.series_count_by_metric_name[0].name, "flag");
-        assert_eq!(status.series_count_by_metric_name[0].value, 276);
+        assert_eq!(status.series_count_by_metric_name[0].value.as_str(), Some("276"));
     }
 
     #[test]

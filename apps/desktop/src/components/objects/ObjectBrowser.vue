@@ -1882,6 +1882,22 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", co
 
   let task: ExportTask | null = null;
   try {
+    if (isVictoriaMetrics.value) {
+      const result = await fetchTableDataForExport({
+        databaseType: effectiveDatabaseType.value,
+        schema,
+        tableName: row.name,
+        executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
+      });
+      if (format === "csv") {
+        await api.exportQueryResultCsv(filePath, result.columns, result.rows);
+      } else {
+        const comments = useCommentHeader ? result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment ?? null) : undefined;
+        await api.exportQueryResultXlsx(filePath, row.name, result.columns, result.column_types ?? result.columns.map(() => ""), comments, result.rows);
+      }
+      toast(t("grid.exported"));
+      return;
+    }
     let columns: string[] | undefined;
     let columnComments: (string | null)[] | undefined;
 

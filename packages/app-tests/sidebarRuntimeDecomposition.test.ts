@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
 const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
+const visibleFilterControl = readFileSync("apps/desktop/src/components/sidebar/SidebarVisibleFilterControl.vue", "utf8");
 const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
 const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
 const dataOpenRuntime = readFileSync("apps/desktop/src/composables/useSidebarDataOpenRuntime.ts", "utf8");
@@ -31,6 +32,15 @@ test("one tree-level runtime serves every row renderer", () => {
   assert.match(dataOpenRuntime, /findExistingDataTabCandidate/);
   assert.match(dataOpenRuntime, /loadTableMetadata/);
   assert.match(dataOpenRuntime, /canApplyDataTabMetadata/);
+});
+
+test("connection rows expose the primary visible-filter control through the shared runtime", () => {
+  assert.match(treeItem, /<SidebarVisibleFilterControl v-if="node\.type === 'connection'" :node="node" \/>/);
+  assert.match(visibleFilterControl, /data-sidebar-visible-filter/);
+  assert.match(visibleFilterControl, /control\.selected/);
+  assert.match(visibleFilterControl, /treeRuntime\.openPrimaryVisibleFilter\(props\.node\)/);
+  assert.match(runtimeHost, /function openPrimaryVisibleFilter\(node: TreeNode\)/);
+  assert.match(runtimeHost, /openVisibleDatabasesDialog\(\)/);
 });
 
 test("the persistent runtime releases detached tree nodes", () => {

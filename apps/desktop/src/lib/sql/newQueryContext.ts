@@ -1,6 +1,6 @@
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
-import { qualifiedTableName } from "@/lib/table/tableSelectSql";
+import { metricRangeQuery, qualifiedTableName } from "@/lib/table/tableSelectSql";
 import type { ConnectionConfig, DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
 export interface NewQueryTarget {
@@ -145,6 +145,7 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  * by the table-data view.
  */
 export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>): string {
+  if (databaseType === "victoriametrics") return metricRangeQuery(table.tableName);
   const ref = qualifiedTableName({ databaseType, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName });
   return `SELECT * FROM ${ref}`;
 }

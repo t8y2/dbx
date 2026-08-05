@@ -9,6 +9,7 @@ import {
   createColumnDrafts,
   createIndexDrafts,
   dataTypeLengthInputValue,
+  filterStructureIndexColumnOptions,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
@@ -402,6 +403,12 @@ test("creates editable index drafts and splits pasted column lists", () => {
     ],
   );
   assert.equal(toColumnNames(["id", "name"]), "id, name");
+});
+
+test("keeps unavailable selected index fields removable", () => {
+  assert.deepEqual(filterStructureIndexColumnOptions(["id", "customer_id", "name"], ["platform_code"]), ["platform_code", "id", "customer_id", "name"]);
+  assert.deepEqual(filterStructureIndexColumnOptions(["id", "customer_id", "name"], ["customer_id", "platform_code"]), ["platform_code", "id", "customer_id", "name"]);
+  assert.deepEqual(filterStructureIndexColumnOptions(["id", "customer_id", "name"], ["platform_code"], "PLAT"), ["platform_code"]);
 });
 
 test("normalizes Postgres lowercase index types when creating structure drafts", () => {

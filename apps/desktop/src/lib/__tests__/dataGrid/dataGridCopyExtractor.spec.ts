@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridExtractorOptions, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("data-grid extractor options", () => {
+  it("resolves smart copy to raw for one cell and TSV otherwise", () => {
+    expect(normalizeDataGridCopyPreference(undefined)).toBe("smart");
+    expect(normalizeDataGridCopyPreference("smart")).toBe("smart");
+    expect(resolveDataGridCopyPreference("smart", 1)).toBe("raw");
+    expect(resolveDataGridCopyPreference("smart", 2)).toBe("tsv");
+    expect(resolveDataGridCopyPreference("csv", 1)).toBe("csv");
+  });
+
   it("normalizes persisted values without sharing the default object", () => {
     const normalized = normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS);
 

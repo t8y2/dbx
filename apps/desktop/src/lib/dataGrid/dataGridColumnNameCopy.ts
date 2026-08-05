@@ -25,7 +25,7 @@ export function isColumnNameCopySeparator(value: unknown): value is ColumnNameCo
 }
 
 // SQL 执行能力是产品能力，不代表数据库支持 SQL 标识符引用。
-const NON_SQL_DATABASE_TYPES = new Set<DatabaseType>(["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"]);
+const NON_SQL_DATABASE_TYPES = new Set<DatabaseType>(["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos", "victoriametrics"]);
 // quoteTableIdentifier 对 jdbc/iotdb 原样返回（无引用字符可用）。
 const UNQUOTABLE_DATABASE_TYPES = new Set<DatabaseType>(["jdbc", "iotdb"]);
 

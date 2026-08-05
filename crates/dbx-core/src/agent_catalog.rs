@@ -25,8 +25,8 @@ const ORACLE_PROFILES: &[AgentDriverProfile] = &[
 ];
 
 const GBASE_PROFILES: &[AgentDriverProfile] = &[
-    AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true },
-    AgentDriverProfile { profile: "gbase8a", key: "gbase8a", label: "GBase 8a", store_visible: true },
+    AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "南大通用 GBase 8s", store_visible: true },
+    AgentDriverProfile { profile: "gbase8a", key: "gbase8a", label: "南大通用 GBase 8a", store_visible: true },
 ];
 
 const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
@@ -86,14 +86,14 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Vastbase,
         key: "vastbase",
-        label: "Vastbase",
+        label: "海量 Vastbase",
         store_visible: true,
         profiles: &[],
     },
     AgentCatalogEntry {
         db_type: DatabaseType::Goldendb,
         key: "goldendb",
-        label: "GoldenDB",
+        label: "金篆 GoldenDB",
         store_visible: true,
         profiles: &[],
     },
@@ -156,7 +156,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Gbase,
         key: "gbase8a",
-        label: "GBase 8a",
+        label: "南大通用 GBase 8a",
         store_visible: true,
         profiles: GBASE_PROFILES,
     },
@@ -249,7 +249,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Sundb,
         key: "sundb",
-        label: "SunDB",
+        label: "科蓝 SUNDB",
         store_visible: true,
         profiles: &[],
     },

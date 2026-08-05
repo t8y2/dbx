@@ -96,7 +96,21 @@ const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 const supportsExplain = computed(() => {
   const dbType = props.activeConnection?.db_type;
-  return dbType !== "redis" && dbType !== "mongodb" && dbType !== "elasticsearch" && dbType !== "easysearch" && dbType !== "qdrant" && dbType !== "milvus" && dbType !== "weaviate" && dbType !== "chromadb" && dbType !== "etcd" && dbType !== "zookeeper" && dbType !== "mq" && dbType !== "nacos";
+  return (
+    dbType !== "redis" &&
+    dbType !== "mongodb" &&
+    dbType !== "elasticsearch" &&
+    dbType !== "easysearch" &&
+    dbType !== "qdrant" &&
+    dbType !== "milvus" &&
+    dbType !== "weaviate" &&
+    dbType !== "chromadb" &&
+    dbType !== "etcd" &&
+    dbType !== "zookeeper" &&
+    dbType !== "mq" &&
+    dbType !== "nacos" &&
+    dbType !== "victoriametrics"
+  );
 });
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
 const supportsExPaste = computed(() => supportsSqlInListPaste(props.activeConnection?.db_type));

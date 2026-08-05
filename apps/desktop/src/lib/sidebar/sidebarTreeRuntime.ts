@@ -18,6 +18,7 @@ export interface SidebarTreeRuntimeHost {
   handleRowClick(node: TreeNode, clickDetail: number): void;
   handleRowDoubleClick(node: TreeNode, event: MouseEvent): void;
   handleRowKeydown(node: TreeNode, event: KeyboardEvent): void;
+  openPrimaryVisibleFilter(node: TreeNode): void;
   openDataInNewTab(node: TreeNode): void;
   requestPaste(node: TreeNode): boolean;
   toggleNode(node: TreeNode): void;
@@ -38,6 +39,7 @@ export interface SidebarTreeRuntime {
   handleRowClick(node: TreeNode, clickDetail: number): void;
   handleRowDoubleClick(node: TreeNode, event: MouseEvent): void;
   handleRowKeydown(node: TreeNode, event: KeyboardEvent): void;
+  openPrimaryVisibleFilter(node: TreeNode): void;
   openDataInNewTab(node: TreeNode): void;
   requestPaste(node: TreeNode): boolean;
   toggleNode(node: TreeNode): void;
@@ -96,6 +98,9 @@ export function createSidebarTreeRuntime(): SidebarTreeRuntime {
     },
     handleRowKeydown(node, event) {
       currentHost()?.handleRowKeydown(node, event);
+    },
+    openPrimaryVisibleFilter(node) {
+      currentHost()?.openPrimaryVisibleFilter(node);
     },
     openDataInNewTab(node) {
       currentHost()?.openDataInNewTab(node);

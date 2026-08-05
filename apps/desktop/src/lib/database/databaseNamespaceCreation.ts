@@ -81,6 +81,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   zookeeper: { deferred: "key-value namespaces are not databases" },
   iris: { database: "schema" },
   influxdb: { connection: "database" },
+  victoriametrics: { deferred: "metric namespaces are managed by VictoriaMetrics deployment configuration" },
   jdbc: { deferred: "generic JDBC does not expose a reliable dialect-specific create target" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace creation already uses the Nacos admin flow" },

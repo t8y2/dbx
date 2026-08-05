@@ -125,7 +125,8 @@ import {
   type TableChildObjectType,
 } from "@/lib/database/dbAdminSql";
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
-import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -890,7 +891,7 @@ function normalizedTreeClipboardTableEntries(): TableClipboardTableContext[] {
 }
 
 function canPasteTreeClipboardToCurrentNode(): boolean {
-  return tableClipboardMatchesTarget(normalizedTreeClipboardTableEntries(), pasteTableTargetContext());
+  return currentDatabaseType() !== "victoriametrics" && tableClipboardMatchesTarget(normalizedTreeClipboardTableEntries(), pasteTableTargetContext());
 }
 
 function canTransferTreeClipboardToCurrentNode(): boolean {
@@ -923,6 +924,7 @@ function openTransferFromTreeClipboard(): boolean {
 }
 
 function requestPasteTreeClipboard(): boolean {
+  if (currentDatabaseType() === "victoriametrics") return false;
   claimTreeItemDialogOwnership();
   ensureDangerDialogRouting();
   routeTreeItemDialogController();
@@ -1375,6 +1377,7 @@ async function newDeleteTemplate() {
 }
 
 async function generateDdlTemplate() {
+  if (currentDatabaseType() === "victoriametrics") return;
   const targets = selectedDdlTargets();
   if (!targets.length) return;
   const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
@@ -1410,6 +1413,7 @@ function selectedDdlTargets() {
 }
 
 async function openDdl() {
+  if (currentDatabaseType() === "victoriametrics") return;
   const targets = selectedDdlTargets();
   if (!targets.length) return;
   if (targets.length > 1) {
@@ -1467,6 +1471,10 @@ async function copySelectedNames() {
 function updateTreeClipboardForNodes(nodes: TreeNode[]) {
   const tableNodes = nodes.filter((node): node is DuplicateStructureSource => node.type === "table" && !!node.connectionId && !!node.database && typeof node.label === "string");
   if (tableNodes.length === 0) {
+    connectionStore.treeClipboard = null;
+    return;
+  }
+  if (tableNodes.some((node) => databaseTypeForNode(node) === "victoriametrics")) {
     connectionStore.treeClipboard = null;
     return;
   }
@@ -1626,14 +1634,29 @@ function openObjectSourceDialog(initialEditing: boolean) {
       .then(async () => {
         connectionStore.activeConnectionId = connectionId;
         const schema = node.schema || database;
-        const result = await api.getObjectSource(connectionId, database, schema, node.objectName || node.label, objectType as any, node.signature);
-        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, result.source, node.catalog, { forceNew: true });
-        const sourceIsEditable = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(objectType);
+        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
+        if (!databaseType) throw new Error("Connection type is unavailable.");
+        const objectName = node.objectName || node.label;
+        const {
+          raw,
+          editableSource,
+          objectType: resolvedType,
+        } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
+          connectionId,
+          database,
+          schema,
+          name: objectName,
+          objectType: objectType as any,
+          databaseType,
+          signature: node.signature,
+        });
+        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true });
+        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
         if (sourceIsEditable) {
           queryStore.setObjectSource(tabId, {
             schema,
-            name: node.objectName || node.label,
-            objectType,
+            name: objectName,
+            objectType: resolvedType,
             signature: node.signature,
           });
         }
@@ -3067,6 +3090,7 @@ async function confirmDropSchema() {
 
 function duplicateStructure(source: TreeNode = activeNode.value) {
   if (!isDuplicateStructureSource(source)) return;
+  if (databaseTypeForNode(source) === "victoriametrics") return;
   duplicateStructureSource.value = source;
   duplicateTableName.value = `${source.label}_copy`;
   showDuplicateDialog.value = true;
@@ -3080,6 +3104,7 @@ async function confirmDuplicateStructure() {
   const node = duplicateStructureSource.value || (isDuplicateStructureSource(activeNode.value) ? activeNode.value : null);
   const newName = duplicateTableName.value.trim();
   if (!newName || !node) return;
+  if (databaseTypeForNode(node) === "victoriametrics") return;
   showDuplicateDialog.value = false;
   try {
     await connectionStore.ensureConnected(node.connectionId);
@@ -3824,16 +3849,17 @@ const shortcutRefresh = "F5";
 
 const shortcutDelete = "Delete";
 
-function exportDataSubmenu(): ContextMenuItem {
+function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
+  const children: ContextMenuItem[] = [
+    { label: "CSV", action: () => exportData("csv") },
+    { label: "JSON", action: () => exportData("json") },
+  ];
+  if (includeSqlInsert) children.push({ label: "SQL INSERT", action: () => exportData("sql") });
+  children.push({ label: "XLSX", action: () => exportDataXlsx() });
   return {
     label: t("contextMenu.exportData"),
     icon: Upload,
-    children: [
-      { label: "CSV", action: () => exportData("csv") },
-      { label: "JSON", action: () => exportData("json") },
-      { label: "SQL INSERT", action: () => exportData("sql") },
-      { label: "XLSX", action: () => exportDataXlsx() },
-    ],
+    children,
   };
 }
 
@@ -4333,6 +4359,17 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items, deleteMenuLabel, deleteMenuAction, truncateMenuLabel, truncateMenuAction, emptyMenuLabel, emptyMenuAction } = context;
   // 6. Table / View / Materialized View
   if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
+    if (currentDatabaseType() === "victoriametrics" && node.type === "table") {
+      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+      items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus });
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: "", separator: true });
+      items.push(exportDataSubmenu(false));
+      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      return true;
+    }
     const destructiveActions: ContextMenuItem[] = [];
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
@@ -4552,6 +4589,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 }
 
 function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
+  if (currentDatabaseType() === "victoriametrics") return [];
   const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
   if (!node.connectionId || !node.database) return [copyItem];
   const state = tableClipboardMenuState(
@@ -4764,6 +4802,11 @@ function handleRowKeydown(node: TreeNode, event: KeyboardEvent) {
   onKeydown(event);
 }
 
+function openPrimaryVisibleFilter(node: TreeNode) {
+  activateRuntimeNode(node);
+  openVisibleDatabasesDialog();
+}
+
 function openDataInNewTab(node: TreeNode) {
   activateRuntimeNode(node);
   openDataInNewTabImmediately(node);
@@ -4784,6 +4827,7 @@ defineExpose({
   handleRowClick,
   handleRowDoubleClick,
   handleRowKeydown,
+  openPrimaryVisibleFilter,
   openDataInNewTab,
   requestPaste,
   toggleNode,

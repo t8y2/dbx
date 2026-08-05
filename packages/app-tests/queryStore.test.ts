@@ -441,7 +441,7 @@ test("hydrating saved SQL content preserves its restored runtime target", async 
   }
 });
 
-test("changing a saved SQL tab target does not rebind its saved default", async () => {
+test("changing a saved SQL tab target updates its saved default", async () => {
   const restoreStorage = installMemoryStorage();
   try {
     setActivePinia(createPinia());
@@ -466,9 +466,11 @@ test("changing a saved SQL tab target does not rebind its saved default", async 
     store.updateConnection(tabId, "runtime-connection", "runtime_database");
     store.updateSchema(tabId, "runtime_schema");
 
-    assert.equal(savedSqlStore.getFile(file.id)?.connectionId, "saved-connection");
-    assert.equal(savedSqlStore.getFile(file.id)?.database, "saved_database");
-    assert.equal(savedSqlStore.getFile(file.id)?.schema, "saved_schema");
+    await waitFor(() => savedSqlStore.getFile(file.id)?.schema === "runtime_schema");
+
+    assert.equal(savedSqlStore.getFile(file.id)?.connectionId, "runtime-connection");
+    assert.equal(savedSqlStore.getFile(file.id)?.database, "runtime_database");
+    assert.equal(savedSqlStore.getFile(file.id)?.schema, "runtime_schema");
   } finally {
     await nextTick();
     restoreStorage();

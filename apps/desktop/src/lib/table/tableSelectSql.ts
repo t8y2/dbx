@@ -96,11 +96,21 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
   return quoteTableIdentifier(databaseType, tableName);
 }
 
+export function metricSelector(metricName: string): string {
+  const escaped = metricName.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n");
+  return `{__name__="${escaped}"}`;
+}
+
+export function metricRangeQuery(metricName: string, lookback = "1h"): string {
+  return `${metricSelector(metricName)}[${lookback}]`;
+}
+
 export function normalizeWhereInput(whereInput?: string): string {
   const withoutSemicolon = whereInput?.trim().replace(/;+$/, "").trim() ?? "";
   return withoutSemicolon.replace(/^where\b/i, "").trim();
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {
+  if (options.databaseType === "victoriametrics") return metricRangeQuery(options.tableName);
   return api.buildTableSelectSql(options);
 }

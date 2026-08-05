@@ -90,6 +90,11 @@ test("Turso does not offer a visible database filter for its fixed main namespac
   assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "turso" })), false);
 });
 
+test("non-database connection types do not offer visible database selection", () => {
+  assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "mq" })), false);
+  assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "nacos" })), false);
+});
+
 test("OceanBase Oracle uses schema filtering for visible object selection", () => {
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "oceanbase-oracle" })), true);
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "mysql", driver_profile: "oceanbase" })), false);

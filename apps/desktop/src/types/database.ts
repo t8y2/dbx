@@ -66,6 +66,7 @@ export type DatabaseType =
   | "zookeeper"
   | "iris"
   | "influxdb"
+  | "victoriametrics"
   | "jdbc"
   | "mq"
   | "mqtt"

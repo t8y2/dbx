@@ -37,7 +37,9 @@ vi.mock("@/composables/useToast", () => ({
 vi.mock("@/composables/useDataGridExtractor", () => ({
   useDataGridExtractor: () => ({
     copyWithExtractor: vi.fn(),
+    copyWithPreference: vi.fn(),
     previewWithExtractor: vi.fn(),
+    previewWithPreference: vi.fn(),
     canCopyWithExtractor: vi.fn(),
   }),
 }));

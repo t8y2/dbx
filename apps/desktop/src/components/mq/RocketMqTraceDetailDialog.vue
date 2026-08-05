@@ -35,6 +35,7 @@ const { t } = useI18n();
 const loading = ref(false);
 const error = ref<string>();
 const messages = ref<RocketMqDisplayMessage[]>([]);
+let loadSeq = 0;
 
 const FIELD_I18N: Record<RocketMqTraceFieldKey, string> = {
   regionId: "mqTrace.fieldRegionId",
@@ -108,17 +109,20 @@ async function loadTrace() {
     return;
   }
 
+  const seq = ++loadSeq;
   loading.value = true;
   error.value = undefined;
   messages.value = [];
   try {
     const traceTopic = props.traceTopic.trim() || DEFAULT_ROCKETMQ_TRACE_TOPIC;
     const result = await mqQueryMessageTrace(props.connectionId, msgId, traceTopic);
+    if (seq !== loadSeq) return;
     messages.value = parseRocketMqMessagesFromResult(result);
   } catch (e: unknown) {
+    if (seq !== loadSeq) return;
     error.value = formatRocketMqTraceError(e, t("mqTrace.traceTopicRouteMissing"));
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
 
@@ -128,6 +132,7 @@ watch(
     if (open) {
       void loadTrace();
     } else {
+      loadSeq += 1;
       loading.value = false;
       error.value = undefined;
       messages.value = [];

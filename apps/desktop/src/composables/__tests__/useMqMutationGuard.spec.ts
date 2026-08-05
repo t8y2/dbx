@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 
 const requestConfirmation = vi.fn();
+const toast = vi.fn();
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
@@ -20,6 +21,16 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({ requestConfirmation }),
 }));
 
+vi.mock("@/composables/useToast", () => ({
+  useToast: () => ({ toast }),
+}));
+
+vi.mock("vue-i18n", () => ({
+  useI18n: () => ({
+    t: (key: string) => key,
+  }),
+}));
+
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 describe("useMqMutationGuard", () => {
@@ -27,6 +38,7 @@ describe("useMqMutationGuard", () => {
     setActivePinia(createPinia());
     requestConfirmation.mockReset();
     requestConfirmation.mockResolvedValue(true);
+    toast.mockReset();
   });
 
   it("denies missing and read-only connections without prompting", async () => {
@@ -35,6 +47,8 @@ describe("useMqMutationGuard", () => {
     await expect(missing.confirmMqWrite("send")).resolves.toBe(false);
     await expect(readonly.confirmMqWrite("send")).resolves.toBe(false);
     expect(requestConfirmation).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("mqAdmin.connectionMissing");
+    expect(toast).toHaveBeenCalledWith("mqAdmin.writeDeniedReadOnly");
   });
 
   it("allows non-production writes immediately", async () => {

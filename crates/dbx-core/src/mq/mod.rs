@@ -168,7 +168,9 @@ async fn build_adapter_with_connect_timeout(
     // RocketMQ: TCP-probe NameServer outside the connect wall so cold JVM spawn
     // retains the full connect_timeout (probe used to steal up to half of it).
     if mqc.system_kind == MqSystemKindInternal::RocketMq {
-        let probe_budget = std::time::Duration::from_secs(2).min(budget).max(std::time::Duration::from_millis(500));
+        // Probe runs outside the connect wall; scale with connect_timeout so HA NameServer
+        // lists are not starved by a hard 2s cap, but keep an upper bound for snappy UX.
+        let probe_budget = (budget / 2).clamp(std::time::Duration::from_millis(500), std::time::Duration::from_secs(5));
         crate::mq::adapters::rocketmq::probe_namesrv_before_connect(&mqc, probe_budget).await?;
     }
     match tokio::time::timeout(budget, build_adapter(mqc, agent_launch)).await {

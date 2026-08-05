@@ -1097,21 +1097,24 @@ public final class RocketMqAgent {
 
     private static SubscriptionGroupConfig findSubscriptionGroupConfig(
         DefaultMQAdminExt admin, JsonObject conn, String groupId) throws Exception {
+        // Walk every master and FIFO-merge so an earlier NORMAL stub cannot hide orderly=true.
+        long timeoutMs = Math.max(1_000L, intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS));
+        Map<String, SubscriptionGroupConfig> merged = new HashMap<>();
         for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
             try {
-                SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS);
+                SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, timeoutMs);
                 if (wrapper == null || wrapper.getSubscriptionGroupTable() == null) {
                     continue;
                 }
                 SubscriptionGroupConfig config = wrapper.getSubscriptionGroupTable().get(groupId);
                 if (config != null) {
-                    return config;
+                    mergeSubscriptionGroupConfigs(merged, Map.of(groupId, config));
                 }
             } catch (Exception ignored) {
                 // Try next broker.
             }
         }
-        return null;
+        return merged.get(groupId);
     }
 
     private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigs(
@@ -1303,7 +1306,15 @@ public final class RocketMqAgent {
         boolean mergedEmpty = merged.getOffsetTable() == null || merged.getOffsetTable().isEmpty();
         // Remap collisions append Docker-internal originals as best-effort fallbacks. Host-side
         // agents usually cannot reach them; those failures must not trip empty-merge fail-closed
-        // when a remapped master already answered. When remapped probes all fail, gate on fallbacks.
+        // when a remapped master already returned offsets. When remapped probes all fail, gate on
+        // fallbacks. Empty merge + unreachable collision siblings is still fail-closed: a single
+        // published host:port can answer for the wrong master and look like healthy zero lag.
+        if (shouldFailClosedOnCollisionEmpty(mergedEmpty, plan.fallbackCount(), fallbackSuccess)) {
+            throw new MQClientException(
+                "Failed to examine consume stats for group " + groupId
+                    + " after Docker remap address collision (unreachable sibling masters)",
+                lastError);
+        }
         int attemptedForGate;
         int successForGate;
         if (remappedSuccess > 0) {
@@ -1318,6 +1329,16 @@ public final class RocketMqAgent {
         }
         ensureConsumeStatsProbeSucceeded(attemptedForGate, successForGate, mergedEmpty, lastError, groupId);
         return merged;
+    }
+
+    /**
+     * Host-side Docker remap collisions collapse N masters onto one published address. An empty
+     * merge is only trustworthy when every collision-fallback original was also reachable (or
+     * there were no collisions).
+     */
+    static boolean shouldFailClosedOnCollisionEmpty(
+        boolean mergedEmpty, int fallbackCount, int fallbackSuccess) {
+        return mergedEmpty && fallbackCount > 0 && fallbackSuccess < fallbackCount;
     }
 
     /**

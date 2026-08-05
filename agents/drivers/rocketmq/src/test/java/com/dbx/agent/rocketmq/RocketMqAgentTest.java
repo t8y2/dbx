@@ -729,6 +729,15 @@ class RocketMqAgentTest {
     }
 
     @Test
+    void shouldFailClosedOnCollisionEmptyWhenSiblingFallbacksUnreachable() {
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 1, 0));
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 2, 1));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(false, 1, 0));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 0, 0));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 2, 2));
+    }
+
+    @Test
     void masterBrokerAddrsFromClusterInfoKeepsCollisionFallbacksSeparate() {
         org.apache.rocketmq.remoting.protocol.body.ClusterInfo clusterInfo =
             new org.apache.rocketmq.remoting.protocol.body.ClusterInfo();
@@ -748,12 +757,20 @@ class RocketMqAgentTest {
         assertEquals(1, plan.fallbackCount());
         assertTrue(plan.allAddrs().contains("127.0.0.1:10911"));
         assertTrue(plan.isCollisionFallback("172.18.0.3:10911") || plan.isCollisionFallback("172.18.0.2:10911"));
-        // Fail-closed gate for host-side agents: remapped answered empty → do not require fallbacks.
+        // Remapped answered with offsets: collision fallbacks may stay unreachable on host agents.
         try {
             RocketMqAgent.ensureConsumeStatsProbeSucceeded(
-                plan.remappedCount(), 1, true, new RuntimeException("fallback unreachable"), "GID_A");
+                plan.remappedCount(), 1, false, new RuntimeException("fallback unreachable"), "GID_A");
         } catch (MQClientException e) {
-            throw new AssertionError("remapped-only empty success should be allowed", e);
+            throw new AssertionError("non-empty remapped merge should be allowed", e);
+        }
+        // Empty merge is still allowed by the shared gate when remappedCount==success; the
+        // examineConsumeStatsOnMasters collision check rejects empty+unreachable siblings.
+        try {
+            RocketMqAgent.ensureConsumeStatsProbeSucceeded(
+                plan.remappedCount(), 1, true, null, "GID_A");
+        } catch (MQClientException e) {
+            throw new AssertionError("empty remapped-only success remains allowed at gate layer", e);
         }
     }
 

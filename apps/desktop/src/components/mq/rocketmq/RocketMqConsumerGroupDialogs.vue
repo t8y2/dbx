@@ -111,7 +111,7 @@ async function loadDetail() {
       topics.map(async (topic) => {
         const ref = buildTopicRef(topic);
         if (!ref) {
-          return { topic, partitions: [] as PartitionBacklog[], error: "Invalid topic scope" };
+          return { topic, partitions: [] as PartitionBacklog[], error: t("mqSubscriptions.invalidTopicScope") };
         }
         try {
           const stats = await mqGetBacklog(props.connectionId, ref, props.group!.name);

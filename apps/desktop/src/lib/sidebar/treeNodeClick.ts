@@ -43,7 +43,8 @@ export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activa
   return "none";
 }
 
-export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetail: number): boolean {
+export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetail: number, allowRepeatedToggle = false): boolean {
+  if (action === "toggle" && allowRepeatedToggle) return true;
   // Double-clicks emit a second click before dblclick; leave that event to the
   // double-click handler so expandable database rows do not toggle first.
   return action !== "none" && clickDetail <= 1;

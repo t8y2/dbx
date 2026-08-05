@@ -33,6 +33,19 @@ export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: r
   return indexedNodes.map((node) => liveNodesById.get(node.id) ?? node);
 }
 
+function applySearchCollapsedState(node: TreeNode, collapsedIds: ReadonlySet<string>): TreeNode {
+  const children = node.children?.map((child) => applySearchCollapsedState(child, collapsedIds));
+  const childrenChanged = children?.some((child, index) => child !== node.children?.[index]) ?? false;
+  const collapsed = collapsedIds.has(node.id);
+  if (!collapsed && !childrenChanged) return node;
+
+  return {
+    ...node,
+    children: childrenChanged ? children : node.children,
+    isExpanded: collapsed ? false : node.isExpanded,
+  };
+}
+
 function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
@@ -57,7 +70,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     // A type-matched table keeps its loaded detail groups after the text query
     // is cleared instead of being rebuilt with an empty filtered child list.
     const preservesTypeMatchedTable = !matchLabel && !!selfMatch && node.type === "table";
-    const filteredChildren = preservesSubtree ? node.children : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
+    const filteredChildren = preservesSubtree ? node.children?.map((child) => applySearchCollapsedState(child, collapsedIds)) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {
       if (!node.children || preservesTypeMatchedTable) {

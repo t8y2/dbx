@@ -73,10 +73,12 @@ test("async tree expansion does not restore a stale rendered clone state", () =>
   assert.equal(liveDatabase.isExpanded, true);
 });
 
-test("local table search preserves live expansion state", () => {
+test("tree filters retain a temporary expansion state", () => {
   assert.match(connectionTree, /return \{ \.\.\.node, children: matchingChildren \};/);
   assert.doesNotMatch(connectionTree, /children: matchingChildren,\s*isExpanded:\s*true/);
+  assert.match(connectionTree, /function onSearchToggle\(node: TreeNode\) \{\s*if \(!isTreeSearchFiltering\.value \|\| !node\.children\) return;/);
   assert.match(connectionTree, /function onNodeToggled\(node: TreeNode, wasExpanded: boolean\) \{\s*if \(isTreeSearchFiltering\.value\) return;\s*syncSidebarTreeNodeExpansion\(store\.treeNodes, node, !wasExpanded\)/);
+  assert.match(runtimeHost, /shouldRunTreeNodeRowAction\(action, clickDetail, isGroupLabel\(node\)\)/);
 });
 
 test("tree rebuilds keep a context menu only while its target row remains visible", () => {

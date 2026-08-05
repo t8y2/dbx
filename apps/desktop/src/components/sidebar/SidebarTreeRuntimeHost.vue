@@ -750,7 +750,7 @@ function runRowClickAction(clickDetail: number) {
     return;
   }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
-  if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
+  if (!shouldRunTreeNodeRowAction(action, clickDetail, isGroupLabel(node))) return;
   if (action === "open-data") {
     scheduleOpenData(node);
   } else if (action === "open-source") {

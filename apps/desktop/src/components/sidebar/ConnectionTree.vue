@@ -1178,7 +1178,7 @@ function findSchemaNode(nodes: TreeNode[], connId: string, database: string, sch
 }
 
 function onSearchToggle(node: TreeNode) {
-  if (!isSearching.value || !node.children) return;
+  if (!isTreeSearchFiltering.value || !node.children) return;
   const next = new Set(searchCollapsedIds.value);
   if (node.isExpanded) next.add(node.id);
   else next.delete(node.id);

@@ -559,7 +559,13 @@ watch(
                 </span>
               </td>
               <td v-if="!isClusterWideMode">{{ t("mqSubscriptions.msgRate", { rate: sub.msgRateOut.toFixed(2) }) }}</td>
-              <td>{{ isClusterWideMode ? (sub.onlineMembers ?? 0) : t("mqSubscriptions.consumerCount", { count: sub.consumers.length }) }}</td>
+              <td data-testid="online-members">
+                <template v-if="isClusterWideMode">
+                  <span v-if="sub.onlineMembers == null" class="text-muted">-</span>
+                  <span v-else>{{ sub.onlineMembers }}</span>
+                </template>
+                <template v-else>{{ t("mqSubscriptions.consumerCount", { count: sub.consumers.length }) }}</template>
+              </td>
               <td class="actions">
                 <template v-if="isRocketMqCluster">
                   <button @click.stop="openRocketMqDetail(sub)" class="btn-sm">{{ t("mqSubscriptions.viewDetail") }}</button>

@@ -727,4 +727,44 @@ class RocketMqAgentTest {
         RocketMqAgent.ensureConsumeStatsProbeSucceeded(
             3, 1, false, new RuntimeException("partial"), "GID_A");
     }
+
+    @Test
+    void masterBrokerAddrsFromClusterInfoKeepsCollisionFallbacksSeparate() {
+        org.apache.rocketmq.remoting.protocol.body.ClusterInfo clusterInfo =
+            new org.apache.rocketmq.remoting.protocol.body.ClusterInfo();
+        HashMap<String, org.apache.rocketmq.remoting.protocol.route.BrokerData> table = new HashMap<>();
+        table.put("broker-a", brokerData("broker-a", "172.18.0.2:10911"));
+        table.put("broker-b", brokerData("broker-b", "172.18.0.3:10911"));
+        clusterInfo.setBrokerAddrTable(table);
+
+        JsonObject conn = JsonParser.parseString("""
+            {"namesrvAddr":"127.0.0.1:9876"}
+            """).getAsJsonObject();
+        RocketMqAgent.MasterBrokerAddrPlan plan =
+            RocketMqAgent.masterBrokerAddrsFromClusterInfo(clusterInfo, conn, null);
+
+        // Both masters remap to the same published host:port; one remapped + one fallback.
+        assertEquals(1, plan.remappedCount());
+        assertEquals(1, plan.fallbackCount());
+        assertTrue(plan.allAddrs().contains("127.0.0.1:10911"));
+        assertTrue(plan.isCollisionFallback("172.18.0.3:10911") || plan.isCollisionFallback("172.18.0.2:10911"));
+        // Fail-closed gate for host-side agents: remapped answered empty → do not require fallbacks.
+        try {
+            RocketMqAgent.ensureConsumeStatsProbeSucceeded(
+                plan.remappedCount(), 1, true, new RuntimeException("fallback unreachable"), "GID_A");
+        } catch (MQClientException e) {
+            throw new AssertionError("remapped-only empty success should be allowed", e);
+        }
+    }
+
+    private static org.apache.rocketmq.remoting.protocol.route.BrokerData brokerData(
+        String name, String masterAddr) {
+        org.apache.rocketmq.remoting.protocol.route.BrokerData data =
+            new org.apache.rocketmq.remoting.protocol.route.BrokerData();
+        data.setBrokerName(name);
+        HashMap<Long, String> addrs = new HashMap<>();
+        addrs.put(0L, masterAddr);
+        data.setBrokerAddrs(addrs);
+        return data;
+    }
 }

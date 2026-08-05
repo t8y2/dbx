@@ -198,6 +198,31 @@ describe("SubscriptionsPanel message peek", () => {
   });
 });
 
+describe("SubscriptionsPanel RocketMQ online members", () => {
+  it("shows '-' when onlineMembers is unknown before enrich completes", async () => {
+    const enrich = deferred<ReturnType<typeof subscription>[]>();
+    const rows = [subscription("orders-group", "NORMAL")];
+    backend.mqListSubscriptions.mockResolvedValue(rows);
+    backend.mqEnrichSubscriptions.mockReturnValueOnce(enrich.promise);
+
+    const panel = await mountPanel({
+      topic: undefined,
+      tenant: "_rocketmq",
+      namespace: "default",
+      mqSystemKind: "rocketmq",
+      supportsPeekMessages: false,
+    });
+
+    // Fast list paints before enrich; unknown member count must not look like healthy zero.
+    const membersCell = () => panel.querySelector('[data-testid="online-members"]')?.textContent?.trim();
+    expect(membersCell()).toBe("-");
+
+    enrich.resolve([{ ...rows[0], onlineMembers: 2, topics: ["orders"] }]);
+    await flushUi();
+    expect(membersCell()).toBe("2");
+  });
+});
+
 describe("SubscriptionsPanel RocketMQ filter count", () => {
   it("updates the visible/total count when type filters or search change", async () => {
     const rows = [subscription("orders-group", "NORMAL"), subscription("payments-fifo", "FIFO"), subscription("CID_SYS_GROUP", "SYSTEM"), subscription("orders-retry", "NORMAL")];

@@ -165,6 +165,12 @@ async fn build_adapter_with_connect_timeout(
     agent_launch: Option<AgentLaunchSpec>,
 ) -> Result<Arc<dyn MessageQueueAdmin>, String> {
     let budget = mqc.connect_timeout();
+    // RocketMQ: TCP-probe NameServer outside the connect wall so cold JVM spawn
+    // retains the full connect_timeout (probe used to steal up to half of it).
+    if mqc.system_kind == MqSystemKindInternal::RocketMq {
+        let probe_budget = std::time::Duration::from_secs(2).min(budget).max(std::time::Duration::from_millis(500));
+        crate::mq::adapters::rocketmq::probe_namesrv_before_connect(&mqc, probe_budget).await?;
+    }
     match tokio::time::timeout(budget, build_adapter(mqc, agent_launch)).await {
         Ok(result) => result,
         Err(_) => Err(format!("Message queue connect timed out after {}s", budget.as_secs())),

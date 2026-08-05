@@ -259,7 +259,7 @@ watch(
               <span>{{ t("mqSubscriptions.type") }}</span
               ><span>{{ groupTypeLabel }}</span> <span>{{ t("mqSubscriptions.mode") }}</span
               ><span>{{ groupModeLabel }}</span> <span>{{ t("mqSubscriptions.consumers") }}</span
-              ><span>{{ group.onlineMembers ?? 0 }}</span>
+              ><span>{{ group.onlineMembers == null ? "-" : group.onlineMembers }}</span>
               <span>{{ t("mqSubscriptions.subscribedTopics") }}</span>
               <span>{{ subscribedTopics.length ? subscribedTopics.join(", ") : "-" }}</span>
             </div>

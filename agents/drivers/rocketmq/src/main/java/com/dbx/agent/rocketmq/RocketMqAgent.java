@@ -1267,17 +1267,31 @@ public final class RocketMqAgent {
 
     private static ConsumeStats examineConsumeStatsRemapped(
         DefaultMQAdminExt admin, JsonObject conn, String groupId, String topic) throws Exception {
-        List<String> masters = resolveMasterBrokerAddrs(admin, conn);
+        return examineConsumeStatsOnMasters(admin, groupId, topic, resolveMasterBrokerAddrPlan(admin, conn));
+    }
+
+    /**
+     * Probe consume stats on a pre-resolved master plan. Callers that fan out per group
+     * (lag attach) should resolve the plan once so each task does not re-hit clusterInfo.
+     */
+    private static ConsumeStats examineConsumeStatsOnMasters(
+        DefaultMQAdminExt admin, String groupId, String topic, MasterBrokerAddrPlan plan) throws Exception {
         // RocketMQ 5.3.1: 3-arg examineConsumeStats(clusterName, group, topic) is NOT broker-scoped.
         // Must use 4-arg (brokerAddr, group, topic, timeout) or remapped Docker addrs never hit brokers.
         long timeout = adminTimeoutMillis(admin);
         ConsumeStats merged = new ConsumeStats();
-        int successCount = 0;
+        int remappedSuccess = 0;
+        int fallbackSuccess = 0;
         Exception lastError = null;
-        for (String brokerAddr : masters) {
+        for (String brokerAddr : plan.allAddrs()) {
+            boolean collisionFallback = plan.isCollisionFallback(brokerAddr);
             try {
                 ConsumeStats stats = admin.examineConsumeStats(brokerAddr, groupId, topic, timeout);
-                successCount++;
+                if (collisionFallback) {
+                    fallbackSuccess++;
+                } else {
+                    remappedSuccess++;
+                }
                 if (stats != null && stats.getOffsetTable() != null) {
                     merged.getOffsetTable().putAll(stats.getOffsetTable());
                     merged.setConsumeTps(merged.getConsumeTps() + stats.getConsumeTps());
@@ -1287,9 +1301,22 @@ public final class RocketMqAgent {
             }
         }
         boolean mergedEmpty = merged.getOffsetTable() == null || merged.getOffsetTable().isEmpty();
-        // Empty offset after every attempted broker succeeded is a real "no progress" result.
-        // All-broker failure, or partial failure with an empty merge, must not become totalLag=0.
-        ensureConsumeStatsProbeSucceeded(masters.size(), successCount, mergedEmpty, lastError, groupId);
+        // Remap collisions append Docker-internal originals as best-effort fallbacks. Host-side
+        // agents usually cannot reach them; those failures must not trip empty-merge fail-closed
+        // when a remapped master already answered. When remapped probes all fail, gate on fallbacks.
+        int attemptedForGate;
+        int successForGate;
+        if (remappedSuccess > 0) {
+            attemptedForGate = plan.remappedCount();
+            successForGate = remappedSuccess;
+        } else if (fallbackSuccess > 0) {
+            attemptedForGate = plan.fallbackCount();
+            successForGate = fallbackSuccess;
+        } else {
+            attemptedForGate = plan.size();
+            successForGate = 0;
+        }
+        ensureConsumeStatsProbeSucceeded(attemptedForGate, successForGate, mergedEmpty, lastError, groupId);
         return merged;
     }
 
@@ -1496,6 +1523,16 @@ public final class RocketMqAgent {
         if (page.isEmpty() || topic == null || topic.isBlank()) {
             return;
         }
+        final MasterBrokerAddrPlan masterPlan;
+        try {
+            // Resolve/remap masters once — per-group examineBrokerClusterInfo burns the lag budget.
+            masterPlan = resolveMasterBrokerAddrPlan(admin, conn);
+        } catch (Exception e) {
+            for (Map<String, Object> row : page) {
+                row.put("totalLagFailed", true);
+            }
+            return;
+        }
         int workers = Math.max(1, Math.min(CONSUMER_LAG_CONCURRENCY, page.size()));
         ExecutorService executor = Executors.newFixedThreadPool(workers, runnable -> {
             Thread thread = new Thread(runnable, "dbx-rocketmq-consumer-lag");
@@ -1507,8 +1544,8 @@ public final class RocketMqAgent {
         for (Map<String, Object> row : page) {
             String groupId = String.valueOf(row.get("groupId"));
             tasks.add(() -> {
-                // examineConsumeStatsRemapped throws when no master succeeds.
-                ConsumeStats stats = examineConsumeStatsRemapped(admin, conn, groupId, topic);
+                // examineConsumeStatsOnMasters throws when no master succeeds.
+                ConsumeStats stats = examineConsumeStatsOnMasters(admin, groupId, topic, masterPlan);
                 long totalLag = 0;
                 if (stats.getOffsetTable() != null) {
                     for (var entry : stats.getOffsetTable().entrySet()) {
@@ -2393,6 +2430,11 @@ public final class RocketMqAgent {
         return resolveMasterBrokerAddrs(admin, conn, null);
     }
 
+    private static MasterBrokerAddrPlan resolveMasterBrokerAddrPlan(
+        DefaultMQAdminExt admin, JsonObject conn) throws Exception {
+        return resolveMasterBrokerAddrPlan(admin, conn, null, admin.examineBrokerClusterInfo());
+    }
+
     static List<String> resolveMasterBrokerAddrs(
         DefaultMQAdminExt admin, JsonObject conn, String brokerNameFilter) throws Exception {
         return resolveMasterBrokerAddrs(admin, conn, brokerNameFilter, admin.examineBrokerClusterInfo());
@@ -2401,19 +2443,25 @@ public final class RocketMqAgent {
     static List<String> resolveMasterBrokerAddrs(
         DefaultMQAdminExt admin, JsonObject conn, String brokerNameFilter, ClusterInfo clusterInfo)
         throws Exception {
-        LinkedHashSet<String> addrs = masterBrokerAddrsFromClusterInfo(clusterInfo, conn, brokerNameFilter);
-        if (addrs.isEmpty()) {
-            addrs.add(resolveBrokerAddr(admin, conn, clusterInfo));
+        return new ArrayList<>(resolveMasterBrokerAddrPlan(admin, conn, brokerNameFilter, clusterInfo).allAddrs());
+    }
+
+    static MasterBrokerAddrPlan resolveMasterBrokerAddrPlan(
+        DefaultMQAdminExt admin, JsonObject conn, String brokerNameFilter, ClusterInfo clusterInfo)
+        throws Exception {
+        MasterBrokerAddrPlan plan = masterBrokerAddrsFromClusterInfo(clusterInfo, conn, brokerNameFilter);
+        if (plan.isEmpty()) {
+            plan.addRemapped(resolveBrokerAddr(admin, conn, clusterInfo));
         }
-        return new ArrayList<>(addrs);
+        return plan;
     }
 
     /** Extract remapped master broker addresses from a ClusterInfo snapshot. */
-    static LinkedHashSet<String> masterBrokerAddrsFromClusterInfo(
+    static MasterBrokerAddrPlan masterBrokerAddrsFromClusterInfo(
         ClusterInfo clusterInfo, JsonObject conn, String brokerNameFilter) {
-        LinkedHashSet<String> addrs = new LinkedHashSet<>();
+        MasterBrokerAddrPlan plan = new MasterBrokerAddrPlan();
         if (clusterInfo == null || clusterInfo.getBrokerAddrTable() == null) {
-            return addrs;
+            return plan;
         }
         LinkedHashSet<String> remappedSeen = new LinkedHashSet<>();
         for (BrokerData broker : clusterInfo.getBrokerAddrTable().values()) {
@@ -2435,12 +2483,60 @@ public final class RocketMqAgent {
             // Multi-broker Docker often remaps every master to the same host:port. Keep the
             // original address for collisions so in-network agents can still reach each broker.
             if (remappedSeen.add(remapped)) {
-                addrs.add(remapped);
+                plan.addRemapped(remapped);
             } else if (!remapped.equals(masterAddr)) {
-                addrs.add(masterAddr);
+                plan.addCollisionFallback(masterAddr);
             }
         }
-        return addrs;
+        return plan;
+    }
+
+    /**
+     * Remapped masters plus optional collision-fallback originals. Fail-closed consume-stats
+     * gating treats fallbacks as best-effort so host-side Docker agents do not mark lag
+     * unavailable when only unreachable internal IPs fail.
+     */
+    static final class MasterBrokerAddrPlan {
+        private final LinkedHashSet<String> remapped = new LinkedHashSet<>();
+        private final LinkedHashSet<String> collisionFallbacks = new LinkedHashSet<>();
+
+        void addRemapped(String addr) {
+            if (addr != null && !addr.isBlank()) {
+                remapped.add(addr);
+            }
+        }
+
+        void addCollisionFallback(String addr) {
+            if (addr != null && !addr.isBlank() && !remapped.contains(addr)) {
+                collisionFallbacks.add(addr);
+            }
+        }
+
+        boolean isCollisionFallback(String addr) {
+            return collisionFallbacks.contains(addr);
+        }
+
+        LinkedHashSet<String> allAddrs() {
+            LinkedHashSet<String> all = new LinkedHashSet<>(remapped);
+            all.addAll(collisionFallbacks);
+            return all;
+        }
+
+        int remappedCount() {
+            return remapped.size();
+        }
+
+        int fallbackCount() {
+            return collisionFallbacks.size();
+        }
+
+        int size() {
+            return remapped.size() + collisionFallbacks.size();
+        }
+
+        boolean isEmpty() {
+            return remapped.isEmpty() && collisionFallbacks.isEmpty();
+        }
     }
 
     private static void applyTopicConfigValue(TopicConfig config, String key, String value) {

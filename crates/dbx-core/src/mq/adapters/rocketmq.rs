@@ -98,13 +98,10 @@ fn cluster_info_from_agent_result(result: &serde_json::Value) -> MqClusterInfo {
 
 impl RocketMqAdmin {
     /// Spawn the RocketMQ Java agent, perform handshake, and connect.
+    ///
+    /// Callers must probe NameServer reachability before invoking this so the
+    /// connect-timeout wall covers only JVM spawn + handshake + connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
-        // Fail fast on unreachable NameServer before paying for JVM agent startup.
-        // Keep half of connect_timeout for JVM spawn; probe itself uses per-host caps so one
-        // blackholed HA NameServer cannot consume the whole budget.
-        let probe_budget = (cfg.connect_timeout() / 2).max(Duration::from_millis(500));
-        probe_namesrv_tcp(&namesrv_addr(&cfg), probe_budget).await?;
-
         let mut client = AgentDriverClient::spawn(launch).await?;
 
         // Handshake
@@ -947,6 +944,12 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
             None
         },
     }
+}
+
+/// Fail fast on unreachable NameServer before paying for JVM agent startup.
+/// Called outside the connect-timeout wall so the probe does not steal JVM budget.
+pub(crate) async fn probe_namesrv_before_connect(cfg: &MqAdminConfig, budget: Duration) -> Result<(), String> {
+    probe_namesrv_tcp(&namesrv_addr(cfg), budget).await
 }
 
 /// Probe NameServer addresses so connect fails before spawning the JVM agent.

@@ -777,6 +777,15 @@ export function sameStructureIndexType(left: string | null | undefined, right: s
   return normalizeStructureIndexType(left) === normalizeStructureIndexType(right);
 }
 
+/** Keep selected fields removable even after they are no longer available on the table. */
+export function filterStructureIndexColumnOptions(availableColumns: readonly string[], selectedColumns: readonly string[], search = ""): string[] {
+  const availableSet = new Set(availableColumns);
+  const unavailableSelected = selectedColumns.filter((column) => column.trim() && !availableSet.has(column));
+  const options = [...new Set([...unavailableSelected, ...availableColumns])];
+  const query = search.trim().toLowerCase();
+  return query ? options.filter((column) => column.toLowerCase().includes(query)) : options;
+}
+
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
   return indexes.map((index) => ({
     id: `existing:${index.name}`,

@@ -16,6 +16,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { nextDatabaseBackupRunAt, normalizeDatabaseBackupTablePatterns, supportsScheduledDatabaseBackup, type DatabaseBackupFile, type DatabaseBackupRun, type DatabaseBackupSchedule } from "@/lib/backup/scheduledDatabaseBackup";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -139,7 +140,8 @@ async function loadDatabases(connectionId: string, preserveSelection: boolean) {
   loadingDatabases.value = true;
   try {
     await connectionStore.ensureConnected(connectionId);
-    const names = (await api.listDatabases(connectionId)).map((database) => database.name);
+    const config = connectionStore.getConfig(connectionId);
+    const names = config?.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(connectionId, config) : (await api.listDatabases(connectionId)).map((database) => database.name);
     databaseOptions.value = names;
     if (!preserveSelection) {
       selectedDatabases.value = [];

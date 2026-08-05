@@ -16,7 +16,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useGraphStore } from "@/lib/diagram/graph-store";
 import * as api from "@/lib/backend/api";
 import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/database/databaseCapabilities";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildDiagramJoinSql, buildDiagramRelationships, filterDiagramTables, mergeRelationshipsWithInferred, normalizeCustomDiagramRelationship, type CustomDiagramRelationship, type DiagramPosition, type DiagramTable, isDraftTable, needsDiagramSync } from "@/lib/diagram/erDiagram";
 import { createDraftTable } from "@/lib/diagram/draft-table";
 import { cardinalityPairFromChoice } from "@/lib/diagram/cardinality";
@@ -1116,11 +1116,17 @@ async function loadDatabases(id: string) {
   databases.value = [];
   try {
     await store.ensureConnected(id);
-    const dbs = await api.listDatabases(id);
-    databases.value = databaseOptionsForConnection(
-      dbs.map((db) => db.name),
-      store.getConfig(id),
-    );
+    const config = store.getConfig(id);
+    if (config?.db_type === "dameng") {
+      // 达梦的"数据库"概念对应 schema，使用 fetchNamespaceOptionsForConnection
+      databases.value = await fetchNamespaceOptionsForConnection(id, config);
+    } else {
+      const dbs = await api.listDatabases(id);
+      databases.value = databaseOptionsForConnection(
+        dbs.map((db) => db.name),
+        config,
+      );
+    }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {

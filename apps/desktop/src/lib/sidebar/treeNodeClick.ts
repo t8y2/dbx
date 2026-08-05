@@ -66,8 +66,8 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
   return "none";
 }
 
-export function sidebarSelectionCopyAction(event: ShortcutLikeEvent): SidebarSelectionCopyAction {
-  return matchesShortcut(event, "Mod+C") ? "copy-name" : "none";
+export function sidebarSelectionCopyAction(event: ShortcutLikeEvent, platform?: string): SidebarSelectionCopyAction {
+  return matchesShortcut(event, "Mod+C", platform) ? "copy-name" : "none";
 }
 
 export function copyNameForTreeNode(node: TreeNode): string {

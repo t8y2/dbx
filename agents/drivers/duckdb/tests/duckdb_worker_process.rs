@@ -227,6 +227,13 @@ async fn worker_process_recovers_after_parser_error() {
         .await
         .expect("create events table");
 
+    let typed_err = client
+        .execute_typed(None, "select * from table limit 19;".to_string(), Some(10), None, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("reserved word query should fail");
+    assert_eq!(typed_err.code, "duckdb_execute_failed");
+    assert!(typed_err.message.contains("Parser Error"), "unexpected error: {}", typed_err.message);
+
     let err = client
         .execute(None, "select * from table limit 19;".to_string(), Some(10), None, Some(Duration::from_secs(5)))
         .await

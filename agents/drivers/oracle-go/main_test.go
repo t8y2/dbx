@@ -1762,6 +1762,18 @@ func TestGetObjectSourceRejectsMissingViewSource(t *testing.T) {
 	}
 }
 
+func TestOracleObjectIdentityNameCandidates(t *testing.T) {
+	if got := oracleObjectIdentityNameCandidates("MIXEDPROC"); len(got) != 1 || got[0] != "MIXEDPROC" {
+		t.Fatalf("uppercase identity should be single candidate, got %#v", got)
+	}
+	if got := oracleObjectIdentityNameCandidates("MiXeDProc"); len(got) != 2 || got[0] != "MiXeDProc" || got[1] != "MIXEDPROC" {
+		t.Fatalf("mixed-case identity should try exact then upper, got %#v", got)
+	}
+	if got := oracleObjectIdentityNameCandidates("  "); got != nil {
+		t.Fatalf("blank name should yield no candidates, got %#v", got)
+	}
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

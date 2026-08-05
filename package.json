@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.5.75",
+  "version": "0.5.76",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -92,6 +92,7 @@
     "marked": "^18.0.4",
     "pako": "^3.0.1",
     "pinia": "^3.0.0",
+    "pinyin-pro": "^3.28.2",
     "proj4": "^2.20.9",
     "reka-ui": "^2.10.1",
     "shadcn-vue": "^2.7.4",

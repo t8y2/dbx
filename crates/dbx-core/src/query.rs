@@ -36,7 +36,7 @@ pub const QUERY_CANCELED: &str = "Query canceled";
 /// (desktop/CLI diagnose first; this is only the Rust SQL-executor backstop).
 const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), db.version(), db.collection.countDocuments({}), db.collection.distinct(\"field\"), db.collection.getIndexes(), db.collection.createIndex({...}), or db.collection.insertOne({...}).";
 const SQL_OMITTED_ERROR_CONTEXT: &str =
-    "SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement.";
+    "SQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolErrorAction {
@@ -48,6 +48,7 @@ pub enum PoolErrorAction {
 #[derive(Debug, Clone)]
 pub enum QueryExecutionError {
     Agent(AgentCallError),
+    DuckDb { code: String, message: String },
     Canceled { stage: AgentErrorStage, operation_outcome: AgentOperationOutcome },
     Timeout(String),
     Sql(String),
@@ -58,6 +59,7 @@ impl QueryExecutionError {
     pub fn into_legacy_string(self) -> String {
         match self {
             Self::Agent(error) => error.into_legacy_string(),
+            Self::DuckDb { message, .. } => message,
             Self::Canceled { .. } => canceled_error(),
             Self::Timeout(error) => error,
             Self::Sql(error) => error,
@@ -68,6 +70,9 @@ impl QueryExecutionError {
     pub fn into_backend_error(self) -> crate::backend_error::BackendError {
         match self {
             Self::Agent(error) => crate::backend_error::BackendError::from_agent_call_error(&error),
+            Self::DuckDb { code, message } => {
+                crate::backend_error::BackendError::from_duckdb_worker_error(&code, &message)
+            }
             Self::Canceled { stage, operation_outcome } => {
                 crate::backend_error::BackendError::from_canceled(stage, operation_outcome)
             }
@@ -80,9 +85,12 @@ impl QueryExecutionError {
     fn with_omitted_sql_context(self, sql: &str) -> Self {
         match self {
             Self::Agent(error) => Self::Agent(error),
+            Self::DuckDb { code, message } => {
+                Self::DuckDb { code, message: query_error_with_omitted_sql_context(&message, sql) }
+            }
             canceled @ Self::Canceled { .. } => canceled,
             Self::Timeout(error) => Self::Timeout(query_error_with_omitted_sql_context(&error, sql)),
-            Self::Sql(error) => Self::Sql(query_error_with_omitted_sql_context(&error, sql)),
+            Self::Sql(error) => Self::Sql(append_typed_sql_error_context(&error, sql)),
             Self::Legacy(error) => Self::Legacy(query_error_with_omitted_sql_context(&error, sql)),
         }
     }
@@ -90,6 +98,7 @@ impl QueryExecutionError {
     fn with_context(self, context: &str) -> Self {
         match self {
             Self::Agent(error) => Self::Agent(error),
+            Self::DuckDb { code, message } => Self::DuckDb { code, message: format!("{message}; {context}") },
             canceled @ Self::Canceled { .. } => canceled,
             Self::Timeout(error) => Self::Timeout(format!("{error}; {context}")),
             Self::Sql(error) => Self::Sql(format!("{error}; {context}")),
@@ -100,7 +109,7 @@ impl QueryExecutionError {
     fn as_agent_error(&self) -> Option<&AgentCallError> {
         match self {
             Self::Agent(error) => Some(error),
-            Self::Canceled { .. } | Self::Timeout(_) | Self::Sql(_) | Self::Legacy(_) => None,
+            Self::DuckDb { .. } | Self::Canceled { .. } | Self::Timeout(_) | Self::Sql(_) | Self::Legacy(_) => None,
         }
     }
 }
@@ -109,6 +118,7 @@ impl std::fmt::Display for QueryExecutionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Agent(error) => error.fmt(formatter),
+            Self::DuckDb { message, .. } => formatter.write_str(message),
             Self::Canceled { .. } => formatter.write_str(QUERY_CANCELED),
             Self::Timeout(error) => formatter.write_str(error),
             Self::Sql(error) => formatter.write_str(error),
@@ -139,11 +149,20 @@ fn query_error_with_omitted_sql_context(error: &str, _sql: &str) -> String {
     crate::db::agent_driver::append_legacy_error_context(error, SQL_OMITTED_ERROR_CONTEXT)
 }
 
+fn append_typed_sql_error_context(error: &str, _sql: &str) -> String {
+    if error.contains(SQL_OMITTED_ERROR_CONTEXT) {
+        return error.to_string();
+    }
+    let separator = if error.trim_start().starts_with("Server error:") { " " } else { "\n" };
+    format!("{error}{separator}{SQL_OMITTED_ERROR_CONTEXT}")
+}
+
 /// A multi-statement result with metadata intended for query clients.
 ///
 /// `execution_error` is emitted for synthesized per-statement errors so clients
 /// can distinguish them from a successful result column named `Error`.
 /// `statement_index` is emitted only after a concrete statement starts running.
+/// `server_message` is emitted only for SQL Server TDS informational messages.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecuteMultiResult {
     #[serde(flatten)]
@@ -154,6 +173,8 @@ pub struct ExecuteMultiResult {
     pub statement_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::backend_error::BackendError>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub server_message: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,12 +214,12 @@ fn report_execute_multi_progress(
 impl ExecuteMultiResult {
     fn execution_error(result: db::QueryResult) -> Self {
         let error = error_from_query_result(&result);
-        Self { result, execution_error: true, statement_index: None, error }
+        Self { result, execution_error: true, statement_index: None, error, server_message: false }
     }
 
     fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
         let error = error_from_query_result(&result);
-        Self { result, execution_error: true, statement_index: Some(statement_index), error }
+        Self { result, execution_error: true, statement_index: Some(statement_index), error, server_message: false }
     }
 
     fn execution_error_with_backend(
@@ -206,11 +227,17 @@ impl ExecuteMultiResult {
         statement_index: Option<usize>,
         error: crate::backend_error::BackendError,
     ) -> Self {
-        Self { result, execution_error: true, statement_index, error: Some(error) }
+        Self { result, execution_error: true, statement_index, error: Some(error), server_message: false }
     }
 
     fn success_with_index(result: db::QueryResult, statement_index: usize) -> Self {
-        Self { result, execution_error: false, statement_index: Some(statement_index), error: None }
+        Self {
+            result,
+            execution_error: false,
+            statement_index: Some(statement_index),
+            error: None,
+            server_message: false,
+        }
     }
 
     pub fn without_error_detail(mut self) -> Self {
@@ -225,7 +252,19 @@ impl ExecuteMultiResult {
 
 impl From<db::QueryResult> for ExecuteMultiResult {
     fn from(result: db::QueryResult) -> Self {
-        Self { result, execution_error: false, statement_index: None, error: None }
+        Self { result, execution_error: false, statement_index: None, error: None, server_message: false }
+    }
+}
+
+impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
+    fn from(result: db::sqlserver::SqlServerBatchResult) -> Self {
+        Self {
+            result: result.result,
+            execution_error: false,
+            statement_index: None,
+            error: None,
+            server_message: result.server_message,
+        }
     }
 }
 
@@ -812,6 +851,7 @@ fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Weaviate
                 | DatabaseType::ChromaDb
                 | DatabaseType::InfluxDb
+                | DatabaseType::VictoriaMetrics
         )
 }
 
@@ -879,6 +919,7 @@ fn query_execution_error_action(
     }
     match error {
         QueryExecutionError::Canceled { .. } => PoolErrorAction::Keep,
+        QueryExecutionError::DuckDb { message, .. } => query_pool_error_action(db_type, sql, message),
         QueryExecutionError::Timeout(message)
         | QueryExecutionError::Sql(message)
         | QueryExecutionError::Legacy(message) => query_pool_error_action(db_type, sql, message),
@@ -1231,6 +1272,8 @@ async fn do_execute_typed(
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
     let mut typed_agent_error = None;
+    #[cfg(feature = "duckdb-sidecar")]
+    let mut typed_duckdb_error = None;
     let result: Result<db::QueryResult, String> = match pool {
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
@@ -1250,7 +1293,17 @@ async fn do_execute_typed(
             let database = database.map(str::to_string);
             let max_rows = options.max_rows;
             drop(connections);
-            client.execute(database, sql, max_rows, cancel_token, query_timeout).await
+            match client.execute_typed(database, sql, max_rows, cancel_token, query_timeout).await {
+                Ok(result) => Ok(result),
+                Err(error) => {
+                    let is_control_error = error.message == QUERY_CANCELED
+                        || is_dbx_query_timeout_error(&error.message.to_ascii_lowercase());
+                    if !is_control_error {
+                        typed_duckdb_error = Some(error.clone());
+                    }
+                    Err(error.message)
+                }
+            }
         }
         #[cfg(not(feature = "duckdb-sidecar"))]
         PoolKind::DuckDbWorker(_) => {
@@ -1510,6 +1563,22 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::VictoriaMetrics(client) => {
+            let client = client.clone();
+            let max_rows = options.max_rows;
+            drop(connections);
+            let result = wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::victoriametrics_driver::execute_query(&client, sql),
+            )
+            .await
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::Agent(client) => {
             let client = client.clone();
             let source_client = client.clone();
@@ -1604,6 +1673,10 @@ async fn do_execute_typed(
     result
         .map(normalize_query_result_for_js)
         .map_err(|error| {
+            #[cfg(feature = "duckdb-sidecar")]
+            if let Some(duckdb_error) = typed_duckdb_error {
+                return QueryExecutionError::DuckDb { code: duckdb_error.code, message: duckdb_error.message };
+            }
             typed_agent_error.map_or_else(|| QueryExecutionError::Legacy(error), QueryExecutionError::Agent)
         })
         .map_err(|error| classify_query_error(pool_db_type, error))
@@ -2431,7 +2504,7 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
     }
 }
 
-fn sqlserver_batch_results(results: Vec<db::QueryResult>) -> Vec<ExecuteMultiResult> {
+fn sqlserver_batch_results(results: Vec<db::sqlserver::SqlServerBatchResult>) -> Vec<ExecuteMultiResult> {
     results.into_iter().map(ExecuteMultiResult::from).collect()
 }
 
@@ -2494,9 +2567,9 @@ async fn execute_multi_sqlserver(
 
         let execution = async {
             if execution_mode == QueryExecutionMode::Simple {
-                db::sqlserver::execute_simple_batch_with_max_rows(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_simple_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
             } else {
-                db::sqlserver::execute_batch_with_max_rows(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
             }
         };
         let result = wait_for_result_opt(cancel_token.clone(), query_timeout, execution).await;
@@ -2784,6 +2857,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Easysearch(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
+        | PoolKind::VictoriaMetrics(_)
         | PoolKind::ExternalDriver { .. } => false,
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(_) => false,
@@ -3028,6 +3102,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
             | PoolKind::Easysearch(_)
             | PoolKind::VectorDb(_)
             | PoolKind::InfluxDb(_)
+            | PoolKind::VictoriaMetrics(_)
             | PoolKind::ExternalDriver { .. } => TxPath::None,
         })
     };
@@ -4954,6 +5029,7 @@ for line in sys.stdin:
         let success = serde_json::to_value(ExecuteMultiResult::from(empty_query_result(0))).unwrap();
         assert!(success.get("execution_error").is_none());
         assert!(success.get("statement_index").is_none());
+        assert!(success.get("server_message").is_none());
 
         let mut error_column = empty_query_result(0);
         error_column.columns = vec!["Error".to_string()];
@@ -4987,9 +5063,17 @@ for line in sys.stdin:
     fn sqlserver_batch_results_do_not_claim_statement_indexes() {
         assert_eq!(split_sql_batches("SELECT 1; SELECT 2;").len(), 1);
 
-        let results = sqlserver_batch_results(vec![empty_query_result(1), empty_query_result(2)]);
+        let results = sqlserver_batch_results(vec![
+            db::sqlserver::SqlServerBatchResult { result: empty_query_result(1), server_message: false },
+            db::sqlserver::SqlServerBatchResult { result: empty_query_result(2), server_message: true },
+        ]);
 
         assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![None, None]);
+        assert!(!results[0].server_message);
+        assert!(results[1].server_message);
+
+        let serialized = serde_json::to_value(&results[1]).unwrap();
+        assert_eq!(serialized.get("server_message"), Some(&serde_json::Value::Bool(true)));
     }
 
     #[test]
@@ -5015,6 +5099,18 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn duckdb_worker_error_preserves_catalog_identity_and_detail() {
+        let error = QueryExecutionError::DuckDb {
+            code: "duckdb_execute_failed".to_string(),
+            message: "Catalog Error: Table missing_table does not exist".to_string(),
+        };
+        let backend_error = error.into_backend_error();
+
+        assert_eq!(backend_error.code(), "DBX-JDBC-4001");
+        assert_eq!(backend_error.detail(), Some("Catalog Error: Table missing_table does not exist"));
+    }
+
+    #[test]
     fn query_timeout_preserves_timeout_catalog_identity_and_detail() {
         let error = classify_query_error(
             Some(DatabaseType::Postgres),
@@ -5030,7 +5126,7 @@ for line in sys.stdin:
         );
         assert_eq!(
             backend_error.detail(),
-            Some("Query timed out after 1 seconds SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement.")
+            Some("Query timed out after 1 seconds\nSQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement.")
         );
     }
 
@@ -5051,7 +5147,7 @@ for line in sys.stdin:
         assert_eq!(
             backend_error.detail(),
             Some(
-                "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+                "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist\nSQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement."
             )
         );
     }
@@ -5076,7 +5172,7 @@ for line in sys.stdin:
         assert_eq!(
             backend_error.detail(),
             Some(
-                "Server error: `ERROR 1064 (42000): You have an error in your SQL syntax` SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+                "Server error: `ERROR 1064 (42000): You have an error in your SQL syntax` SQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement."
             )
         );
     }
@@ -5097,7 +5193,7 @@ for line in sys.stdin:
         assert_eq!(
             backend_error.detail(),
             Some(
-                "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+                "ERROR: relation \"dbx_table_that_does_not_exist\" does not exist\nSQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement."
             )
         );
     }
@@ -5117,7 +5213,7 @@ for line in sys.stdin:
         assert_eq!(
             backend_error.detail(),
             Some(
-                "Statement 1 failed: ERROR: relation \"dbx_table_that_does_not_exist\" does not exist SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement."
+                "Statement 1 failed: ERROR: relation \"dbx_table_that_does_not_exist\" does not exist\nSQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement."
             )
         );
     }
@@ -5479,6 +5575,18 @@ for line in sys.stdin:
 
         let repeated = query_error_with_omitted_sql_context(&error, sql);
         assert_eq!(repeated.matches(SQL_OMITTED_ERROR_CONTEXT).count(), 1);
+    }
+
+    #[test]
+    fn typed_sql_error_context_keeps_driver_text_on_one_line() {
+        let error = QueryExecutionError::Sql("Server error: `ERROR 1064 (42000): syntax error`".to_string())
+            .with_omitted_sql_context("SELECT * FROM users")
+            .into_backend_error();
+
+        assert_eq!(
+            error.detail(),
+            Some("Server error: `ERROR 1064 (42000): syntax error` SQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement.")
+        );
     }
 
     #[test]

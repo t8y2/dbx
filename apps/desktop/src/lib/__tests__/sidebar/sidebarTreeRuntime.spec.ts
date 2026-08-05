@@ -12,6 +12,7 @@ function host(): SidebarTreeRuntimeHost {
     handleRowClick: vi.fn(),
     handleRowDoubleClick: vi.fn(),
     handleRowKeydown: vi.fn(),
+    openPrimaryVisibleFilter: vi.fn(),
     openDataInNewTab: vi.fn(),
     requestPaste: vi.fn(() => false),
     toggleNode: vi.fn(),
@@ -44,6 +45,17 @@ describe("sidebar tree runtime", () => {
 
     expect(runtime.diagnostics.hostBindings).toBe(1);
     expect(runtimeHost.handleRowClick).toHaveBeenCalledTimes(100);
+  });
+
+  it("forwards the direct primary visible-filter action to the bound host", () => {
+    const runtime = createSidebarTreeRuntime();
+    const runtimeHost = host();
+    const connection = { id: "connection-1", label: "Connection", type: "connection", connectionId: "connection-1" } satisfies TreeNode;
+    runtime.bindHost(runtimeHost);
+
+    runtime.openPrimaryVisibleFilter(connection);
+
+    expect(runtimeHost.openPrimaryVisibleFilter).toHaveBeenCalledWith(connection);
   });
 
   it("rejects superseded and disposed generations without affecting another runtime", () => {

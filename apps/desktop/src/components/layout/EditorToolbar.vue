@@ -96,7 +96,21 @@ const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 const supportsExplain = computed(() => {
   const dbType = props.activeConnection?.db_type;
-  return dbType !== "redis" && dbType !== "mongodb" && dbType !== "elasticsearch" && dbType !== "easysearch" && dbType !== "qdrant" && dbType !== "milvus" && dbType !== "weaviate" && dbType !== "chromadb" && dbType !== "etcd" && dbType !== "zookeeper" && dbType !== "mq" && dbType !== "nacos";
+  return (
+    dbType !== "redis" &&
+    dbType !== "mongodb" &&
+    dbType !== "elasticsearch" &&
+    dbType !== "easysearch" &&
+    dbType !== "qdrant" &&
+    dbType !== "milvus" &&
+    dbType !== "weaviate" &&
+    dbType !== "chromadb" &&
+    dbType !== "etcd" &&
+    dbType !== "zookeeper" &&
+    dbType !== "mq" &&
+    dbType !== "nacos" &&
+    dbType !== "victoriametrics"
+  );
 });
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
 const supportsExPaste = computed(() => supportsSqlInListPaste(props.activeConnection?.db_type));
@@ -229,6 +243,7 @@ async function changeCatalog(selectedCatalog: string) {
             class="h-6 w-6"
             :class="executeButtonClass"
             :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !executableSql.trim())"
+            @mousedown.prevent
             @click="activeTab.isExecuting ? emit('cancel') : emit('execute')"
           >
             <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />

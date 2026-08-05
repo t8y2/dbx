@@ -65,7 +65,7 @@ async function refreshTree() {
   try {
     await connectionStore.refreshAllTree();
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 

@@ -1706,6 +1706,7 @@ pub fn run() {
             commands::redis_cmd::redis_set_remove,
             commands::redis_cmd::redis_zadd,
             commands::redis_cmd::redis_zrem,
+            commands::redis_cmd::redis_zset_update,
             commands::redis_cmd::redis_stream_add,
             commands::redis_cmd::redis_json_set,
             commands::redis_cmd::redis_check_json_module,

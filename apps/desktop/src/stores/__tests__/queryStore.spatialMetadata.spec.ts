@@ -39,4 +39,24 @@ describe("appendQueryResultSegment spatial merge", () => {
     // Every row keeps its own SRID; a later page does not overwrite earlier cells.
     expect(merged.spatial_values).toEqual([[4326], [3857], [3857], [4490]]);
   });
+
+  it("raises the structured segment error instead of reconstructing from the Error row", () => {
+    const previous = make(1);
+    const segment = {
+      ...make(0),
+      execution_error: true as const,
+      rows: [["legacy row text"]],
+      error: {
+        version: 1 as const,
+        code: "DBX-JDBC-4001",
+        messageKey: "backendErrors.jdbc.sqlFailed",
+        messageParams: { stage: "execute" },
+        source: "jdbcAgent" as const,
+        operationOutcome: "unknown" as const,
+        detail: "relation missing_table does not exist",
+      },
+    } as unknown as QueryResult;
+
+    expect(() => appendQueryResultSegment(previous, segment, 100)).toThrow("relation missing_table does not exist");
+  });
 });

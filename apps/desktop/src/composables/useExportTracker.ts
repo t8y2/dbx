@@ -175,6 +175,10 @@ function finishDataTransferTask(task: ExportTask) {
   task.finishedAt ??= Date.now();
 }
 
+function finishExportTask(task: ExportTask) {
+  task.finishedAt ??= Date.now();
+}
+
 export function formatDataTransferDuration(elapsedMs: number): string {
   const safeElapsedMs = Math.max(0, Number.isFinite(elapsedMs) ? Math.round(elapsedMs) : 0);
   if (safeElapsedMs < 1000) return `${safeElapsedMs} ms`;
@@ -244,6 +248,7 @@ export function useExportTracker() {
       totalRows: null,
       status: "Running",
       errorMessage: null,
+      startedAt: Date.now(),
     });
     taskMap.set(id, task);
     return task;
@@ -262,6 +267,7 @@ export function useExportTracker() {
       errorMessage: null,
       objectIndex: 0,
       totalObjects: 0,
+      startedAt: Date.now(),
     });
     taskMap.set(exportId, task);
     return task;
@@ -380,6 +386,7 @@ export function useExportTracker() {
     task.totalRows = progress.totalRows;
     task.status = normalizeExportStatus(progress.status);
     task.errorMessage = progress.errorMessage || null;
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
   }
 
   function updateDatabaseExportTask(exportId: string, progress: api.ExportProgress & { overallPercent?: number }) {
@@ -398,6 +405,7 @@ export function useExportTracker() {
     if (progress.overallPercent !== undefined) {
       task.overallPercent = Math.max(0, Math.min(100, Math.round(progress.overallPercent)));
     }
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
   }
 
   function updateSqlFileTask(executionId: string, progress: api.SqlFileProgress) {

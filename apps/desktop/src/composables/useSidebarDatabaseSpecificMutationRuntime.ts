@@ -175,19 +175,26 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
 
   const canDropMongoIndex = computed(() => canDropMongoIndexNode(activeNode.value));
 
-  const canDropAllMongoIndexes = computed(() => activeNode.value.type === "mongo-collection" && canMutateMongoIndexes(activeNode.value));
+  function mongoIndexCollectionName(node: TreeNode): string {
+    return node.type === "group-indexes" ? node.tableName || "" : "";
+  }
+
+  function canManageMongoIndexesNode(node: TreeNode): boolean {
+    return !!mongoIndexCollectionName(node) && !!node.database && canMutateMongoIndexes(node);
+  }
+
+  const canDropAllMongoIndexes = computed(() => canManageMongoIndexesNode(activeNode.value));
 
   function mongoIndexDropPreview(node: Pick<TreeNode, "database" | "tableName">, indexName: string): string {
     return mongoDropIndexPreview(node.database || "", node.tableName || "", indexName);
   }
 
-  function mongoDropAllIndexesPreviewForNode(node: Pick<TreeNode, "database" | "label">): string {
-    return mongoDropAllIndexesPreview(node.database || "", node.label);
+  function mongoDropAllIndexesPreviewForNode(node: TreeNode): string {
+    return mongoDropAllIndexesPreview(node.database || "", mongoIndexCollectionName(node));
   }
 
   function canCreateMongoIndexNode(node: TreeNode): boolean {
-    const collectionName = mongoIndexCollectionName(node);
-    return !!collectionName && !!node.database && canMutateMongoIndexes(node);
+    return canManageMongoIndexesNode(node);
   }
 
   const canCreateMongoIndex = computed(() => canCreateMongoIndexNode(activeNode.value));
@@ -201,11 +208,6 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     },
     { deep: true },
   );
-
-  function mongoIndexCollectionName(node: TreeNode): string {
-    if (node.type === "mongo-collection") return node.label;
-    return node.type === "group-indexes" ? node.tableName || "" : "";
-  }
 
   function prepareCreateMongoIndexDialog() {
     const node = activeNode.value;
@@ -292,7 +294,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       if (liveNode) liveNode.isExpanded = true;
       toast(t("nacos.namespaceCreated", { name: namespaceName }), 3000);
     } catch (error: any) {
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error?.message || String(error)) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
     } finally {
       createNacosNamespaceLoading.value = false;
     }
@@ -320,7 +322,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       await connectionStore.loadNacosNamespaces(node.connectionId, { force: true });
       toast(t("nacos.namespaceUpdated", { name: namespaceName }), 3000);
     } catch (error: any) {
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error?.message || String(error)) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
     } finally {
       editNacosNamespaceLoading.value = false;
     }
@@ -505,8 +507,8 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const node = sidebarDangerTarget.value ?? activeNode.value;
     const connectionId = node.connectionId;
     const database = node.database;
-    if (node.type !== "mongo-collection" || !canMutateMongoIndexes(node) || !connectionId || !database) return;
-    const collectionName = node.label;
+    if (!canManageMongoIndexesNode(node) || !connectionId || !database) return;
+    const collectionName = mongoIndexCollectionName(node);
     await runMongoSidebarMutation({
       connection: connectionStore.getConfig(connectionId),
       database,

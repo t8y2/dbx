@@ -263,7 +263,7 @@ function blurValueRule(id: string) {
         <div v-if="index > 0" class="flex justify-center">
           <Button variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
         </div>
-        <div :ref="(element) => setFilterRuleElement(rule.id, element)" class="grid items-center gap-2" :class="usesExpandedLayout(rule.mode) ? 'grid-cols-[minmax(0,1fr)_80px_auto]' : 'grid-cols-[minmax(0,1fr)_80px_minmax(0,1fr)_auto]'">
+        <div :ref="(element) => setFilterRuleElement(rule.id, element)" class="grid items-center justify-start gap-2" :class="usesExpandedLayout(rule.mode) ? 'grid-cols-[minmax(0,260px)_88px_auto]' : 'grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]'">
           <Select :model-value="rule.columnName" :open="openColumnSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => updateRuleColumn(rule, value)" @update:open="(open: boolean) => handleColumnSelectOpen(rule, open)">
             <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
               <SelectValue v-if="rule.columnName">{{ rule.columnName }}</SelectValue>

@@ -216,7 +216,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 return listVisibleSchemas();
             } catch (SQLException catalogError) {
                 try {
-                    return listVisibleUsers();
+                    return listJdbcSchemas();
                 } catch (Exception fallbackError) {
                     catalogError.addSuppressed(fallbackError);
                     throw catalogError;
@@ -236,6 +236,19 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return result;
+    }
+
+    private List<String> listJdbcSchemas() throws Exception {
+        Set<String> schemas = new LinkedHashSet<>();
+        try (ResultSet rs = requireConnected().getMetaData().getSchemas()) {
+            while (rs.next()) {
+                String schema = rs.getString("TABLE_SCHEM");
+                if (schema != null && !schema.isBlank()) {
+                    schemas.add(schema);
+                }
+            }
+        }
+        return schemas.stream().sorted().toList();
     }
 
     private List<String> listVisibleSchemas() throws Exception {

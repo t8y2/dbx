@@ -170,6 +170,100 @@ describe("useSqlExecution", () => {
     expect(activeOutputView.value).toBe("summary");
   });
 
+  it("shows SQL Server PRINT messages instead of leaving them behind the execution summary", async () => {
+    const sql = `IF 1 = 1
+BEGIN
+  PRINT 'x';
+END
+ELSE
+BEGIN
+  PRINT 'y';
+END
+GO`;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1, server_message: true };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
+    expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+  });
+
+  it("selects a trailing SQL Server PRINT result after a data result", async () => {
+    const sql = "SELECT 1 AS value; PRINT N'x';";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const setActiveResultIndex = vi.spyOn(queryStore, "setActiveResultIndex").mockImplementation((_id, index) => {
+      if (!activeTab.value?.results) return;
+      activeTab.value.activeResultIndex = index;
+      activeTab.value.result = activeTab.value.results[index];
+    });
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (!activeTab.value) return;
+      const dataResult = { columns: ["value"], column_types: ["int"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+      const messageResult = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1, server_message: true };
+      activeTab.value.results = [dataResult, messageResult];
+      activeTab.value.activeResultIndex = 0;
+      activeTab.value.result = dataResult;
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
+    expect(setActiveResultIndex).toHaveBeenCalledWith("tab-1", 1);
+    expect(activeTab.value?.activeResultIndex).toBe(1);
+    expect(activeTab.value?.result?.server_message).toBe(true);
+    expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+  });
+
+  it("keeps the summary for ordinary SQL Server data aliased as Message", async () => {
+    const sql = `DECLARE @value nvarchar(1) = N'x';
+SELECT @value AS Message;`;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["Message"], column_types: ["nvarchar"], rows: [["x"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("summary");
+    expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+  });
+
   it("forwards execute-in-new-result-tab intent to the query store", async () => {
     const sql = "SELECT * FROM users";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });

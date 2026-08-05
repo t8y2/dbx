@@ -4950,7 +4950,7 @@ func stripLeadingSQLComments(sqlText string) string {
 
 func isQuerySQL(sqlText string) bool {
 	sqlText = stripLeadingSQLComments(sqlText)
-	for _, keyword := range []string{"select", "with", "show"} {
+	for _, keyword := range []string{"select", "with", "show", "explain"} {
 		if hasLeadingSQLKeyword(sqlText, keyword) {
 			return true
 		}

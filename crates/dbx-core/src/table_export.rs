@@ -430,6 +430,29 @@ async fn fetch_table_export_batch(
         });
     }
 
+    // VictoriaMetrics metrics are read through MetricsQL rather than SQL table
+    // pagination. Execute the range query once and let the normal writers emit
+    // the returned matrix/vector rows.
+    if *db_type == DatabaseType::VictoriaMetrics {
+        *table_read_attempted = true;
+        *table_read_completed = true;
+        let query = crate::db::victoriametrics_driver::metric_range_query(&request.table_name, "1h");
+        return execute_sql_statement_with_options(
+            state,
+            &request.connection_id,
+            &request.database,
+            &query,
+            request.schema.as_deref(),
+            Some(cancel_token),
+            QueryExecutionOptions {
+                max_rows: request.row_limit,
+                client_session_id: Some(table_export_client_session_id(&request.export_id)),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
     if !*table_read_attempted {
         match table_export_cursor_kind(state, pool_key).await {
             Some(TableExportCursorKind::Agent) => {
@@ -1205,7 +1228,7 @@ async fn export_table_data_core_inner(
     // grid exports skip this by default because COUNT can be the slowest query
     // on large HANA/JDBC tables, especially with filters.
     let row_limit = request.row_limit;
-    let total_rows = if request.skip_count {
+    let total_rows = if request.skip_count || db_type == DatabaseType::VictoriaMetrics {
         None
     } else {
         let count_query = count_sql_with_where_and_identifier_quote(

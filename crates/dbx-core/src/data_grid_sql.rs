@@ -150,6 +150,9 @@ fn supports_data_grid_context_filter_mode(
     database_type: Option<DatabaseType>,
     mode: DataGridContextFilterMode,
 ) -> bool {
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return false;
+    }
     !matches!(
         (database_type, mode),
         (
@@ -3764,6 +3767,33 @@ mod tests {
                     "{database_type:?} must not emit {mode:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn does_not_emit_sql_filters_for_victoriametrics() {
+        for mode in [
+            DataGridContextFilterMode::Equals,
+            DataGridContextFilterMode::Like,
+            DataGridContextFilterMode::GreaterThan,
+            DataGridContextFilterMode::IsNull,
+            DataGridContextFilterMode::In,
+            DataGridContextFilterMode::Between,
+        ] {
+            assert_eq!(
+                build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                    database_type: Some(DatabaseType::VictoriaMetrics),
+                    identifier_quote: None,
+                    column_name: "value".to_string(),
+                    mode,
+                    value: json!(10),
+                    values: vec![json!(10), json!(20)],
+                    end_value: Some(json!(20)),
+                    column_info: Some(column("value", "double", false, None)),
+                }),
+                None,
+                "VictoriaMetrics must not emit SQL filter mode {mode:?}"
+            );
         }
     }
 

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { isBooleanCheckboxValue, isBooleanColumnType, nextBooleanCellValue, normalizeBooleanCellValue } from "../../apps/desktop/src/lib/dataGrid/dataGridBooleanColumn.ts";
+import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "../../apps/desktop/src/lib/dataGrid/dataGridBooleanColumn.ts";
 import { resolveDataGridColumnsByResultIndex } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnMetadata.ts";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
 
@@ -20,18 +20,19 @@ test("detects boolean types using database semantics", () => {
   assert.equal(isBooleanColumnType("boolean"), true);
   assert.equal(isBooleanColumnType("bool", "postgres"), true);
   assert.equal(isBooleanColumnType("bit", "sqlserver"), true);
-  assert.equal(isBooleanColumnType("bit", "mysql"), true);
-  assert.equal(isBooleanColumnType("bit(1)", "mysql"), true);
+  assert.equal(isBooleanColumnType("boolean", "mysql"), true);
   assert.equal(isBooleanColumnType("  BOOLEAN ", "postgres"), true);
 });
 
-test("does not treat PostgreSQL bit strings or unknown bit semantics as boolean", () => {
+test("does not treat database bit strings or MySQL integer aliases as boolean", () => {
   assert.equal(isBooleanColumnType("bit", "postgres"), false);
   assert.equal(isBooleanColumnType("bit(1)", "postgres"), false);
   assert.equal(isBooleanColumnType("bit varying", "postgres"), false);
   assert.equal(isBooleanColumnType("varbit", "postgres"), false);
   assert.equal(isBooleanColumnType("bit", "opengauss"), false);
   assert.equal(isBooleanColumnType("bit", undefined), false);
+  assert.equal(isBooleanColumnType("bit", "mysql"), false);
+  assert.equal(isBooleanColumnType("bit(1)", "mysql"), false);
   assert.equal(isBooleanColumnType("bit(8)", "mysql"), false);
   assert.equal(isBooleanColumnType("tinyint(1)", "mysql"), false);
   assert.equal(isBooleanColumnType(undefined, "mysql"), false);
@@ -51,26 +52,31 @@ test("normalizes raw cell values to a tri-state boolean", () => {
   assert.equal(normalizeBooleanCellValue("maybe"), null);
 });
 
-test("shows checkboxes only for recognized boolean cell values", () => {
-  assert.equal(isBooleanCheckboxValue(true), true);
-  assert.equal(isBooleanCheckboxValue(0), true);
-  assert.equal(isBooleanCheckboxValue("false"), true);
-  assert.equal(isBooleanCheckboxValue(null), true);
-  assert.equal(isBooleanCheckboxValue(undefined), false);
-  assert.equal(isBooleanCheckboxValue("maybe"), false);
-  assert.equal(isBooleanCheckboxValue({}), false);
+test("opens boolean editors only for recognized boolean cell values", () => {
+  assert.equal(isBooleanCellValue(true), true);
+  assert.equal(isBooleanCellValue(0), true);
+  assert.equal(isBooleanCellValue("false"), true);
+  assert.equal(isBooleanCellValue(null), true);
+  assert.equal(isBooleanCellValue(undefined), false);
+  assert.equal(isBooleanCellValue("maybe"), false);
+  assert.equal(isBooleanCellValue({}), false);
 });
 
-test("cycles true -> false -> true for NOT NULL columns", () => {
-  assert.equal(nextBooleanCellValue(true, false), false);
-  assert.equal(nextBooleanCellValue(false, false), true);
-  assert.equal(nextBooleanCellValue(null, false), true);
+test("normalizes boolean values for the enum-style editor", () => {
+  assert.deepEqual(BOOLEAN_CELL_EDITOR_VALUES, ["true", "false"]);
+  assert.equal(booleanCellEditorValue(true), "true");
+  assert.equal(booleanCellEditorValue(1), "true");
+  assert.equal(booleanCellEditorValue(false), "false");
+  assert.equal(booleanCellEditorValue("0"), "false");
+  assert.equal(booleanCellEditorValue(null), "");
+  assert.equal(booleanCellEditorValue("maybe"), "");
 });
 
-test("cycles true -> false -> null -> true for nullable columns", () => {
-  assert.equal(nextBooleanCellValue(true, true), false);
-  assert.equal(nextBooleanCellValue(false, true), null);
-  assert.equal(nextBooleanCellValue(null, true), true);
+test("parses explicit enum-style boolean selections", () => {
+  assert.equal(parseBooleanCellEditorValue("true"), true);
+  assert.equal(parseBooleanCellEditorValue("false"), false);
+  assert.equal(parseBooleanCellEditorValue(null), null);
+  assert.equal(parseBooleanCellEditorValue("maybe"), undefined);
 });
 
 test("indexes table metadata once and resolves source-column aliases", () => {
@@ -87,18 +93,14 @@ test("indexes table metadata once and resolves source-column aliases", () => {
   assert.equal(resolved[2], undefined);
 });
 
-test("runs canvas selection before toggling a checkbox", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const start = source.indexOf("function onCanvasMouseDown");
-  const end = source.indexOf("function onCanvasContext", start);
-  const handler = source.slice(start, end);
-  const selectionIndex = handler.indexOf("handleDataCellMousedown");
-  const toggleIndex = handler.indexOf("tryCycleBooleanCheckboxOnCanvasMouseDown");
+test("uses the enum editor for boolean cells without checkbox rendering or click cycling", () => {
+  const gridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const rendererSource = readFileSync("apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts", "utf8");
 
-  assert.ok(start >= 0 && end > start);
-  assert.ok(selectionIndex >= 0);
-  assert.ok(toggleIndex >= 0);
-  assert.ok(selectionIndex < toggleIndex);
+  assert.match(gridSource, /v-else-if="isBooleanGridCell\([^\n]+"[\s\S]*?v-model="booleanEditorModelValue"[\s\S]*?:values="BOOLEAN_CELL_EDITOR_VALUES"/);
+  assert.match(gridSource, /@commit="commitBooleanGridEdit"/);
+  assert.doesNotMatch(gridSource, /cycleBooleanCellValue|tryCycleBooleanCheckboxOnCanvasMouseDown|booleanCellChecked/);
+  assert.doesNotMatch(rendererSource, /drawBooleanCheckbox|BOOLEAN_CHECKBOX_SIZE|columnIsBoolean/);
 });
 
 test("uses the indexed metadata lookup in grid hot paths", () => {

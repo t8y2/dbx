@@ -476,6 +476,7 @@ fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
     }
 
     match pg_type.kind() {
+        Kind::Enum(_) => false,
         Kind::Array(element_type) => element_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
         Kind::Simple => pg_scalar_type_requires_text_protocol(pg_type.oid(), col_type),
         _ => pg_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
@@ -1441,11 +1442,27 @@ async fn stream_query_rows_text_on_client(
 }
 
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, String> {
-    let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
-    connect_with_local_timezone(url, fallback_timeout, &timezone).await
+    #[cfg(all(windows, target_vendor = "win7"))]
+    {
+        connect_with_optional_local_timezone(url, fallback_timeout, None).await
+    }
+
+    #[cfg(not(all(windows, target_vendor = "win7")))]
+    {
+        let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+        connect_with_local_timezone(url, fallback_timeout, &timezone).await
+    }
 }
 
 async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, timezone: &str) -> Result<Pool, String> {
+    connect_with_optional_local_timezone(url, fallback_timeout, Some(timezone)).await
+}
+
+async fn connect_with_optional_local_timezone(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: Option<&str>,
+) -> Result<Pool, String> {
     let url_with_keepalive = inject_postgres_keepalive_params(url);
     let postgres_url = postgres_connection_url(&url_with_keepalive)?;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -1488,7 +1505,9 @@ async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, time
         let client =
             pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {}", pg_pool_error_to_string(e)))?;
         if !pg_url_has_timezone_setting(url) {
-            set_automatic_postgres_timezone(&client, timezone).await?;
+            if let Some(timezone) = timezone {
+                set_automatic_postgres_timezone(&client, timezone).await?;
+            }
         }
 
         Ok(pool)
@@ -4784,6 +4803,21 @@ mod tests {
             Type::new("_record".to_string(), Type::RECORD_ARRAY.oid(), Kind::Simple, "pg_catalog".to_string());
         assert!(pg_type_requires_text_protocol(&dynamic_record, PgColType::Other));
         assert!(pg_type_requires_text_protocol(&dynamic_record_array, PgColType::GenericArray));
+    }
+
+    #[test]
+    fn postgres_enum_keeps_binary_protocol() {
+        let enum_type = Type::new(
+            "withdraw_btc_status".to_string(),
+            98_765,
+            Kind::Enum(vec!["pending".to_string(), "completed".to_string()]),
+            "risk".to_string(),
+        );
+        let enum_array =
+            Type::new("_withdraw_btc_status".to_string(), 98_766, Kind::Array(enum_type.clone()), "risk".to_string());
+
+        assert!(!pg_type_requires_text_protocol(&enum_type, PgColType::Other));
+        assert!(pg_type_requires_text_protocol(&enum_array, PgColType::GenericArray));
     }
 
     #[test]

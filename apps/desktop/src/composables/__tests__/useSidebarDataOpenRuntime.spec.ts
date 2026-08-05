@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
+import type { DataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import type { QueryTab, TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   databaseType: "oceanbase" as string,
   callOrder: [] as string[],
   tabs: [] as QueryTab[],
+  activeTabId: null as string | null,
   cachedMetadata: undefined as unknown,
-  reuseDataTab: false,
+  dataTabReuseMode: "same-table" as DataTabReuseMode,
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   loadTableMetadata: vi.fn(),
@@ -27,10 +29,16 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({
     tabs: mocks.tabs,
+    get activeTabId() {
+      return mocks.activeTabId;
+    },
     createTab: (connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string, _initialSql?: string, catalog?: string, options: { forceNew?: boolean } = {}) => {
       if (!options.forceNew) {
         const existing = mocks.tabs.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
-        if (existing) return existing.id;
+        if (existing) {
+          mocks.activeTabId = existing.id;
+          return existing.id;
+        }
       }
       const tab = {
         id: `tab-${mocks.tabs.length + 1}`,
@@ -47,9 +55,12 @@ vi.mock("@/stores/queryStore", () => ({
         isExplaining: false,
       } as QueryTab;
       mocks.tabs.push(tab);
+      mocks.activeTabId = tab.id;
       return tab.id;
     },
-    switchTab: vi.fn(),
+    switchTab: vi.fn((id: string) => {
+      mocks.activeTabId = id;
+    }),
     cancelTabExecution: mocks.cancelTabExecution,
     setExecutingWithId: (id: string, executionId: string) => {
       const tab = mocks.tabs.find((item) => item.id === id);
@@ -76,7 +87,7 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { reuseDataTab: mocks.reuseDataTab, pageSize: 100 } }),
+  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: mocks.dataTabReuseMode, pageSize: 100 } }),
 }));
 
 vi.mock("@/lib/database/jdbcDialect", () => ({
@@ -127,8 +138,9 @@ describe("useSidebarDataOpenRuntime", () => {
     mocks.databaseType = "oceanbase";
     mocks.callOrder.length = 0;
     mocks.tabs.length = 0;
+    mocks.activeTabId = null;
     mocks.cachedMetadata = undefined;
-    mocks.reuseDataTab = false;
+    mocks.dataTabReuseMode = "same-table";
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM users");
     mocks.executeTabSql.mockImplementation(async () => {
@@ -153,24 +165,23 @@ describe("useSidebarDataOpenRuntime", () => {
     });
   });
 
-  it("creates a new sidebar tab for the same table when reuse is disabled", async () => {
+  it("creates a new sidebar tab for the same table in always-new mode", async () => {
+    mocks.dataTabReuseMode = "always-new";
+
     await useSidebarDataOpenRuntime().openData(tableNode);
     await useSidebarDataOpenRuntime().openData(tableNode);
 
     expect(mocks.tabs).toHaveLength(2);
   });
 
-  it("reuses a sidebar tab for the same table when reuse is enabled", async () => {
-    mocks.reuseDataTab = true;
-
+  it("reuses a sidebar tab for the same table in same-table mode", async () => {
     await useSidebarDataOpenRuntime().openData(tableNode);
     await useSidebarDataOpenRuntime().openData(tableNode);
 
     expect(mocks.tabs).toHaveLength(1);
   });
 
-  it("keeps different sidebar tables independent when reuse is enabled", async () => {
-    mocks.reuseDataTab = true;
+  it("keeps different sidebar tables independent in same-table mode", async () => {
     const ordersNode = { ...tableNode, id: "table-orders", label: "orders" };
 
     await useSidebarDataOpenRuntime().openData(tableNode);
@@ -180,8 +191,68 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.tabs.map((tab) => tab.title)).toEqual(["users", "orders"]);
   });
 
-  it("creates a new HBase tab for the same table when reuse is disabled", async () => {
+  it("reuses the active safe data tab for a different table in active-tab mode", async () => {
+    mocks.dataTabReuseMode = "active-tab";
+    const ordersNode = { ...tableNode, id: "table-orders", label: "orders" };
+    mocks.loadTableMetadata.mockImplementation(async (request: { database: string; schema?: string; tableName: string; tableType?: string }) => ({
+      metadata: {
+        schema: request.schema,
+        tableName: request.tableName,
+        tableType: request.tableType ?? "TABLE",
+        database: request.database,
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    }));
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    mocks.tabs[0]!.isExecuting = false;
+    mocks.tabs[0]!.executionId = undefined;
+    await useSidebarDataOpenRuntime().openData(ordersNode);
+
+    expect(mocks.tabs).toHaveLength(1);
+    expect(mocks.tabs[0]?.title).toBe("orders");
+    expect(mocks.tabs[0]?.tableMeta?.tableName).toBe("orders");
+  });
+
+  it.each([
+    ["pinned", { pinned: true }],
+    ["executing", { isExecuting: true, executionId: "running" }],
+    ["pending edits", { pendingDataChangeCount: 1 }],
+  ])("opens a new tab instead of replacing an active %s data tab", async (_label, patch) => {
+    mocks.dataTabReuseMode = "active-tab";
+    const activeTab = {
+      id: "active-users",
+      connectionId: "connection-1",
+      database: "app",
+      title: "users",
+      mode: "data",
+      schema: "public",
+      sql: "SELECT * FROM users",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      tableMeta: { schema: "public", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
+      ...patch,
+    } as QueryTab;
+    mocks.tabs.push(activeTab);
+    mocks.activeTabId = activeTab.id;
+
+    await useSidebarDataOpenRuntime().openData({ ...tableNode, id: "table-orders", label: "orders" });
+
+    expect(mocks.tabs).toHaveLength(2);
+    expect(mocks.tabs[0]?.title).toBe("users");
+    expect(mocks.tabs[1]?.title).toBe("orders");
+    expect(mocks.cancelTabExecution).not.toHaveBeenCalledWith(activeTab.id);
+  });
+
+  it("creates a new HBase tab for the same table in always-new mode", async () => {
     mocks.databaseType = "hbase";
+    mocks.dataTabReuseMode = "always-new";
 
     await useSidebarDataOpenRuntime().openData(tableNode);
     await useSidebarDataOpenRuntime().openData(tableNode);
@@ -189,9 +260,8 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.tabs).toHaveLength(2);
   });
 
-  it("keeps different HBase tables independent when reuse is enabled", async () => {
+  it("keeps different HBase tables independent in same-table mode", async () => {
     mocks.databaseType = "hbase";
-    mocks.reuseDataTab = true;
 
     await useSidebarDataOpenRuntime().openData(tableNode);
     await useSidebarDataOpenRuntime().openData({ ...tableNode, id: "table-orders", label: "orders" });
@@ -352,11 +422,7 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.tabs[0]?.tableMetaPending).toBe(true);
   });
 
-  it("aborts when a newer navigation takes over the tab during the cancel wait", async () => {
-    mocks.reuseDataTab = true;
-    const { beginDataTabNavigation } = await import("@/lib/tabs/dataTabNavigationGeneration");
-    // 已存在同表 data tab 且有在途执行：真实 findExistingDataTabCandidate 会
-    // 选中它（same-table 复用分支），openData 需先等待取消
+  it("activates an already-running same-table tab without cancelling it", async () => {
     mocks.tabs.push({
       id: "existing-tab",
       connectionId: "connection-1",
@@ -370,29 +436,22 @@ describe("useSidebarDataOpenRuntime", () => {
       executionId: "stale-execution",
       isCancelling: false,
       isExplaining: false,
-      tableMeta: { schema: "public", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        primaryKeys: ["id"],
+      },
+      tableMetaUpdatedAt: Date.now(),
     } as QueryTab);
-    let releaseCancel: () => void = () => {};
-    mocks.cancelTabExecution.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        releaseCancel = resolve;
-      }),
-    );
-    const open = useSidebarDataOpenRuntime().openData(tableNode);
-    await vi.waitFor(() => expect(mocks.cancelTabExecution).toHaveBeenCalledWith("existing-tab"));
-    // 复用既有 tab，而非新建
+    mocks.activeTabId = null;
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
     expect(mocks.tabs).toHaveLength(1);
-
-    // 取消等待期间，更晚的导航（如 openTableTarget）接管该 tab
-    beginDataTabNavigation("existing-tab");
-    const takeoverMeta = { schema: "public", tableName: "other_table", tableType: "TABLE", columns: [], primaryKeys: [] };
-    mocks.tabs[0]!.tableMeta = takeoverMeta;
-
-    releaseCancel();
-    await open;
-
-    // 旧 openData 必须让位：不得覆盖新导航写入的身份，不得启动查询
-    expect(mocks.tabs[0]?.tableMeta).toBe(takeoverMeta);
+    expect(mocks.activeTabId).toBe("existing-tab");
+    expect(mocks.cancelTabExecution).not.toHaveBeenCalled();
     expect(mocks.executeTabSql).not.toHaveBeenCalled();
     expect(mocks.loadTableMetadata).not.toHaveBeenCalled();
   });

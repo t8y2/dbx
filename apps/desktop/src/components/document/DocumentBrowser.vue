@@ -1640,10 +1640,10 @@ defineExpose({ focusSearch });
             </span>
           </label>
           <DataGridCopyFormatControl
-            :current-label="dataGridRef?.defaultCopyExtractorLabel ?? '-'"
-            :current-value="dataGridRef?.defaultCopyExtractor ?? ''"
-            :items="dataGridRef?.copyExtractorMenuItems ?? []"
-            @select="dataGridRef?.setDefaultCopyExtractor($event)"
+            :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+            :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+            :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+            @select="dataGridRef?.setDefaultCopyPreference($event)"
             @configure="openDataGridExtractorConfiguration"
           />
         </PopoverContent>

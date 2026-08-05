@@ -357,6 +357,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v5
 
@@ -377,6 +378,9 @@ jobs:
           toolchain: nightly-2026-07-22
           components: rust-src
 
+      # sccache must be set up before the WebView2 loader/runtime scripts: they
+      # run `cargo fetch` under the job-wide RUSTC_WRAPPER=sccache, so installing
+      # sccache only after them made cargo abort with "program not found".
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
@@ -403,6 +407,18 @@ jobs:
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
           } >> "$GITHUB_ENV"
 
+      - name: Prepare Win7-compatible WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
+
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -416,13 +432,16 @@ jobs:
         run: pnpm build
 
       - name: Build DBX for Windows 7
-        run: cargo build --locked --package dbx --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
-
-      - name: Prepare WebView2 109 offline runtime
         shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+        run: |
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
-      - name: Bundle and upload Windows 7 offline installer
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
+      - name: Bundle and upload Windows 7 fixed-runtime installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -438,15 +457,17 @@ jobs:
             exit 1
           }
 
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-offline.conf.json
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-fixed.conf.json
 
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
           if (!$installer) {
-            Write-Error "Missing Windows 7 WebView2 offline installer in ${bundleDir}"
+            Write-Error "Missing Windows 7 fixed-runtime installer in ${bundleDir}"
             exit 1
           }
+
+          ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
 
           Copy-Item $installer.FullName $offlineName -Force
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber

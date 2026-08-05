@@ -338,3 +338,44 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(expandedPaneCss).not.toContain("height 150ms");
   });
 });
+
+describe("DataGridConditionEditor Chinese column matching", () => {
+  function mountChineseColumns() {
+    return mountEditor("where", "", { columns: ["总租金", "租赁日期", "amount"] });
+  }
+
+  async function typeToken(input: HTMLTextAreaElement, token: string) {
+    input.focus();
+    input.value = token;
+    input.setSelectionRange(token.length, token.length);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("matches a single Han character anywhere in the column name", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "金");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("matches pinyin initials and initials subsequences", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "zzj");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+
+    await typeToken(input, "zj");
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("still matches plain English columns", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "am");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("amount");
+  });
+});

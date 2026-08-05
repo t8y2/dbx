@@ -22,7 +22,7 @@ export function elasticsearchRestRequestRanges(sql: string, databaseType?: Datab
   return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
-const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "neo4j"]);
+const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "neo4j", "victoriametrics"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
   return !!databaseType && (databaseType === "redis" || isElasticsearchCompatibleDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
@@ -444,7 +444,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     }
     // Block comments consume until the closing */.
     if (ch === "/" && next === "*") {
-      if (statementStart === -1 && pendingHintStart === -1 && sql[i + 2] === "+") pendingHintStart = i;
+      const hintMarker = sql[i + 2];
+      if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@")) pendingHintStart = i;
       const close = sql.indexOf("*/", i + 2);
       i = close === -1 ? len : close + 2;
       continue;

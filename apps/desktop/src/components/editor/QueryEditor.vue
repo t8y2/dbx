@@ -11,6 +11,7 @@ import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
+import { completionMatchRanges } from "@/lib/common/completionMatch";
 import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
@@ -24,6 +25,7 @@ import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/edito
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
+import { convertSqlSelectionCase, type SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -59,7 +61,21 @@ import {
   type SqlCompletionScope,
 } from "@/lib/sql/sqlCompletionLookupTarget";
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
-import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationSourceKind, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import {
+  extractIdentifierDetailsAt,
+  isSqlKeyword,
+  matchSqlObject,
+  matchTable,
+  mergeSqlObjectNavigationType,
+  resolveSqlObjectNavigationIdentity,
+  splitQualifiedIdentifier,
+  sqlObjectHoverDetail,
+  sqlObjectNavigationSourceKind,
+  sqlObjectNavigationTarget,
+  sqlObjectNavigationTargetFromIdentity,
+  sqlObjectNavigationTypeFromCompletionObjectType,
+  type SqlObjectNavigationTarget,
+} from "@/lib/sql/sqlNavigation";
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
@@ -419,7 +435,6 @@ function runStatementGutterExtension(markers = props.statementExecutionMarkers ?
   return shouldShowStatementGutter(showRunButtons, markers.length) ? (buildRunStatementGutterExtension?.() ?? []) : [];
 }
 
-type SelectionCaseMode = "upper" | "lower";
 let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
 let editorScrollbarPointerCleanup: (() => void) | null = null;
 let editorSelectionDragCleanup: (() => void) | null = null;
@@ -622,6 +637,7 @@ function emitExecutionRequest(source: SqlExecutionOverride, openInNewResultTab =
 function requestExecute(options: RequestExecuteOptions = {}) {
   const currentView = view.value;
   if (!currentView) return false;
+  currentView.focus();
   return requestExecuteFromView(currentView, currentView.state.selection.main.head, options);
 }
 
@@ -1076,17 +1092,17 @@ function selectAllSqlFromContextMenu() {
   focusEditor();
 }
 
-function convertSelectedSqlCase(mode: SelectionCaseMode): boolean {
+function convertSelectedSqlCase(mode: SqlSelectionCaseMode): boolean {
   const currentView = view.value;
   const EditorSelection = codeMirrorEditorSelection;
   if (!currentView || !EditorSelection) return false;
 
   const state = currentView.state;
+  const documentText = state.doc.toString();
   const transaction = state.changeByRange((range) => {
     if (range.empty) return { range };
 
-    const selectedText = state.sliceDoc(range.from, range.to);
-    const convertedText = mode === "upper" ? selectedText.toUpperCase() : selectedText.toLowerCase();
+    const convertedText = convertSqlSelectionCase(documentText, { from: range.from, to: range.to }, mode, sqlBehaviorDialect());
     return {
       changes: { from: range.from, to: range.to, insert: convertedText },
       range: EditorSelection.range(range.from, range.from + convertedText.length),
@@ -1473,7 +1489,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 
 function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean {
   const databaseType = props.databaseType;
-  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" ? "text" : "sql";
+  const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "victoriametrics" ? "text" : "sql";
   return extendQueryEditorSelection(currentView, {
     databaseType,
     dialect: props.syntaxDialect ?? props.dialect,
@@ -1672,7 +1688,7 @@ function getInsertValueHintTableColumns(table: string, schema?: string, database
 
 function requestInsertValueHintTableColumns(table: string, schema?: string, database?: string) {
   if (!props.connectionId || props.database == null) return;
-  if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") return;
+  if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "victoriametrics") return;
   const cacheKey = insertHintCacheKey({ name: table, schema, database });
   const hasCachedColumns = props.databaseType === "sqlserver" ? cachedInsertValueHintColumnsByTable.has(cacheKey) : cachedColumnsByTable.has(cacheKey);
   if (hasCachedColumns || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
@@ -2106,7 +2122,7 @@ function invalidateSemanticDiagnosticsForDocumentChange() {
 }
 
 function shouldSkipSqlSemanticDiagnostics() {
-  return props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
+  return props.databaseType === "victoriametrics" || (props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 }
 
 function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {
@@ -2232,7 +2248,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     setSemanticDiagnostics([]);
     return;
   }
-  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
+  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "victoriametrics") {
     setSemanticDiagnostics([]);
     return;
   }
@@ -2347,6 +2363,7 @@ function scheduleSemanticDiagnostics(delay = 500, options: { preserveOutsideRang
 
 async function formatCurrentSql() {
   if (props.readOnly) return;
+  if (props.databaseType === "victoriametrics") return;
   const currentView = view.value;
   if (!currentView) return;
 
@@ -2506,14 +2523,39 @@ function consumeSqlCompletionAutoStartSuppression() {
   return true;
 }
 
-function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp) {
+function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp, prefix?: string) {
   if (items.length === 0) return null;
+  const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
+  const resultItems = bypassFilter && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
   return {
     from,
     // Keep CodeMirror's live filtering enabled so an already-open menu follows the typed prefix.
-    options: items.map((item) => completionOptionForItem(item)),
+    options: resultItems.map((item) => completionOptionForItem(item)),
     validFor,
+    // When bypassing CodeMirror's matcher, supply our own highlight ranges so
+    // the matched characters (Han substring or pinyin initials) stay marked.
+    // Ranges must target the rendered text, which is displayLabel when set.
+    ...(bypassFilter && prefix ? { filter: false as const, getMatch: (option: { label: string; displayLabel?: string }) => completionMatchRanges(option.displayLabel ?? option.label, prefix) } : {}),
   };
+}
+
+// CodeMirror's built-in matcher only matches single-character queries against
+// the label start, and cannot match pinyin initials against Han labels. Our
+// provider already filters and ranks items itself (substring + pinyin), so
+// skip the second-stage filter exactly in the cases it would break.
+function shouldBypassCompletionFilter(prefix: string, items: QueryCompletionItem[]): boolean {
+  if (!prefix) return false;
+  if (/\p{Script=Han}/u.test(prefix)) return true;
+  return /^[a-z0-9]+$/i.test(prefix) && items.some((item) => /\p{Script=Han}/u.test(item.label));
+}
+
+function completionItemsForBypassedFilter(prefix: string, items: QueryCompletionItem[]): QueryCompletionItem[] {
+  if ([...prefix].length !== 1 || !/^[a-z0-9]$/i.test(prefix)) return items;
+  const normalized = prefix.toLowerCase();
+  return items.filter((item) => {
+    const renderedLabel = "displayLabel" in item && typeof item.displayLabel === "string" ? item.displayLabel : item.label;
+    return /\p{Script=Han}/u.test(item.label) || renderedLabel.toLowerCase().startsWith(normalized);
+  });
 }
 
 function localCompletionDatabaseNames(completionContext: ReturnType<typeof getSqlCompletionContext>): string[] {
@@ -2540,7 +2582,7 @@ function localCompletionSchemasForDatabaseDisambiguation(completionContext: Retu
 }
 
 function shouldInsertSqlCompletionSpace(): boolean {
-  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch";
+  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics";
 }
 
 function completionOptionForItem(item: QueryCompletionItem) {
@@ -2723,6 +2765,7 @@ async function provideSqlCompletions(context: CompletionContext) {
   if (props.databaseType === "redis") {
     return provideRedisCompletions(currentState, position, explicit);
   }
+  if (props.databaseType === "victoriametrics") return null;
   const hasDatabase = props.database != null;
 
   const epoch = ++completionEpoch;
@@ -2761,7 +2804,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         supportsSessionDatabaseSwitch: sqlServerContext.supports_session_database_switch,
       });
       const items = buildSqlServerUseDatabaseCompletionItems(databaseNames, useDatabaseCompletion);
-      return buildCompletionResult(items, useDatabaseCompletion.from);
+      return buildCompletionResult(items, useDatabaseCompletion.from, undefined, useDatabaseCompletion.prefix);
     }
 
     const legacyCompletionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
@@ -2783,7 +2826,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
     }
 
     const useDatabase = props.databaseType === "sqlserver" ? sqlServerUseDatabaseBeforeCursor(fullDoc, position) : undefined;
@@ -2843,7 +2886,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       });
-      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+      return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
     }
 
     const tableNameCompletion = isTableNameCompletionContext(completionContext);
@@ -2930,6 +2973,7 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   if (props.databaseType === "mongodb") {
     return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
   }
+  if (props.databaseType === "victoriametrics") return false;
   if (!insertedText && removedText) {
     const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
     return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
@@ -3060,7 +3104,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
 }
 
 function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
@@ -3520,7 +3564,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
   });
 
-  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
+  return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
 }
 
 function isReferencedTableQualifier(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {
@@ -3969,7 +4013,7 @@ onMounted(async () => {
         const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
         let insertValueHints: Array<{ from: number; column: string }> = [];
         try {
-          if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch") {
+          if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics") {
             const statementSql = view.state.doc.sliceString(range.from, range.to);
             if (/\binsert\b/i.test(statementSql)) {
               insertValueHints = parseInsertValueHints(statementSql, { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
@@ -4122,7 +4166,7 @@ onMounted(async () => {
       sqlSignatureComp.of(buildSqlSignatureExtension()),
       diagnosticComp.of(buildSqlDiagnosticExtension()),
       createInsertValueHintsExtension({
-        isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch",
+        isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics",
         getTableColumns: getInsertValueHintTableColumns,
         requestTableColumns: requestInsertValueHintTableColumns,
       }),
@@ -4285,22 +4329,113 @@ onMounted(async () => {
           event.preventDefault();
           setTimeout(async () => {
             try {
-              const identifierParts = splitQualifiedIdentifier(identifier);
-              const tableLookupFilter = identifierParts[identifierParts.length - 1] ?? identifier;
+              // Single identity model: quote flags + role (relation column list vs routine call vs unknown).
+              const identity = resolveSqlObjectNavigationIdentity(doc, pos);
+              if (!identity) return;
 
-              // Ensure table cache is populated
+              const identifierParts = identity.parts.map((part) => part.value);
+              const tableLookupFilter = identity.name;
+              const objectNameFilter = identity.name;
+              // 3-part schema.package.member; 2-part stays ambiguous until metadata resolves it.
+              const objectParentHint = identity.parts.length >= 3 ? identity.qualifier : undefined;
+              const objectSchemaHint = identity.parts.length >= 3 ? identity.schema : identity.parts.length === 1 ? props.schema : undefined;
+              const isRoutineCall = identity.role === "routine_call";
+              const isRelationColumnList = identity.role === "relation_column_list";
+
+              // 1. Local table cache (sync). Relation column lists always prefer tables over routines.
               if (cachedTables.length === 0) {
-                // Some metadata providers only accept table-name masks, not schema.table masks.
-                cachedTables = usesLocalOnlyCompletionMetadata()
-                  ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, props.catalog)
-                  : await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, false, props.schema, props.catalog);
+                cachedTables = connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, props.catalog);
               }
 
-              // 1. Check if it's a table name
-              const matchedTable = matchTable(identifier, cachedTables);
+              let matchedTable = matchTable(identifier, cachedTables);
               if (matchedTable) {
                 emit("clickTable", sqlObjectNavigationTarget(matchedTable));
                 return;
+              }
+
+              const preserveOracleStoreCase = (value?: string) => !!value && value !== value.toUpperCase();
+              const openMatchedObject = (matchedObject: { name: string; schema?: string; type: string; signature?: string; parentName?: string; parentSchema?: string }) => {
+                const navigationType = sqlObjectNavigationTypeFromCompletionObjectType(matchedObject.type);
+                if (!navigationType) return false;
+                // Metadata names are store-correct; mark mixed-case (or click-quoted) so Oracle normalize won't force UPPER.
+                emit(
+                  "openObjectSource",
+                  sqlObjectNavigationTarget({
+                    name: matchedObject.name,
+                    schema: matchedObject.schema,
+                    type: navigationType,
+                    signature: matchedObject.signature,
+                    parentName: matchedObject.parentName,
+                    parentSchema: matchedObject.parentSchema,
+                    nameQuoted: identity.nameQuoted || preserveOracleStoreCase(matchedObject.name),
+                    schemaQuoted: matchedObject.schema ? identity.schemaQuoted || identity.qualifierQuoted || preserveOracleStoreCase(matchedObject.schema) : undefined,
+                    parentNameQuoted: matchedObject.parentName ? identity.qualifierQuoted || preserveOracleStoreCase(matchedObject.parentName) : undefined,
+                    parentSchemaQuoted: matchedObject.parentSchema ? identity.schemaQuoted || preserveOracleStoreCase(matchedObject.parentSchema) : undefined,
+                  }),
+                  false,
+                );
+                return true;
+              };
+
+              // 1b. Local routine cache — skip for pure relation column lists (INSERT INTO t(...)).
+              if (!isRelationColumnList) {
+                const localObjects = connectionStore.lookupLocalCompletionObjects(props.connectionId!, props.database!, objectNameFilter, MAX_COMPLETION_TABLES, props.schema);
+                let matchedObject = matchSqlObject(identifier, localObjects);
+                if (matchedObject && openMatchedObject(matchedObject)) return;
+
+                if (!usesLocalOnlyCompletionMetadata()) {
+                  // Disambiguate schema.routine vs package.member with small scoped lookups (no global scan).
+                  if (identity.parts.length === 2 && identity.qualifier) {
+                    // Prefer package.member under session schema (Oracle common: PKG.MEMBER()).
+                    const packageObjects = await connectionStore.listCompletionObjects(props.connectionId!, props.database!, objectNameFilter, 20, props.schema, identity.qualifier, false, props.schema, ["routine"]);
+                    matchedObject = matchSqlObject(identifier, packageObjects);
+                    if (matchedObject && openMatchedObject(matchedObject)) return;
+
+                    // Then schema.routine with qualifier as owner.
+                    const schemaObjects = await connectionStore.listCompletionObjects(props.connectionId!, props.database!, objectNameFilter, 20, identity.qualifier, undefined, false, props.schema, ["routine"]);
+                    matchedObject = matchSqlObject(identifier, schemaObjects);
+                    if (matchedObject && openMatchedObject(matchedObject)) return;
+                  } else {
+                    const scopedObjects = await connectionStore.listCompletionObjects(props.connectionId!, props.database!, objectNameFilter, 20, objectSchemaHint, objectParentHint, false, props.schema, ["routine"]);
+                    matchedObject = matchSqlObject(identifier, scopedObjects);
+                    if (matchedObject && openMatchedObject(matchedObject)) return;
+                  }
+                }
+              }
+
+              // 1c. Remote table metadata — never skip for relation column lists or unknown identifiers.
+              // Routine-call sites may still hit this when a table and procedure share a name and
+              // local caches were empty; table wins only if listed as a relation.
+              if (!usesLocalOnlyCompletionMetadata() && (!isRoutineCall || isRelationColumnList || identity.role === "unknown")) {
+                cachedTables = await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, false, props.schema, props.catalog);
+                matchedTable = matchTable(identifier, cachedTables);
+                if (matchedTable) {
+                  emit("clickTable", sqlObjectNavigationTarget(matchedTable));
+                  return;
+                }
+              } else if (!usesLocalOnlyCompletionMetadata() && isRoutineCall) {
+                // Lightweight table check so INSERT INTO ORDERS(…) is not the only guarded path —
+                // still avoid global scans: only session-scoped prefix lookup.
+                cachedTables = await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, 20, props.schema, false, props.schema, props.catalog);
+                matchedTable = matchTable(identifier, cachedTables);
+                if (matchedTable) {
+                  emit("clickTable", sqlObjectNavigationTarget(matchedTable));
+                  return;
+                }
+              }
+
+              // 1d. Optimistic routine open only for confirmed call sites after metadata + table checks.
+              if (isRoutineCall) {
+                const optimistic = sqlObjectNavigationTargetFromIdentity(identity, {
+                  fallbackSchema: props.schema,
+                  preferType: "procedure",
+                  // 2-part: package.member under session schema (not schema.routine).
+                  asPackageMember: identity.twoPartAmbiguous,
+                });
+                if (optimistic) {
+                  emit("openObjectSource", optimistic, false);
+                  return;
+                }
               }
 
               // 2. Parse SQL at click position to get referenced tables
@@ -4614,7 +4749,7 @@ watch(
 watch(
   () => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled,
   (enabled) => {
-    if (props.databaseType === "redis") return;
+    if (props.databaseType === "redis" || props.databaseType === "victoriametrics") return;
     if (!shouldSkipSqlSemanticDiagnostics() && enabled) {
       scheduleSemanticDiagnostics(0);
       return;

@@ -8,7 +8,8 @@ async fn connect_sqlserver() -> sqlserver::SqlServerClient {
     let port = std::env::var("DBX_TEST_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
     let user = std::env::var("DBX_TEST_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_TEST_SQLSERVER_PASSWORD").expect("DBX_TEST_SQLSERVER_PASSWORD");
-    sqlserver::connect_with_port_explicit(&host, port, true, &user, &password, Some("master"), Duration::from_secs(15))
+    let database = std::env::var("DBX_TEST_SQLSERVER_DATABASE").unwrap_or_else(|_| "master".to_string());
+    sqlserver::connect_with_port_explicit(&host, port, true, &user, &password, Some(&database), Duration::from_secs(15))
         .await
         .expect("connect to SQL Server")
 }
@@ -51,6 +52,83 @@ async fn sqlserver_insert_select_reports_affected_rows() {
     assert_eq!(result.affected_rows, 3);
     assert!(result.columns.is_empty());
     assert!(result.rows.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_transaction_batch_reports_affected_rows() {
+    let mut client = connect_sqlserver().await;
+    sqlserver::execute_simple_batch_with_max_rows(
+        &mut client,
+        "CREATE TABLE #dbx_transaction_rows (id INT NOT NULL PRIMARY KEY, value INT NOT NULL); \
+         INSERT INTO #dbx_transaction_rows (id, value) VALUES (1, 0), (2, 0), (3, 0), (4, 0);",
+        None,
+    )
+    .await
+    .expect("create transaction row-count fixture");
+
+    let plain = sqlserver::execute_query(
+        &mut client,
+        "UPDATE #dbx_transaction_rows SET value = value + 1 WHERE id IN (1, 2, 3);",
+    )
+    .await
+    .expect("execute plain UPDATE");
+    assert_eq!(plain.affected_rows, 3);
+
+    let committed = sqlserver::execute_query(
+        &mut client,
+        "BEGIN TRANSACTION; \
+         UPDATE #dbx_transaction_rows SET value = value + 1 WHERE id IN (1, 2, 3); \
+         COMMIT TRANSACTION;",
+    )
+    .await
+    .expect("execute committed transaction UPDATE");
+    assert_eq!(committed.affected_rows, 3);
+
+    let persisted =
+        sqlserver::execute_query(&mut client, "SELECT SUM(value) AS total_value FROM #dbx_transaction_rows;")
+            .await
+            .expect("read committed transaction values");
+    assert_eq!(persisted.rows[0][0].as_i64(), Some(6));
+
+    let multiple = sqlserver::execute_query(
+        &mut client,
+        "BEGIN TRANSACTION; \
+         UPDATE #dbx_transaction_rows SET value = value + 1 WHERE id IN (1, 2); \
+         DELETE FROM #dbx_transaction_rows WHERE id = 4; \
+         COMMIT TRANSACTION;",
+    )
+    .await
+    .expect("execute multiple DML statements in a committed transaction");
+    assert_eq!(multiple.affected_rows, 3);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_driver_execute_reports_balanced_transaction_rows() {
+    let mut client = connect_sqlserver().await;
+    client
+        .simple_query(
+            "CREATE TABLE #dbx_driver_transaction_rows (id INT NOT NULL PRIMARY KEY, value INT NOT NULL); \
+             INSERT INTO #dbx_driver_transaction_rows (id, value) VALUES (1, 0), (2, 0), (3, 0), (4, 0);",
+        )
+        .await
+        .expect("create driver transaction row-count fixture")
+        .into_results()
+        .await
+        .expect("drain fixture setup results");
+
+    let result = client
+        .execute(
+            "BEGIN TRANSACTION; \
+             UPDATE #dbx_driver_transaction_rows SET value = value + 1 WHERE id IN (1, 2, 3); \
+             COMMIT TRANSACTION;",
+            &[],
+        )
+        .await
+        .expect("execute balanced transaction through RPC");
+
+    assert_eq!(result.rows_affected().iter().sum::<u64>(), 3);
 }
 
 #[tokio::test]

@@ -112,6 +112,35 @@ describe("connectionStore completion assistant", () => {
     setActivePinia(createPinia());
   });
 
+  it("does not replace the active connection during a cold metadata search", async () => {
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "users", kind: "table", schema: "public" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      connectionDatabaseInfo: vi.fn().mockResolvedValue(null),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue('"'),
+      completionAssistantSearch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.activeConnectionId = "already-active";
+
+    const tables = await store.listCompletionTables("pg-1", "app", "users", 20, undefined, true, undefined, undefined, { activateConnection: false });
+
+    expect(connectDb).toHaveBeenCalledOnce();
+    expect(store.connectedIds.has("pg-1")).toBe(true);
+    expect(store.activeConnectionId).toBe("already-active");
+    expect(tables).toEqual([{ name: "users", schema: "public", type: "table" }]);
+  });
+
   it("deduplicates in-flight assistant table requests", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [{ name: "accounts", kind: "table", schema: "public" }],

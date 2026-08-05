@@ -66,6 +66,12 @@ export interface AllDatabaseExportPlanItem {
   displayName: string;
 }
 
+export interface DatabaseBackupSnapshotOptions {
+  connectionId: string;
+  database: string;
+  enabled: boolean;
+}
+
 export function buildInsertStatements(options: BuildExportInsertStatementsOptions): Promise<string[]> {
   return api.buildExportInsertStatements(options);
 }
@@ -98,6 +104,23 @@ export async function runDatabaseExportUntilTerminal(request: api.DatabaseExport
       })
       .catch(reject);
   });
+}
+
+export async function runWithDatabaseBackupSnapshot<T>(options: DatabaseBackupSnapshotOptions, operation: (snapshotSessionId: string | undefined) => Promise<T>, shouldPropagateCleanupError: (result: T) => boolean = () => true): Promise<T> {
+  if (!options.enabled) return operation(undefined);
+
+  const snapshot = await api.beginDatabaseBackupSnapshot(options.connectionId, options.database);
+  let result: T | undefined;
+  let operationCompleted = false;
+  try {
+    result = await operation(snapshot.sessionId);
+    operationCompleted = true;
+    return result;
+  } finally {
+    await api.rollbackManualTransaction(snapshot.sessionId).catch((error) => {
+      if (operationCompleted && shouldPropagateCleanupError(result as T)) throw error;
+    });
+  }
 }
 
 export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput): AllDatabaseExportPlanItem[] {

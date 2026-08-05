@@ -1,5 +1,6 @@
 import { computed, getCurrentScope, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from "vue";
 import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory, type DataGridConditionHistoryKind, type DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
+import { pinyinAwareMatchScore } from "@/lib/common/pinyin";
 
 export type DataGridConditionSuggestionKind = "column" | "keyword" | "history";
 
@@ -232,15 +233,23 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     const seen = new Set<string>();
     const suggestions: DataGridConditionSuggestion[] = [];
     if (role === "field") {
+      const scored: Array<{ suggestion: DataGridConditionSuggestion; score: number; index: number }> = [];
+      let index = 0;
       for (const column of toValue(options.columns) ?? []) {
         const columnValue = typeof column === "string" ? column : column.name;
         const normalizedValue = columnValue.toLowerCase();
-        if ((normalizedToken && (!normalizedValue.startsWith(normalizedToken) || normalizedValue === normalizedToken)) || seen.has(columnValue)) continue;
+        if ((normalizedToken && normalizedValue === normalizedToken) || seen.has(columnValue)) continue;
         seen.add(columnValue);
+        // Substring + pinyin-initials matching (金 / zzj / zj → 总租金), scored so
+        // prefix matches rank above looser ones and ties keep the column order.
+        const score = normalizedToken ? pinyinAwareMatchScore(columnValue, normalizedToken) : 0;
+        if (score < 0) continue;
         const comment = normalizedColumnComment(column);
         const insertText = target.quotedIdentifier ? columnValue : typeof column === "string" ? columnValue : column.insertText;
-        suggestions.push({ value: columnValue, kind: "column", ...(insertText !== undefined && insertText !== columnValue ? { insertText } : {}), ...(comment ? { comment } : {}) });
+        scored.push({ suggestion: { value: columnValue, kind: "column", ...(insertText !== undefined && insertText !== columnValue ? { insertText } : {}), ...(comment ? { comment } : {}) }, score, index: index++ });
       }
+      scored.sort((a, b) => b.score - a.score || a.index - b.index);
+      return scored.map((entry) => entry.suggestion);
     } else {
       for (const keyword of WHERE_CONNECTOR_KEYWORDS) {
         if (!keyword.toLowerCase().startsWith(normalizedToken) || keyword.toLowerCase() === normalizedToken) continue;

@@ -228,7 +228,13 @@ export function useSqlExecution(deps: {
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
     });
     if (producedResult === false) return;
-    if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
+    const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
+    if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
+      queryStore.setActiveResultIndex(tab.id, sqlServerMessageResultIndex);
+      deps.activeOutputView.value = "result";
+    } else if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
+      deps.activeOutputView.value = "result";
+    } else if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }
     const elapsed = Date.now() - start;
@@ -360,7 +366,7 @@ export function useSqlExecution(deps: {
 export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined, sql = ""): boolean {
   if (!connection) return false;
   if (connection.db_type === "elasticsearch" || connection.db_type === "easysearch") return !isElasticsearchRestRequestText(sql);
-  return connection.db_type !== "redis" && connection.db_type !== "mongodb";
+  return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "victoriametrics";
 }
 
 export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, _sql = ""): boolean {

@@ -41,18 +41,14 @@ type DropPosition = "before" | "after" | "inside";
 const activeConnectionIds = computed(() => new Set(connectionStore.connections.map((c) => c.id)));
 const searchText = ref("");
 const searchQuery = computed(() => searchText.value.trim().toLowerCase());
-const orphanedIds = computed(() => savedSqlStore.orphanedFileIds(activeConnectionIds.value));
 
 // Sort mode: "folder" (default tree structure) or "date" (flat list by update date)
 const sortMode = ref<"folder" | "date">("folder");
 
-function isConnectionVisible(connectionId: string) {
-  return activeConnectionIds.value.has(connectionId);
-}
-
 function getConnectionLabel(connectionId: string) {
+  if (!connectionId) return t("sqlLibrary.unassociated");
   const conn = connectionStore.connections.find((c) => c.id === connectionId);
-  return conn?.name || connectionId;
+  return conn?.name || t("sqlLibrary.deletedConnection");
 }
 
 function folderPath(folder: SavedSqlFolder) {
@@ -180,13 +176,13 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
     if (folder) {
       await writeFolder(folder, rootDir);
     } else {
-      for (const libraryFolder of savedSqlStore.allFolders.filter((item) => isConnectionVisible(item.connectionId) && !item.parentFolderId)) {
+      for (const libraryFolder of savedSqlStore.allFolders.filter((item) => !item.parentFolderId)) {
         const folderDir = await join(rootDir, sanitizeFileSystemSegment(libraryFolder.name));
         await mkdir(folderDir, { recursive: true });
         await writeFolder(libraryFolder, folderDir);
       }
 
-      const unfiled = savedSqlStore.filesWithoutFolder().filter((file) => !orphanedIds.value.has(file.id));
+      const unfiled = savedSqlStore.filesWithoutFolder();
       if (unfiled.length > 0) {
         const unfiledDir = await join(rootDir, sanitizeFileSystemSegment(t("sqlLibrary.unfiled")));
         await mkdir(unfiledDir, { recursive: true });
@@ -239,7 +235,7 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
       return;
     }
 
-    const takenNames = new Set((targetFolder ? savedSqlStore.filesInFolder(targetFolder.id) : savedSqlStore.filesWithoutFolder()).filter((file) => !orphanedIds.value.has(file.id)).map((file) => file.name));
+    const takenNames = new Set((targetFolder ? savedSqlStore.filesInFolder(targetFolder.id) : savedSqlStore.filesWithoutFolder()).map((file) => file.name));
 
     for (const path of sqlPaths) {
       const content = await api.readExternalSqlFile(path);
@@ -320,11 +316,11 @@ function folderMatchesQuery(folder: SavedSqlFolder) {
   const q = searchQuery.value;
   if (!q) return true;
   if (folder.name.toLowerCase().includes(q)) return true;
-  return savedSqlStore.filesInFolder(folder.id).some((file) => !orphanedIds.value.has(file.id) && fileMatchesQuery(file));
+  return savedSqlStore.filesInFolder(folder.id).some((file) => fileMatchesQuery(file));
 }
 
 function childFolders(parentFolderId?: string) {
-  return savedSqlStore.allFolders.filter((folder) => isConnectionVisible(folder.connectionId) && (folder.parentFolderId || "") === (parentFolderId || ""));
+  return savedSqlStore.allFolders.filter((folder) => (folder.parentFolderId || "") === (parentFolderId || ""));
 }
 
 function descendantFolders(parentFolderId: string): SavedSqlFolder[] {
@@ -340,15 +336,11 @@ function folderBranchMatchesQuery(folder: SavedSqlFolder) {
 function filesInFolder(folderId: string) {
   const folder = savedSqlStore.allFolders.find((item) => item.id === folderId);
   const includeAllFilesForMatchedFolder = !!folder && !!searchQuery.value && folder.name.toLowerCase().includes(searchQuery.value);
-  return savedSqlStore
-    .filesInFolder(folderId)
-    .filter((file) => !orphanedIds.value.has(file.id))
-    .filter((file) => includeAllFilesForMatchedFolder || fileMatchesQuery(file));
+  return savedSqlStore.filesInFolder(folderId).filter((file) => includeAllFilesForMatchedFolder || fileMatchesQuery(file));
 }
 
 function folderFileCount(folderId: string) {
-  const visibleFolders = savedSqlStore.allFolders.filter((folder) => isConnectionVisible(folder.connectionId));
-  return savedSqlFolderBranchFileCount(folderId, visibleFolders, filesInFolder);
+  return savedSqlFolderBranchFileCount(folderId, savedSqlStore.allFolders, filesInFolder);
 }
 
 type SqlLibraryRow = { type: "folder"; folder: SavedSqlFolder; depth: number; folderIndex: number } | { type: "file"; file: SavedSqlFile; depth: number };
@@ -373,19 +365,11 @@ const visibleFolderRows = computed<SqlLibraryRow[]>(() => {
   return rows;
 });
 
-const visibleFiles = computed(() =>
-  savedSqlStore
-    .filesWithoutFolder()
-    .filter((file) => !orphanedIds.value.has(file.id))
-    .filter((file) => fileMatchesQuery(file)),
-);
+const visibleFiles = computed(() => savedSqlStore.filesWithoutFolder().filter((file) => fileMatchesQuery(file)));
 
 // Flat list sorted by updatedAt (descending) - combines all folders and files
 const itemsByDate = computed(() => {
-  const allFolders = savedSqlStore.allFolders
-    .filter((folder) => isConnectionVisible(folder.connectionId))
-    .filter((folder) => folderBranchMatchesQuery(folder))
-    .map((folder) => ({ type: "folder" as const, item: folder, updatedAt: folder.updatedAt }));
+  const allFolders = savedSqlStore.allFolders.filter((folder) => folderBranchMatchesQuery(folder)).map((folder) => ({ type: "folder" as const, item: folder, updatedAt: folder.updatedAt }));
 
   const allFiles = [...savedSqlStore.allFolders.flatMap((folder) => filesInFolder(folder.id)), ...visibleFiles.value].map((file) => ({ type: "file" as const, item: file, updatedAt: file.updatedAt }));
 
@@ -429,14 +413,7 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
   const connectionId = folder?.connectionId || connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
   if (!connectionId) return;
 
-  const takenNames = folder
-    ? new Set(savedSqlStore.filesInFolder(folder.id).map((f) => f.name))
-    : new Set(
-        savedSqlStore
-          .filesWithoutFolder()
-          .filter((file) => !orphanedIds.value.has(file.id))
-          .map((f) => f.name),
-      );
+  const takenNames = folder ? new Set(savedSqlStore.filesInFolder(folder.id).map((f) => f.name)) : new Set(savedSqlStore.filesWithoutFolder().map((f) => f.name));
   const name = uniqueImportedName("new_query.sql", takenNames);
   const file = await savedSqlStore.saveFile({
     connectionId,
@@ -805,18 +782,16 @@ const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);
 function folderMoveMenuItems(fileIds: string[]): CtxMenuItem[] {
   const files = [...new Set(fileIds)].map((id) => savedSqlStore.getFile(id)).filter((file): file is SavedSqlFile => Boolean(file));
   const allInUnfiled = files.length > 0 && files.every((file) => !file.folderId);
-  const folderItems = savedSqlStore.allFoldersTreeOrder
-    .filter((folder) => isConnectionVisible(folder.connectionId))
-    .map((folder) => ({
-      label: folderPath(folder),
-      action: () =>
-        moveFilesToFolder(
-          files.map((file) => file.id),
-          folder.id,
-        ),
-      disabled: files.every((file) => file.folderId === folder.id),
-      icon: FolderClosed,
-    }));
+  const folderItems = savedSqlStore.allFoldersTreeOrder.map((folder) => ({
+    label: folderPath(folder),
+    action: () =>
+      moveFilesToFolder(
+        files.map((file) => file.id),
+        folder.id,
+      ),
+    disabled: files.every((file) => file.folderId === folder.id),
+    icon: FolderClosed,
+  }));
 
   return [
     {

@@ -46,7 +46,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoSelectActiveSidebarNode",
   "openTabsRestoreMode",
   "disconnectTabHandlingMode",
-  "reuseDataTab",
+  "dataTabReuseMode",
   "prefillNewQueryWithSelect",
   "updateNotificationsEnabled",
   "sidebarObjectInfoMode",

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -12,13 +12,13 @@ import * as api from "@/lib/backend/api";
 import type { ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
+import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
 import { Input } from "@/components/ui/input";
 import { Download, Square, CheckSquare, Search, X, Loader2 } from "@lucide/vue";
-import { useExportTracker } from "@/composables/useExportTracker";
+import { formatDataTransferDuration, useExportTracker } from "@/composables/useExportTracker";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -73,6 +73,9 @@ const exportId = ref("");
 const exportDone = ref(false);
 const exportError = ref<string | null>(null);
 const exportCancelled = ref(false);
+const exportStartedAt = ref<number | null>(null);
+const exportFinishedAt = ref<number | null>(null);
+const currentTime = ref(Date.now());
 const pendingPrefillTable = ref("");
 const pendingPrefillTables = ref<string[]>([]);
 const exportAllDatabases = ref(false);
@@ -80,6 +83,25 @@ const batchDatabaseIndex = ref(0);
 const batchDatabaseTotal = ref(0);
 const batchRowsExported = ref(0);
 const activeDatabaseExportId = ref("");
+
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  elapsedTimer = setInterval(() => {
+    currentTime.value = Date.now();
+  }, 1000);
+});
+onBeforeUnmount(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+});
+
+function finishExportTiming() {
+  exportFinishedAt.value ??= Date.now();
+}
+
+const exportElapsedText = computed(() => {
+  if (exportStartedAt.value === null) return "";
+  return formatDataTransferDuration((exportFinishedAt.value ?? currentTime.value) - exportStartedAt.value);
+});
 
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
 
@@ -257,6 +279,8 @@ async function startExport() {
   // Switch to the progress view only after the save dialog closes, and seed a
   // preparing state so the dialog is never a blank panel while metadata loads.
   isExporting.value = true;
+  exportStartedAt.value = Date.now();
+  exportFinishedAt.value = null;
   exportDone.value = false;
   exportError.value = null;
   exportCancelled.value = false;
@@ -272,40 +296,54 @@ async function startExport() {
     preparing: true,
   };
 
-  const request: api.DatabaseExportRequest = {
-    exportId: exportId.value,
-    connectionId: connectionId.value,
-    database: database.value,
-    schema: schema.value,
-    filePath,
-    selectedTables: buildSelectedTablesPayload(tables.value, selectedTables.value),
-    includeStructure: includeStructure.value,
-    includeData: includeData.value,
-    includeObjects: includeObjects.value,
-    includeCreateDatabase: includeCreateDatabase.value,
-    dropTableIfExists: dropTableIfExists.value,
-    omitAutoIncrement: omitAutoIncrement.value,
-    batchSize: 1000,
-  };
-
   addDatabaseExportTask(exportId.value, database.value || "database", filePath);
 
   try {
-    await api.exportDatabaseSql(request, (progress) => {
-      exportProgress.value = { ...progress };
-      updateDatabaseExportTask(progress.exportId, progress);
-      if (progress.status === "Done") {
-        exportDone.value = true;
-        isExporting.value = false;
-        toast(t("databaseExport.exportSuccess"), 3000);
-      } else if (progress.status === "Error") {
-        exportError.value = progress.error;
-        isExporting.value = false;
-      } else if (progress.status === "Cancelled") {
-        exportCancelled.value = true;
-        isExporting.value = false;
-      }
-    });
+    const connectionType = store.getConfig(connectionId.value)?.db_type;
+    await runWithDatabaseBackupSnapshot(
+      {
+        connectionId: connectionId.value,
+        database: database.value,
+        enabled: includeData.value && (connectionType === "mysql" || connectionType === "postgres"),
+      },
+      async (snapshotSessionId) => {
+        const request: api.DatabaseExportRequest = {
+          exportId: exportId.value,
+          connectionId: connectionId.value,
+          database: database.value,
+          schema: schema.value,
+          filePath,
+          selectedTables: buildSelectedTablesPayload(tables.value, selectedTables.value),
+          includeStructure: includeStructure.value,
+          includeData: includeData.value,
+          includeObjects: includeObjects.value,
+          includeCreateDatabase: includeCreateDatabase.value,
+          dropTableIfExists: dropTableIfExists.value,
+          omitAutoIncrement: omitAutoIncrement.value,
+          snapshotSessionId,
+          batchSize: 1000,
+        };
+        await api.exportDatabaseSql(request, (progress) => {
+          exportProgress.value = { ...progress };
+          updateDatabaseExportTask(progress.exportId, progress);
+          if (progress.status === "Done") {
+            finishExportTiming();
+            exportDone.value = true;
+            isExporting.value = false;
+            toast(t("databaseExport.exportSuccess"), 3000);
+          } else if (progress.status === "Error") {
+            finishExportTiming();
+            exportError.value = progress.error;
+            isExporting.value = false;
+          } else if (progress.status === "Cancelled") {
+            finishExportTiming();
+            exportCancelled.value = true;
+            isExporting.value = false;
+          }
+        });
+      },
+      () => !exportError.value && !exportCancelled.value,
+    );
   } catch (e: any) {
     exportError.value = e?.message || String(e);
     const lastProgress = exportProgress.value as api.ExportProgress | null;
@@ -320,6 +358,7 @@ async function startExport() {
       error: exportError.value,
     };
     updateDatabaseExportTask(exportId.value, fallbackProgress);
+    finishExportTiming();
     isExporting.value = false;
   }
 }
@@ -345,6 +384,8 @@ async function startAllDatabasesExport() {
   }
 
   isExporting.value = true;
+  exportStartedAt.value = Date.now();
+  exportFinishedAt.value = null;
   exportDone.value = false;
   exportError.value = null;
   exportCancelled.value = false;
@@ -352,6 +393,7 @@ async function startAllDatabasesExport() {
   batchRowsExported.value = 0;
 
   const dbs = [...selectedDatabases.value];
+  const connectionType = store.getConfig(connectionId.value)?.db_type;
   const batchId = generateDatabaseExportId();
   exportId.value = batchId;
   exportProgress.value = {
@@ -390,48 +432,62 @@ async function startAllDatabasesExport() {
       const currentExportId = `${batchId}-${index + 1}`;
       activeDatabaseExportId.value = currentExportId;
       const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.sql`) : `__web_export_${currentExportId}.sql`;
-      const request: api.DatabaseExportRequest = {
-        exportId: currentExportId,
-        connectionId: connectionId.value,
-        database: item.database,
-        schema: item.schema,
-        filePath,
-        includeStructure: includeStructure.value,
-        includeData: includeData.value,
-        includeObjects: includeObjects.value,
-        includeCreateDatabase: includeCreateDatabase.value,
-        dropTableIfExists: dropTableIfExists.value,
-        omitAutoIncrement: omitAutoIncrement.value,
-        batchSize: 1000,
-      };
       let currentDatabaseRowsExported = 0;
 
-      await runDatabaseExportUntilTerminal(request, (progress) => {
-        const nextRowsExported = Math.max(0, progress.rowsExported);
-        batchRowsExported.value += Math.max(0, nextRowsExported - currentDatabaseRowsExported);
-        currentDatabaseRowsExported = nextRowsExported;
-        exportProgress.value = {
-          ...progress,
-          exportId: batchId,
-          currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`,
-          rowsExported: batchRowsExported.value,
-        };
-        updateDatabaseExportTask(batchId, {
-          ...progress,
-          exportId: batchId,
-          currentObject: item.displayName,
-          objectIndex: index,
-          totalObjects: exportPlan.length,
-          rowsExported: batchRowsExported.value,
-        });
-        if (progress.status === "Error") {
-          exportError.value = progress.error;
-          isExporting.value = false;
-        } else if (progress.status === "Cancelled") {
-          exportCancelled.value = true;
-          isExporting.value = false;
-        }
-      });
+      await runWithDatabaseBackupSnapshot(
+        {
+          connectionId: connectionId.value,
+          database: item.database,
+          enabled: includeData.value && (connectionType === "mysql" || connectionType === "postgres"),
+        },
+        (snapshotSessionId) =>
+          runDatabaseExportUntilTerminal(
+            {
+              exportId: currentExportId,
+              connectionId: connectionId.value,
+              database: item.database,
+              schema: item.schema,
+              filePath,
+              includeStructure: includeStructure.value,
+              includeData: includeData.value,
+              includeObjects: includeObjects.value,
+              includeCreateDatabase: includeCreateDatabase.value,
+              dropTableIfExists: dropTableIfExists.value,
+              omitAutoIncrement: omitAutoIncrement.value,
+              snapshotSessionId,
+              batchSize: 1000,
+            },
+            (progress) => {
+              const nextRowsExported = Math.max(0, progress.rowsExported);
+              batchRowsExported.value += Math.max(0, nextRowsExported - currentDatabaseRowsExported);
+              currentDatabaseRowsExported = nextRowsExported;
+              exportProgress.value = {
+                ...progress,
+                exportId: batchId,
+                currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`,
+                rowsExported: batchRowsExported.value,
+              };
+              updateDatabaseExportTask(batchId, {
+                ...progress,
+                exportId: batchId,
+                currentObject: item.displayName,
+                objectIndex: index,
+                totalObjects: exportPlan.length,
+                rowsExported: batchRowsExported.value,
+              });
+              if (progress.status === "Error") {
+                finishExportTiming();
+                exportError.value = progress.error;
+                isExporting.value = false;
+              } else if (progress.status === "Cancelled") {
+                finishExportTiming();
+                exportCancelled.value = true;
+                isExporting.value = false;
+              }
+            },
+          ),
+        (terminal) => terminal.status === "Done",
+      );
 
       if (exportError.value || exportCancelled.value) break;
       activeDatabaseExportId.value = "";
@@ -439,6 +495,7 @@ async function startAllDatabasesExport() {
 
     if (!exportError.value && !exportCancelled.value) {
       exportDone.value = true;
+      finishExportTiming();
       isExporting.value = false;
       const finalProgress: api.ExportProgress = {
         exportId: batchId,
@@ -466,6 +523,7 @@ async function startAllDatabasesExport() {
       status: "Error",
       error: exportError.value,
     });
+    finishExportTiming();
     isExporting.value = false;
   }
 }
@@ -474,6 +532,7 @@ async function cancelExport() {
   if (exportId.value) {
     if (exportAllDatabases.value) {
       exportCancelled.value = true;
+      finishExportTiming();
       isExporting.value = false;
       if (activeDatabaseExportId.value) {
         await api.cancelDatabaseExport(activeDatabaseExportId.value);
@@ -509,6 +568,8 @@ function resetState() {
   exportDone.value = false;
   exportError.value = null;
   exportCancelled.value = false;
+  exportStartedAt.value = null;
+  exportFinishedAt.value = null;
   exportId.value = "";
   batchDatabaseIndex.value = 0;
   batchDatabaseTotal.value = 0;
@@ -801,6 +862,9 @@ watch(
 
             <div v-if="exportProgress && !isPreparingExport" class="text-xs text-muted-foreground">
               {{ exportAllDatabases ? t("databaseExport.allRowsExported", { count: exportProgress.rowsExported.toLocaleString() }) : t("databaseExport.rowsExported", { current: exportProgress.objectIndex, total: exportProgress.totalObjects, count: exportProgress.rowsExported.toLocaleString() }) }}
+            </div>
+            <div v-if="exportElapsedText" class="text-xs text-muted-foreground tabular-nums">
+              {{ t("exportProgress.elapsed", { duration: exportElapsedText }) }}
             </div>
           </div>
 

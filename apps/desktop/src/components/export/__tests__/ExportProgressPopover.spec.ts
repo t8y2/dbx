@@ -136,6 +136,27 @@ describe("ExportProgressPopover task duration", () => {
     expect(document.body.textContent).toContain("Preparing: t_0001");
   });
 
+  it.each(["Done", "Error", "Cancelled"] as const)("hides stale database object text after the task reaches %s", async (status) => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask(`terminal-${status}`, "Nightly", "/tmp/backups", "scheduled");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "Nightly",
+      objectIndex: 2,
+      totalObjects: status === "Error" ? 0 : 2,
+      rowsExported: 0,
+      totalRows: null,
+      status,
+      error: status === "Error" ? "backup failed" : null,
+      preparing: status === "Error",
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).not.toContain("Preparing: Nightly");
+    expect(document.body.textContent).not.toContain("Current: Nightly");
+  });
+
   it("shows frozen transfer elapsed time and live duration for table tasks", async () => {
     const tracker = useExportTracker();
     now = 1_000;

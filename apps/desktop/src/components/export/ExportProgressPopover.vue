@@ -117,7 +117,7 @@ const elapsedText = (task: ExportTask) => {
 };
 
 const databaseObjectText = (task: ExportTask) => {
-  if (task.kind !== "database-export" || !task.currentObject) return "";
+  if (task.kind !== "database-export" || !isActive(task.status) || !task.currentObject) return "";
   if (task.preparing || !task.totalObjects) {
     return t("databaseExport.preparingObject", { object: task.currentObject });
   }

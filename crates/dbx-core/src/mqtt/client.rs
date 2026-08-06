@@ -1601,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_plan_uses_ws_path_and_insecure_tls_transport() {
+    fn connect_plan_uses_ws_path_and_insecure_tls_transport() -> Result<(), Box<dyn std::error::Error>> {
         let config = MqttConnectionConfig {
             host: "broker.example.com".to_string(),
             port: 8084,
@@ -1619,6 +1619,8 @@ mod tests {
             Transport::Wss(TlsConfiguration::Rustls(_)) => {}
             _ => panic!("tlsSkipVerify 应使用显式 Rustls 自定义校验器"),
         }
+
+        Ok(())
     }
 
     #[tokio::test]

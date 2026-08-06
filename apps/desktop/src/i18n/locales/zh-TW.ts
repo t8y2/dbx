@@ -770,7 +770,7 @@ export default withEnglishFallback({
     mqttPayloadEncoding: "Payload 編碼",
     mqttPayload: "訊息內容 (Payload)",
     mqttPayloadPlaceholderPlaintext: "輸入訊息內容...",
-    mqttPayloadPlaceholderJson: '輸入 JSON，例如 {"key": "value"}',
+    mqttPayloadPlaceholderJson: "輸入 JSON，例如 {example}",
     mqttPayloadPlaceholderBase64: "輸入 Base64 編碼的資料",
     mqttPayloadPlaceholderHex: "輸入十六進位資料，例如 48 65 6C 6C 6F",
     mqttPayloadPlaceholderStructured: "輸入 JSON 值，傳送時將自動編碼為 {encoding}",

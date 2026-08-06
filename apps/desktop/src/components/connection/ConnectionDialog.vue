@@ -710,14 +710,18 @@ const mqttClientId = ref("");
 const mqttProtocolVersion = ref<"v3" | "v4" | "v5">("v5");
 const mqttTransportMode = ref<"tcp" | "websocket">("tcp");
 const mqttWsPath = ref("/mqtt");
-const mqttAuthKind = ref<"none" | "password">("none");
+const mqttAuthKind = ref<"none" | "password" | "certificate">("none");
 const mqttUsername = ref("");
 const mqttPassword = ref("");
+const mqttCaCertPath = ref("");
+const mqttClientCertPath = ref("");
+const mqttClientKeyPath = ref("");
 const mqttTls = ref(false);
 const mqttTlsSkipVerify = ref(false);
 const mqttKeepAliveSecs = ref(60);
 const mqttConnectTimeoutSecs = ref(30);
 const mqttMaxPacketSizeBytes = ref(16 * 1024 * 1024);
+const mqttSavedTopics = ref<MqttConnectionConfig["savedTopics"]>([]);
 const nacosPrimaryAddressPlaceholder = computed(() => {
   return "http://127.0.0.1:8848/nacos";
 });
@@ -1231,15 +1235,29 @@ function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
   mqttKeepAliveSecs.value = Math.max(1, config?.keepAliveSecs || 60);
   mqttConnectTimeoutSecs.value = Math.max(1, config?.connectTimeoutSecs || 30);
   mqttMaxPacketSizeBytes.value = Math.min(268435455, Math.max(1024, config?.maxPacketSizeBytes || 16 * 1024 * 1024));
+  mqttSavedTopics.value = config?.savedTopics ?? [];
   const auth = config?.auth;
   if (auth && auth.kind === "password") {
     mqttAuthKind.value = "password";
     mqttUsername.value = auth.username || "";
     mqttPassword.value = auth.password || "";
+    mqttCaCertPath.value = "";
+    mqttClientCertPath.value = "";
+    mqttClientKeyPath.value = "";
+  } else if (auth && auth.kind === "certificate") {
+    mqttAuthKind.value = "certificate";
+    mqttUsername.value = "";
+    mqttPassword.value = "";
+    mqttCaCertPath.value = auth.caCertPath || "";
+    mqttClientCertPath.value = auth.clientCertPath || "";
+    mqttClientKeyPath.value = auth.clientKeyPath || "";
   } else {
     mqttAuthKind.value = "none";
     mqttUsername.value = "";
     mqttPassword.value = "";
+    mqttCaCertPath.value = "";
+    mqttClientCertPath.value = "";
+    mqttClientKeyPath.value = "";
   }
 }
 
@@ -1252,7 +1270,12 @@ function hydrateMqttFields(value: unknown) {
 }
 
 function buildMqttExternalConfig(): MqttConnectionConfig {
-  const auth: MqttConnectionConfig["auth"] = mqttAuthKind.value === "password" ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value } : { kind: "none" };
+  const auth: MqttConnectionConfig["auth"] =
+    mqttAuthKind.value === "password"
+      ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value }
+      : mqttAuthKind.value === "certificate"
+        ? { kind: "certificate", caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
+        : { kind: "none" };
 
   return {
     host: mqttHost.value.trim(),
@@ -1266,6 +1289,7 @@ function buildMqttExternalConfig(): MqttConnectionConfig {
     keepAliveSecs: Math.max(1, mqttKeepAliveSecs.value),
     connectTimeoutSecs: Math.max(1, mqttConnectTimeoutSecs.value),
     maxPacketSizeBytes: Math.min(268435455, Math.max(1024, mqttMaxPacketSizeBytes.value)),
+    savedTopics: mqttSavedTopics.value,
     wsPath: mqttTransportMode.value === "websocket" ? mqttWsPath.value || "/mqtt" : undefined,
   };
 }
@@ -6050,6 +6074,7 @@ function openExternalUrl(url: string) {
                     <div class="col-span-3 flex gap-2">
                       <Button size="sm" :variant="mqttAuthKind === 'none' ? 'default' : 'outline'" @click="mqttAuthKind = 'none'">{{ t("connection.mqAuthNone") }}</Button>
                       <Button size="sm" :variant="mqttAuthKind === 'password' ? 'default' : 'outline'" @click="mqttAuthKind = 'password'">{{ t("connection.mqAuthBasic") }}</Button>
+                      <Button size="sm" :variant="mqttAuthKind === 'certificate' ? 'default' : 'outline'" @click="mqttAuthKind = 'certificate'">{{ t("connection.mqttAuthCertificate") }}</Button>
                     </div>
                   </div>
                   <template v-if="mqttAuthKind === 'password'">
@@ -6060,6 +6085,20 @@ function openExternalUrl(url: string) {
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.mqttPassword") }}</Label>
                       <Input v-model="mqttPassword" type="password" class="col-span-3" :placeholder="t('connection.mqttPasswordPlaceholder')" />
+                    </div>
+                  </template>
+                  <template v-else-if="mqttAuthKind === 'certificate'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttCaCertPath") }}</Label>
+                      <Input v-model="mqttCaCertPath" class="col-span-3" placeholder="/path/to/ca.pem" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttClientCertPath") }}</Label>
+                      <Input v-model="mqttClientCertPath" class="col-span-3" placeholder="/path/to/client.crt" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttClientKeyPath") }}</Label>
+                      <Input v-model="mqttClientKeyPath" class="col-span-3" placeholder="/path/to/client.key" />
                     </div>
                   </template>
                   <div class="grid grid-cols-4 items-center gap-4">

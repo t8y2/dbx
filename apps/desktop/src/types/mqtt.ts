@@ -26,6 +26,13 @@ export interface MqttConnectionConfig {
   connectTimeoutSecs: number;
   maxPacketSizeBytes: number;
   wsPath?: string;
+  savedTopics?: MqttSavedTopic[];
+}
+
+export interface MqttSavedTopic {
+  topic: string;
+  qos: MqttQoS;
+  noLocal?: boolean;
 }
 
 export interface MqttBrokerInfo {

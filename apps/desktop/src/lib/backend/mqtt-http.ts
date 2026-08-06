@@ -9,7 +9,7 @@ export async function mqttGetBrokerInfo(_connectionId: string) {
   mqttWebNotAvailable("mqttGetBrokerInfo");
 }
 
-export async function mqttSubscribe(_connectionId: string, _topic: string, _qos?: string | null) {
+export async function mqttSubscribe(_connectionId: string, _topic: string, _qos?: string | null, _noLocal?: boolean) {
   mqttWebNotAvailable("mqttSubscribe");
 }
 

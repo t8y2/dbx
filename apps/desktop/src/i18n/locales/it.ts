@@ -770,7 +770,7 @@ export default withEnglishFallback({
     mqttPayloadEncoding: "Codifica del Payload",
     mqttPayload: "Payload",
     mqttPayloadPlaceholderPlaintext: "Inserisci il contenuto del messaggio...",
-    mqttPayloadPlaceholderJson: 'Inserisci JSON, ad esempio {"key": "value"}',
+    mqttPayloadPlaceholderJson: "Inserisci JSON, ad esempio {example}",
     mqttPayloadPlaceholderBase64: "Inserisci dati codificati in Base64",
     mqttPayloadPlaceholderHex: "Inserisci dati esadecimali, ad esempio 48 65 6C 6C 6F",
     mqttPayloadPlaceholderStructured: "Inserisci un valore JSON; verrà codificato come {encoding}",

@@ -770,7 +770,7 @@ export default withEnglishFallback({
     mqttPayloadEncoding: "ペイロードのエンコード",
     mqttPayload: "ペイロード",
     mqttPayloadPlaceholderPlaintext: "メッセージ内容を入力...",
-    mqttPayloadPlaceholderJson: 'JSON を入力（例: {"key": "value"}）',
+    mqttPayloadPlaceholderJson: "JSON を入力（例: {example}）",
     mqttPayloadPlaceholderBase64: "Base64 エンコード済みデータを入力",
     mqttPayloadPlaceholderHex: "16 進数データを入力（例: 48 65 6C 6C 6F）",
     mqttPayloadPlaceholderStructured: "JSON 値を入力してください。{encoding} としてエンコードされます",

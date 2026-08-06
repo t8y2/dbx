@@ -582,6 +582,38 @@ GET /_cat/indices`;
     expect(statementRangeAtCursor(sql, indexOf(sql, "tbB"))?.sql.trim()).toBe(expected);
   });
 
+  it("keeps a trailing-whitespace cursor on a multi-line WITH statement tail", () => {
+    const sql = "WITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    for (const pos of [contentEnd, contentEnd + 1, contentEnd + 2]) {
+      expect(statementRangeAtCursor(sql, pos)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    }
+  });
+
+  it("keeps a trailing-whitespace cursor on a UNION operand tail", () => {
+    const sql = "SELECT 1\nUNION\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(statementRangeAtCursor(sql, contentEnd + 1)?.sql).toBe("SELECT 1\nUNION\nSELECT 2");
+    expect(statementRangeAtCursor(sql, contentEnd + 2)?.sql).toBe("SELECT 1\nUNION\nSELECT 2");
+  });
+
+  it("keeps a trailing-whitespace cursor on an EXPLAIN target tail", () => {
+    const sql = "EXPLAIN\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(statementRangeAtCursor(sql, contentEnd + 1)?.sql).toBe("EXPLAIN\nSELECT 2");
+  });
+
+  it("does not swallow the following statement when a trailing-whitespace cursor sits on a semicolon-terminated multi-line statement tail", () => {
+    const sql = "SELECT 0;\nWITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(statementRangeAtCursor(sql, contentEnd + 1)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(statementRangeAtCursor(sql, contentEnd + 2)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
   it("keeps newline set-operation operands with ALL modifiers together", () => {
     const sql = "select * from tbA\nunion all\nselect * from tbB\nSELECT * FROM logs;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "tbA"));
@@ -1164,6 +1196,25 @@ WHERE t2.product_name = '12345'
     const sql = "SELECT 1\nSELECT 2 ";
     const candidates = buildExecutionCandidates(sql, sql.length);
     expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nSELECT 2"]);
+  });
+
+  it("uses the multi-line cursor statement at a trailing-whitespace tail instead of falling back to the whole script", () => {
+    const sql = "WITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+    const candidates = buildExecutionCandidates(sql, contentEnd + 1, "mysql");
+
+    expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
+    expect(candidates[0].sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("uses the cursor statement at a semicolon-terminated multi-line tail instead of swallowing the following statement", () => {
+    const sql = "SELECT 0;\nWITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+    const candidates = buildExecutionCandidates(sql, contentEnd + 2, "mysql");
+
+    expect(candidates[0].kind).toBe("cursor");
+    expect(candidates[0].sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
   });
 
   it("uses the final soft statement when the cursor is on a standalone trailing semicolon", () => {

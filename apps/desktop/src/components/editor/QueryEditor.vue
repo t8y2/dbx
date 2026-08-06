@@ -114,7 +114,7 @@ import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
-import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
+import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, queryTableNavigationTargetAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isMacOS } from "@/lib/backend/platform";
@@ -4512,6 +4512,18 @@ onMounted(async () => {
               const objectSchemaHint = identity.parts.length >= 3 ? identity.schema : identity.parts.length === 1 ? props.schema : undefined;
               const isRoutineCall = identity.role === "routine_call";
               const isRelationColumnList = identity.role === "relation_column_list";
+              const relationNavigationTarget = (target: SqlObjectNavigationTarget) =>
+                queryTableNavigationTargetAtSqlPosition(
+                  {
+                    connectionId: props.connectionId!,
+                    database: props.database!,
+                    schema: props.schema,
+                    databaseType: props.databaseType,
+                    sql: doc,
+                    position: pos,
+                  },
+                  target,
+                );
 
               // 1. Local table cache (sync). Relation column lists always prefer tables over routines.
               if (cachedTables.length === 0) {
@@ -4520,7 +4532,7 @@ onMounted(async () => {
 
               let matchedTable = matchTable(identifier, cachedTables);
               if (matchedTable) {
-                emit("clickTable", sqlObjectNavigationTarget(matchedTable));
+                emit("clickTable", relationNavigationTarget(matchedTable));
                 return;
               }
 
@@ -4581,7 +4593,7 @@ onMounted(async () => {
                 cachedTables = await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema, false, props.schema, props.catalog);
                 matchedTable = matchTable(identifier, cachedTables);
                 if (matchedTable) {
-                  emit("clickTable", sqlObjectNavigationTarget(matchedTable));
+                  emit("clickTable", relationNavigationTarget(matchedTable));
                   return;
                 }
               } else if (!usesLocalOnlyCompletionMetadata() && isRoutineCall) {
@@ -4590,7 +4602,7 @@ onMounted(async () => {
                 cachedTables = await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, 20, props.schema, false, props.schema, props.catalog);
                 matchedTable = matchTable(identifier, cachedTables);
                 if (matchedTable) {
-                  emit("clickTable", sqlObjectNavigationTarget(matchedTable));
+                  emit("clickTable", relationNavigationTarget(matchedTable));
                   return;
                 }
               }
@@ -4629,7 +4641,7 @@ onMounted(async () => {
 
               const matchedRef = matchTable(identifier, referencedTables);
               if (matchedRef) {
-                emit("clickTable", sqlObjectNavigationTarget(matchedRef));
+                emit("clickTable", relationNavigationTarget(matchedRef));
                 return;
               }
               const colName = identifierParts[identifierParts.length - 1] ?? identifier;

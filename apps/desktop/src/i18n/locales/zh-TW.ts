@@ -2381,7 +2381,8 @@ export default withEnglishFallback({
   },
   visibleDatabases: {
     title: "顯示資料庫",
-    sidebarControlLabel: "設定「{connection}」的可見資料庫{count}",
+    detailLabel: "可見資料庫",
+    detailActionLabel: "設定「{connection}」的可見資料庫",
     description: "選擇「{connection}」下要在側邊欄顯示的資料庫。",
     searchPlaceholder: "搜尋資料庫……",
     selectedCount: "已選擇 {selected}/{total}",
@@ -2396,7 +2397,8 @@ export default withEnglishFallback({
   },
   visibleSchemas: {
     title: "Schema 過濾器",
-    sidebarControlLabel: "設定「{connection}」的可見 Schema{count}",
+    detailLabel: "可見 Schema",
+    detailActionLabel: "設定「{connection}」的可見 Schema",
     description: "選擇「{connection}」下要在側邊欄顯示的 Schema。",
     searchPlaceholder: "搜尋 Schema……",
     selectedCount: "已選擇 {selected}/{total}",

@@ -61,6 +61,7 @@ import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelToo
 import { treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -70,7 +71,6 @@ import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
-import SidebarVisibleFilterControl from "./SidebarVisibleFilterControl.vue";
 
 const { t } = useI18n();
 
@@ -364,6 +364,8 @@ type DetailTooltipRow = {
   multiline?: boolean;
   /** When set, renders each value on its own line (e.g. one host per line) */
   values?: string[];
+  action?: () => void;
+  actionLabel?: string;
 };
 
 function cleanTooltipValue(value: string | number | null | undefined): string {
@@ -420,6 +422,16 @@ const detailTooltip = computed(() => {
           .map((h) => h.trim())
           .filter(Boolean)
       : [];
+    const visibleFilterSummary = connectionCanConfigureSidebarVisibleDatabases(config.db_type) ? connectionStore.getSidebarVisibleFilterSummary(node.connectionId) : null;
+    const visibleFilterRow: DetailTooltipRow | null =
+      visibleFilterSummary?.selected != null && visibleFilterSummary.total != null
+        ? {
+            label: t(visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailLabel" : "visibleDatabases.detailLabel"),
+            value: `${visibleFilterSummary.selected}/${visibleFilterSummary.total}`,
+            action: () => treeRuntime.openPrimaryVisibleFilter(node),
+            actionLabel: t(visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailActionLabel" : "visibleDatabases.detailActionLabel", { connection: config.name }),
+          }
+        : null;
     const rows: DetailTooltipRow[] = [
       { label: t("connection.name"), value: cleanTooltipValue(config.name) },
       { label: "URL", value: connectionTooltipUrl(config), multiline: true },
@@ -429,6 +441,7 @@ const detailTooltip = computed(() => {
       { label: t("connection.user"), value: cleanTooltipValue(config.username) },
       { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
       { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },
+      ...(visibleFilterRow ? [visibleFilterRow] : []),
       { label: t("connection.note"), value: cleanTooltipValue(config.note), multiline: true },
     ].filter((row) => row.value);
     return { rows };
@@ -1206,7 +1219,6 @@ function onKeydown(event: KeyboardEvent) {
             >{{ trailingComment }}</span
           >
         </div>
-        <SidebarVisibleFilterControl v-if="node.type === 'connection'" :node="node" />
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
@@ -1246,6 +1258,16 @@ function onKeydown(event: KeyboardEvent) {
                   <span v-for="(v, vi) in row.values" :key="vi" class="break-all">{{ v }}</span>
                 </div>
               </template>
+              <button
+                v-else-if="row.action"
+                type="button"
+                class="w-fit rounded px-1 font-mono text-primary underline-offset-2 hover:bg-primary/10 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                :aria-label="row.actionLabel"
+                :title="row.actionLabel"
+                @click.stop="row.action()"
+              >
+                {{ row.value }}
+              </button>
               <span v-else-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
                 {{ row.value }}
               </span>

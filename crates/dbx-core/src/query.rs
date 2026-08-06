@@ -3676,6 +3676,63 @@ async fn begin_transaction_session(
     Ok(txn_session_id)
 }
 
+pub struct ManualTransactionKeepAlive {
+    task: tokio::task::JoinHandle<()>,
+    sessions: Arc<tokio::sync::RwLock<std::collections::HashMap<String, TransactionSession>>>,
+    txn_session_id: String,
+}
+
+impl Drop for ManualTransactionKeepAlive {
+    fn drop(&mut self) {
+        self.task.abort();
+        spawn_txn_idle_watcher_for_sessions(Arc::clone(&self.sessions), self.txn_session_id.clone());
+    }
+}
+
+/// Keep an existing transaction session alive while a caller prepares work for
+/// that session. The caller must retain the returned guard for the full period;
+/// dropping it restores the normal five-minute idle rollback behavior.
+pub async fn keep_manual_transaction_alive(
+    state: &AppState,
+    txn_session_id: &str,
+) -> Result<ManualTransactionKeepAlive, String> {
+    {
+        let mut sessions = state.transaction_sessions.write().await;
+        let session = sessions.get_mut(txn_session_id).ok_or_else(|| {
+            "Transaction session not found or expired; it may have been auto-rolled back due to inactivity".to_string()
+        })?;
+        if !session.busy {
+            session.last_activity = std::time::Instant::now();
+        }
+    }
+
+    let sessions = Arc::clone(&state.transaction_sessions);
+    let keep_alive_sessions = Arc::clone(&sessions);
+    let txn_session_id = txn_session_id.to_string();
+    let keep_alive_txn_session_id = txn_session_id.clone();
+    let task = tokio::spawn(async move {
+        const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+        loop {
+            tokio::time::sleep(KEEPALIVE_INTERVAL).await;
+            let should_continue = {
+                let mut guard = sessions.write().await;
+                if let Some(session) = guard.get_mut(&keep_alive_txn_session_id) {
+                    if !session.busy {
+                        session.last_activity = std::time::Instant::now();
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+            if !should_continue {
+                break;
+            }
+        }
+    });
+    Ok(ManualTransactionKeepAlive { task, sessions: keep_alive_sessions, txn_session_id })
+}
+
 /// Execute SQL within an existing manual transaction session.
 pub async fn execute_in_manual_transaction(
     state: &AppState,
@@ -3950,6 +4007,13 @@ async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), 
 /// will see a missing session or a non-expired one and exit harmlessly.
 fn spawn_txn_idle_watcher(state: &AppState, txn_session_id: String) {
     let sessions = Arc::clone(&state.transaction_sessions);
+    spawn_txn_idle_watcher_for_sessions(sessions, txn_session_id);
+}
+
+fn spawn_txn_idle_watcher_for_sessions(
+    sessions: Arc<tokio::sync::RwLock<std::collections::HashMap<String, TransactionSession>>>,
+    txn_session_id: String,
+) {
     tokio::spawn(async move {
         const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
         tokio::time::sleep(TXN_IDLE_TIMEOUT).await;

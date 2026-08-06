@@ -337,3 +337,16 @@ test("scheduled backup history exposes rename and overall percentage controls", 
   assert.match(scheduler, /status: databaseBackupAggregateExportStatus\(progress\.status, false\)/);
   assert.match(scheduler, /overallPercent: progressPercent/);
 });
+
+test("scheduled backups prepare table scope before opening a consistent snapshot", () => {
+  const scheduler = readFileSync("apps/desktop/src/composables/useScheduledDatabaseBackups.ts", "utf8");
+  const exportCore = readFileSync("crates/dbx-core/src/database_export.rs", "utf8");
+  const schemaIndex = scheduler.indexOf("await api.listSchemas(schedule.connectionId, database)");
+  const snapshotIndex = scheduler.indexOf("await api.beginDatabaseBackupSnapshot(schedule.connectionId, database)");
+  const exportIndex = scheduler.indexOf("await runDatabaseExportUntilTerminal(");
+
+  assert.ok(schemaIndex >= 0);
+  assert.ok(snapshotIndex > schemaIndex);
+  assert.ok(exportIndex > snapshotIndex);
+  assert.match(exportCore, /keep_manual_transaction_alive\(state, snapshot_session_id\)\.await/);
+});

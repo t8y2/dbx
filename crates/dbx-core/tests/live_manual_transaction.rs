@@ -1,9 +1,11 @@
 use dbx_core::connection::AppState;
+use dbx_core::database_export::{begin_database_backup_snapshot_core, export_database_sql_core, DatabaseExportRequest};
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{
     begin_manual_transaction, commit_manual_transaction, execute_in_manual_transaction, rollback_manual_transaction,
 };
 use dbx_core::storage::Storage;
+use std::time::{Duration, Instant};
 
 fn live_config(prefix: &str, db_type: DatabaseType, default_port: u16) -> ConnectionConfig {
     let host = std::env::var(format!("{prefix}_HOST")).expect("live DB host env var");
@@ -101,5 +103,50 @@ async fn live_manual_transaction_mysql_streams_with_row_limit() {
     assert!(limited[0].truncated);
 
     rollback_manual_transaction(&state, &txn).await.expect("rollback");
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MANUAL_TXN_MYSQL_* env vars pointing at readable MySQL with table t_0001"]
+async fn live_mysql_database_backup_refreshes_an_idle_snapshot_before_export() {
+    let config = live_config("DBX_LIVE_MANUAL_TXN_MYSQL", DatabaseType::Mysql, 3306);
+    let database = config.database.clone().expect("database");
+    let (state, db_path) = app_state_with_config(config.clone()).await;
+    let export_path = std::env::temp_dir().join(format!("dbx-live-backup-{}.sql", uuid::Uuid::new_v4().simple()));
+
+    let snapshot = begin_database_backup_snapshot_core(&state, &config.id, &database).await.expect("begin snapshot");
+    {
+        let mut sessions = state.transaction_sessions.write().await;
+        sessions.get_mut(&snapshot.session_id).expect("snapshot session").last_activity =
+            Instant::now() - Duration::from_secs(301);
+    }
+
+    let request = DatabaseExportRequest {
+        export_id: format!("live-mysql-backup-{}", uuid::Uuid::new_v4().simple()),
+        connection_id: config.id.clone(),
+        database: database.clone(),
+        schema: database.clone(),
+        file_path: export_path.to_string_lossy().to_string(),
+        selected_tables: vec!["t_0001".to_string()],
+        excluded_tables: Vec::new(),
+        include_structure: true,
+        include_data: true,
+        include_objects: false,
+        include_create_database: false,
+        drop_table_if_exists: false,
+        omit_auto_increment: false,
+        fail_on_error: true,
+        snapshot_session_id: Some(snapshot.session_id.clone()),
+        batch_size: 100,
+    };
+    let export_result = export_database_sql_core(&state, &request, |_| {}).await;
+    let rollback_result = rollback_manual_transaction(&state, &snapshot.session_id).await;
+
+    export_result.expect("export through refreshed snapshot");
+    rollback_result.expect("rollback snapshot");
+    let sql = std::fs::read_to_string(&export_path).expect("read exported SQL");
+    assert!(sql.contains("t_0001"));
+
+    let _ = std::fs::remove_file(export_path);
     let _ = std::fs::remove_file(db_path);
 }

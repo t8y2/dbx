@@ -145,6 +145,10 @@ describe("TreeItem visible filter connection detail", () => {
     const action = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "2/3");
     expect(action).toBeDefined();
     expect(action?.getAttribute("aria-label")).toBe('Configure visible databases for "Filtered connection"');
+    expect(action?.classList.contains("bg-primary/10")).toBe(true);
+    expect(action?.classList.contains("underline")).toBe(false);
+    expect(action?.classList.contains("hover:underline")).toBe(true);
+    expect(action?.classList.contains("hover:bg-primary/10")).toBe(false);
     action?.click();
     expect(host.openPrimaryVisibleFilter).toHaveBeenCalledWith(node);
   });

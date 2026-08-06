@@ -1261,7 +1261,7 @@ function onKeydown(event: KeyboardEvent) {
               <button
                 v-else-if="row.action"
                 type="button"
-                class="w-fit rounded px-1 font-mono text-primary underline-offset-2 hover:bg-primary/10 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                class="w-fit rounded bg-primary/10 px-1 font-mono text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 :aria-label="row.actionLabel"
                 :title="row.actionLabel"
                 @click.stop="row.action()"

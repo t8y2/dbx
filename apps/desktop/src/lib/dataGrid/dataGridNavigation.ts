@@ -19,6 +19,14 @@ export interface DataGridRowScrollOptions {
   alignment: DataGridScrollAlignment;
 }
 
+export interface DataGridPageScrollOptions {
+  previousRowIndex: number;
+  rowIndex: number;
+  rowHeight: number;
+  currentScrollTop: number;
+  maximumScrollTop: number;
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
@@ -35,6 +43,11 @@ export function dataGridRowScrollTop(options: DataGridRowScrollOptions): number 
     return Math.max(0, rowBottom - options.viewportHeight);
   }
   return options.currentScrollTop;
+}
+
+export function dataGridPageScrollTop(options: DataGridPageScrollOptions): number {
+  const rowOffset = (options.rowIndex - options.previousRowIndex) * options.rowHeight;
+  return clamp(options.currentScrollTop + rowOffset, 0, Math.max(0, options.maximumScrollTop));
 }
 
 export function moveDataGridCell(position: CellPosition, rowDelta: number, columnDelta: number, bounds: DataGridNavigationBounds): CellPosition | null {

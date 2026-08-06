@@ -197,7 +197,7 @@ import { useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composa
 import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
-import { dataGridNavigationOrigin, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
+import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
 import type { CellPosition } from "@/lib/dataGrid/gridSelection";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
@@ -6222,7 +6222,7 @@ function currentSelectedCellPosition() {
 
 const DOM_DATA_GRID_ROW_HEIGHT = 26;
 
-function scrollCellIntoView(rowIndex: number, colIndex: number, block: DataGridScrollAlignment = "nearest") {
+function scrollCellIntoView(rowIndex: number, colIndex: number, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number) {
   if (isTransposeMode.value) {
     nextTick(() => {
       const scroller = transposeScrollRef.value;
@@ -6238,15 +6238,15 @@ function scrollCellIntoView(rowIndex: number, colIndex: number, block: DataGridS
   nextTick(() => {
     if (useCanvasGridRows.value) {
       scrollGridColumnIntoView(colIndex);
-      scrollCanvasRowIntoView(rowIndex, block);
+      scrollCanvasRowIntoView(rowIndex, block, previousPageRowIndex);
       return;
     }
     scrollGridColumnIntoView(colIndex);
-    scrollDomRowIntoView(rowIndex, block);
+    scrollDomRowIntoView(rowIndex, block, previousPageRowIndex);
     requestAnimationFrame(() => {
       const rowEl = gridRef.value?.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"]`);
       const cellEl = rowEl?.querySelector<HTMLElement>(`[data-visible-col-index="${colIndex}"]`);
-      (cellEl ?? rowEl)?.scrollIntoView({ block, inline: "nearest" });
+      (cellEl ?? rowEl)?.scrollIntoView({ block: previousPageRowIndex === undefined ? block : "nearest", inline: "nearest" });
     });
   });
 }
@@ -6273,34 +6273,49 @@ function scrollGridColumnIntoView(visibleColIdx: number) {
   if (useCanvasGridRows.value) syncCanvasViewport();
 }
 
-function scrollCanvasRowIntoView(rowIndex: number, block: DataGridScrollAlignment) {
+function scrollCanvasRowIntoView(rowIndex: number, block: DataGridScrollAlignment, previousPageRowIndex?: number) {
   const target = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
   const scroller = canvasScrollerElement();
   if (!scroller) return;
-  const rowTop = target * CANVAS_DATA_GRID_ROW_HEIGHT;
-  const rowBottom = rowTop + CANVAS_DATA_GRID_ROW_HEIGHT;
-  if (block === "end") {
-    // Align the target row to the bottom of the viewport, even when it is already visible.
-    scroller.scrollTop = Math.max(0, rowBottom - scroller.clientHeight);
-  } else if (block === "start" || rowTop < scroller.scrollTop) {
-    scroller.scrollTop = rowTop;
-  } else if (rowBottom > scroller.scrollTop + scroller.clientHeight) {
-    scroller.scrollTop = Math.max(0, rowBottom - scroller.clientHeight);
-  }
+  scroller.scrollTop =
+    previousPageRowIndex === undefined
+      ? dataGridRowScrollTop({
+          rowIndex: target,
+          rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+          viewportHeight: scroller.clientHeight,
+          currentScrollTop: scroller.scrollTop,
+          alignment: block,
+        })
+      : dataGridPageScrollTop({
+          previousRowIndex: previousPageRowIndex,
+          rowIndex: target,
+          rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+          currentScrollTop: scroller.scrollTop,
+          maximumScrollTop: scroller.scrollHeight - scroller.clientHeight,
+        });
   syncCanvasViewport();
 }
 
-function scrollDomRowIntoView(rowIndex: number, block: DataGridScrollAlignment) {
+function scrollDomRowIntoView(rowIndex: number, block: DataGridScrollAlignment, previousPageRowIndex?: number) {
   const target = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
   const scroller = gridScrollerElement();
   if (!scroller) return;
-  const nextScrollTop = dataGridRowScrollTop({
-    rowIndex: target,
-    rowHeight: DOM_DATA_GRID_ROW_HEIGHT,
-    viewportHeight: scroller.clientHeight,
-    currentScrollTop: scroller.scrollTop,
-    alignment: block,
-  });
+  const nextScrollTop =
+    previousPageRowIndex === undefined
+      ? dataGridRowScrollTop({
+          rowIndex: target,
+          rowHeight: DOM_DATA_GRID_ROW_HEIGHT,
+          viewportHeight: scroller.clientHeight,
+          currentScrollTop: scroller.scrollTop,
+          alignment: block,
+        })
+      : dataGridPageScrollTop({
+          previousRowIndex: previousPageRowIndex,
+          rowIndex: target,
+          rowHeight: DOM_DATA_GRID_ROW_HEIGHT,
+          currentScrollTop: scroller.scrollTop,
+          maximumScrollTop: scroller.scrollHeight - scroller.clientHeight,
+        });
   const virtualScroller = scrollerRef.value;
   if (virtualScroller && !(virtualScroller instanceof HTMLElement)) {
     virtualScroller.scrollToPosition?.(nextScrollTop);
@@ -6374,13 +6389,13 @@ function toggleKeyboardTranspose(): boolean {
 
 // Shared path that selects or extends to nextPosition and scrolls it into view.
 // Used by both moveSelectedCell (relative steps) and navigateSelectedCell (absolute/page jumps).
-function applyCellNavigation(nextPosition: CellPosition, extend = false, block: DataGridScrollAlignment = "nearest"): boolean {
+function applyCellNavigation(nextPosition: CellPosition, extend = false, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number): boolean {
   invalidateSyntheticContextSelection();
   if (extend) extendCellSelectionTo(nextPosition.rowIndex, nextPosition.colIndex);
   else selectSingleCell(nextPosition.rowIndex, nextPosition.colIndex);
   clearRowSelection();
   if (showTranspose.value) transposeRowIndex.value = nextPosition.rowIndex;
-  scrollCellIntoView(nextPosition.rowIndex, nextPosition.colIndex, block);
+  scrollCellIntoView(nextPosition.rowIndex, nextPosition.colIndex, block, previousPageRowIndex);
   return true;
 }
 
@@ -6422,7 +6437,8 @@ function navigateSelectedCell(direction: DataGridNavigationDirection, extend = f
   if (!nextPosition) return false;
   // docHome/docEnd must reach the very start/end of the grid even if the target row is already visible, so "nearest" is not used.
   const block: DataGridScrollAlignment = direction === "docHome" ? "start" : direction === "docEnd" ? "end" : "nearest";
-  return applyCellNavigation(nextPosition, extend, block);
+  const previousPageRowIndex = direction === "pageUp" || direction === "pageDown" ? position.rowIndex : undefined;
+  return applyCellNavigation(nextPosition, extend, block, previousPageRowIndex);
 }
 
 function editSelectedCell(): boolean {

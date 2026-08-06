@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { dataGridNavigationOrigin, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell } from "@/lib/dataGrid/dataGridNavigation";
+import { CANVAS_DATA_GRID_ROW_HEIGHT } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell } from "@/lib/dataGrid/dataGridNavigation";
 
 const bounds = { rowCount: 3, visibleColumnCount: 4 };
 
@@ -34,6 +35,16 @@ describe("dataGridNavigation", () => {
     expect(navigateDataGridCell({ rowIndex: 2, colIndex: 2 }, "pageDown", pageBounds)).toEqual({ rowIndex: 7, colIndex: 2 });
   });
 
+  it("continues Shift+Page navigation from the range focus", () => {
+    const pageBounds = { rowCount: 30, visibleColumnCount: 4, pageRowCount: 10 };
+    const anchor = { rowIndex: 5, colIndex: 2 };
+    const firstFocus = navigateDataGridCell(dataGridNavigationOrigin(anchor, null, true)!, "pageDown", pageBounds);
+    const secondFocus = navigateDataGridCell(dataGridNavigationOrigin(anchor, firstFocus, true)!, "pageDown", pageBounds);
+
+    expect(firstFocus).toEqual({ rowIndex: 15, colIndex: 2 });
+    expect(secondFocus).toEqual({ rowIndex: 25, colIndex: 2 });
+  });
+
   it("clamps page navigation at the grid boundaries", () => {
     const pageBounds = { rowCount: 10, visibleColumnCount: 4, pageRowCount: 5 };
     expect(navigateDataGridCell({ rowIndex: 1, colIndex: 2 }, "pageUp", pageBounds)).toEqual({ rowIndex: 0, colIndex: 2 });
@@ -59,5 +70,23 @@ describe("dataGridNavigation", () => {
     expect(dataGridRowScrollTop({ rowIndex: 12, rowHeight: 26, viewportHeight: 260, currentScrollTop: 260, alignment: "nearest" })).toBe(260);
     expect(dataGridRowScrollTop({ rowIndex: 9, rowHeight: 26, viewportHeight: 260, currentScrollTop: 260, alignment: "nearest" })).toBe(234);
     expect(dataGridRowScrollTop({ rowIndex: 20, rowHeight: 26, viewportHeight: 260, currentScrollTop: 260, alignment: "nearest" })).toBe(286);
+  });
+
+  describe.each([
+    ["DOM", 26],
+    ["Canvas", CANVAS_DATA_GRID_ROW_HEIGHT],
+  ])("%s PageUp/PageDown scrolling", (_renderMode, rowHeight) => {
+    const maximumScrollTop = 100 * rowHeight - 260;
+
+    it("keeps the focused row at the same viewport-relative position", () => {
+      expect(dataGridPageScrollTop({ previousRowIndex: 5, rowIndex: 15, rowHeight, currentScrollTop: 0, maximumScrollTop })).toBe(260);
+      expect(dataGridPageScrollTop({ previousRowIndex: 15, rowIndex: 5, rowHeight, currentScrollTop: 260, maximumScrollTop })).toBe(0);
+      expect(dataGridPageScrollTop({ previousRowIndex: 10, rowIndex: 20, rowHeight, currentScrollTop: 117, maximumScrollTop })).toBe(377);
+    });
+
+    it("clamps scrolling at the upper and lower boundaries", () => {
+      expect(dataGridPageScrollTop({ previousRowIndex: 2, rowIndex: 0, rowHeight, currentScrollTop: 0, maximumScrollTop })).toBe(0);
+      expect(dataGridPageScrollTop({ previousRowIndex: 97, rowIndex: 99, rowHeight, currentScrollTop: maximumScrollTop, maximumScrollTop })).toBe(maximumScrollTop);
+    });
   });
 });

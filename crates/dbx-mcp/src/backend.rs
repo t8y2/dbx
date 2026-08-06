@@ -323,11 +323,8 @@ impl LocalBackend {
                 }
             }
         }
-        let stale_ids: Vec<String> = runtime
-            .keys()
-            .filter(|id| !configs.iter().any(|config| &config.id == *id))
-            .cloned()
-            .collect();
+        let stale_ids: Vec<String> =
+            runtime.keys().filter(|id| !configs.iter().any(|config| &config.id == *id)).cloned().collect();
         for id in stale_ids {
             runtime.remove(&id);
         }

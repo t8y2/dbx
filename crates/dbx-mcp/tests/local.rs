@@ -111,11 +111,8 @@ async fn local_backend_picks_up_connections_added_after_startup_without_reload()
     storage.save_connections(&[initial, added.clone()]).await.expect("save added connection");
 
     // list_connections reads storage live, so the new connection is already visible.
-    let list_result = client
-        .peer()
-        .call_tool(CallToolRequestParams::new("dbx_list_connections"))
-        .await
-        .expect("list connections");
+    let list_result =
+        client.peer().call_tool(CallToolRequestParams::new("dbx_list_connections")).await.expect("list connections");
     let list_text = list_result.content[0].as_text().expect("text response").text.clone();
     assert!(list_text.contains("added-sqlite"), "list should include added connection: {list_text}");
 

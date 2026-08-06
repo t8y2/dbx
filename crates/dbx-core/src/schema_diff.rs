@@ -3115,7 +3115,7 @@ fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
         definition.push_str(" NOT NULL");
     }
     if let Some(default) = &col.column_default {
-        definition.push_str(&format!(" DEFAULT {default}"));
+        definition.push_str(&format!(" DEFAULT {}", default_literal(default, &col.data_type)));
     }
     if profile.inline_column_comment {
         if let Some(comment) = &col.comment {
@@ -3247,6 +3247,54 @@ fn comment_literal(comment: &str) -> String {
     format!("'{}'", comment.replace('\'', "''"))
 }
 
+/// Bare temporal keywords that are defaults in their own right and must not be quoted.
+const TEMPORAL_DEFAULT_KEYWORDS: [&str; 8] =
+    ["current_timestamp", "current_date", "current_time", "now", "localtime", "localtimestamp", "getdate", "sysdate"];
+
+/// Prefixes that introduce an already-quoted literal: SQL Server / Sybase `N'x'`,
+/// MySQL `b'1'` and `x'1f'`, Postgres `e'\n'`.
+const QUOTED_LITERAL_PREFIXES: [&str; 4] = ["n'", "b'", "x'", "e'"];
+
+/// Render a column default as a SQL literal.
+///
+/// Drivers hand `column_default` back verbatim and they do not agree on its
+/// shape. MySQL's `information_schema` stores a string default unquoted
+/// (`THE_VALUE`), while Postgres returns it already quoted and cast
+/// (`'new'::text`). Emitting the raw value is right for the second and
+/// produces DDL that will not deploy for the first, so quote only a bare
+/// value on a column whose type takes a quoted literal.
+///
+/// `table_structure_sql::util::format_default_for_sql` and
+/// `transfer::format_mysql_default_literal` do the same job on their own
+/// paths; both are private to their modules.
+fn default_literal(default: &str, data_type: &str) -> String {
+    let trimmed = default.trim();
+    if trimmed.eq_ignore_ascii_case("NULL") {
+        return trimmed.to_string();
+    }
+    // Already a literal: `'x'`, `'new'::text`, or a prefixed form like `N'x'`.
+    let lowered = trimmed.to_ascii_lowercase();
+    if trimmed.starts_with('\'') || QUOTED_LITERAL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix)) {
+        return trimmed.to_string();
+    }
+    // Expressions and function calls: `uuid()`, `(uuid())`, `nextval('s'::regclass)`.
+    if trimmed.contains('(') {
+        return trimmed.to_string();
+    }
+
+    let base_type = data_type.split('(').next().unwrap_or(data_type).trim().to_ascii_lowercase();
+    let takes_text_literal = ["char", "text", "string", "clob", "enum"].iter().any(|kind| base_type.contains(kind));
+    let takes_temporal_literal = base_type.contains("date") || base_type.contains("time");
+
+    if takes_temporal_literal && TEMPORAL_DEFAULT_KEYWORDS.iter().any(|kw| trimmed.eq_ignore_ascii_case(kw)) {
+        return trimmed.to_string();
+    }
+    if takes_text_literal || takes_temporal_literal {
+        return format!("'{}'", trimmed.replace('\'', "''"));
+    }
+    trimmed.to_string()
+}
+
 fn column_comment_sql(
     table_name: &str,
     column_name: &str,
@@ -3356,7 +3404,7 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        def.push_str(&format!(" DEFAULT {default}"));
+                        def.push_str(&format!(" DEFAULT {}", default_literal(default, &mapped_type)));
                     }
                 }
                 if profile.inline_column_comment {
@@ -3383,7 +3431,7 @@ fn generate_create_table_sql(
                 }
                 if !skip_default {
                     if let Some(default) = &col.column_default {
-                        def.push_str(&format!(" DEFAULT {default}"));
+                        def.push_str(&format!(" DEFAULT {}", default_literal(default, &mapped_type)));
                     }
                 }
                 if profile.inline_column_comment {
@@ -3889,7 +3937,10 @@ fn generate_schema_sync_sql_inner(
                                 }
                                 if column.changes.iter().any(|change| change.starts_with("default:")) {
                                     parts.push(if let Some(default) = &source.column_default {
-                                        format!("  ALTER COLUMN {name} SET DEFAULT {default}")
+                                        format!(
+                                            "  ALTER COLUMN {name} SET DEFAULT {}",
+                                            default_literal(default, &mapped.data_type)
+                                        )
                                     } else {
                                         format!("  ALTER COLUMN {name} DROP DEFAULT")
                                     });
@@ -6769,6 +6820,36 @@ mod tests {
         let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
         let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Postgres, None);
         assert!(sql.contains("DROP DEFAULT"), "default drop: {sql}");
+    }
+
+    #[test]
+    fn added_varchar_column_quotes_a_bare_default_mysql() {
+        // MySQL's information_schema returns a string default unquoted, so the
+        // generated DDL read `DEFAULT THE_VALUE` and the deploy failed.
+        let source =
+            vec![ColumnInfo { column_default: Some("THE_VALUE".into()), ..column("menu_type", "varchar(64)", None) }];
+        let target: Vec<ColumnInfo> = vec![];
+        let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Mysql, None);
+        assert!(sql.contains("DEFAULT 'THE_VALUE'"), "bare default must be quoted: {sql}");
+    }
+
+    #[test]
+    fn default_literal_only_quotes_bare_values_that_need_it() {
+        assert_eq!(default_literal("THE_VALUE", "varchar(64)"), "'THE_VALUE'");
+        assert_eq!(default_literal("it's", "text"), "'it''s'");
+        assert_eq!(default_literal("2024-01-01", "date"), "'2024-01-01'");
+        // `DEFAULT ''` on a text column, which previously emitted a bare `DEFAULT `.
+        assert_eq!(default_literal("", "varchar(20)"), "''");
+        // Untouched: already a literal, a cast literal, an expression, a number,
+        // an explicit NULL, and a bare temporal keyword.
+        assert_eq!(default_literal("'guest'", "varchar(50)"), "'guest'");
+        assert_eq!(default_literal("'new'::text", "text"), "'new'::text");
+        assert_eq!(default_literal("N'guest'", "nvarchar(50)"), "N'guest'");
+        assert_eq!(default_literal("uuid()", "varchar(36)"), "uuid()");
+        assert_eq!(default_literal("0", "bigint"), "0");
+        assert_eq!(default_literal("NULL", "varchar(10)"), "NULL");
+        assert_eq!(default_literal("CURRENT_TIMESTAMP", "datetime"), "CURRENT_TIMESTAMP");
     }
 
     // -- 35. Column order changes --

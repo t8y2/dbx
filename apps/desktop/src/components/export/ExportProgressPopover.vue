@@ -187,7 +187,7 @@ function failureDetailCount(task: ExportTask) {
     <PopoverTrigger as-child>
       <Button variant="ghost" size="icon" class="relative h-8 w-8" :title="triggerTitle" :class="{ 'bg-destructive/10 text-destructive hover:bg-destructive/15': failedCount > 0, 'bg-accent text-primary': failedCount === 0 && hasActive }">
         <FileDown class="h-4 w-4" />
-        <span v-if="failedCount > 0" class="absolute right-0 top-0 h-2.5 w-2.5 rounded-full bg-destructive ring-2 ring-background" />
+        <span v-if="failedCount > 0" class="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-destructive ring-2 ring-background" />
         <span v-else-if="hasActive" class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-medium leading-none text-primary-foreground">
           {{ activeCount > 9 ? "9+" : activeCount }}
         </span>

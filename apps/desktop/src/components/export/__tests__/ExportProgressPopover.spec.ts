@@ -89,6 +89,8 @@ describe("ExportProgressPopover task duration", () => {
     const failureDot = document.body.querySelector<HTMLSpanElement>("button > span");
     expect(failureDot?.classList.contains("h-2.5")).toBe(true);
     expect(failureDot?.classList.contains("w-2.5")).toBe(true);
+    expect(failureDot?.classList.contains("right-0.5")).toBe(true);
+    expect(failureDot?.classList.contains("top-0.5")).toBe(true);
     expect(failureDot?.textContent?.trim()).toBe("");
   });
 

@@ -4790,6 +4790,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Muestra los comentarios de columnas directamente debajo del nombre de la columna.",
     showColumnTypesInHeader: "Mostrar tipos de columna bajo los nombres",
     showColumnTypesInHeaderDescription: "Muestra el tipo de dato de cada columna directamente debajo del nombre de la columna.",
+    showIndexIndicatorsInHeader: "Mostrar indicadores de índice junto a los nombres",
+    showIndexIndicatorsInHeaderDescription: "Usa iconos para indicar el tipo de índice de cada columna en el encabezado: clave primaria (naranja), índice único (rojo), índice regular (verde).",
     compactColumnHeaderActions: "Compactar herramientas del encabezado",
     compactColumnHeaderActionsDescription: "Mueve formatear y filtrar a un menú de más acciones para priorizar el nombre de columna.",
     dataGridQuickEntry: "Entrada rápida en grilla",

@@ -230,6 +230,7 @@ import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilit
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
+import { buildColumnIndexMap } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
@@ -495,6 +496,8 @@ const dataGridTopbarWidth = ref(0);
 const dataGridViewportWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
+const showIndexIndicatorsInHeader = computed(() => settingsStore.editorSettings.showIndexIndicatorsInHeader !== false);
+const columnIndexMap = computed(() => buildColumnIndexMap(indexes.value));
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
@@ -7658,6 +7661,19 @@ watch(
   { immediate: true },
 );
 
+// 当表元数据加载完成后，自动获取索引信息用于表头标识
+watch(
+  () => [props.connectionId, props.tableMeta?.schema, props.tableMeta?.tableName, props.tableMeta?.catalog] as const,
+  ([connId, _schema, tableName, _catalog]) => {
+    if (!connId || !tableName) return;
+    // 重置索引加载状态和数据，以便重新加载
+    indexes.value = [];
+    indexesLoaded.value = false;
+    void fetchIndexes();
+  },
+  { immediate: true },
+);
+
 async function fetchDdl() {
   if (!props.connectionId || !props.tableMeta) return;
   showTableInfo.value = true;
@@ -8941,6 +8957,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :column-name-label="t('grid.columnName')"
                     :column-type-label="t('grid.columnType')"
                     :column-comment-label="t('grid.columnComment')"
+                    :column-index-kind="showIndexIndicatorsInHeader ? columnIndexMap.get(col.name) : undefined"
                     @pointerdown="startColumnHeaderDrag(col.visibleColIdx, $event)"
                     @click-capture="onHeaderClickCapture"
                     @click="onHeaderClick(col.visibleColIdx, $event)"

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { CSSProperties, HTMLAttributes } from "vue";
-import { Copy } from "@lucide/vue";
+import { Copy, KeyRound, Hash } from "@lucide/vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { columnIndexColorClass, columnIndexTooltip, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 
 defineProps<{
   name: string;
@@ -26,6 +27,8 @@ defineProps<{
   columnNameLabel: string;
   columnTypeLabel: string;
   columnCommentLabel: string;
+  /** 该列的索引类型，undefined 时不显示标识 */
+  columnIndexKind?: ColumnIndexKind;
 }>();
 
 const emit = defineEmits<{
@@ -60,6 +63,9 @@ const emit = defineEmits<{
       @contextmenu="emit('contextmenu', $event)"
     >
       <span class="flex min-w-0 items-center gap-1 overflow-hidden">
+        <!-- 索引标识：显示在列名左侧 -->
+        <KeyRound v-if="columnIndexKind === 'primary'" class="h-3 w-3 shrink-0" :class="columnIndexColorClass(columnIndexKind)" :title="columnIndexTooltip(columnIndexKind)" />
+        <Hash v-else-if="columnIndexKind && columnIndexKind !== 'none'" class="h-3 w-3 shrink-0" :class="columnIndexColorClass(columnIndexKind)" :title="columnIndexTooltip(columnIndexKind)" />
         <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
           <span class="min-w-0 truncate leading-4">{{ name }}</span>
           <span v-if="showTypeLine" data-grid-header-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3" :class="[typeClass, { invisible: !columnType }]" :title="columnType || undefined" :aria-hidden="columnType ? undefined : true">{{ columnType }}</span>
@@ -87,6 +93,14 @@ const emit = defineEmits<{
         <template v-if="tooltipColumnComment ?? columnComment">
           <span class="text-background/70">{{ columnCommentLabel }}</span>
           <span>{{ tooltipColumnComment ?? columnComment }}</span>
+        </template>
+        <template v-if="columnIndexKind && columnIndexKind !== 'none'">
+          <span class="text-background/70">索引</span>
+          <span class="flex items-center gap-1">
+            <KeyRound v-if="columnIndexKind === 'primary'" class="h-3 w-3" :class="columnIndexColorClass(columnIndexKind)" />
+            <Hash v-else class="h-3 w-3" :class="columnIndexColorClass(columnIndexKind)" />
+            <span :class="columnIndexColorClass(columnIndexKind)">{{ columnIndexTooltip(columnIndexKind) }}</span>
+          </span>
         </template>
       </div>
     </template>

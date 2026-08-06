@@ -4827,6 +4827,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "グリッド列名の直下にテーブル列コメントを表示します。",
     showColumnTypesInHeader: "列名の下にデータ型を表示",
     showColumnTypesInHeaderDescription: "グリッド列名の直下に各列のデータ型を表示します。",
+    showIndexIndicatorsInHeader: "列名の横にインデックス指標を表示",
+    showIndexIndicatorsInHeaderDescription: "グリッド列ヘッダーにインデックスの種類をアイコンで表示します：主キー（オレンジ）、一意インデックス（赤）、通常インデックス（緑）。",
     compactColumnHeaderActions: "列ヘッダーツールをコンパクトに",
     compactColumnHeaderActionsDescription: "フォーマッターとローカルフィルターツールをもっと見るメニューに移動し、列名を優先表示します。",
     dataGridQuickEntry: "グリッド高速入力",

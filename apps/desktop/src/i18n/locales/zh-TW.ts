@@ -4253,6 +4253,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "直接在資料表格欄位名稱下方顯示資料表欄位註解。",
     showColumnTypesInHeader: "在欄位名稱下方顯示資料類型",
     showColumnTypesInHeaderDescription: "直接在資料表格欄位名稱下方顯示每個欄位的資料類型。",
+    showIndexIndicatorsInHeader: "在欄位名稱旁顯示索引標識",
+    showIndexIndicatorsInHeaderDescription: "在資料表格欄位名稱旁用圖示標識欄位的索引類型：主鍵（橙色）、唯一索引（紅色）、普通索引（綠色）。",
     compactColumnHeaderActions: "收起欄位表頭工具",
     compactColumnHeaderActionsDescription: "將格式設定和本機篩選工具移到更多選單，讓欄位名稱優先顯示。",
     dataGridQuickEntry: "表格快速輸入",

@@ -5013,6 +5013,8 @@ export default {
     showColumnCommentsInHeaderDescription: "Display table column comments directly below grid column names.",
     showColumnTypesInHeader: "Show column types under names",
     showColumnTypesInHeaderDescription: "Display each column's data type directly below grid column names.",
+    showIndexIndicatorsInHeader: "Show index indicators beside column names",
+    showIndexIndicatorsInHeaderDescription: "Use icons to indicate each column's index type in the grid header: primary key (orange), unique index (red), regular index (green).",
     compactColumnHeaderActions: "Compact column header tools",
     compactColumnHeaderActionsDescription: "Move formatter and local filter tools into a more menu so column names get priority.",
     dataGridQuickEntry: "Quick grid entry",

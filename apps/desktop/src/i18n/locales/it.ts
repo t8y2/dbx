@@ -4790,6 +4790,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Visualizza i commenti delle colonne della tabella direttamente sotto i nomi delle colonne nella griglia.",
     showColumnTypesInHeader: "Mostra i tipi di colonna sotto i nomi",
     showColumnTypesInHeaderDescription: "Visualizza il tipo di dato di ciascuna colonna direttamente sotto i nomi delle colonne nella griglia.",
+    showIndexIndicatorsInHeader: "Mostra gli indicatori di indice accanto ai nomi",
+    showIndexIndicatorsInHeaderDescription: "Utilizza icone per indicare il tipo di indice di ciascuna colonna nell'intestazione: chiave primaria (arancione), indice univoco (rosso), indice normale (verde).",
     compactColumnHeaderActions: "Strumenti intestazione colonna compatti",
     compactColumnHeaderActionsDescription: "Sposta gli strumenti del formattatore e dei filtri locali in un menu 'altro' in modo che i nomi delle colonne abbiano la priorità.",
     dataGridQuickEntry: "Inserimento rapido griglia",

@@ -4555,6 +4555,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "그리드 컬럼 이름 바로 아래에 테이블 컬럼 주석을 표시합니다.",
     showColumnTypesInHeader: "이름 아래에 컬럼 타입 표시",
     showColumnTypesInHeaderDescription: "그리드 컬럼 이름 바로 아래에 각 컬럼의 데이터 타입을 표시합니다.",
+    showIndexIndicatorsInHeader: "컬럼 이름 옆에 인덱스 표시",
+    showIndexIndicatorsInHeaderDescription: "그리드 컬럼 헤더에 인덱스 유형을 아이콘으로 표시합니다: 기본키(주황색), 고유 인덱스(빨간색), 일반 인덱스(녹색).",
     compactColumnHeaderActions: "컴팩트한 컬럼 머리글 도구",
     compactColumnHeaderActionsDescription: "포매터와 로컬 필터 도구를 더보기 메뉴로 이동하여 컬럼 이름에 우선순위를 둡니다.",
     dataGridQuickEntry: "빠른 그리드 입력",

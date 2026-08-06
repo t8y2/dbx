@@ -469,6 +469,7 @@ export interface EditorSettings {
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
   showColumnTypesInHeader: boolean;
+  showIndexIndicatorsInHeader: boolean;
   compactColumnHeaderActions: boolean;
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
@@ -647,6 +648,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   mongoViewMode: "document",
   showColumnCommentsInHeader: true,
   showColumnTypesInHeader: true,
+  showIndexIndicatorsInHeader: true,
   compactColumnHeaderActions: true,
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
@@ -956,6 +958,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
+    showIndexIndicatorsInHeader: settings.showIndexIndicatorsInHeader ?? DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader,
     compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
@@ -1449,6 +1452,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
+    if (partial.showIndexIndicatorsInHeader !== undefined) editorSettings.value.showIndexIndicatorsInHeader = partial.showIndexIndicatorsInHeader;
     if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;

@@ -5011,6 +5011,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "把表字段注释直接显示在结果表头字段名下方。",
     showColumnTypesInHeader: "在字段名下方显示数据类型",
     showColumnTypesInHeaderDescription: "把每个字段的数据类型直接显示在结果表头字段名下方。",
+    showIndexIndicatorsInHeader: "在字段名旁显示索引标识",
+    showIndexIndicatorsInHeaderDescription: "在结果表头字段名旁用图标标识字段的索引类型：主键（橙色）、唯一索引（红色）、普通索引（绿色）。",
     compactColumnHeaderActions: "收起字段表头工具",
     compactColumnHeaderActionsDescription: "将格式化、本地筛选收进更多菜单，优先显示字段名称。",
     dataGridQuickEntry: "表格快捷录入",

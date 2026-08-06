@@ -2,6 +2,24 @@ import { describe, expect, it } from "vitest";
 import { containsHan, matchesPinyinInitials, orderedSubsequenceSpan, pinyinAwareMatchScore, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { completionMatchRanges } from "@/lib/common/completionMatch";
 import { buildSqlCompletionItems } from "@/lib/sql/sqlCompletion";
+import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
+
+describe("identifier search", () => {
+  it("matches camel-case initials and ranks them above loose fuzzy matches", () => {
+    expect(matchesIdentifierSearch("userProfile", "up")).toBe(true);
+    expect(identifierMatchScore("userProfile", "up")).toBeGreaterThan(identifierMatchScore("userPreference", "up"));
+  });
+
+  it("matches an identifier from any position", () => {
+    expect(matchesIdentifierSearch("order_id", "id")).toBe(true);
+    expect(matchesIdentifierSearch("created_at", "id")).toBe(false);
+    expect(matchesIdentifierSearch("customer_order_total", "cot")).toBe(true);
+  });
+
+  it("keeps unrelated identifiers out of the result", () => {
+    expect(matchesIdentifierSearch("userProfile", "xyz")).toBe(false);
+  });
+});
 
 describe("pinyinAwareMatchScore", () => {
   it("ranks prefix above pinyin prefix above substring above pinyin subsequence", () => {
@@ -125,5 +143,37 @@ describe("sqlCompletion Chinese column matching", () => {
     const items = completionItems("am");
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "amount", type: "column" })]));
     expect(items.some((item) => item.label === "总租金")).toBe(false);
+  });
+});
+
+describe("sqlCompletion identifier column matching", () => {
+  function completionItems(typedPrefix: string) {
+    const sql = `SELECT * FROM orders WHERE ${typedPrefix}`;
+    return buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "mysql",
+      tables: [{ name: "orders", type: "table" }],
+      columnsByTable: new Map([
+        [
+          "orders",
+          [
+            { name: "userProfile", table: "orders" },
+            { name: "order_id", table: "orders" },
+            { name: "created_at", table: "orders" },
+          ],
+        ],
+      ]),
+    });
+  }
+
+  it("matches camel-case initials in WHERE column completion", () => {
+    const items = completionItems("up");
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "userProfile", type: "column" })]));
+    expect(items.some((item) => item.label === "order_id")).toBe(false);
+  });
+
+  it("matches WHERE columns from any position", () => {
+    const items = completionItems("id");
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "order_id", type: "column" })]));
+    expect(items.some((item) => item.label === "created_at")).toBe(false);
   });
 });

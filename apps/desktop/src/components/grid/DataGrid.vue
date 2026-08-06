@@ -719,7 +719,9 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
   { value: "greater-than", labelKey: "grid.filterBuilderGreaterThan" },
+  { value: "greater-than-or-equal", labelKey: "grid.filterBuilderGreaterThanOrEqual" },
   { value: "less-than", labelKey: "grid.filterBuilderLessThan" },
+  { value: "less-than-or-equal", labelKey: "grid.filterBuilderLessThanOrEqual" },
   { value: "in", labelKey: "grid.filterBuilderIn" },
   { value: "not-in", labelKey: "grid.filterBuilderNotIn" },
   { value: "between", labelKey: "grid.filterBuilderBetween" },
@@ -1564,8 +1566,8 @@ watch(
   [structuredFilterRules, appliedStructuredWhereInput, serverColumnFilters],
   () => {
     const columns = filterBuilderColumnOptions.value;
-    if (columns.length > 0 && structuredFilterRules.value.some((rule) => !columns.includes(rule.columnName))) {
-      structuredFilterRules.value = structuredFilterRules.value.map((rule) => (columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" }));
+    if (columns.length > 0 && structuredFilterRules.value.some((rule) => rule.columnName && !columns.includes(rule.columnName))) {
+      structuredFilterRules.value = structuredFilterRules.value.map((rule) => (!rule.columnName || columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" }));
       return;
     }
     persistStructuredFilterState();

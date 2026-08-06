@@ -6224,11 +6224,16 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mqttProtocolVersion") }}</Label>
-                    <select v-model="mqttProtocolVersion" class="col-span-3 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
-                      <option value="v5">MQTT 5.0</option>
-                      <option value="v4">MQTT 3.1.1</option>
-                      <option value="v3">MQTT 3.1</option>
-                    </select>
+                    <Select v-model="mqttProtocolVersion">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="v5">MQTT 5.0</SelectItem>
+                        <SelectItem value="v4">MQTT 3.1.1</SelectItem>
+                        <SelectItem value="v3">MQTT 3.1</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mqttTransport") }}</Label>

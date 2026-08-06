@@ -79,6 +79,7 @@ describe("dataTabOpenPolicy", () => {
     ["explaining", { isExplaining: true }],
     ["manual transaction", { txnSessionId: "txn-1" }],
     ["pending edits", { pendingDataChangeCount: 1 }],
+    ["pending editor draft", { hasPendingDataEditorDraft: true }],
   ])("does not reuse the active tab when it is %s", (_label, patch) => {
     const active = Object.assign(dataTab("orders", "orders"), patch);
 

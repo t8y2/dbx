@@ -3091,7 +3091,7 @@ watch(
     const tab = queryStore.tabs.find((item) => item.id === props.cacheKey);
     if (tab?.mode === "data") tab.pendingDataChangeCount = count || undefined;
   },
-  { immediate: true },
+  { immediate: true, flush: "sync" },
 );
 
 const saveActionMode = computed(() =>
@@ -4125,6 +4125,32 @@ watch(activeCellDetailTab, (tab) => {
   }
 });
 
+const detailEditValue = ref("");
+const detailEditOriginalValue = ref("");
+const isEditingDetail = ref(false);
+const hasPendingDetailEditorDraft = computed(() => isEditingDetail.value && detailEditValue.value !== detailEditOriginalValue.value);
+const hasPendingInlineEditorDraft = computed(() => {
+  const cell = editingCell.value;
+  if (!cell) return false;
+  const item = getRowItem(cell.rowId);
+  if (!item || item.isDeleted) return false;
+  const originalValue = dataGridCellEditorText({
+    value: item.data[cell.col] ?? null,
+    databaseType: resolvedDatabaseType.value,
+    columnInfo: tableColumnForGridColumn(cell.col),
+  });
+  return editValue.value !== originalValue;
+});
+const hasPendingDataEditorDraft = computed(() => hasPendingDetailEditorDraft.value || hasPendingInlineEditorDraft.value);
+
+function syncPendingDataEditorDraft(pending: boolean) {
+  if (props.context !== "table-data" || !props.cacheKey) return;
+  const tab = queryStore.tabs.find((item) => item.id === props.cacheKey);
+  if (tab?.mode === "data") tab.hasPendingDataEditorDraft = pending || undefined;
+}
+
+watch(hasPendingDataEditorDraft, syncPendingDataEditorDraft, { immediate: true, flush: "sync" });
+
 const activeValueEditorActions = computed(() => {
   const detail = activeCellDetail.value;
   return valueEditorActions({
@@ -4213,17 +4239,17 @@ watch(activeCellDetail, (detail) => {
     resetDetailEdit();
     return;
   }
-  detailEditValue.value = dataGridCellEditorText({
+  const value = dataGridCellEditorText({
     value: detail.value,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 });
 
-const detailEditValue = ref("");
-const isEditingDetail = ref(false);
 const detailTemporalEditorConfig = computed(() => {
   const detail = activeCellDetail.value;
   return detail ? temporalEditorConfigForColumn(detail.colIndex) : undefined;
@@ -4287,6 +4313,7 @@ watch(valueEditorContainer, async (el) => {
 function resetDetailEdit() {
   isEditingDetail.value = false;
   detailEditValue.value = "";
+  detailEditOriginalValue.value = "";
 }
 
 function closeCellDetails() {
@@ -4338,7 +4365,9 @@ function startDetailEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
   warnFormattedJsonEditIfNeeded(detail);
-  detailEditValue.value = cellDetailEditText(detail);
+  const value = cellDetailEditText(detail);
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   isEditingDetail.value = true;
 }
 
@@ -4350,6 +4379,7 @@ function commitDetailEdit() {
   const item = getRowItem(detail.rowId);
   if (!item || item.isDeleted) return;
   applyCellValue(detail.rowId, detail.colIndex, detailEditValue.value);
+  detailEditOriginalValue.value = detailEditValue.value;
   detailCell.value = detailCell.value ? { ...detailCell.value } : null;
 }
 
@@ -4367,11 +4397,13 @@ function syncEditorFromDetailEdit() {
 function cancelValueEditorEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
-  detailEditValue.value = dataGridCellEditorText({
+  const value = dataGridCellEditorText({
     value: detail.value,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 }
@@ -4397,11 +4429,13 @@ function restoreDetailOriginalValue() {
   }
   restoreCellValue(detail.rowId, detail.colIndex);
 
-  detailEditValue.value = dataGridCellEditorText({
+  const value = dataGridCellEditorText({
     value: restoredValue,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
   detailCell.value = { ...detailCell.value! };
@@ -4410,6 +4444,7 @@ function restoreDetailOriginalValue() {
 function setValueEditorNull() {
   setDetailNull();
   detailEditValue.value = cellDetailEditorText(null);
+  detailEditOriginalValue.value = detailEditValue.value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
 }
@@ -8071,6 +8106,7 @@ onDeactivated(() => {
 });
 
 onUnmounted(() => {
+  syncPendingDataEditorDraft(false);
   cleanupFrames();
   autoRefresh.stop();
   onDdlResizeEnd();

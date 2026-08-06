@@ -13,7 +13,7 @@ function functionSource(source: string, startMarker: string, endMarker: string) 
 }
 
 test("external SQL saves persist their selected data source before closing", () => {
-  const source = functionSource(appSource, "async function saveExternalSqlPath", "function savedSqlTargetForSave");
+  const source = functionSource(appSource, "async function writeExternalSqlTab", "async function saveExternalSqlPath");
   const write = source.indexOf("api.writeExternalSqlFile");
   const remember = source.indexOf("rememberExternalSqlFileTarget");
   const close = source.indexOf("queryStore.closeTab");

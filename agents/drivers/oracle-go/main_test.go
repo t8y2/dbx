@@ -2097,6 +2097,49 @@ func TestManualTransactionBeginCommitRollback(t *testing.T) {
 	}
 }
 
+// TestManualTransactionSkipsPerStatementSetSchema guards against Oracle's
+// implicit COMMIT before+after DDL (ALTER SESSION SET CURRENT_SCHEMA is DDL).
+// Once a manual transaction is open and the schema is pinned at BEGIN time,
+// executeQuery/executeQueryPage/startTableRead must NOT re-issue ALTER SESSION
+// per statement, otherwise prior DML in the same transaction is silently
+// committed and Rollback can no longer undo it.
+func TestManualTransactionSkipsPerStatementSetSchema(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+
+	if err := s.beginManualTransaction("APP_TEST"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// Run a couple of statements with a non-empty schema; before the fix each
+	// call would issue an extra ALTER SESSION SET CURRENT_SCHEMA inside the tx.
+	if _, err := s.executeQuery(queryOptions{SQL: "UPDATE t SET a = 1", Schema: "APP_TEST", MaxRows: 10}); err != nil {
+		t.Fatalf("update in txn: %v", err)
+	}
+	if _, err := s.executeQuery(queryOptions{SQL: "DELETE FROM t", Schema: "APP_TEST", MaxRows: 10}); err != nil {
+		t.Fatalf("delete in txn: %v", err)
+	}
+
+	alterSessionCount := 0
+	for _, q := range driver.execs {
+		if strings.Contains(strings.ToUpper(q), "ALTER SESSION SET CURRENT_SCHEMA") {
+			alterSessionCount++
+		}
+	}
+	// Exactly one ALTER SESSION is expected: the one issued by
+	// beginManualTransaction when pinning the schema. Any additional one would
+	// mean per-statement setSchema ran inside the open transaction and would
+	// trigger an implicit COMMIT of the preceding DML.
+	if alterSessionCount != 1 {
+		t.Fatalf("expected exactly 1 ALTER SESSION (from begin), got %d; per-statement setSchema must be skipped during manual tx", alterSessionCount)
+	}
+
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+}
+
 func TestManualTransactionDisconnectRollsBack(t *testing.T) {
 	db, driver := openOracleManualTxTestDB(t)
 	s := newServer()

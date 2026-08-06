@@ -2883,7 +2883,7 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 
 func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageResult, error) {
 	start := time.Now()
-	if strings.TrimSpace(opts.Schema) != "" {
+	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
 			return queryPageResult{}, err
 		}
@@ -2959,7 +2959,7 @@ func (s *server) storeQuerySession(session *querySession) string {
 
 func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResult, error) {
 	start := time.Now()
-	if strings.TrimSpace(opts.Schema) != "" {
+	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
 			return queryPageResult{}, err
 		}
@@ -3092,7 +3092,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 
 func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	start := time.Now()
-	if strings.TrimSpace(opts.Schema) != "" {
+	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
 			return queryResult{}, err
 		}

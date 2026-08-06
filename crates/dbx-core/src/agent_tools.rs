@@ -191,7 +191,9 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
     let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
-    if supports_sql_query(db_type) {
+    if db_type == DatabaseType::MongoDb {
+        tools.push(mongo_execute_query_tool(sql_permissions));
+    } else if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
     }
@@ -199,6 +201,29 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         tools.push(explain_query_tool());
     }
     tools
+}
+
+fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_query",
+        description: "Execute a read-only MongoDB shell command and return results (max 50 rows). Use commands such as db.collection.find({}), db.collection.findOne({}), db.collection.aggregate([]), or db.collection.countDocuments({}). Write commands are not available to the MongoDB Agent.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The MongoDB shell-style command to execute"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Max rows to return (default 50, max 100)"
+                }
+            },
+            "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: false,
+    }
 }
 
 /// list_tables tool definition.
@@ -620,6 +645,10 @@ async fn execute_execute_query(
         .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
         .unwrap_or(EXECUTE_QUERY_LIMIT);
 
+    if *db_type == DatabaseType::MongoDb {
+        return execute_mongo_query(state, connection_id, database, sql, limit.max(1)).await;
+    }
+
     // Classify SQL risk using the concrete database dialect.
     let risk = crate::sql_risk::classify_sql_risk_for_database(sql, *db_type)?;
     let connection_config = state.configs.read().await.get(connection_id).cloned();
@@ -674,6 +703,29 @@ async fn execute_execute_query(
     )
     .await?;
 
+    format_query_result_as_text(&result, limit)
+}
+
+async fn execute_mongo_query(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    source: &str,
+    limit: usize,
+) -> Result<String, String> {
+    let command = crate::mongo_shell::parse(source).map_err(|error| {
+        format!(
+            "{error} Use MongoDB shell-style commands such as db.collection.find({{}}), db.collection.findOne({{}}), or db.collection.aggregate([])."
+        )
+    })?;
+    if command.is_mutating() {
+        return Err(
+            "Blocked: MongoDB Agent queries are read-only. Return the command for the user to review and execute manually in DBX."
+                .to_string(),
+        );
+    }
+
+    let result = crate::mongo_ops::execute_mongo_command_core(state, connection_id, database, &command, limit).await?;
     format_query_result_as_text(&result, limit)
 }
 
@@ -1172,6 +1224,94 @@ for line in sys.stdin:
         assert!(names.contains(&"list_collections"));
         assert!(names.contains(&"browse_collection"));
         assert!(names.contains(&"get_current_time"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_registers_shell_query_tool_and_routes_find_one_as_read_only() {
+        let tools = all_tools(DatabaseType::MongoDb, AgentSqlPermissions::default());
+        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        assert!(names.contains(&"execute_query"));
+        assert!(!names.contains(&"get_sample_data"));
+        assert!(!names.contains(&"explain_query"));
+        let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(execute_query.description.contains("MongoDB shell command"));
+        assert!(!execute_query.description.contains("SQL query"));
+        assert!(execute_query.description.contains("read-only"));
+
+        let confirmed_tools = all_tools(
+            DatabaseType::MongoDb,
+            AgentSqlPermissions {
+                allow_writes: true,
+                allow_dangerous: true,
+                confirmed_write_sql: Some("db.items.insertOne({name: 'test'})".to_string()),
+            },
+        );
+        let confirmed_execute_query = confirmed_tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(confirmed_execute_query.description.contains("read-only"));
+        assert!(!confirmed_execute_query.description.contains("confirmed write"));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "mongo-find-one".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "db.BenchmarkIndex_approved.findOne({})" }),
+            provider_payload: None,
+        };
+
+        let result = execute_tool(
+            &call,
+            &state,
+            "mongo-1",
+            "benchmark",
+            None,
+            &DatabaseType::MongoDb,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(!result.content.contains("Blocked:"), "{}", result.content);
+        assert!(result.content.contains("Connection") || result.content.contains("connection"), "{}", result.content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_keeps_all_writes_blocked_after_sql_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let permissions = AgentSqlPermissions {
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("SQL confirmation does not grant MongoDB writes".to_string()),
+        };
+
+        for (index, source) in [
+            "db.items.insertOne({name: 'test'})",
+            "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
+            "db.items.deleteMany({tenant: 7})",
+            "db.items.createIndex({tenant: 1})",
+            r#"db.items.aggregate([{"$out":"items_backup"}])"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = ToolCall {
+                id: format!("mongo-write-{index}"),
+                name: "execute_query".to_string(),
+                arguments: json!({ "sql": source }),
+                provider_payload: None,
+            };
+            let result =
+                execute_tool(&call, &state, "mongo-1", "benchmark", None, &DatabaseType::MongoDb, permissions.clone())
+                    .await;
+
+            assert!(result.is_error, "{source}: {}", result.content);
+            assert!(result.content.contains("read-only"), "{source}: {}", result.content);
+        }
     }
 
     #[test]

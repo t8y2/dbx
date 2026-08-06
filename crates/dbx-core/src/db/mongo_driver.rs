@@ -710,6 +710,41 @@ pub async fn find_documents(
     sort: Option<&str>,
     collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
+    find_documents_with_total(client, database, collection, skip, limit, filter, projection, sort, collation, true)
+        .await
+}
+
+/// Execute a find without the document browser's separate total-count query.
+/// Agent callers only consume returned rows, so counting the full result set adds latency
+/// without providing any useful output.
+pub async fn find_documents_without_total(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    find_documents_with_total(client, database, collection, skip, limit, filter, projection, sort, collation, false)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn find_documents_with_total(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    include_total: bool,
+) -> Result<MongoDocumentResult, String> {
     let col = client.database(database).collection::<Document>(collection);
 
     let filter_doc: Document = match filter {
@@ -722,14 +757,16 @@ pub async fn find_documents(
 
     let collation = parse_find_collation(collation)?;
     let count_is_exact = !filter_doc.is_empty();
-    let total_result = if count_is_exact {
+    let total_result = if !include_total {
+        None
+    } else if count_is_exact {
         let mut count = col.count_documents(filter_doc.clone());
         if let Some(collation) = collation.clone() {
             count = count.collation(collation);
         }
-        count.await.map_err(|e| e.to_string())
+        Some(count.await.map_err(|e| e.to_string()))
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())
+        Some(col.estimated_document_count().await.map_err(|e| e.to_string()))
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -761,7 +798,10 @@ pub async fn find_documents(
         documents.push(bson_to_json(&Bson::Document(doc.clone())));
         extended_documents.push(Bson::Document(doc).into_canonical_extjson());
     }
-    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
+    let (total, total_is_exact) = match total_result {
+        Some(total_result) => resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len()),
+        None => (documents.len() as u64, false),
+    };
 
     Ok(MongoDocumentResult {
         documents,

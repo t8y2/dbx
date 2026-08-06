@@ -124,6 +124,19 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeAtCursor(cache, contentEnd + 1)?.sql).toBe("SELECT 2");
   });
 
+  it("keeps a trailing-whitespace cursor on a non-final line of a multi-line statement in the frame cache", () => {
+    const sql = "SELECT * FROM `profiles`;\nSELECT * FROM `users` AS uu   \nWHERE id = 2\nSELECT * FROM `orders`;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const markerEnd = sql.indexOf("uu") + 2;
+    const lineEnd = sql.indexOf("\n", markerEnd);
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+
+    for (let pos = markerEnd; pos < lineEnd; pos += 1) {
+      expect(executableStatementRangeAtCursor(cache, pos)?.sql).toBe(expected);
+    }
+  });
+
   it("does not attach a semicolon after a blank line to the previous statement", () => {
     const sql = "SELECT 1\n\n;";
     const doc = Text.of(sql.split("\n"));

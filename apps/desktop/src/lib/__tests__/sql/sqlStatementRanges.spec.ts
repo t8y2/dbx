@@ -29,6 +29,23 @@ function candidateSummaries(candidates: Array<{ kind: string; sql: string }>): s
   return candidates.map((candidate) => `${candidate.kind}:${candidate.sql.trim()}`);
 }
 
+function trailingSpacePositionsAfter(sql: string, marker: string): number[] {
+  const markerEnd = sql.indexOf(marker) + marker.length;
+  const lineEnd = sql.indexOf("\n", markerEnd);
+  const end = lineEnd === -1 ? sql.length : lineEnd;
+  const positions: number[] = [];
+  for (let p = markerEnd; p < end; p += 1) {
+    if (sql[p] === " " || sql[p] === "\t") positions.push(p);
+  }
+  return positions;
+}
+
+// Reported repro: trailing spaces sit after `AS uu` (a NON-final line of the
+// middle statement) with `WHERE id = 2` continuing on the next line. The cursor
+// is inside the statement body, so the middle statement must be kept.
+const screenshotSqlNoSemi = "SELECT * FROM `profiles`\nWHERE active = 1\nSELECT * FROM `users` AS uu   \nWHERE id = 2\nSELECT * FROM `orders`\nWHERE status = 'paid'";
+const screenshotSqlWithSemi = "SELECT * FROM `profiles`;\nSELECT * FROM `users` AS uu   \nWHERE id = 2\nSELECT * FROM `orders`;";
+
 const oraclePlSqlFixture = `DECLARE
   v_order_count NUMBER;
 BEGIN
@@ -612,6 +629,38 @@ GET /_cat/indices`;
 
     expect(statementRangeAtCursor(sql, contentEnd + 1)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
     expect(statementRangeAtCursor(sql, contentEnd + 2)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("keeps a trailing-whitespace cursor on a non-final line of a multi-line middle statement (no semicolons before)", () => {
+    // Reported repro: spaces after `AS uu`, `WHERE id = 2` follows on the next line.
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const positions = trailingSpacePositionsAfter(screenshotSqlNoSemi, "uu");
+
+    expect(positions.length).toBeGreaterThan(0);
+    for (const pos of positions) {
+      expect(statementRangeAtCursor(screenshotSqlNoSemi, pos, "mysql")?.sql).toBe(expected);
+    }
+  });
+
+  it("keeps a trailing-whitespace cursor on a non-final line of a multi-line middle statement (semicolons before)", () => {
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const positions = trailingSpacePositionsAfter(screenshotSqlWithSemi, "uu");
+
+    expect(positions.length).toBeGreaterThan(0);
+    for (const pos of positions) {
+      expect(statementRangeAtCursor(screenshotSqlWithSemi, pos, "mysql")?.sql).toBe(expected);
+    }
+  });
+
+  it("keeps a trailing-whitespace cursor on the last line of a multi-line middle statement", () => {
+    const sql = "SELECT 1;\nSELECT * FROM `users` AS uu\nWHERE id = 2   \nSELECT * FROM `orders`;";
+    const expected = "SELECT * FROM `users` AS uu\nWHERE id = 2";
+    const positions = trailingSpacePositionsAfter(sql, "= 2");
+
+    expect(positions.length).toBeGreaterThan(0);
+    for (const pos of positions) {
+      expect(statementRangeAtCursor(sql, pos, "mysql")?.sql).toBe(expected);
+    }
   });
 
   it("keeps newline set-operation operands with ALL modifiers together", () => {
@@ -1215,6 +1264,32 @@ WHERE t2.product_name = '12345'
 
     expect(candidates[0].kind).toBe("cursor");
     expect(candidates[0].sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("submits only the middle statement for a trailing-whitespace cursor on its non-final line (no semicolons before)", () => {
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const pos = trailingSpacePositionsAfter(screenshotSqlNoSemi, "uu")[0];
+    const candidates = buildExecutionCandidates(screenshotSqlNoSemi, pos, "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(expected);
+    expect(executionCandidateForMode(candidates, "all")?.sql).toBe(screenshotSqlNoSemi);
+  });
+
+  it("submits only the middle statement for a trailing-whitespace cursor on its non-final line (semicolons before)", () => {
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const pos = trailingSpacePositionsAfter(screenshotSqlWithSemi, "uu")[0];
+    const candidates = buildExecutionCandidates(screenshotSqlWithSemi, pos, "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(expected);
+  });
+
+  it("submits only the middle statement, not the merged script, for a trailing-whitespace cursor on its last line", () => {
+    const sql = "SELECT 1;\nSELECT * FROM `users` AS uu\nWHERE id = 2   \nSELECT * FROM `orders`;";
+    const expected = "SELECT * FROM `users` AS uu\nWHERE id = 2";
+    const pos = trailingSpacePositionsAfter(sql, "= 2")[0];
+    const candidates = buildExecutionCandidates(sql, pos, "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(expected);
   });
 
   it("uses the final soft statement when the cursor is on a standalone trailing semicolon", () => {

@@ -1,4 +1,6 @@
 import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { dataGridFrameCoversRow, dataGridFrameIsMultiCell, dataGridSelectionFrameKindAtCell } from "@/lib/dataGrid/dataGridSelectionFrames";
+import type { CellSelectionRange } from "@/lib/dataGrid/gridSelection";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 
@@ -77,6 +79,9 @@ export interface DrawCanvasDataGridOptions {
   isRowActive: (rowIndex: number) => boolean;
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
+  /** 连续选区矩形（displayRow/visibleCol 坐标）。用于 Navicat 风格的形态区分：
+   * 多格范围浅色填充 + 一圈细外框、内部零描边；1×1 画细边框；离散点选传空数组退回逐格描边 */
+  selectionFrames?: readonly CellSelectionRange[];
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
   infiniteScrollEnabled: boolean;
   pageOffset: number;
@@ -307,6 +312,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     isRowActive,
     rowCellsUseSelectionVisual,
     cellIsSelected,
+    selectionFrames = [],
     cellCanHover,
     infiniteScrollEnabled,
     pageOffset,
@@ -381,6 +387,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.fillStyle = rowFill;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
+    // 选区覆盖指示（Navicat 风格）：行落在选区范围内时行号淡色高亮；
+    // 优先级低于行选中/状态色/活动行，与 DOM 的级联顺序一致
+    const rowInSelection = !rowSelectionVisual && selectionFrames.length > 0 && dataGridFrameCoversRow(selectionFrames, item.displayIndex);
     const rowNumberFill = rowSelectionVisual
       ? theme.rowNumberSelected
       : item.status === "draft"
@@ -393,16 +402,24 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
               ? theme.rowNumberDeleted
               : rowIsActive
                 ? theme.rowNumberActive
-                : theme.rowNumberDefault;
+                : rowInSelection
+                  ? theme.cellSelected
+                  : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+    // 与 DOM 的 .data-grid-row-number--selected 对齐：选中行号左侧 3px 蓝色条
+    if (rowSelectionVisual) {
+      ctx.fillStyle = theme.cellSelectedBorder;
+      ctx.fillRect(0, y, 3, CANVAS_DATA_GRID_ROW_HEIGHT);
+    }
     ctx.strokeStyle = theme.border;
     ctx.beginPath();
     ctx.moveTo(rowNumberBorderX, y);
     ctx.lineTo(rowNumberBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.stroke();
 
-    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : theme.rowNumberTextClean;
+    // 与 DOM 对齐：选中行号文字用前景色
+    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : rowSelectionVisual ? theme.foreground : theme.rowNumberTextClean;
     ctx.fillStyle = rowNumberText;
     ctx.font = item.status === "new" || item.status === "edited" || item.status === "draft" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
@@ -436,7 +453,10 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
       const isDirtyCell = item.isDirtyCol[actualColIdx];
       const selectedFillVisual = rowSelectionVisual || selectedCell;
-      const selectedBorderVisual = selectedCell;
+      // Navicat 风格：多格范围选区内部零描边（末尾统一画一圈细外框）；
+      // 单个单元格或离散点选（Ctrl）保留细边框
+      const selectionFrameKind = selectedCell ? dataGridSelectionFrameKindAtCell(selectionFrames, item.displayIndex, visibleColIdx) : null;
+      const selectedBorderVisual = selectedCell && selectionFrameKind !== "range";
       const isSearchMatch = paintSearchMatches && searchMatchKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
       const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
       const clippedX = Math.max(drawX, rowNumberWidth);
@@ -516,7 +536,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         const selectedRightX = clippedX + cellPaintWidth - 1.5;
         const selectedTopY = Math.max(y + 0.5, 1);
         const drawSelectedLeftBorder = selectedLeftX >= rowNumberWidth + 0.5;
-        ctx.strokeStyle = selectedCell && !isDirtyCell ? theme.cellSelectedSingleBorder : theme.cellSelectedBorder;
+        ctx.strokeStyle = theme.cellSelectedSingleBorder;
         ctx.beginPath();
         ctx.moveTo(selectedLeftX, selectedTopY);
         ctx.lineTo(selectedRightX, selectedTopY);
@@ -593,6 +613,33 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.moveTo(separatorX, 0);
     ctx.lineTo(separatorX, height);
     ctx.stroke();
+    ctx.restore();
+  }
+
+  // 选区外框：多格范围选区画一圈主题色细外框（1.5px，比单格的 1px 略粗），
+  // 内部零描边（Navicat 风格）；1×1 单格外框已由逐格细边框覆盖，这里跳过
+  const multiCellFrames = selectionFrames.filter(dataGridFrameIsMultiCell);
+  if (multiCellFrames.length > 0) {
+    const frozenWidth = frozenColumnCount > 0 && frozenColumnCount <= renderedColumnWidths.length ? (offsets[frozenColumnCount] ?? 0) : 0;
+    const frozenRight = rowNumberWidth + frozenWidth;
+    // 列边缘的屏幕 x：冻结区内的边缘不随水平滚动，其余减去 scrollLeft
+    const columnEdgeX = (edgeCol: number): number => {
+      const offset = offsets[edgeCol] ?? 0;
+      return edgeCol <= frozenColumnCount ? rowNumberWidth + offset : rowNumberWidth + offset - scrollLeft;
+    };
+    ctx.save();
+    ctx.strokeStyle = theme.cellSelectedSingleBorder;
+    ctx.lineWidth = 1.5;
+    for (const frame of multiCellFrames) {
+      const minX = frame.startCol >= frozenColumnCount ? frozenRight : rowNumberWidth;
+      const minRightX = frame.endCol + 1 > frozenColumnCount ? frozenRight : rowNumberWidth;
+      const left = Math.min(Math.max(columnEdgeX(frame.startCol), minX), width);
+      const right = Math.min(Math.max(columnEdgeX(frame.endCol + 1), minRightX), width);
+      const top = Math.min(Math.max(frame.startRow * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop, 0), height);
+      const bottom = Math.min(Math.max((frame.endRow + 1) * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop, 0), height);
+      if (right - left < 2 || bottom - top < 2) continue;
+      ctx.strokeRect(left + 1, top + 1, right - left - 2, bottom - top - 2);
+    }
     ctx.restore();
   }
 }

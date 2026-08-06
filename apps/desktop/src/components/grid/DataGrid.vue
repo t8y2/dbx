@@ -170,6 +170,7 @@ import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGri
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { summarizeSelection } from "@/lib/dataGrid/gridSelection";
+import { dataGridFrameCoversRow, dataGridSelectionEdgeFlags, dataGridSelectionFrameKindAtCell, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
 import {
   createDataGridCellContextMenuItems,
   createDataGridColumnContextMenuItems,
@@ -3792,6 +3793,7 @@ const {
   isSelectingAll,
   selectedRange,
   selectedCells,
+  selectedCellKeys,
   selectedCellMatrix,
   selectedCellCount,
   hasCellSelection,
@@ -3834,6 +3836,49 @@ const selectionSummarySumText = computed(() => {
 });
 
 const isMultiRow = computed(() => multiRowCount.value > 1);
+
+// Navicat 风格选区形态：单个单元格细边框，多格范围浅色填充 + 一圈细外框；
+// 离散点选（Ctrl）退回逐格描边
+const selectionFramesData = computed(() =>
+  resolveDataGridSelectionFrames({
+    sparseCellCount: selectedCellKeys.value.size,
+    hasColumnSelection: hasColumnSelection.value,
+    selectedColumnIndexes: selectedColumnIndexes.value,
+    selectedRange: selectedRange.value,
+    rowCount: displayRowCount.value,
+  }),
+);
+
+function selectionFrameKindForCell(rowIndex: number, visibleColIdx: number): "single" | "range" | null {
+  const frames = selectionFramesData.value.frames;
+  if (frames.length === 0) return null;
+  return dataGridSelectionFrameKindAtCell(frames, rowIndex, visibleColIdx);
+}
+
+// 行号的选区覆盖指示（Navicat 风格），但行选中（--selected）和行状态色（新增/编辑/删除）优先，
+// 与 canvas 渲染器的 rowNumberFill 优先级顺序保持一致
+function rowNumberShowsSelectionTint(item: RowItem): boolean {
+  if (isRowSelected(item.id)) return false;
+  if (item.status !== "clean") return false;
+  const frames = selectionFramesData.value.frames;
+  return frames.length > 0 && dataGridFrameCoversRow(frames, item.displayIndex);
+}
+
+// 多格范围的外框用单元格四边的 inset 阴影拼出（跟着单元格走，冻结列/虚拟滚动都不错位）；
+// 1×1 单格由 cell-selected--single 的 outline 负责，这里跳过
+function selectionFrameStyleForCell(rowIndex: number, visibleColIdx: number): CSSProperties | undefined {
+  const frames = selectionFramesData.value.frames;
+  if (frames.length === 0 || selectionFrameKindForCell(rowIndex, visibleColIdx) !== "range") return undefined;
+  const flags = dataGridSelectionEdgeFlags(frames, rowIndex, visibleColIdx);
+  if (!flags) return undefined;
+  const shadows: string[] = [];
+  const frameColor = "var(--data-grid-cell-selected-single-border, var(--primary))";
+  if (flags.top) shadows.push(`inset 0 1.5px 0 0 ${frameColor}`);
+  if (flags.right) shadows.push(`inset -1.5px 0 0 0 ${frameColor}`);
+  if (flags.bottom) shadows.push(`inset 0 -1.5px 0 0 ${frameColor}`);
+  if (flags.left) shadows.push(`inset 1.5px 0 0 0 ${frameColor}`);
+  return shadows.length > 0 ? { boxShadow: shadows.join(", ") } : undefined;
+}
 
 function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
   quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
@@ -5352,6 +5397,7 @@ function drawCanvasGrid() {
     isRowActive,
     rowCellsUseSelectionVisual,
     cellIsSelected,
+    selectionFrames: selectionFramesData.value.frames,
     cellCanHover: canEditCellItem,
     infiniteScrollEnabled: infiniteScrollEnabled.value,
     pageOffset: rowNumberPageOffset(),
@@ -8825,6 +8871,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'text-muted-foreground italic': cell.isNull,
                         'cell-selected': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'cell-selected-dirty': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'cell-selected--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'cell-selected-dirty--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
@@ -8950,7 +8998,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <div class="data-grid-header-row flex w-(--header-total-w) font-semibold text-foreground">
                   <div
                     class="data-grid-header-cell shrink-0 px-2 py-1.5 border-r w-(--row-num-w) border-border text-center text-muted-foreground select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-20"
-                    :class="{ 'data-grid-header-cell--selected outline outline-primary -outline-offset-1': isSelectingAll }"
+                    :class="{ 'data-grid-header-cell--selected': isSelectingAll }"
                     @click="selectAllCells"
                   >
                     #
@@ -9495,7 +9543,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   >
                     <div
                       class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10"
-                      :class="[rowNumberStatusClass(item), { 'data-grid-row-number--selected': isRowSelected(item.id) }]"
+                      :class="[rowNumberStatusClass(item), { 'data-grid-row-number--selected': isRowSelected(item.id), 'data-grid-row-number--in-selection': rowNumberShowsSelectionTint(item) }]"
                       @mousedown="onRowNumberMouseDown(item, $event)"
                       @dblclick.stop="toggleTranspose(item.displayIndex)"
                       @contextmenu="onRowContext(item.id, item.displayIndex)"
@@ -9507,7 +9555,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       v-for="col in renderedGridColumns"
                       :key="col.actualColIdx"
                       class="data-grid-cell group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none inline-block items-center tabular-nums"
-                      :style="renderedColumnStyle(col.visibleColIdx)"
+                      :style="[renderedColumnStyle(col.visibleColIdx), selectionFrameStyleForCell(item.displayIndex, col.visibleColIdx)]"
                       :class="{
                         'data-grid-cell--frozen': col.visibleColIdx < frozenColumnCount,
                         'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
@@ -9516,6 +9564,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
                         'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
                         'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                        'cell-selected--single': selectionFrameKindForCell(item.displayIndex, col.visibleColIdx) === 'single' && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                        'cell-selected--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                        'cell-selected-dirty--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
                         'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
                         'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
                         'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
@@ -10797,8 +10848,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .cell-selected-dirty {
   background-color: var(--data-grid-cell-selected-dirty-bg) !important;
-  outline: 1px solid var(--data-grid-cell-selected-border);
-  outline-offset: -1px;
 }
 
 .row-cell-selected-dirty {
@@ -10821,16 +10870,39 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   background-color: var(--data-grid-row-number-active-bg) !important;
 }
 
+/* 选区覆盖指示：选中单元格/范围时，覆盖到的行号淡色高亮（Navicat 风格）。
+ * 不用 !important：行选中（--selected）和活动行规则天然优先 */
+.data-grid-row-number--in-selection {
+  background-color: var(--data-grid-cell-selected-bg);
+}
+
 .data-grid-row-number--selected {
   background-color: var(--data-grid-row-number-selected-bg) !important;
   color: var(--foreground) !important;
   box-shadow: inset 3px 0 0 var(--data-grid-cell-selected-border);
 }
 
+/* 选中优先级高于活动行（与 canvas 的 resolveCanvasDataGridRowFill 一致），
+ * 否则选中且活动的行号在 DOM 里显示为更浅的活动行底色 */
+.active-row > .data-grid-row-number--selected {
+  background-color: var(--data-grid-row-number-selected-bg) !important;
+}
+
 .cell-selected {
   color: var(--foreground);
   background-color: var(--data-grid-cell-selected-single-bg) !important;
-  outline: 1px solid var(--data-grid-cell-selected-border);
+}
+
+/* 单个单元格：细边框（跟随主题色，与 canvas 一致） */
+.cell-selected--single {
+  outline: 1px solid var(--data-grid-cell-selected-single-border, var(--primary));
+  outline-offset: -1px;
+}
+
+/* 离散点选（Ctrl 多选、transpose 视图）无法矩形化，退回逐格描边 */
+.cell-selected--sparse,
+.cell-selected-dirty--sparse {
+  outline: 1px solid var(--data-grid-cell-selected-single-border, var(--primary));
   outline-offset: -1px;
 }
 

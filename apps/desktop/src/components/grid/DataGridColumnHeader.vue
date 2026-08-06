@@ -57,14 +57,7 @@ const emit = defineEmits<{
   <LightTooltip :text="name" side="bottom" :side-offset="4" :disabled="tooltipDisabled">
     <div
       class="data-grid-header-cell shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-gray-200 dark:hover:bg-gray-800 select-none relative overflow-hidden"
-      :class="[
-        dark && 'data-grid-header-cell--dark',
-        selected && 'data-grid-header-cell--selected outline outline-primary -outline-offset-1',
-        searchMatch && 'bg-amber-500/20 ring-1 ring-inset ring-amber-500/40',
-        frozen && 'data-grid-header-cell--frozen',
-        frozenSeparator && 'data-grid-header-cell--frozen-separator',
-        dragClass,
-      ]"
+      :class="[dark && 'data-grid-header-cell--dark', selected && 'data-grid-header-cell--selected', searchMatch && 'bg-amber-500/20 ring-1 ring-inset ring-amber-500/40', frozen && 'data-grid-header-cell--frozen', frozenSeparator && 'data-grid-header-cell--frozen-separator', dragClass]"
       :style="columnStyle"
       :data-grid-column-index="actualColumnIndex"
       :data-visible-col-index="visibleColumnIndex"

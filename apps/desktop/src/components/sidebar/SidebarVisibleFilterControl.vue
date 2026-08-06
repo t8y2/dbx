@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, inject } from "vue";
 import { useI18n } from "vue-i18n";
-import { ListFilter } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { TreeNode } from "@/types/database";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
@@ -40,18 +39,16 @@ function openPrimaryVisibleFilter() {
 
 <template>
   <button
-    v-if="control"
+    v-if="control?.isActive && control.selected != null && control.total != null"
     type="button"
     data-sidebar-visible-filter
-    class="flex h-5 min-w-5 shrink-0 items-center justify-center rounded px-1 text-[10px] leading-none tabular-nums text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    :class="{ 'bg-primary/10 text-primary': control.isExplicit }"
+    class="flex h-5 min-w-5 shrink-0 items-center justify-center rounded bg-primary/10 px-1 text-[10px] leading-none tabular-nums text-primary opacity-0 transition-[color,background-color,opacity] hover:bg-secondary/60 hover:text-foreground group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     :aria-label="control.label"
     :title="control.label"
     @mousedown.stop
     @click.stop="openPrimaryVisibleFilter"
     @dblclick.stop
   >
-    <span v-if="control.selected != null && control.total != null">{{ control.selected }}/{{ control.total }}</span>
-    <ListFilter v-else class="h-3 w-3" aria-hidden="true" />
+    <span>{{ control.selected }}/{{ control.total }}</span>
   </button>
 </template>

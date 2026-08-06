@@ -123,7 +123,8 @@ import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
 import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/mqConsoleDefaults";
 import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
-import { sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
+import { connectionHasConfiguredSidebarVisibleFilter, sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
+import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -446,6 +447,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const connectionStateRevisions = new Map<string, number>();
   const connectionErrorRevisions = new Map<string, number>();
   const treeNodeLoads = new TreeNodeLoadRegistry();
+  const primaryVisibleObjectRefreshInFlight = new Set<string>();
   let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
@@ -904,6 +906,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function markConnectionLost(connectionId: string, error: unknown) {
     connectedIds.value.delete(connectionId);
+    clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionNodeLoading(connectionId);
     clearConnectionHealthCheck(connectionId);
@@ -2579,6 +2582,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return config ? sidebarVisibleFilterSummary(config, primaryVisibleObjectNames.value[connectionId]) : null;
   }
 
+  function scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId: string, config: ConnectionConfig | undefined, options?: LoadTreeOptions) {
+    if (options?.force || !config || primaryVisibleObjectNames.value[connectionId] || primaryVisibleObjectRefreshInFlight.has(connectionId)) return;
+    if (!connectionCanConfigureSidebarVisibleDatabases(config.db_type) || !connectionHasConfiguredSidebarVisibleFilter(config)) return;
+    primaryVisibleObjectRefreshInFlight.add(connectionId);
+    void loadDatabases(connectionId, { force: true, connectedOnly: true })
+      .catch(() => undefined)
+      .finally(() => primaryVisibleObjectRefreshInFlight.delete(connectionId));
+  }
+
   async function clearVisibleDatabases(connectionId: string) {
     const config = getConfig(connectionId);
     if (!config || !Array.isArray(config.visible_databases)) return;
@@ -2760,6 +2772,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!cancelled) return false;
     clearConnectionError(connectionId);
     connectedIds.value.delete(connectionId);
+    clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionHealthCheck(connectionId);
     if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
@@ -2775,6 +2788,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
 
     connectedIds.value.delete(connectionId);
+    clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     forgetSuccessfulLocalConnectionAttempt(connectionId);
     clearConnectionHealthCheck(connectionId);
@@ -2851,6 +2865,7 @@ export const useConnectionStore = defineStore("connection", () => {
       } catch {
         // Backend pool is dead — remove from connectedIds and reconnect
         connectedIds.value.delete(connectionId);
+        clearPrimaryVisibleObjectNames(connectionId);
         clearConnectionHealthCheck(connectionId);
         if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
       }
@@ -3050,15 +3065,19 @@ export const useConnectionStore = defineStore("connection", () => {
             await ensureConnected(connectionId);
             load = reclaimTreeNodeLoad(load, node);
           }
-          if (useCachedChildren(node, options, load)) return;
-
           const config = getConfig(connectionId);
+          if (useCachedChildren(node, options, load)) {
+            scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
+            return;
+          }
+
           if (config?.db_type === "duckdb") {
             const cacheKey = schemaCacheKey(connectionId, "duckdb-root");
             if (!options?.force) {
               const cached = await loadPersistedTreeChildren(node, cacheKey, load);
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
+                else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
                 return;
               }
             }
@@ -3084,6 +3103,7 @@ export const useConnectionStore = defineStore("connection", () => {
               const cached = await loadPersistedTreeChildren(node, cacheKey, load);
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
+                else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
                 return;
               }
             }
@@ -3149,6 +3169,7 @@ export const useConnectionStore = defineStore("connection", () => {
                 const cached = await loadPersistedTreeChildren(node, cacheKey, load);
                 if (cached.hit) {
                   if (cached.isStale) refreshStaleTreeNode(node);
+                  else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
                   return;
                 }
               }

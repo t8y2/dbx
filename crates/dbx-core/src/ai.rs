@@ -1543,6 +1543,7 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
         return crate::ai_pi_agent_cli::resolve_pi_agent_model_effort(config, model_id).await;
     }
 
+<<<<<<< HEAD
     if matches!(config.provider, AiProvider::OpenCodeCli) {
         return crate::ai_opencode_cli::resolve_opencode_model_effort(config, model_id).await;
     }
@@ -1551,6 +1552,8 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
         return Ok(AiEffortCapability::Unsupported);
     }
 
+=======
+>>>>>>> d95e884eb (feat(ai): expose Grok CLI reasoning effort like Codex)
     if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::GrokCli) {
         let models = list_models_core(config).await?;
         return Ok(models

@@ -1,8 +1,11 @@
 use crate::agent_events::AgentEvent;
-use crate::ai::{AiConfig, AiModelInfo, AiTestConnectionResult};
+use crate::ai::{
+    AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortLevel, AiEffortOption, AiEffortSelection, AiModelInfo,
+    AiTestConnectionResult,
+};
 use crate::ai_cli_agent::{
-    build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env, model_infos, run_cli_jsonl_agent,
-    toml_string, toml_string_array, CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
+    build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env, run_cli_jsonl_agent, toml_string,
+    toml_string_array, CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -12,6 +15,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 const DEFAULT_GROK_MODELS: &[&str] = &["default", "grok-4.5"];
+/// Matches Grok CLI model metadata (`supports_reasoning_effort` + `reasoning_efforts`).
+const DEFAULT_GROK_EFFORTS: &[&str] = &["low", "medium", "high"];
+const DEFAULT_GROK_EFFORT: &str = "high";
 const GROK_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const DISALLOWED_BUILTIN_TOOLS: &str = "run_terminal_command,read_file,search_replace,list_dir,grep,kill_command_or_subagent,todo_write,get_command_or_subagent_output,spawn_subagent,scheduler_create,scheduler_delete,scheduler_list,monitor,search_tool,use_tool,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,image_gen,image_edit,image_to_video,reference_to_video,write,bash,shell,edit,Glob,Grep";
 
@@ -314,9 +320,48 @@ pub fn build_grok_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage],
     build_cli_agent_prompt("Grok", system_prompt, messages, allow_write_sql)
 }
 
+fn grok_effort_option(id: &str, label: &str, description: &str) -> AiEffortOption {
+    AiEffortOption {
+        id: id.to_string(),
+        label: label.to_string(),
+        description: Some(description.to_string()),
+        selection: AiEffortSelection::Enum(id.to_string()),
+    }
+}
+
+/// Grok CLI reasoning effort levels (same surface as Codex model effort in the assistant).
+pub fn grok_effort_capability() -> AiEffortCapability {
+    AiEffortCapability::Enum {
+        options: vec![
+            grok_effort_option("low", "Low", "Quick, fast implementations"),
+            grok_effort_option("medium", "Medium", "Balanced effort with standard implementation and testing"),
+            grok_effort_option("high", "High", "Highest implementation quality with extensive reasoning"),
+        ],
+        default: AiEffortSelection::Enum(DEFAULT_GROK_EFFORT.to_string()),
+        source: AiCapabilitySource::LocalCli,
+    }
+}
+
+fn with_grok_effort(mut model: AiModelInfo) -> AiModelInfo {
+    model.effort_capability = Some(grok_effort_capability());
+    model.supported_effort_levels =
+        DEFAULT_GROK_EFFORTS.iter().filter_map(|level| level.parse::<AiEffortLevel>().ok()).collect();
+    model
+}
+
+fn default_grok_models() -> Vec<AiModelInfo> {
+    DEFAULT_GROK_MODELS
+        .iter()
+        .map(|id| {
+            let display = if *id == "default" { Some("Default".to_string()) } else { None };
+            with_grok_effort(AiModelInfo::new(*id, display))
+        })
+        .collect()
+}
+
 pub async fn list_grok_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     let program = validate_grok_program(config)?;
-    Ok(discover_grok_models(config, program).await.unwrap_or_else(|| model_infos(DEFAULT_GROK_MODELS)))
+    Ok(discover_grok_models(config, program).await.unwrap_or_else(default_grok_models))
 }
 
 async fn discover_grok_models(config: &AiConfig, program: String) -> Option<Vec<AiModelInfo>> {
@@ -350,13 +395,13 @@ fn parse_grok_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
         if id.is_empty() || !seen.insert(id.to_string()) {
             continue;
         }
-        models.push(AiModelInfo::new(id, None));
+        models.push(with_grok_effort(AiModelInfo::new(id, None)));
     }
     if models.is_empty() {
         return None;
     }
     if seen.insert("default".to_string()) {
-        models.insert(0, AiModelInfo::new("default", Some("Default".to_string())));
+        models.insert(0, with_grok_effort(AiModelInfo::new("default", Some("Default".to_string()))));
     }
     Some(models)
 }
@@ -465,11 +510,14 @@ pub async fn run_grok_agent(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_grok_command, classify_grok_run_error, grok_cli_env, grok_mcp_config_toml, parse_grok_models,
-        validate_grok_program, GrokRunOptions, DEFAULT_GROK_MODELS,
+        build_grok_command, classify_grok_run_error, default_grok_models, grok_cli_env, grok_effort_capability,
+        grok_mcp_config_toml, parse_grok_models, validate_grok_program, GrokRunOptions,
     };
-    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
-    use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
+    use crate::ai::{
+        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortLevel, AiEffortSelection,
+        AiProvider, AiReasoningLevel,
+    };
+    use crate::ai_cli_agent::CliAgentCommandSpec;
     use std::path::PathBuf;
 
     fn base_config() -> AiConfig {
@@ -546,6 +594,33 @@ mod tests {
     }
 
     #[test]
+    fn builds_reasoning_effort_flag_from_runtime_effort() {
+        let mut config = base_config();
+        config.model = "grok-4.5".to_string();
+        config.runtime_effort = Some(AiEffortSelection::Enum("medium".to_string()));
+        let prompt = PathBuf::from("/tmp/dbx-prompt.txt");
+        let command = build_grok_command(&config, &prompt, &run_options());
+        assert!(command.args.windows(2).any(|pair| pair == ["--reasoning-effort", "medium"]));
+    }
+
+    #[test]
+    fn models_expose_low_medium_high_effort_like_codex() {
+        let capability = grok_effort_capability();
+        let AiEffortCapability::Enum { options, default, source } = capability else {
+            panic!("expected enum effort capability");
+        };
+        assert_eq!(source, AiCapabilitySource::LocalCli);
+        assert_eq!(default, AiEffortSelection::Enum("high".to_string()));
+        assert_eq!(options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>(), vec!["low", "medium", "high"]);
+
+        let stdout = "You are logged in with grok.com.\n\nDefault model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n";
+        let models = parse_grok_models(stdout).unwrap();
+        let grok = models.iter().find(|model| model.id == "grok-4.5").unwrap();
+        assert!(matches!(grok.effort_capability, Some(AiEffortCapability::Enum { .. })));
+        assert_eq!(grok.supported_effort_levels, vec![AiEffortLevel::Low, AiEffortLevel::Medium, AiEffortLevel::High]);
+    }
+
+    #[test]
     fn mcp_config_includes_scoped_dbx_server() {
         let toml = grok_mcp_config_toml(&run_options());
         assert!(toml.contains("[mcp_servers.dbx]"));
@@ -562,7 +637,7 @@ mod tests {
         assert_eq!(models[0].id, "default");
         assert!(models.iter().any(|model| model.id == "grok-4.5"));
         assert!(models.iter().any(|model| model.id == "grok-4"));
-        assert_eq!(model_infos(DEFAULT_GROK_MODELS)[1].id, "grok-4.5");
+        assert_eq!(default_grok_models()[1].id, "grok-4.5");
     }
 
     #[test]

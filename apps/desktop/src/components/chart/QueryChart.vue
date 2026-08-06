@@ -6,7 +6,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { LineChart, BarChart, PieChart } from "echarts/charts";
 import { GridComponent, TooltipComponent, LegendComponent } from "echarts/components";
 import VChart from "vue-echarts";
-import { BarChart3, CheckIcon, ChevronDown } from "@lucide/vue";
+import { BarChart3, ChevronDown } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -60,12 +60,12 @@ watch(
   { immediate: true },
 );
 
-function toggleYColumn(index: number) {
-  const idx = yColumnIndexes.value.indexOf(index);
-  if (idx >= 0) {
-    yColumnIndexes.value = yColumnIndexes.value.filter((selected) => selected !== index);
-  } else {
+function setYColumn(index: number, selected: boolean | "indeterminate") {
+  const isSelected = yColumnIndexes.value.includes(index);
+  if (selected === true && !isSelected) {
     yColumnIndexes.value = [...yColumnIndexes.value, index];
+  } else if (selected !== true && isSelected) {
+    yColumnIndexes.value = yColumnIndexes.value.filter((selected) => selected !== index);
   }
 }
 
@@ -163,10 +163,7 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent class="w-56" align="start" @close-auto-focus.prevent>
-              <DropdownMenuCheckboxItem v-for="col in numericColumnOptions" :key="col.index" :checked="yColumnIndexes.includes(col.index)" :class="['text-xs', yColumnIndexes.includes(col.index) ? 'bg-primary/10' : '']" @select.prevent @click="toggleYColumn(col.index)">
-                <span v-if="yColumnIndexes.includes(col.index)" class="absolute right-2 flex items-center justify-center pointer-events-none">
-                  <CheckIcon />
-                </span>
+              <DropdownMenuCheckboxItem v-for="col in numericColumnOptions" :key="col.index" :model-value="yColumnIndexes.includes(col.index)" :class="['text-xs', yColumnIndexes.includes(col.index) ? 'bg-primary/10' : '']" @select.prevent @update:model-value="setYColumn(col.index, $event)">
                 <span class="truncate">{{ col.label }}</span>
               </DropdownMenuCheckboxItem>
             </DropdownMenuContent>

@@ -2634,7 +2634,7 @@ function normalizeMaxRetries(value: number | undefined): number {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
@@ -2662,6 +2662,8 @@ const aiEditOpenCodeCliPath = ref("");
 const aiEditOpenCodeCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditCursorCliPath = ref("");
 const aiEditCursorCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditGrokCliPath = ref("");
+const aiEditGrokCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 
@@ -2694,6 +2696,7 @@ const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-c
 const aiIsPiAgentCli = computed(() => aiEditProvider.value === "pi-agent-cli");
 const aiIsOpenCodeCli = computed(() => aiEditProvider.value === "opencode-cli");
 const aiIsCursorCli = computed(() => aiEditProvider.value === "cursor-cli");
+const aiIsGrokCli = computed(() => aiEditProvider.value === "grok-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
 const aiCliCommandName = computed(() => {
@@ -2701,6 +2704,7 @@ const aiCliCommandName = computed(() => {
   if (aiIsPiAgentCli.value) return "pi";
   if (aiIsOpenCodeCli.value) return "opencode";
   if (aiIsCursorCli.value) return "agent";
+  if (aiIsGrokCli.value) return "grok";
   return "codex";
 });
 const aiCliLoginCommand = computed(() => {
@@ -2708,6 +2712,7 @@ const aiCliLoginCommand = computed(() => {
   if (aiIsPiAgentCli.value) return "pi";
   if (aiIsOpenCodeCli.value) return "opencode auth login";
   if (aiIsCursorCli.value) return "agent login";
+  if (aiIsGrokCli.value) return "grok login";
   return "codex login";
 });
 const aiEditCliPath = computed({
@@ -2716,6 +2721,7 @@ const aiEditCliPath = computed({
     if (aiIsPiAgentCli.value) return aiEditPiAgentCliPath.value;
     if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliPath.value;
     if (aiIsCursorCli.value) return aiEditCursorCliPath.value;
+    if (aiIsGrokCli.value) return aiEditGrokCliPath.value;
     return aiEditCodexCliPath.value;
   },
   set: (value: string) => {
@@ -2727,6 +2733,8 @@ const aiEditCliPath = computed({
       aiEditOpenCodeCliPath.value = value;
     } else if (aiIsCursorCli.value) {
       aiEditCursorCliPath.value = value;
+    } else if (aiIsGrokCli.value) {
+      aiEditGrokCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
@@ -2737,6 +2745,7 @@ const aiEditCliEnvRows = computed(() => {
   if (aiIsPiAgentCli.value) return aiEditPiAgentCliEnvRows.value;
   if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliEnvRows.value;
   if (aiIsCursorCli.value) return aiEditCursorCliEnvRows.value;
+  if (aiIsGrokCli.value) return aiEditGrokCliEnvRows.value;
   return aiEditCodexCliEnvRows.value;
 });
 watch(aiIsCliProvider, (isCliProvider) => {
@@ -2833,6 +2842,8 @@ function removeCliEnvRow(id: string) {
     aiEditOpenCodeCliEnvRows.value = aiEditOpenCodeCliEnvRows.value.filter((row) => row.id !== id);
   } else if (aiIsCursorCli.value) {
     aiEditCursorCliEnvRows.value = aiEditCursorCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsGrokCli.value) {
+    aiEditGrokCliEnvRows.value = aiEditGrokCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
@@ -2865,6 +2876,8 @@ function currentAiEditConfig() {
     opencodeCliEnv: aiIsOpenCodeCli.value ? cliEnvFromRows(aiEditOpenCodeCliEnvRows.value) : {},
     cursorCliPath: aiEditCursorCliPath.value.trim() || undefined,
     cursorCliEnv: aiIsCursorCli.value ? cliEnvFromRows(aiEditCursorCliEnvRows.value) : {},
+    grokCliPath: aiEditGrokCliPath.value.trim() || undefined,
+    grokCliEnv: aiIsGrokCli.value ? cliEnvFromRows(aiEditGrokCliEnvRows.value) : {},
   };
 }
 
@@ -2938,6 +2951,8 @@ function aiEnterEditMode(configId?: string) {
       aiEditOpenCodeCliEnvRows.value = aiEnvRowsFromConfig(config.opencodeCliEnv);
       aiEditCursorCliPath.value = config.cursorCliPath ?? "";
       aiEditCursorCliEnvRows.value = aiEnvRowsFromConfig(config.cursorCliEnv);
+      aiEditGrokCliPath.value = config.grokCliPath ?? "";
+      aiEditGrokCliEnvRows.value = aiEnvRowsFromConfig(config.grokCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
@@ -2963,6 +2978,8 @@ function aiEnterEditMode(configId?: string) {
     aiEditOpenCodeCliEnvRows.value = [];
     aiEditCursorCliPath.value = "";
     aiEditCursorCliEnvRows.value = [];
+    aiEditGrokCliPath.value = "";
+    aiEditGrokCliEnvRows.value = [];
   }
 }
 

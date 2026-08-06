@@ -22,7 +22,7 @@ describe("orderAiConfigsForDisplay", () => {
       { id: "openai-compatible", provider: "openai-compatible" },
       { id: "codex", provider: "codex-cli" },
       { id: "opencode", provider: "opencode-cli" },
-      { id: "cursor", provider: "cursor-cli" },
+      { id: "cursor", provider: "cursor-cli", "grok-cli" },
       { id: "pi", provider: "pi-agent-cli" },
       { id: "custom", provider: "custom" },
     ];

@@ -811,6 +811,11 @@ export default withEnglishFallback({
     zookeeperAuthMethod: "認証方式",
     zookeeperAuthDigest: "Digest（デフォルト）",
     zookeeperAuthSaslDigest: "SASL DIGEST-MD5",
+    mqttAuthCertificate: "クライアント証明書",
+    mqttCaCertPath: "CA証明書パス",
+    mqttClientCertPath: "クライアント証明書パス",
+    mqttClientKeyPath: "クライアント秘密鍵パス",
+    mqttNoLocal: "ローカル転送禁止",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

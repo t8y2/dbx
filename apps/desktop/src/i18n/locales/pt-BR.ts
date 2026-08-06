@@ -791,6 +791,11 @@ export default withEnglishFallback({
     zookeeperAuthMethod: "Método de autenticação",
     zookeeperAuthDigest: "Digest (padrão)",
     zookeeperAuthSaslDigest: "SASL DIGEST-MD5",
+    mqttAuthCertificate: "Certificado do cliente",
+    mqttCaCertPath: "Caminho do certificado CA",
+    mqttClientCertPath: "Caminho do certificado do cliente",
+    mqttClientKeyPath: "Caminho da chave privada do cliente",
+    mqttNoLocal: "Proibir encaminhamento local",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",

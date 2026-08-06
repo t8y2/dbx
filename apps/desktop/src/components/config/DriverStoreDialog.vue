@@ -30,9 +30,7 @@ import {
   updatePerDriverProgress,
   type DriverInstallProgress,
 } from "@/lib/connection/driverInstallProgressUi";
-import { PRESTOSQL_DRIVER_DB_TYPE, prestoSqlBuiltinDriverRow, prestoSqlMavenBundle } from "@/lib/database/prestoSqlBuiltinDriver";
-import { PHOENIX_MAVEN_REPOSITORY } from "@/lib/database/phoenixConnection";
-import { isPhoenixBuiltinDriver, phoenixBuiltinDriverBundles, phoenixBuiltinDriverRow, phoenixMissingMavenCoordinates } from "@/lib/database/phoenixBuiltinDriver";
+import { installRegisteredManagedJdbcDriver, isManagedJdbcDriver, managedJdbcDriverRows, uninstallRegisteredManagedJdbcDriver } from "@/lib/database/managedJdbcDrivers";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { isOfflineDriverPackage, webDriverImportAccept } from "@/lib/driverStore/driverImportSelection";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -349,15 +347,11 @@ function getJreReinstallTitle(fallback: string): string {
   return formatProgressText(jreReinstallProgress.value) || fallback;
 }
 
-function isPrestoSqlBuiltinDriver(dbType: string): boolean {
-  return dbType === PRESTOSQL_DRIVER_DB_TYPE;
-}
-
 function isManagedJdbcBuiltinDriver(dbType: string): boolean {
-  return isPrestoSqlBuiltinDriver(dbType) || isPhoenixBuiltinDriver(dbType);
+  return isManagedJdbcDriver(dbType);
 }
 
-const builtinDriverRows = computed<AgentDriverInfo[]>(() => [...drivers.value, prestoSqlBuiltinDriverRow(jdbcMavenBundles.value), phoenixBuiltinDriverRow(jdbcMavenBundles.value, jdbcPluginStatus.value)]);
+const builtinDriverRows = computed<AgentDriverInfo[]>(() => [...drivers.value, ...managedJdbcDriverRows(jdbcMavenBundles.value, jdbcPluginStatus.value)]);
 
 function driverLabel(dbType: string): string {
   return builtinDriverRows.value.find((d) => d.db_type === dbType)?.label ?? dbType;
@@ -475,26 +469,14 @@ async function runDriverInstall(dbType: string) {
   activeAgentOperationId.value = uuid();
   resetAgentInstallProgress();
   try {
-    if (isPrestoSqlBuiltinDriver(dbType)) {
-      if (!jdbcPluginStatus.value?.installed || !jdbcPluginStatus.value.compatible) {
-        jdbcPluginStatus.value = await api.installJdbcPlugin();
+    const managedResult = await installRegisteredManagedJdbcDriver(dbType, jdbcMavenBundles.value, jdbcPluginStatus.value, api);
+    if (managedResult) {
+      if (managedResult.pluginStatus) {
+        jdbcPluginStatus.value = managedResult.pluginStatus;
         emitDriverUpdateCount();
       }
-      jdbcDrivers.value = await api.installPrestoSqlJdbcDriver();
-      jdbcMavenBundles.value = await api.listJdbcMavenBundles();
-      void loadDriverStoreUsage();
-      toast(t("driverStore.driverInstallSuccess", { label }));
-      return;
-    }
-    if (isPhoenixBuiltinDriver(dbType)) {
-      if (!jdbcPluginStatus.value?.installed || !jdbcPluginStatus.value.compatible) {
-        jdbcPluginStatus.value = await api.installJdbcPlugin();
-        emitDriverUpdateCount();
-      }
-      for (const coordinate of phoenixMissingMavenCoordinates(jdbcMavenBundles.value)) {
-        jdbcDrivers.value = await api.installJdbcDriverFromMaven(coordinate, [PHOENIX_MAVEN_REPOSITORY]);
-        jdbcMavenBundles.value = await api.listJdbcMavenBundles();
-      }
+      if (managedResult.drivers) jdbcDrivers.value = managedResult.drivers;
+      jdbcMavenBundles.value = managedResult.bundles;
       void loadDriverStoreUsage();
       toast(t("driverStore.driverInstallSuccess", { label }));
       return;
@@ -563,20 +545,10 @@ async function upgradeAll() {
 async function uninstallDriver(dbType: string) {
   const label = driverLabel(dbType);
   try {
-    if (isPrestoSqlBuiltinDriver(dbType)) {
-      const bundle = prestoSqlMavenBundle(jdbcMavenBundles.value);
-      if (!bundle) return;
-      jdbcDrivers.value = await api.deleteJdbcMavenBundle(bundle.id);
-      jdbcMavenBundles.value = await api.listJdbcMavenBundles();
-      void loadDriverStoreUsage();
-      toast(t("driverStore.driverUninstallSuccess", { label }));
-      return;
-    }
-    if (isPhoenixBuiltinDriver(dbType)) {
-      for (const bundle of phoenixBuiltinDriverBundles(jdbcMavenBundles.value)) {
-        jdbcDrivers.value = await api.deleteJdbcMavenBundle(bundle.id);
-      }
-      jdbcMavenBundles.value = await api.listJdbcMavenBundles();
+    const managedResult = await uninstallRegisteredManagedJdbcDriver(dbType, jdbcMavenBundles.value, api);
+    if (managedResult) {
+      if (managedResult.drivers) jdbcDrivers.value = managedResult.drivers;
+      jdbcMavenBundles.value = managedResult.bundles;
       void loadDriverStoreUsage();
       toast(t("driverStore.driverUninstallSuccess", { label }));
       return;

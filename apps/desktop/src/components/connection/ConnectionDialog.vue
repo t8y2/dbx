@@ -108,21 +108,27 @@ import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig
 import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
-  createPhoenixConnectionFieldsByMode,
-  ensurePhoenixRuntimeDrivers,
-  isPhoenixDefaultDriverClass,
-  isPhoenixDriverInstallError,
-  isPhoenixManagedMavenCoordinate,
-  isPhoenixManagedMavenPath,
-  PHOENIX_DRIVER_PROFILE,
-  phoenixConnectionDefaults,
-  phoenixConnectionModeForConfig,
-  phoenixManagedRuntimePaths,
-  phoenixRuntimeSelectionId,
-  rememberPhoenixConnectionFields,
-  type PhoenixConnectionFieldsByMode,
-  type PhoenixConnectionMode,
-} from "@/lib/database/phoenixConnection";
+  createJdbcProductConnectionFieldsByMode,
+  isJdbcProductDefaultDriverClass,
+  isJdbcProductManagedMavenCoordinate,
+  isJdbcProductManagedMavenPath,
+  jdbcProductConnectionDefaults,
+  jdbcProductManagedRuntimePaths,
+  jdbcProductMode,
+  jdbcProductRuntimeSelectionId,
+  rememberJdbcProductConnectionFields,
+  type JdbcProductConnectionFieldsByMode,
+} from "@/lib/database/jdbcProductProfile";
+import {
+  ensureRegisteredJdbcProductRuntimeDrivers,
+  isRegisteredJdbcProductRuntimeInstallError,
+  jdbcProductDriverProfiles,
+  jdbcProductIconTypes,
+  jdbcProductPickerOptions,
+  jdbcProductProfileDefinition,
+  jdbcProductProfileForConfig,
+  jdbcProductProfileIdsForCategory,
+} from "@/lib/database/jdbcProductProfiles";
 
 type DbOption = { value: string; label: string };
 type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
@@ -139,7 +145,7 @@ type JdbcDriverSelectItem = {
   label: string;
   paths: string[];
   jdbcxRuntime: boolean;
-  phoenixRuntime?: boolean;
+  managedProductRuntime?: boolean;
 };
 
 const DREMIO_ARROW_FLIGHT_SQL_JDBC_URL = "jdbc:arrow-flight-sql://127.0.0.1:32010";
@@ -553,7 +559,7 @@ function resizeNoteTextarea() {
   textarea.style.overflowY = textarea.scrollHeight > maxContentHeight ? "auto" : "hidden";
 }
 
-const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && (isJdbcMissingRuntimeDependencyError(connectionErrorRawDetail.value) || (form.value.driver_profile === PHOENIX_DRIVER_PROFILE && isPhoenixDriverInstallError(connectionErrorRawDetail.value))));
+const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && (isJdbcMissingRuntimeDependencyError(connectionErrorRawDetail.value) || isRegisteredJdbcProductRuntimeInstallError(form.value, connectionErrorRawDetail.value)));
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
@@ -615,8 +621,13 @@ const dremioConnectionUrls = ref<Record<DremioConnectionMode, string>>({
   "arrow-flight-sql": DREMIO_ARROW_FLIGHT_SQL_JDBC_URL,
   legacy: DREMIO_LEGACY_JDBC_URL,
 });
-const phoenixConnectionMode = ref<PhoenixConnectionMode>("direct");
-const phoenixConnectionFields = ref<PhoenixConnectionFieldsByMode>(createPhoenixConnectionFieldsByMode());
+const jdbcProductConnectionMode = ref("");
+const jdbcProductConnectionFields = ref<JdbcProductConnectionFieldsByMode>({});
+const activeJdbcProductProfile = computed(() => jdbcProductProfileForConfig(form.value));
+const activeJdbcProductMode = computed(() => {
+  const profile = activeJdbcProductProfile.value;
+  return profile ? jdbcProductMode(profile, jdbcProductConnectionMode.value) : undefined;
+});
 const hiveAuthMode = ref<HiveKerberosAuthMode>("none");
 const hivePrincipal = ref("");
 const hiveKrb5ConfPath = ref("");
@@ -803,9 +814,10 @@ const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
     paths: bundle.artifacts.map((artifact) => artifact.path),
     jdbcxRuntime: bundle.artifacts.some((artifact) => isJdbcxRuntimePath(artifact.path)),
   }));
-  const phoenixProfileSelected = form.value.db_type === "jdbc" && form.value.driver_profile === PHOENIX_DRIVER_PROFILE;
+  const productProfile = activeJdbcProductProfile.value;
+  const productMode = activeJdbcProductMode.value;
   const bundles = jdbcMavenBundles.value
-    .filter((bundle) => !phoenixProfileSelected || !isPhoenixManagedMavenCoordinate(bundle.coordinate))
+    .filter((bundle) => !productProfile || !isJdbcProductManagedMavenCoordinate(productProfile, bundle.coordinate))
     .map((bundle) => ({
       id: `maven:${bundle.id}`,
       label: bundle.coordinate,
@@ -820,22 +832,22 @@ const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
       paths: [driver.path],
       jdbcxRuntime: isJdbcxRuntimePath(driver.path),
     }));
-  const phoenixPaths = phoenixProfileSelected ? phoenixManagedRuntimePaths(jdbcMavenBundles.value, phoenixConnectionMode.value) : [];
-  const phoenixRuntime: JdbcDriverSelectItem[] =
-    phoenixPaths.length > 0
+  const productPaths = productProfile && productMode ? jdbcProductManagedRuntimePaths(productProfile, jdbcMavenBundles.value, productMode.id) : [];
+  const managedProductRuntime: JdbcDriverSelectItem[] =
+    productProfile && productMode && productPaths.length > 0
       ? [
           {
-            id: phoenixRuntimeSelectionId(phoenixConnectionMode.value),
-            label: t("connection.phoenixRuntimeOption", {
-              mode: t(phoenixConnectionMode.value === "direct" ? "connection.phoenixDirectMode" : "connection.phoenixQueryServerMode"),
+            id: jdbcProductRuntimeSelectionId(productProfile, productMode.id),
+            label: t(productProfile.runtimeLabelKey, {
+              mode: t(productMode.labelKey),
             }),
-            paths: phoenixPaths,
+            paths: productPaths,
             jdbcxRuntime: false,
-            phoenixRuntime: true,
+            managedProductRuntime: true,
           },
         ]
       : [];
-  return [...phoenixRuntime, ...localBundles, ...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
+  return [...managedProductRuntime, ...localBundles, ...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
 });
 
 const jdbcDriverSelectItemById = computed(() => new Map(jdbcDriverSelectItems.value.map((item) => [item.id, item])));
@@ -1014,7 +1026,6 @@ const driverProfiles: Record<
   db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
   informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
   dremio: { type: "jdbc", port: 31010, user: "", label: "Dremio", icon: "dremio" },
-  phoenix: { type: "jdbc", port: 0, user: "", label: "Apache Phoenix", icon: "phoenix" },
   jdbcx: { type: "jdbc", port: 0, user: "", label: "JDBCX", icon: "jdbcx" },
   neo4j: { type: "neo4j", port: 7687, user: "neo4j", label: "Neo4j", icon: "neo4j" },
   cassandra: { type: "cassandra", port: 9042, user: "cassandra", label: "Cassandra", icon: "cassandra" },
@@ -1060,6 +1071,7 @@ const driverProfiles: Record<
     icon: "postgres",
     urlParams: "",
   },
+  ...jdbcProductDriverProfiles(),
 };
 
 function profileForConfig(config: ConnectionConfig) {
@@ -1693,8 +1705,8 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
   }
 }
 
-async function ensureRequiredPhoenixRuntimeInstalled(config: ConnectionConfig): Promise<void> {
-  const result = await ensurePhoenixRuntimeDrivers(config, api);
+async function ensureRequiredJdbcProductRuntimeInstalled(config: ConnectionConfig): Promise<void> {
+  const result = await ensureRegisteredJdbcProductRuntimeDrivers(config, api);
   if (!result) return;
 
   jdbcMavenBundles.value = result.bundles;
@@ -1993,53 +2005,62 @@ function dremioConnectionModeForConfig(config: Pick<ConnectionConfig, "connectio
   return haystack.includes("jdbc:dremio:") || haystack.includes("com.dremio.jdbc.driver") ? "legacy" : "arrow-flight-sql";
 }
 
-function currentPhoenixConnectionFields() {
+function currentJdbcProductConnectionFields() {
   return {
     connectionString: form.value.connection_string || "",
     driverClass: form.value.jdbc_driver_class || "",
   };
 }
 
-function applyPhoenixConnectionMode(mode: PhoenixConnectionMode) {
-  phoenixConnectionFields.value = rememberPhoenixConnectionFields(phoenixConnectionFields.value, phoenixConnectionMode.value, currentPhoenixConnectionFields());
-  phoenixConnectionMode.value = mode;
-  const fields = phoenixConnectionFields.value[mode];
+function applyJdbcProductConnectionMode(modeId: string) {
+  const profile = activeJdbcProductProfile.value;
+  if (!profile) return;
+  jdbcProductConnectionFields.value = rememberJdbcProductConnectionFields(profile, jdbcProductConnectionFields.value, jdbcProductConnectionMode.value, currentJdbcProductConnectionFields());
+  jdbcProductConnectionMode.value = modeId;
+  const fields = jdbcProductConnectionFields.value[modeId] ?? jdbcProductConnectionDefaults(profile, modeId);
   form.value.connection_string = fields.connectionString;
   form.value.jdbc_driver_class = fields.driverClass;
   resetTestState();
 }
 
-function resetPhoenixConnectionFields(mode: PhoenixConnectionMode = "direct", config?: Pick<ConnectionConfig, "connection_string" | "jdbc_driver_class">) {
-  phoenixConnectionMode.value = mode;
-  phoenixConnectionFields.value = createPhoenixConnectionFieldsByMode(config);
+function resetJdbcProductConnectionFields(profile = activeJdbcProductProfile.value, config?: Pick<ConnectionConfig, "connection_string" | "jdbc_driver_class">) {
+  if (!profile) {
+    jdbcProductConnectionMode.value = "";
+    jdbcProductConnectionFields.value = {};
+    return;
+  }
+  jdbcProductConnectionMode.value = config ? profile.detectMode(config) : jdbcProductMode(profile, "").id;
+  jdbcProductConnectionFields.value = createJdbcProductConnectionFieldsByMode(profile, config);
 }
 
-function restorePhoenixConnectionDefaultsIfEmpty() {
-  if (form.value.driver_profile !== PHOENIX_DRIVER_PROFILE) return;
-  const defaults = phoenixConnectionDefaults(phoenixConnectionMode.value);
+function restoreJdbcProductConnectionDefaultsIfEmpty() {
+  const profile = activeJdbcProductProfile.value;
+  if (!profile) return;
+  const defaults = jdbcProductConnectionDefaults(profile, jdbcProductConnectionMode.value);
   form.value.connection_string = form.value.connection_string?.trim() || defaults.connectionString;
   form.value.jdbc_driver_class = form.value.jdbc_driver_class?.trim() || defaults.driverClass;
 }
 
-function syncPhoenixConnectionModeFromUrl() {
-  if (form.value.driver_profile !== PHOENIX_DRIVER_PROFILE) return;
-  restorePhoenixConnectionDefaultsIfEmpty();
-  const nextMode = phoenixConnectionModeForConfig(form.value);
-  if (nextMode === phoenixConnectionMode.value) {
-    phoenixConnectionFields.value = rememberPhoenixConnectionFields(phoenixConnectionFields.value, nextMode, currentPhoenixConnectionFields());
+function syncJdbcProductConnectionModeFromUrl() {
+  const profile = activeJdbcProductProfile.value;
+  if (!profile) return;
+  restoreJdbcProductConnectionDefaultsIfEmpty();
+  const nextMode = profile.detectMode(form.value);
+  if (nextMode === jdbcProductConnectionMode.value) {
+    jdbcProductConnectionFields.value = rememberJdbcProductConnectionFields(profile, jdbcProductConnectionFields.value, nextMode, currentJdbcProductConnectionFields());
     return;
   }
 
-  if (isPhoenixDefaultDriverClass(form.value.jdbc_driver_class)) {
-    form.value.jdbc_driver_class = phoenixConnectionDefaults(nextMode).driverClass;
+  if (isJdbcProductDefaultDriverClass(profile, form.value.jdbc_driver_class)) {
+    form.value.jdbc_driver_class = jdbcProductConnectionDefaults(profile, nextMode).driverClass;
   }
-  phoenixConnectionMode.value = nextMode;
-  phoenixConnectionFields.value = rememberPhoenixConnectionFields(phoenixConnectionFields.value, nextMode, currentPhoenixConnectionFields());
+  jdbcProductConnectionMode.value = nextMode;
+  jdbcProductConnectionFields.value = rememberJdbcProductConnectionFields(profile, jdbcProductConnectionFields.value, nextMode, currentJdbcProductConnectionFields());
 }
 
 function syncJdbcProfileModeFromUrl() {
   syncDremioConnectionModeFromUrl();
-  syncPhoenixConnectionModeFromUrl();
+  syncJdbcProductConnectionModeFromUrl();
 }
 
 function isCustomCompatibleProfile() {
@@ -2094,9 +2115,10 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       if (val === "dremio") {
         resetDremioConnectionUrls();
         applyDremioConnectionMode("legacy");
-      } else if (val === PHOENIX_DRIVER_PROFILE) {
-        resetPhoenixConnectionFields();
-        const fields = phoenixConnectionDefaults("direct");
+      } else if (jdbcProductProfileDefinition(val)) {
+        const jdbcProductProfile = jdbcProductProfileDefinition(val)!;
+        resetJdbcProductConnectionFields(jdbcProductProfile);
+        const fields = jdbcProductConnectionDefaults(jdbcProductProfile, jdbcProductConnectionMode.value);
         form.value.connection_string = fields.connectionString;
         form.value.jdbc_driver_class = fields.driverClass;
       } else if (val === JDBCX_DRIVER_PROFILE) {
@@ -2278,8 +2300,7 @@ watch(
       }
       dremioConnectionMode.value = profile === "dremio" ? dremioConnectionModeForConfig(config) : "legacy";
       resetDremioConnectionUrls(dremioConnectionMode.value, profile === "dremio" ? config.connection_string : undefined);
-      const loadedPhoenixMode = profile === PHOENIX_DRIVER_PROFILE ? phoenixConnectionModeForConfig(config) : "direct";
-      resetPhoenixConnectionFields(loadedPhoenixMode, profile === PHOENIX_DRIVER_PROFILE ? config : undefined);
+      resetJdbcProductConnectionFields(jdbcProductProfileForConfig(config), config);
       mongoUseUrl.value = !!config.connection_string;
       jdbcDriverPathsInput.value = (config.jdbc_driver_paths || []).join("\n");
       jdbcManualClasspathOpen.value = config.db_type === "prestosql" || (config.jdbc_driver_paths || []).length > 0;
@@ -2310,7 +2331,7 @@ watch(
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
       resetDremioConnectionUrls();
-      resetPhoenixConnectionFields();
+      resetJdbcProductConnectionFields(undefined);
       dialogStep.value = "select";
       configTab.value = "connection";
     }
@@ -2516,7 +2537,6 @@ const iconTypeMap: Record<string, string> = {
   db2: "db2",
   informix: "informix",
   dremio: "dremio",
-  phoenix: "phoenix",
   jdbcx: "jdbcx",
   iris: "iris",
   neo4j: "neo4j",
@@ -2530,6 +2550,7 @@ const iconTypeMap: Record<string, string> = {
   jdbc: "jdbc",
   custom_mysql: "mysql",
   custom_postgres: "postgres",
+  ...jdbcProductIconTypes(),
 };
 
 const dbOptions: DbOption[] = [
@@ -2593,7 +2614,6 @@ const dbOptions: DbOption[] = [
   { value: "spark", label: "Apache Spark" },
   { value: "db2", label: "DB2" },
   { value: "informix", label: "Informix" },
-  { value: "phoenix", label: "Apache Phoenix" },
   { value: "neo4j", label: "Neo4j" },
   { value: "cassandra", label: "Cassandra" },
   { value: "bigquery", label: "BigQuery" },
@@ -2618,12 +2638,13 @@ const dbOptions: DbOption[] = [
   { value: "custom_mysql", label: "Custom (MySQL)" },
   { value: "custom_postgres", label: "Custom (PostgreSQL)" },
   { value: "dremio", label: "Dremio" },
+  ...jdbcProductPickerOptions(),
 ];
 
 const dbCategoryDefinitions: Array<{
   key: DbCategoryKey;
   titleKey: string;
-  optionValues: readonly string[];
+  optionValues: string[];
 }> = [
   {
     key: "sql",
@@ -2633,7 +2654,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "analytics",
     titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "spark", "bigquery", "kylin", "dremio", "phoenix"],
+    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "spark", "bigquery", "kylin", "dremio"],
   },
   {
     key: "domestic",
@@ -2671,6 +2692,10 @@ const dbCategoryDefinitions: Array<{
     optionValues: ["etcd", "zookeeper", "nacos"],
   },
 ];
+
+for (const category of dbCategoryDefinitions) {
+  category.optionValues.push(...jdbcProductProfileIdsForCategory(category.key));
+}
 
 // Keep the picker exhaustive as database drivers are added or reorganized.
 assertCompleteDatabaseCategories(
@@ -2737,7 +2762,7 @@ const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selecte
 const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql"]);
 const isJdbcConnection = computed(() => form.value.db_type === "jdbc");
 const isJdbcxConnection = computed(() => isJdbcConnection.value && form.value.driver_profile === JDBCX_DRIVER_PROFILE);
-const isPhoenixConnection = computed(() => isJdbcConnection.value && form.value.driver_profile === PHOENIX_DRIVER_PROFILE);
+const isJdbcProductConnection = computed(() => Boolean(activeJdbcProductProfile.value));
 const jdbcxHighPrivilegeExtensionsAllowed = computed({
   get: () => jdbcxHighPrivilegeExtensionsEnabled(form.value),
   set: (enabled: boolean) => {
@@ -2750,7 +2775,7 @@ const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionM
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
 
 const connectionUrlPlaceholder = computed(() => getUrlPlaceholder(form.value.db_type));
-const jdbcUsernamePlaceholder = computed(() => (form.value.driver_profile === "dremio" || form.value.driver_profile === PHOENIX_DRIVER_PROFILE ? "" : "sa"));
+const jdbcUsernamePlaceholder = computed(() => (form.value.driver_profile === "dremio" || isJdbcProductConnection.value ? "" : "sa"));
 const filePathPlaceholder = computed(() => {
   if (form.value.db_type === "duckdb") return "/path/to/database.duckdb or :memory:";
   if (form.value.db_type === "access") return "/path/to/database.accdb";
@@ -3193,7 +3218,7 @@ async function testConnection() {
     await ensureRequiredAgentDriverInstalled(config);
     await ensureRequiredGaussdbMJdbcRuntime(config);
     await ensureRequiredJdbcxDriverInstalled(config);
-    await ensureRequiredPhoenixRuntimeInstalled(config);
+    await ensureRequiredJdbcProductRuntimeInstalled(config);
     const result = await testConnectionWithTimeout(config, runId);
     if (runId !== testRunId) return;
     let successfulConfig = config;
@@ -3656,8 +3681,9 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     if (config.db_type === "jdbc") {
       if (config.driver_profile === "dremio") {
         applyDremioJdbcMetadata(config);
-      } else if (config.driver_profile === PHOENIX_DRIVER_PROFILE) {
-        const defaults = phoenixConnectionDefaults(phoenixConnectionModeForConfig(config));
+      } else if (jdbcProductProfileForConfig(config)) {
+        const jdbcProductProfile = jdbcProductProfileForConfig(config)!;
+        const defaults = jdbcProductConnectionDefaults(jdbcProductProfile, jdbcProductProfile.detectMode(config));
         config.host = "";
         config.port = 0;
         config.connection_string = config.connection_string?.trim() || defaults.connectionString;
@@ -4344,7 +4370,7 @@ async function copyConnectionErrorDetail() {
 }
 
 function openJdbcDriverManager() {
-  emit("openDriverStore", isPhoenixConnection.value ? agentDriverFocus.value : { target: "tab", tab: "jdbc" });
+  emit("openDriverStore", isJdbcProductConnection.value ? agentDriverFocus.value : { target: "tab", tab: "jdbc" });
 }
 
 function openJdbcDriverManagerFromError() {
@@ -4364,7 +4390,7 @@ function resetForm() {
   oceanbaseSubMode.value = "mysql";
   dremioConnectionMode.value = "legacy";
   resetDremioConnectionUrls();
-  resetPhoenixConnectionFields();
+  resetJdbcProductConnectionFields(undefined);
   jdbcDriverPathsInput.value = "";
   selectedJdbcDriverPath.value = "";
   connectionUrlInput.value = "";
@@ -4424,10 +4450,7 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   if (form.value.db_type === "h2") {
     h2ConnectionMode.value = h2ConnectionModeForConfig(form.value);
   }
-  if (draft.driverProfile === PHOENIX_DRIVER_PROFILE) {
-    const mode = phoenixConnectionModeForConfig(form.value);
-    resetPhoenixConnectionFields(mode, form.value);
-  }
+  resetJdbcProductConnectionFields(jdbcProductProfileForConfig(form.value), form.value);
   if (draft.driverProfile === "oceanbase-oracle") {
     oceanbaseSubMode.value = "oracle";
     selectedType.value = "oceanbase";
@@ -5059,11 +5082,11 @@ function onJdbcDriverSelect(id: any) {
   const item = jdbcDriverSelectItemById.value.get(id);
   if (!item) return;
   selectedJdbcDriverPath.value = id;
-  if (item.phoenixRuntime) {
+  if (item.managedProductRuntime && activeJdbcProductProfile.value) {
     const existingPaths = jdbcDriverPathsInput.value
       .split(/\r?\n/)
       .map((path) => path.trim())
-      .filter((path) => path && !isPhoenixManagedMavenPath(path));
+      .filter((path) => path && !isJdbcProductManagedMavenPath(activeJdbcProductProfile.value!, path));
     jdbcDriverPathsInput.value = Array.from(new Set([...existingPaths, ...item.paths])).join("\n");
   } else if (isJdbcxConnection.value && item.jdbcxRuntime) {
     const installedJdbcxRuntimePaths = new Set(jdbcDriverSelectItems.value.filter((candidate) => candidate.jdbcxRuntime).flatMap((candidate) => candidate.paths));
@@ -5388,24 +5411,21 @@ function openExternalUrl(url: string) {
                       </Button>
                     </div>
                   </div>
-                  <div v-if="isPhoenixConnection" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="activeJdbcProductProfile && activeJdbcProductProfile.modes.length > 1" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 flex gap-2">
-                      <Button type="button" size="sm" :variant="phoenixConnectionMode === 'direct' ? 'default' : 'outline'" @click="applyPhoenixConnectionMode('direct')">
-                        {{ t("connection.phoenixDirectMode") }}
-                      </Button>
-                      <Button type="button" size="sm" :variant="phoenixConnectionMode === 'query-server' ? 'default' : 'outline'" @click="applyPhoenixConnectionMode('query-server')">
-                        {{ t("connection.phoenixQueryServerMode") }}
+                      <Button v-for="mode in activeJdbcProductProfile.modes" :key="mode.id" type="button" size="sm" :variant="jdbcProductConnectionMode === mode.id ? 'default' : 'outline'" @click="applyJdbcProductConnectionMode(mode.id)">
+                        {{ t(mode.labelKey) }}
                       </Button>
                     </div>
                   </div>
-                  <div v-if="isPhoenixConnection" class="grid grid-cols-4 items-start gap-4">
+                  <div v-if="activeJdbcProductProfile && activeJdbcProductMode" class="grid grid-cols-4 items-start gap-4">
                     <span />
                     <div class="col-span-3 space-y-1 text-xs text-muted-foreground">
-                      <p>{{ phoenixConnectionMode === "direct" ? t("connection.phoenixDirectModeHint") : t("connection.phoenixQueryServerModeHint") }}</p>
+                      <p>{{ t(activeJdbcProductMode.hintKey) }}</p>
                       <p>
-                        {{ t("connection.phoenixDriverManagerHintPrefix") }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', agentDriverFocus)">{{ t("toolbar.driverManager") }}</a
-                        >{{ t("connection.phoenixDriverManagerHintSuffix") }}
+                        {{ t(activeJdbcProductProfile.driverManagerHintPrefixKey) }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', agentDriverFocus)">{{ t("toolbar.driverManager") }}</a
+                        >{{ t(activeJdbcProductProfile.driverManagerHintSuffixKey) }}
                       </p>
                     </div>
                   </div>
@@ -5477,7 +5497,7 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-start gap-4">
                     <span />
                     <div class="col-span-3 space-y-2">
-                      <p v-if="!isPhoenixConnection" class="text-xs text-muted-foreground">
+                      <p v-if="!isJdbcProductConnection" class="text-xs text-muted-foreground">
                         {{ t("connection.jdbcPluginHint") }}
                       </p>
                       <div class="flex flex-wrap gap-2">
@@ -5485,9 +5505,9 @@ function openExternalUrl(url: string) {
                           <FolderOpen class="h-3.5 w-3.5" />
                           {{ t("toolbar.driverManager") }}
                         </Button>
-                        <Button type="button" variant="outline" size="sm" @click="openExternalUrl(isPhoenixConnection ? 'https://phoenix.apache.org/docs/fundamentals/client-classpath-and-jdbc-url/' : 'https://dbxio.com')">
+                        <Button type="button" variant="outline" size="sm" @click="openExternalUrl(activeJdbcProductProfile?.docsUrl || 'https://dbxio.com')">
                           <ExternalLink class="h-3.5 w-3.5" />
-                          {{ isPhoenixConnection ? t("connection.phoenixDocs") : t("connection.jdbcDocs") }}
+                          {{ activeJdbcProductProfile ? t(activeJdbcProductProfile.docsLabelKey) : t("connection.jdbcDocs") }}
                         </Button>
                       </div>
                     </div>

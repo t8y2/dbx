@@ -1,13 +1,13 @@
 {
   "repository": "t8y2/dbx",
-  "generatedAt": "2026-08-05T19:19:00.466Z",
-  "stars": 13317,
+  "generatedAt": "2026-08-05T18:33:53.515Z",
+  "stars": 13315,
   "contributors": [
     {
       "login": "t8y2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/77960507?v=4",
       "profileUrl": "https://github.com/t8y2",
-      "commits": 2808,
+      "commits": 2805,
       "mergedPullRequests": 15,
       "firstContributionAt": "2026-04-30T08:14:51Z",
       "latestContributionAt": "2026-07-30T13:10:01Z"
@@ -1622,6 +1622,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-06-23T05:56:48Z",
       "latestContributionAt": "2026-06-23T17:44:46Z"
+    },
+    {
+      "login": "TangTangH",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31877158?v=4",
+      "profileUrl": "https://github.com/TangTangH",
+      "commits": 0,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-08-04T04:55:17Z",
+      "latestContributionAt": "2026-08-04T18:59:34Z"
     }
   ]
 }

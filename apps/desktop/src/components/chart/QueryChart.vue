@@ -6,7 +6,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { LineChart, BarChart, PieChart } from "echarts/charts";
 import { GridComponent, TooltipComponent, LegendComponent } from "echarts/components";
 import VChart from "vue-echarts";
-import { BarChart3, ChevronDown } from "@lucide/vue";
+import { BarChart3, CheckIcon, ChevronDown } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -163,7 +163,10 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent class="w-56" align="start" @close-auto-focus.prevent>
-              <DropdownMenuCheckboxItem v-for="col in numericColumnOptions" :key="col.index" :checked="yColumnIndexes.includes(col.index)" class="text-xs" @select.prevent @click="toggleYColumn(col.index)">
+              <DropdownMenuCheckboxItem v-for="col in numericColumnOptions" :key="col.index" :checked="yColumnIndexes.includes(col.index)" :class="['text-xs', yColumnIndexes.includes(col.index) ? 'bg-primary/10' : '']" @select.prevent @click="toggleYColumn(col.index)">
+                <span v-if="yColumnIndexes.includes(col.index)" class="absolute right-2 flex items-center justify-center pointer-events-none">
+                  <CheckIcon />
+                </span>
                 <span class="truncate">{{ col.label }}</span>
               </DropdownMenuCheckboxItem>
             </DropdownMenuContent>

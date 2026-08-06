@@ -26,6 +26,9 @@ export interface SavedOpenTab {
   originalSql?: string;
   savedSqlId?: string;
   externalSqlPath?: string;
+  externalSqlFileVersion?: QueryTab["externalSqlFileVersion"];
+  externalSqlIgnoredFileVersion?: QueryTab["externalSqlIgnoredFileVersion"];
+  externalSqlFileMissing?: boolean;
   lastExecutedSql?: string;
   resultBaseSql?: string;
   resultSortedSql?: string;
@@ -99,6 +102,9 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.originalSql !== undefined && !tab.savedSqlId && !tab.externalSqlPath ? { originalSql: tab.originalSql } : {}),
     savedSqlId: tab.savedSqlId,
     externalSqlPath: tab.externalSqlPath,
+    externalSqlFileVersion: tab.externalSqlFileVersion,
+    externalSqlIgnoredFileVersion: tab.externalSqlIgnoredFileVersion,
+    ...(tab.externalSqlFileMissing ? { externalSqlFileMissing: true } : {}),
     ...(tab.lastExecutedSql !== undefined ? { lastExecutedSql: tab.lastExecutedSql } : {}),
     ...(tab.resultBaseSql !== undefined ? { resultBaseSql: tab.resultBaseSql } : {}),
     ...(tab.resultSortedSql !== undefined ? { resultSortedSql: tab.resultSortedSql } : {}),

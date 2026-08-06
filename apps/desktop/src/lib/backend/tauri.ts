@@ -56,6 +56,7 @@ import type {
   SshConfigHostEntry,
   TunnelProfile,
   TransactionLog,
+  ExternalSqlFileVersion,
 } from "@/types/database";
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { CollectionInfo } from "@/types/database";
@@ -754,19 +755,41 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
   return invoke("pending_open_connection_links");
 }
 
-export async function readExternalSqlFile(path: string): Promise<string> {
-  const result = await invoke<{ kind: "content"; content: string } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+export interface ExternalSqlFileSnapshot {
+  content: string;
+  version: ExternalSqlFileVersion;
+}
+
+export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifiedNs: string } | { kind: "missing" };
+
+export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
+
+export async function readExternalSqlFileSnapshot(path: string): Promise<ExternalSqlFileSnapshot> {
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
-  return result.content;
+  return { content: result.content, version: result.version };
 }
 
-export async function writeExternalSqlFile(path: string, content: string): Promise<void> {
-  return invoke("write_external_sql_file", { path, content });
+export async function readExternalSqlFile(path: string): Promise<string> {
+  return (await readExternalSqlFileSnapshot(path)).content;
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<string | null> {
+export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlFileStatus> {
+  return invoke("inspect_external_sql_file", { path });
+}
+
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; force?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+  return invoke("write_external_sql_file", {
+    path,
+    content,
+    expectedContentHash: options.expectedContentHash ?? null,
+    force: options.force ?? false,
+  });
+}
+
+export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
   return invoke("save_external_sql_file", { defaultFileName, content });
 }
 

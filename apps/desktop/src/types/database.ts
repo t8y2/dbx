@@ -925,6 +925,12 @@ export interface ObjectBrowserViewport {
   viewMode: ObjectBrowserViewMode;
 }
 
+export interface ExternalSqlFileVersion {
+  sizeBytes: number;
+  modifiedNs: string;
+  contentHash: string;
+}
+
 export interface QueryTab {
   id: string;
   title: string;
@@ -938,6 +944,9 @@ export interface QueryTab {
   sql: string;
   savedSqlId?: string;
   externalSqlPath?: string;
+  externalSqlFileVersion?: ExternalSqlFileVersion;
+  externalSqlIgnoredFileVersion?: ExternalSqlFileVersion;
+  externalSqlFileMissing?: boolean;
   originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;

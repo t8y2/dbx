@@ -490,6 +490,7 @@ function tabColorStyle(tab: QueryTab) {
 }
 
 function tabIconClass(tab: QueryTab) {
+  if (tab.externalSqlFileMissing) return "text-amber-600 dark:text-amber-400";
   if (tab.mode === "mq") return "";
   if (tab.mode === "objects") return "text-amber-500 dark:text-amber-400";
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "hbase" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
@@ -519,6 +520,7 @@ const tabBarClass = computed(() => [isClassicLayout.value ? "bg-muted" : "border
 const regularTabRowClass = computed(() => [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]);
 
 function tabMenuIcon(tab: QueryTab) {
+  if (tab.externalSqlFileMissing) return AlertTriangle;
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
   if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
@@ -663,7 +665,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                      <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                      <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
@@ -858,7 +861,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                      <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                      <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />

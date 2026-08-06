@@ -31,6 +31,7 @@ import { useDataGridActions } from "@/composables/useDataGridActions";
 import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
+import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
@@ -109,6 +110,7 @@ import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import type { HistoryEntry } from "@/lib/backend/tauri";
 import type { AiAction } from "@/lib/ai/ai";
+import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChangeDialog.vue";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
@@ -244,6 +246,15 @@ const pendingAppCloseAction = ref<AppCloseAction | null>(null);
 const pendingCloseActionChoice = ref(false);
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
+
+const externalSqlFileChanges = useExternalSqlFileChanges({
+  activeTab,
+  recreateFile: (tab) => writeExternalSqlTab(tab, { force: true }).then((result) => result === "saved"),
+  saveAsFile: (tab) => saveExternalSqlTabAs(tab),
+  closeTab: (tab) => queryStore.closeTab(tab.id),
+  reportError: (message) => toast(message, 5000),
+});
+const externalSqlFilePrompt = externalSqlFileChanges.pendingPrompt;
 
 const activeConnection = computed(() => {
   const tab = activeTab.value;
@@ -833,19 +844,44 @@ function handleCloseActionPromptOpenChange(open: boolean) {
   }
 }
 
-async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: boolean } = {}): Promise<boolean> {
-  if (!tab.externalSqlPath || !isTauriRuntime()) return false;
+async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: boolean; expectedContentHash?: string; force?: boolean } = {}): Promise<"saved" | "retry" | "failed"> {
+  if (!tab.externalSqlPath || !isTauriRuntime()) return "failed";
   try {
-    await api.writeExternalSqlFile(tab.externalSqlPath, tab.sql);
+    const result = await api.writeExternalSqlFile(tab.externalSqlPath, tab.sql, {
+      expectedContentHash: options.expectedContentHash,
+      force: options.force,
+    });
+    if (result.kind !== "written") return "retry";
     rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database: tab.database });
-    queryStore.markTabClean(tab);
+    queryStore.markExternalSqlFileSaved(tab.id, result.version);
     toast(t("savedSql.saved"), 2000);
     if (options.closeAfterSave) queryStore.closeTab(tab.id, { force: true });
-    return true;
+    return "saved";
   } catch (e: any) {
     toast(t("toolbar.sqlSaveFailed", { message: e?.message || String(e) }), 5000);
-    return true;
+    return "failed";
   }
+}
+
+async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: boolean } = {}): Promise<boolean> {
+  if (!tab.externalSqlPath || !isTauriRuntime()) return false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const preparation = await externalSqlFileChanges.prepareSave(tab);
+    if (!preparation.proceed) {
+      if (options.closeAfterSave && queryStore.tabs.some((candidate) => candidate.id === tab.id) && !queryStore.isTabDirty(tab)) {
+        queryStore.closeTab(tab.id, { force: true });
+      }
+      return true;
+    }
+    const result = await writeExternalSqlTab(tab, {
+      closeAfterSave: options.closeAfterSave,
+      expectedContentHash: preparation.expectedContentHash,
+      force: preparation.force,
+    });
+    if (result !== "retry") return true;
+  }
+  toast(t("externalSqlFile.checkFailed", { message: t("externalSqlFile.changedAgain") }), 5000);
+  return true;
 }
 
 function savedSqlTargetForSave(tab: QueryTab) {
@@ -1090,21 +1126,27 @@ async function confirmSaveSqlToLibrary() {
   }
 }
 
-async function saveActiveSqlAsLocalFile() {
-  const tab = activeTab.value;
-  if (!tab || !canSaveSqlTab(tab) || !isTauriRuntime()) return;
+async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
+  if (!canSaveSqlTab(tab) || !isTauriRuntime()) return false;
   try {
-    const path = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), tab.sql);
-    if (!path) return;
-    queryStore.linkExternalSqlPath(tab.id, path, sqlFileTitleFromPath(path));
-    rememberExternalSqlFileTarget(path, { connectionId: tab.connectionId, database: tab.database });
+    const saved = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), tab.sql);
+    if (!saved) return false;
+    queryStore.linkExternalSqlPath(tab.id, saved.path, sqlFileTitleFromPath(saved.path), saved.version);
+    rememberExternalSqlFileTarget(saved.path, { connectionId: tab.connectionId, database: tab.database });
     invalidateSaveSqlFolderSelection();
     showSaveSqlDialog.value = false;
     closePendingSavedTab();
     toast(t("savedSql.saved"), 2000);
+    return true;
   } catch (e: any) {
     toast(t("toolbar.sqlSaveFailed", { message: e?.message || String(e) }), 5000);
+    return false;
   }
+}
+
+async function saveActiveSqlAsLocalFile() {
+  const tab = activeTab.value;
+  if (tab) await saveExternalSqlTabAs(tab);
 }
 
 function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
@@ -1131,9 +1173,9 @@ async function openSqlFile() {
       });
       if (path) {
         const sqlPath = path as string;
-        const content = await api.readExternalSqlFile(sqlPath);
-        queryStore.updateSql(tab.id, content);
-        queryStore.linkExternalSqlPath(tab.id, sqlPath, sqlFileTitleFromPath(sqlPath));
+        const snapshot = await api.readExternalSqlFileSnapshot(sqlPath);
+        queryStore.updateSql(tab.id, snapshot.content);
+        queryStore.linkExternalSqlPath(tab.id, sqlPath, sqlFileTitleFromPath(sqlPath), snapshot.version);
         applyExternalSqlFileTarget(tab, sqlPath);
       }
     } else {
@@ -1185,12 +1227,12 @@ async function openSqlFilePath(path: string) {
   if (!isTauriRuntime()) return;
   try {
     await desktopOpenTabsRestorationBarrier?.settled;
-    const content = await api.readExternalSqlFile(path);
+    const snapshot = await api.readExternalSqlFileSnapshot(path);
     const connectionId = connectionStore.activeConnectionId || activeTab.value?.connectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = activeTab.value?.database || (connection ? resolveDefaultDatabase(connection, []) : "");
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, content);
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version);
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
@@ -1779,11 +1821,11 @@ async function handleQuickOpenSelect(item: any) {
   // Handle SQL file types first — they don't require a database connection
   if (item.type === "sql_file" && item.filePath) {
     try {
-      const content = await api.readExternalSqlFile(item.filePath);
+      const snapshot = await api.readExternalSqlFileSnapshot(item.filePath);
       const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
       const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
       const database = connection ? resolveDefaultDatabase(connection, []) : "";
-      queryStore.openExternalSqlFile(connectionId, database, item.filePath, content);
+      queryStore.openExternalSqlFile(connectionId, database, item.filePath, snapshot.content, snapshot.version);
     } catch (e: any) {
       toast(
         externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)),
@@ -2639,6 +2681,7 @@ onUnmounted(() => {
           @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
         />
+        <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />
         <QuickOpenDialog :open="showQuickOpen" @update:open="showQuickOpen = $event" @select="handleQuickOpenSelect" />
       </div>

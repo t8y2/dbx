@@ -249,7 +249,11 @@ const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore
 
 const externalSqlFileChanges = useExternalSqlFileChanges({
   activeTab,
-  recreateFile: (tab) => writeExternalSqlTab(tab, { force: true }).then((result) => result === "saved"),
+  recreateFile: async (tab) => {
+    const result = await writeExternalSqlTab(tab, { expectedMissing: true });
+    if (result === "retry") toast(t("externalSqlFile.changedAgain"), 5000);
+    return result === "saved";
+  },
   saveAsFile: (tab) => saveExternalSqlTabAs(tab),
   closeTab: (tab) => queryStore.closeTab(tab.id),
   reportError: (message) => toast(message, 5000),
@@ -844,12 +848,12 @@ function handleCloseActionPromptOpenChange(open: boolean) {
   }
 }
 
-async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: boolean; expectedContentHash?: string; force?: boolean } = {}): Promise<"saved" | "retry" | "failed"> {
+async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: boolean; expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<"saved" | "retry" | "failed"> {
   if (!tab.externalSqlPath || !isTauriRuntime()) return "failed";
   try {
     const result = await api.writeExternalSqlFile(tab.externalSqlPath, tab.sql, {
       expectedContentHash: options.expectedContentHash,
-      force: options.force,
+      expectedMissing: options.expectedMissing,
     });
     if (result.kind !== "written") return "retry";
     rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database: tab.database });
@@ -876,7 +880,7 @@ async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: bo
     const result = await writeExternalSqlTab(tab, {
       closeAfterSave: options.closeAfterSave,
       expectedContentHash: preparation.expectedContentHash,
-      force: preparation.force,
+      expectedMissing: preparation.expectedMissing,
     });
     if (result !== "retry") return true;
   }

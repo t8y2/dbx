@@ -50,7 +50,19 @@ describe("external SQL file API", () => {
       path: "/tmp/demo.sql",
       content: "select 2;",
       expectedContentHash: "abc123",
-      force: false,
+      expectedMissing: false,
+    });
+  });
+
+  it("passes an expected-missing precondition to recreate writes", async () => {
+    mocks.invoke.mockResolvedValue({ kind: "written", version });
+
+    await expect(writeExternalSqlFile("/tmp/demo.sql", "select 2;", { expectedMissing: true })).resolves.toEqual({ kind: "written", version });
+    expect(mocks.invoke).toHaveBeenCalledWith("write_external_sql_file", {
+      path: "/tmp/demo.sql",
+      content: "select 2;",
+      expectedContentHash: null,
+      expectedMissing: true,
     });
   });
 

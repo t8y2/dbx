@@ -4,6 +4,7 @@ import { test } from "vitest";
 
 const appSource = readFileSync("apps/desktop/src/App.vue", "utf8");
 const sqlFilePanelSource = readFileSync("apps/desktop/src/components/layout/SqlFilePanel.vue", "utf8");
+const externalSqlFileChangesSource = readFileSync("apps/desktop/src/composables/useExternalSqlFileChanges.ts", "utf8");
 
 function functionSource(source: string, startMarker: string, endMarker: string) {
   const start = source.indexOf(startMarker);
@@ -38,4 +39,14 @@ test("external SQL open entry points restore a saved data source", () => {
 
   const pickerOpen = functionSource(appSource, "async function openSqlFile()", "async function importResultArchive");
   assert.ok(pickerOpen.includes("applyExternalSqlFileTarget(tab, sqlPath)"));
+});
+
+test("external SQL overwrite and recreate actions keep checked-write preconditions", () => {
+  const prepareSave = functionSource(externalSqlFileChangesSource, "async function prepareSave", "\n  watch(");
+  assert.ok(prepareSave.includes("expectedContentHash: change.snapshot.version.contentHash"));
+  assert.ok(prepareSave.includes("expectedMissing: true"));
+  assert.equal(prepareSave.includes("force: true"), false);
+
+  const setup = appSource.slice(appSource.indexOf("const externalSqlFileChanges = useExternalSqlFileChanges"), appSource.indexOf("const externalSqlFilePrompt"));
+  assert.ok(setup.includes("writeExternalSqlTab(tab, { expectedMissing: true })"));
 });

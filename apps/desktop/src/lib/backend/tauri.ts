@@ -780,12 +780,12 @@ export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlF
   return invoke("inspect_external_sql_file", { path });
 }
 
-export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; force?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
   return invoke("write_external_sql_file", {
     path,
     content,
     expectedContentHash: options.expectedContentHash ?? null,
-    force: options.force ?? false,
+    expectedMissing: options.expectedMissing ?? false,
   });
 }
 

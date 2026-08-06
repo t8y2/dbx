@@ -51,8 +51,8 @@ interface UseExternalSqlFileChangesOptions {
 
 export interface ExternalSqlFileSavePreparation {
   proceed: boolean;
-  force?: boolean;
   expectedContentHash?: string;
+  expectedMissing?: boolean;
 }
 
 const MISSING_FILE_RECHECK_DELAY_MS = 180;
@@ -203,12 +203,17 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
 
       const decision = await requestDecision(change, "save");
       if (change.kind === "modified") {
-        if (decision === "overwrite") return { proceed: true, force: true };
+        if (decision === "overwrite") {
+          return {
+            proceed: true,
+            expectedContentHash: change.snapshot.version.contentHash,
+          };
+        }
         if (decision === "load") await loadLatest(tab);
         return { proceed: false };
       }
 
-      if (decision === "recreate") return { proceed: true, force: true };
+      if (decision === "recreate") return { proceed: true, expectedMissing: true };
       await handleDeletedDecision(tab, decision);
       return { proceed: false };
     } catch (error: any) {

@@ -74,9 +74,10 @@ pub async fn write_external_sql_file(
     path: String,
     content: String,
     expected_content_hash: Option<String>,
-    force: bool,
+    expected_missing: bool,
 ) -> Result<ExternalSqlFileWriteResult, String> {
-    write_external_sql_file_checked_async(PathBuf::from(path), content, expected_content_hash, force).await
+    write_external_sql_file_checked_async(PathBuf::from(path), content, expected_content_hash, expected_missing, false)
+        .await
 }
 
 #[tauri::command]
@@ -262,6 +263,7 @@ async fn write_external_sql_file_checked_async(
     path: PathBuf,
     content: String,
     expected_content_hash: Option<String>,
+    expected_missing: bool,
     force: bool,
 ) -> Result<ExternalSqlFileWriteResult, String> {
     if !is_sql_file_path(&path) {
@@ -271,7 +273,9 @@ async fn write_external_sql_file_checked_async(
     if !force {
         match external_sql_file_version_async(&path).await? {
             Some(current_version) => {
-                if expected_content_hash.as_deref().is_some_and(|expected| expected != current_version.content_hash) {
+                if expected_missing
+                    || expected_content_hash.as_deref().is_some_and(|expected| expected != current_version.content_hash)
+                {
                     return Ok(ExternalSqlFileWriteResult::Conflict { current_version });
                 }
             }
@@ -300,7 +304,7 @@ async fn save_external_sql_file_content_async(
     let Some(path) = path else {
         return Ok(None);
     };
-    let result = write_external_sql_file_checked_async(path.clone(), content, None, true).await?;
+    let result = write_external_sql_file_checked_async(path.clone(), content, None, false, true).await?;
     let ExternalSqlFileWriteResult::Written { version } = result else {
         return Err("Failed to save SQL file".to_string());
     };
@@ -491,6 +495,7 @@ mod tests {
             "select 3;".to_string(),
             Some(content_hash(b"select 1;")),
             false,
+            false,
         )
         .await
         .unwrap();
@@ -509,15 +514,32 @@ mod tests {
             "select 2;".to_string(),
             Some(content_hash(b"select 1;")),
             false,
+            false,
         )
         .await
         .unwrap();
         assert_eq!(missing, ExternalSqlFileWriteResult::Missing);
 
-        let recreated =
-            write_external_sql_file_checked_async(path.clone(), "select 2;".to_string(), None, true).await.unwrap();
+        let recreated = write_external_sql_file_checked_async(path.clone(), "select 2;".to_string(), None, true, false)
+            .await
+            .unwrap();
         assert!(matches!(recreated, ExternalSqlFileWriteResult::Written { .. }));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "select 2;");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn checked_write_does_not_overwrite_a_file_recreated_after_confirmation() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "select external;").unwrap();
+
+        let result =
+            write_external_sql_file_checked_async(path.clone(), "select editor;".to_string(), None, true, false)
+                .await
+                .unwrap();
+
+        assert!(matches!(result, ExternalSqlFileWriteResult::Conflict { .. }));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "select external;");
         let _ = std::fs::remove_file(&path);
     }
 

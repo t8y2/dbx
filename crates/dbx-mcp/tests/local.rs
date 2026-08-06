@@ -1,7 +1,7 @@
 use std::{ffi::OsString, sync::Arc};
 
 use dbx_core::{models::connection::ConnectionConfig, storage::Storage};
-use dbx_mcp::{DbxMcpServer, LocalBackend, McpScope};
+use dbx_mcp::{DbxBackend, DbxMcpServer, LocalBackend, McpScope};
 use rmcp::{model::CallToolRequestParams, ServiceExt};
 use serde_json::{json, Map, Value};
 use tempfile::tempdir;

@@ -338,6 +338,9 @@ describe("queryStore multi-statement errors", () => {
     const store = useQueryStore();
     const tabA = store.createTab("oracle-1", "ORCL", "Tab A");
     const tabB = store.createTab("oracle-1", "ORCL", "Tab B");
+    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    store.setAutoCommit(tabA, true);
+    store.setAutoCommit(tabB, true);
 
     await store.executeTabSql(tabA, "ALTER SESSION SET CURRENT_SCHEMA = REPORTING");
     expect(store.tabs.find((tab) => tab.id === tabA)?.completionContextVersion).toBe(1);

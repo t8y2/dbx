@@ -3,6 +3,7 @@ import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
+export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
 
 export interface CanvasDevicePixelSize {
   cssWidth: number;
@@ -111,13 +112,15 @@ export interface CanvasBackingStoreMetrics {
 export function resolveCanvasBackingStoreMetrics(options: { width: number; height: number; pixelRatio: number; devicePixelSize?: CanvasDevicePixelSize | null }): CanvasBackingStoreMetrics {
   const width = Math.max(1, options.width);
   const height = Math.max(1, options.height);
-  const fallbackRatio = Math.max(1, options.pixelRatio);
+  const fallbackRatio = Math.min(MAX_CANVAS_DATA_GRID_PIXEL_RATIO, Math.max(1, options.pixelRatio));
   const measured = options.devicePixelSize;
   const measurementMatches = !!measured && Math.abs(measured.cssWidth - width) <= 0.5 && Math.abs(measured.cssHeight - height) <= 0.5 && measured.pixelWidth > 0 && measured.pixelHeight > 0;
   const fallbackPixelWidth = Math.max(1, Math.ceil(width * fallbackRatio));
   const fallbackPixelHeight = Math.max(1, Math.ceil(height * fallbackRatio));
-  const pixelWidth = measurementMatches ? Math.min(measured.pixelWidth, fallbackPixelWidth) : fallbackPixelWidth;
-  const pixelHeight = measurementMatches ? Math.min(measured.pixelHeight, fallbackPixelHeight) : fallbackPixelHeight;
+  const maxPixelWidth = Math.max(1, Math.ceil(width * MAX_CANVAS_DATA_GRID_PIXEL_RATIO));
+  const maxPixelHeight = Math.max(1, Math.ceil(height * MAX_CANVAS_DATA_GRID_PIXEL_RATIO));
+  const pixelWidth = measurementMatches ? Math.min(measured.pixelWidth, maxPixelWidth) : fallbackPixelWidth;
+  const pixelHeight = measurementMatches ? Math.min(measured.pixelHeight, maxPixelHeight) : fallbackPixelHeight;
   return {
     pixelWidth,
     pixelHeight,

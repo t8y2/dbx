@@ -79,7 +79,7 @@ import {
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
-import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
+import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
   DBX_TABLE_REFERENCE_DROP_EVENT,
@@ -2208,14 +2208,11 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
 function sqlErrorDecorationRange(currentState: import("@codemirror/state").EditorState) {
   if (!props.executionError) return [];
   if (!props.executionErrorSql || props.executionErrorSql !== currentState.doc.toString()) return [];
-  const location = parseSqlErrorLocation(props.executionError);
-  if (!location) return [];
-  const offset = lineColumnToOffset(currentState.doc.toString(), location);
-  if (offset == null) return [];
+  const range = resolveSqlErrorDecorationRange(currentState.doc.toString(), props.executionError);
+  if (!range) return [];
   return [
     {
-      from: offset,
-      to: Math.min(offset + 1, currentState.doc.length),
+      ...range,
       message: props.executionError,
     },
   ];

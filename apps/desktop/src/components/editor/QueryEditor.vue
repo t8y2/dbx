@@ -45,7 +45,7 @@ import {
   shouldChainSqlCompletionAfterAccept,
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
-import { shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSource } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
@@ -2946,16 +2946,7 @@ async function provideSqlCompletions(context: CompletionContext) {
     if (isSqlCompletionSuppressedContext(fullDoc, position)) return null;
 
     // 2. Determine completion origin (session-level marker).
-    if (activeCompletionOrigin === null) {
-      // Explicit sessions without DBX intercept: first provider call with
-      // context.explicit and no typed marker -> treat as explicit.
-      if (context.explicit && !typedActivation) {
-        activeCompletionOrigin = "explicit";
-      } else {
-        // activateOnTyping implicit or DBX programmatic start.
-        activeCompletionOrigin = "typing";
-      }
-    }
+    activeCompletionOrigin = originForSqlCompletionProvider(activeCompletionOrigin, context.explicit);
     const origin = activeCompletionOrigin;
 
     // 3. Explicit (manual shortcut) -> always proceed. No mode gating.
@@ -3166,7 +3157,7 @@ function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
   window.setTimeout(() => {
     if (!codeMirrorStartCompletion || isEditorComposing(currentView)) return;
     markTypedCompletionActivation();
-    activeCompletionOrigin = "typing";
+    activeCompletionOrigin = originForTypedSqlCompletionStart(activeCompletionOrigin);
     codeMirrorStartCompletion(currentView);
   }, delayMs);
 }

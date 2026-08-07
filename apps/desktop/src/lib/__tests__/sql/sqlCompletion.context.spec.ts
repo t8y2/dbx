@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildSelectStarExpansion, buildSqlCompletionItems, getSqlCompletionContext, selectStarResultColumnsMatch, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
-import { shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
 
 describe("sqlCompletion keyword snippets", () => {
   it("auto-opens and suggests SELECT when typing sel", () => {
@@ -782,5 +782,28 @@ describe("shouldAllowSqlCompletionTrigger", () => {
     it("rejects when positionalEligible is undefined and no useDatabasePrefix", () => {
       expect(shouldAllowSqlCompletionTrigger("positional", typingFacts())).toBe(false);
     });
+  });
+});
+
+describe("originForTypedSqlCompletionStart", () => {
+  it("starts a new automatic session as typing", () => {
+    expect(originForTypedSqlCompletionStart(null)).toBe("typing");
+  });
+
+  it("preserves the origin of an active completion session", () => {
+    expect(originForTypedSqlCompletionStart("typing")).toBe("typing");
+    expect(originForTypedSqlCompletionStart("explicit")).toBe("explicit");
+  });
+});
+
+describe("originForSqlCompletionProvider", () => {
+  it("classifies an unmarked provider call from CodeMirror", () => {
+    expect(originForSqlCompletionProvider(null, false)).toBe("typing");
+    expect(originForSqlCompletionProvider(null, true)).toBe("explicit");
+  });
+
+  it("preserves the active session independently of the current provider flag", () => {
+    expect(originForSqlCompletionProvider("typing", true)).toBe("typing");
+    expect(originForSqlCompletionProvider("explicit", false)).toBe("explicit");
   });
 });

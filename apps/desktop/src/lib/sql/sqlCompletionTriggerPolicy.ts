@@ -3,6 +3,20 @@ export type SqlCompletionTriggerOrigin = "typing" | "explicit";
 
 export const SQL_COMPLETION_TRIGGER_MODES: readonly SqlCompletionTriggerMode[] = ["manual", "require-prefix", "positional"];
 
+export function originForTypedSqlCompletionStart(activeOrigin: SqlCompletionTriggerOrigin | null): SqlCompletionTriggerOrigin {
+  // Programmatic refreshes can run while a shortcut-opened session is active.
+  // Preserve that explicit origin so typing and metadata refreshes do not make
+  // the session subject to automatic-trigger mode gates.
+  return activeOrigin ?? "typing";
+}
+
+export function originForSqlCompletionProvider(activeOrigin: SqlCompletionTriggerOrigin | null, explicit: boolean): SqlCompletionTriggerOrigin {
+  // Programmatic starts set their origin before calling CodeMirror, while
+  // activate-on-typing calls the provider with explicit=false. Therefore an
+  // otherwise unmarked explicit call is always the manual shortcut session.
+  return activeOrigin ?? (explicit ? "explicit" : "typing");
+}
+
 export function normalizeCompletionTriggerMode(value: unknown): SqlCompletionTriggerMode {
   if (typeof value === "string" && (value === "manual" || value === "require-prefix" || value === "positional")) {
     return value;

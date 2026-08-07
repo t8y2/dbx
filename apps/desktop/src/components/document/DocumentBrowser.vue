@@ -2207,7 +2207,7 @@ defineExpose({ focusSearch });
         <div class="h-full flex flex-col min-w-0 overflow-hidden">
           <template v-if="selectedIdx !== null || isNew">
             <div class="h-9 flex items-center gap-2 px-4 border-b bg-muted/30 shrink-0">
-              <Badge variant="secondary" class="max-w-[50%] text-xs" :style="{ width: selectedDocumentIdWidth }">
+              <Badge variant="secondary" class="max-w-[50%] rounded text-xs" :style="{ width: selectedDocumentIdWidth }">
                 <input class="min-w-0 w-full cursor-text select-text appearance-none border-0 bg-transparent p-0 text-inherit outline-none focus:ring-0" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
               </Badge>
               <span class="flex-1" />

@@ -546,6 +546,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(documentId.readOnly).toBe(true);
     expect(documentId.value).toBe("document-1");
     expect(documentId.classList.contains("select-text")).toBe(true);
+    expect(documentId.closest('[data-slot="badge"]')).not.toBeNull();
     expect(viewer.querySelector(".json-viewer")?.classList.contains("select-text")).toBe(true);
 
     documentId.setSelectionRange(0, documentId.value.length);

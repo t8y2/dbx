@@ -7921,6 +7921,10 @@ watch(
     triggers.value = [];
     triggersLoaded.value = false;
     triggersError.value = "";
+    // 表身份变更后，主动触发索引加载，确保索引指示器在切换表后立即可见
+    if (showIndexIndicatorsInHeader.value && canShowTableIndexes.value && currentIndexTableIdentity.value) {
+      void fetchIndexes();
+    }
     if (showTableInfo.value) selectTableInfoTab(activeTableInfoTab.value);
   },
 );

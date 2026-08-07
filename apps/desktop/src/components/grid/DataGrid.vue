@@ -2986,6 +2986,7 @@ const editor = useDataGridEditor({
   orderByInput,
   rowStatusFilter,
   dataGridQuickEntryEnabled: computed(() => settingsStore.editorSettings.dataGridQuickEntry),
+  confirmDangerousRowDeletion: computed(() => settingsStore.editorSettings.confirmDangerousSqlExecution),
   initialEditColumn: firstVisibleColumnIndex,
   getRowItem,
   pageSize,

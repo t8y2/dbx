@@ -198,7 +198,8 @@ import { useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composa
 import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
-import { moveDataGridCell } from "@/lib/dataGrid/dataGridNavigation";
+import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
+import type { CellPosition } from "@/lib/dataGrid/gridSelection";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
 import { useDataGridSort } from "@/composables/useDataGridSort";
@@ -3093,7 +3094,7 @@ watch(
     const tab = queryStore.tabs.find((item) => item.id === props.cacheKey);
     if (tab?.mode === "data") tab.pendingDataChangeCount = count || undefined;
   },
-  { immediate: true },
+  { immediate: true, flush: "sync" },
 );
 
 const saveActionMode = computed(() =>
@@ -3805,6 +3806,7 @@ const {
   selectColumn,
   selectAllCells,
   extendCellSelectionTo,
+  selectionFocus,
   finishCellSelection,
   extendCellSelection,
   cellIsSelected,
@@ -4223,6 +4225,32 @@ watch(activeCellDetailTab, (tab) => {
   }
 });
 
+const detailEditValue = ref("");
+const detailEditOriginalValue = ref("");
+const isEditingDetail = ref(false);
+const hasPendingDetailEditorDraft = computed(() => isEditingDetail.value && detailEditValue.value !== detailEditOriginalValue.value);
+const hasPendingInlineEditorDraft = computed(() => {
+  const cell = editingCell.value;
+  if (!cell) return false;
+  const item = getRowItem(cell.rowId);
+  if (!item || item.isDeleted) return false;
+  const originalValue = dataGridCellEditorText({
+    value: item.data[cell.col] ?? null,
+    databaseType: resolvedDatabaseType.value,
+    columnInfo: tableColumnForGridColumn(cell.col),
+  });
+  return editValue.value !== originalValue;
+});
+const hasPendingDataEditorDraft = computed(() => hasPendingDetailEditorDraft.value || hasPendingInlineEditorDraft.value);
+
+function syncPendingDataEditorDraft(pending: boolean) {
+  if (props.context !== "table-data" || !props.cacheKey) return;
+  const tab = queryStore.tabs.find((item) => item.id === props.cacheKey);
+  if (tab?.mode === "data") tab.hasPendingDataEditorDraft = pending || undefined;
+}
+
+watch(hasPendingDataEditorDraft, syncPendingDataEditorDraft, { immediate: true, flush: "sync" });
+
 const activeValueEditorActions = computed(() => {
   const detail = activeCellDetail.value;
   return valueEditorActions({
@@ -4311,17 +4339,17 @@ watch(activeCellDetail, (detail) => {
     resetDetailEdit();
     return;
   }
-  detailEditValue.value = dataGridCellEditorText({
+  const value = dataGridCellEditorText({
     value: detail.value,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 });
 
-const detailEditValue = ref("");
-const isEditingDetail = ref(false);
 const detailTemporalEditorConfig = computed(() => {
   const detail = activeCellDetail.value;
   return detail ? temporalEditorConfigForColumn(detail.colIndex) : undefined;
@@ -4385,6 +4413,7 @@ watch(valueEditorContainer, async (el) => {
 function resetDetailEdit() {
   isEditingDetail.value = false;
   detailEditValue.value = "";
+  detailEditOriginalValue.value = "";
 }
 
 function closeCellDetails() {
@@ -4436,7 +4465,9 @@ function startDetailEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
   warnFormattedJsonEditIfNeeded(detail);
-  detailEditValue.value = cellDetailEditText(detail);
+  const value = cellDetailEditText(detail);
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   isEditingDetail.value = true;
 }
 
@@ -4448,6 +4479,7 @@ function commitDetailEdit() {
   const item = getRowItem(detail.rowId);
   if (!item || item.isDeleted) return;
   applyCellValue(detail.rowId, detail.colIndex, detailEditValue.value);
+  detailEditOriginalValue.value = detailEditValue.value;
   detailCell.value = detailCell.value ? { ...detailCell.value } : null;
 }
 
@@ -4465,11 +4497,13 @@ function syncEditorFromDetailEdit() {
 function cancelValueEditorEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
-  detailEditValue.value = dataGridCellEditorText({
+  const value = dataGridCellEditorText({
     value: detail.value,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 }
@@ -4495,11 +4529,13 @@ function restoreDetailOriginalValue() {
   }
   restoreCellValue(detail.rowId, detail.colIndex);
 
-  detailEditValue.value = dataGridCellEditorText({
+  const value = dataGridCellEditorText({
     value: restoredValue,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+  detailEditValue.value = value;
+  detailEditOriginalValue.value = value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
   detailCell.value = { ...detailCell.value! };
@@ -4508,6 +4544,7 @@ function restoreDetailOriginalValue() {
 function setValueEditorNull() {
   setDetailNull();
   detailEditValue.value = cellDetailEditorText(null);
+  detailEditOriginalValue.value = detailEditValue.value;
   syncEditorFromDetailEdit();
   isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
 }
@@ -6328,7 +6365,9 @@ function currentSelectedCellPosition() {
   return { rowIndex: range.startRow, colIndex: range.startCol };
 }
 
-function scrollCellIntoView(rowIndex: number, colIndex: number) {
+const DOM_DATA_GRID_ROW_HEIGHT = 26;
+
+function scrollCellIntoView(rowIndex: number, colIndex: number, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number) {
   if (isTransposeMode.value) {
     nextTick(() => {
       const scroller = transposeScrollRef.value;
@@ -6342,15 +6381,17 @@ function scrollCellIntoView(rowIndex: number, colIndex: number) {
     return;
   }
   nextTick(() => {
-    scrollGridColumnIntoView(colIndex);
     if (useCanvasGridRows.value) {
-      scrollCanvasRowIntoView(rowIndex, "nearest");
+      scrollGridColumnIntoView(colIndex);
+      scrollCanvasRowIntoView(rowIndex, block, previousPageRowIndex);
       return;
     }
-    nextTick(() => {
+    scrollGridColumnIntoView(colIndex);
+    scrollDomRowIntoView(rowIndex, block, previousPageRowIndex);
+    requestAnimationFrame(() => {
       const rowEl = gridRef.value?.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"]`);
       const cellEl = rowEl?.querySelector<HTMLElement>(`[data-visible-col-index="${colIndex}"]`);
-      (cellEl ?? rowEl)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      (cellEl ?? rowEl)?.scrollIntoView({ block: previousPageRowIndex === undefined ? block : "nearest", inline: "nearest" });
     });
   });
 }
@@ -6377,18 +6418,55 @@ function scrollGridColumnIntoView(visibleColIdx: number) {
   if (useCanvasGridRows.value) syncCanvasViewport();
 }
 
-function scrollCanvasRowIntoView(rowIndex: number, block: "nearest" | "start") {
+function scrollCanvasRowIntoView(rowIndex: number, block: DataGridScrollAlignment, previousPageRowIndex?: number) {
   const target = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
   const scroller = canvasScrollerElement();
   if (!scroller) return;
-  const rowTop = target * CANVAS_DATA_GRID_ROW_HEIGHT;
-  const rowBottom = rowTop + CANVAS_DATA_GRID_ROW_HEIGHT;
-  if (block === "start" || rowTop < scroller.scrollTop) {
-    scroller.scrollTop = rowTop;
-  } else if (rowBottom > scroller.scrollTop + scroller.clientHeight) {
-    scroller.scrollTop = Math.max(0, rowBottom - scroller.clientHeight);
-  }
+  scroller.scrollTop =
+    previousPageRowIndex === undefined
+      ? dataGridRowScrollTop({
+          rowIndex: target,
+          rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+          viewportHeight: scroller.clientHeight,
+          currentScrollTop: scroller.scrollTop,
+          alignment: block,
+        })
+      : dataGridPageScrollTop({
+          previousRowIndex: previousPageRowIndex,
+          rowIndex: target,
+          rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+          currentScrollTop: scroller.scrollTop,
+          maximumScrollTop: scroller.scrollHeight - scroller.clientHeight,
+        });
   syncCanvasViewport();
+}
+
+function scrollDomRowIntoView(rowIndex: number, block: DataGridScrollAlignment, previousPageRowIndex?: number) {
+  const target = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
+  const scroller = gridScrollerElement();
+  if (!scroller) return;
+  const nextScrollTop =
+    previousPageRowIndex === undefined
+      ? dataGridRowScrollTop({
+          rowIndex: target,
+          rowHeight: DOM_DATA_GRID_ROW_HEIGHT,
+          viewportHeight: scroller.clientHeight,
+          currentScrollTop: scroller.scrollTop,
+          alignment: block,
+        })
+      : dataGridPageScrollTop({
+          previousRowIndex: previousPageRowIndex,
+          rowIndex: target,
+          rowHeight: DOM_DATA_GRID_ROW_HEIGHT,
+          currentScrollTop: scroller.scrollTop,
+          maximumScrollTop: scroller.scrollHeight - scroller.clientHeight,
+        });
+  const virtualScroller = scrollerRef.value;
+  if (virtualScroller && !(virtualScroller instanceof HTMLElement)) {
+    virtualScroller.scrollToPosition?.(nextScrollTop);
+  } else {
+    scroller.scrollTop = nextScrollTop;
+  }
 }
 
 function scrollGridRowIntoView(rowIndex: number) {
@@ -6398,13 +6476,7 @@ function scrollGridRowIntoView(rowIndex: number) {
       scrollCanvasRowIntoView(target, "start");
       return;
     }
-    const scroller = scrollerRef.value;
-    if (scroller && !(scroller instanceof HTMLElement)) {
-      scroller.scrollToItem?.(target);
-      scroller.scrollToPosition?.(target * 26);
-    } else if (scroller instanceof HTMLElement) {
-      scroller.scrollTop = target * 26;
-    }
+    scrollDomRowIntoView(target, "start");
     requestAnimationFrame(() => {
       const rowEl = gridRef.value?.querySelector<HTMLElement>(`[data-row-index="${target}"]`);
       rowEl?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -6460,20 +6532,58 @@ function toggleKeyboardTranspose(): boolean {
   return true;
 }
 
-function moveSelectedCell(rowDelta: number, colDelta: number): boolean {
-  const position = currentSelectedCellPosition();
+// Shared path that selects or extends to nextPosition and scrolls it into view.
+// Used by both moveSelectedCell (relative steps) and navigateSelectedCell (absolute/page jumps).
+function applyCellNavigation(nextPosition: CellPosition, extend = false, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number): boolean {
+  invalidateSyntheticContextSelection();
+  if (extend) extendCellSelectionTo(nextPosition.rowIndex, nextPosition.colIndex);
+  else selectSingleCell(nextPosition.rowIndex, nextPosition.colIndex);
+  clearRowSelection();
+  if (showTranspose.value) transposeRowIndex.value = nextPosition.rowIndex;
+  scrollCellIntoView(nextPosition.rowIndex, nextPosition.colIndex, block, previousPageRowIndex);
+  return true;
+}
+
+function moveSelectedCell(rowDelta: number, colDelta: number, extend = false): boolean {
+  const position = dataGridNavigationOrigin(currentSelectedCellPosition(), selectionFocus.value, extend);
   if (!position || editingCell.value || displayRowCount.value === 0 || visibleColumnIndexes.value.length === 0) return false;
   const nextPosition = moveDataGridCell(position, rowDelta, colDelta, {
     rowCount: displayRowCount.value,
     visibleColumnCount: visibleColumnIndexes.value.length,
   });
   if (!nextPosition) return false;
-  invalidateSyntheticContextSelection();
-  selectSingleCell(nextPosition.rowIndex, nextPosition.colIndex);
-  clearRowSelection();
-  if (showTranspose.value) transposeRowIndex.value = nextPosition.rowIndex;
-  scrollCellIntoView(nextPosition.rowIndex, nextPosition.colIndex);
-  return true;
+  return applyCellNavigation(nextPosition, extend);
+}
+
+// Rows moved by a single PageUp/PageDown, i.e. one viewport worth of rows.
+// Canvas mode computes this from its fixed row height; the DOM virtual scroller reuses the same
+// approximate row height (26px) that scrollGridRowIntoView relies on.
+function gridPageRowCount(): number {
+  const canvasMode = useCanvasGridRows.value;
+  const scroller = canvasMode ? canvasScrollerElement() : gridScrollerElement();
+  if (!scroller) return 1;
+  const rowHeight = canvasMode ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
+  if (rowHeight <= 0) return 1;
+  return Math.max(1, Math.floor(scroller.clientHeight / rowHeight));
+}
+
+// Direction-based absolute movement for Home/End/PageUp/PageDown, including their Ctrl combinations.
+// Transpose mode is handled by a dedicated branch in onGridKeydown, so this always assumes the normal grid.
+// When extend is true (Shift combinations) the anchor stays put and only the focus moves, growing the range.
+function navigateSelectedCell(direction: DataGridNavigationDirection, extend = false): boolean {
+  // While extending, move from the focus end of the range; fall back to the range start for a single selection.
+  const position = dataGridNavigationOrigin(currentSelectedCellPosition(), selectionFocus.value, extend);
+  if (!position || editingCell.value || displayRowCount.value === 0 || visibleColumnIndexes.value.length === 0) return false;
+  const nextPosition = navigateDataGridCell(position, direction, {
+    rowCount: displayRowCount.value,
+    visibleColumnCount: visibleColumnIndexes.value.length,
+    pageRowCount: gridPageRowCount(),
+  });
+  if (!nextPosition) return false;
+  // docHome/docEnd must reach the very start/end of the grid even if the target row is already visible, so "nearest" is not used.
+  const block: DataGridScrollAlignment = direction === "docHome" ? "start" : direction === "docEnd" ? "end" : "nearest";
+  const previousPageRowIndex = direction === "pageUp" || direction === "pageDown" ? position.rowIndex : undefined;
+  return applyCellNavigation(nextPosition, extend, block, previousPageRowIndex);
 }
 
 function editSelectedCell(): boolean {
@@ -6674,36 +6784,54 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (isTransposeMode.value) {
-    if (event.key === "ArrowUp" && moveSelectedCell(0, -1)) {
+    if (event.key === "ArrowUp" && moveSelectedCell(0, -1, event.shiftKey)) {
       event.preventDefault();
       return;
     }
-    if (event.key === "ArrowDown" && moveSelectedCell(0, 1)) {
+    if (event.key === "ArrowDown" && moveSelectedCell(0, 1, event.shiftKey)) {
       event.preventDefault();
       return;
     }
-    if (event.key === "ArrowLeft" && (moveSelectedCell(-1, 0) || moveTransposeRecordSelection(-1))) {
+    if (event.key === "ArrowLeft" && (moveSelectedCell(-1, 0, event.shiftKey) || moveTransposeRecordSelection(-1))) {
       event.preventDefault();
       return;
     }
-    if (event.key === "ArrowRight" && (moveSelectedCell(1, 0) || moveTransposeRecordSelection(1))) {
+    if (event.key === "ArrowRight" && (moveSelectedCell(1, 0, event.shiftKey) || moveTransposeRecordSelection(1))) {
       event.preventDefault();
       return;
     }
   }
-  if (event.key === "ArrowUp" && moveSelectedCell(-1, 0)) {
+  if (event.key === "ArrowUp" && moveSelectedCell(-1, 0, event.shiftKey)) {
     event.preventDefault();
     return;
   }
-  if (event.key === "ArrowDown" && moveSelectedCell(1, 0)) {
+  if (event.key === "ArrowDown" && moveSelectedCell(1, 0, event.shiftKey)) {
     event.preventDefault();
     return;
   }
-  if (event.key === "ArrowLeft" && moveSelectedCell(0, -1)) {
+  if (event.key === "ArrowLeft" && moveSelectedCell(0, -1, event.shiftKey)) {
     event.preventDefault();
     return;
   }
-  if (event.key === "ArrowRight" && moveSelectedCell(0, 1)) {
+  if (event.key === "ArrowRight" && moveSelectedCell(0, 1, event.shiftKey)) {
+    event.preventDefault();
+    return;
+  }
+  // Home / End / Ctrl+Home / Ctrl+End: transpose mode is served by the dedicated branch above,
+  // so these only apply to the normal grid.
+  if (!isTransposeMode.value && (event.key === "Home" || event.key === "End")) {
+    const docJump = event.metaKey || event.ctrlKey;
+    const direction: DataGridNavigationDirection = event.key === "Home" ? (docJump ? "docHome" : "home") : docJump ? "docEnd" : "end";
+    if (navigateSelectedCell(direction, event.shiftKey)) {
+      event.preventDefault();
+      return;
+    }
+  }
+  if (!isTransposeMode.value && event.key === "PageUp" && navigateSelectedCell("pageUp", event.shiftKey)) {
+    event.preventDefault();
+    return;
+  }
+  if (!isTransposeMode.value && event.key === "PageDown" && navigateSelectedCell("pageDown", event.shiftKey)) {
     event.preventDefault();
     return;
   }
@@ -8171,6 +8299,7 @@ onDeactivated(() => {
 });
 
 onUnmounted(() => {
+  syncPendingDataEditorDraft(false);
   cleanupFrames();
   autoRefresh.stop();
   onDdlResizeEnd();
@@ -9574,7 +9703,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   class="data-grid-scroller dbx-data-grid-font-family h-full overflow-x-auto overscroll-none"
                   :class="{ 'is-scrolling': isScrolling, 'has-horizontal-scrollbar': hasGridHorizontalOverflow }"
                   :items="displayItems"
-                  :item-size="26"
+                  :item-size="DOM_DATA_GRID_ROW_HEIGHT"
                   :buffer="600"
                   :skip-hover="true"
                   key-field="id"
@@ -10303,7 +10432,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   --data-grid-row-new-bg: rgb(243, 243, 243);
   --data-grid-row-deleted-bg: rgb(255, 244, 244);
   --data-grid-cell-active-bg: rgb(244, 248, 255);
-  --data-grid-cell-dirty-bg: rgb(166, 210, 255);
+  --data-grid-cell-dirty-bg: rgb(255, 248, 230);
   --data-grid-cell-selected-bg: rgb(239, 246, 255);
   --data-grid-cell-selected-single-bg: rgb(191, 219, 254);
   --data-grid-cell-selected-dirty-bg: rgb(235, 224, 184);
@@ -10335,7 +10464,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   --data-grid-row-new-bg: rgb(51, 51, 55);
   --data-grid-row-deleted-bg: rgb(55, 31, 32);
   --data-grid-cell-active-bg: rgb(25, 34, 46);
-  --data-grid-cell-dirty-bg: rgb(33, 66, 131);
+  --data-grid-cell-dirty-bg: rgb(94, 75, 26);
   --data-grid-cell-selected-bg: rgb(20, 40, 60);
   --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
   --data-grid-cell-selected-dirty-bg: rgb(76, 66, 38);
@@ -10367,7 +10496,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     --data-grid-row-muted-bg: color-mix(in oklab, var(--muted) 99%, var(--foreground));
     --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
     --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
-    --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(166 210 255) 85%, var(--background));
+    --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
     --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 12%, var(--background));
     --data-grid-cell-selected-single-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
     --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, rgb(59 130 246) 18%, var(--background)));

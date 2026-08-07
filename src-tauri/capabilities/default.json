@@ -13,6 +13,8 @@
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:webview:allow-set-webview-zoom",

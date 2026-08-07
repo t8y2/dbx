@@ -31,8 +31,8 @@ pub async fn get_broker_info(client: &Arc<MqttClient>) -> Result<MqttBrokerInfo,
 }
 
 /// 订阅 topic
-pub async fn subscribe(client: &Arc<MqttClient>, topic: &str, qos: MqttQoS) -> Result<(), String> {
-    client.subscribe(topic, qos).await
+pub async fn subscribe(client: &Arc<MqttClient>, topic: &str, qos: MqttQoS, no_local: bool) -> Result<(), String> {
+    client.subscribe(topic, qos, no_local).await
 }
 
 /// 取消订阅 topic

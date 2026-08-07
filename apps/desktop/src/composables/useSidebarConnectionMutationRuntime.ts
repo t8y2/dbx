@@ -16,6 +16,7 @@ import { canConfigureVisibleSchemasForTreeNode } from "@/lib/database/databaseFe
 import { canCloseSidebarDatabaseConnection } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionDeleteTargetSnapshot, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
+import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 
 interface SidebarConnectionMutationRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -234,7 +235,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   const canConfigureVisibleDatabases = computed(() => {
     if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
     const databaseType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-    return databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "qdrant" && databaseType !== "milvus" && databaseType !== "weaviate" && databaseType !== "chromadb" && databaseType !== "etcd" && databaseType !== "mq" && databaseType !== "nacos";
+    return connectionCanConfigureSidebarVisibleDatabases(databaseType);
   });
   const canConfigureVisibleSchemas = computed(() => {
     if (!activeNode.value.connectionId) return false;

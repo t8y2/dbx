@@ -5,6 +5,10 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 const VERSIONS_PATH = "agents/versions.json";
 const VERSION_SYNC_SUBJECT = "chore: bump module versions [skip ci]";
 const JRE_BUILD_PATHS = new Set([".github/workflows/agents-release.yml"]);
+const NATIVE_RELEASE_PACKAGING_PATHS = new Set([
+  ".github/scripts/reuse-agent-release-assets.mjs",
+  "agents/scripts/version_agent_artifacts.py",
+]);
 
 function bumpPatchVersion(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)(.*)$/.exec(version);
@@ -126,16 +130,21 @@ export function evaluateAgentVersionBump({
   if (commonChanged) {
     logs.push("Common agent runtime changes detected; common-triggered bumps are limited to modules that package agents/common.");
   }
+  const nativeReleasePackagingChanged = changedFiles.some((file) => NATIVE_RELEASE_PACKAGING_PATHS.has(file));
+  if (nativeReleasePackagingChanged) {
+    logs.push("Shared native release packaging changes detected; all native modules will be rebuilt.");
+  }
 
   for (const { moduleName, module } of resolvedModules) {
     const moduleChanged = pathChanged(changedFiles, module.modulePath);
     // Only modules that package agents/common need installer-visible updates
     // for shared Java runtime changes; native and standalone agents do not.
     const commonAffectsModule = commonChanged && module.commonDependent;
+    const nativePackagingAffectsModule = nativeReleasePackagingChanged && module.nativeBuild;
     const oldVersion = nextVersions[moduleName] ?? "0.1.0";
     const prevVersion = prevVersions[moduleName] ?? "";
     const manuallyVersioned = manualVersionsChanged && (!prevVersion || prevVersion !== oldVersion);
-    const moduleNeedsBuild = moduleChanged || commonAffectsModule || manuallyVersioned;
+    const moduleNeedsBuild = moduleChanged || commonAffectsModule || nativePackagingAffectsModule || manuallyVersioned;
 
     if (!moduleNeedsBuild) {
       logs.push(`  ${moduleName}: no changes`);

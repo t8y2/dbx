@@ -1,0 +1,48 @@
+export default {
+  title: "Documentación",
+  groupBySchema: "Esquemas",
+  groupByTableGroup: "Grupos de tablas",
+  noGroup: "(sin grupo)",
+  noSchema: "(sin esquema)",
+  search: "Buscar tablas, columnas, grupos…",
+  columns: "Columnas",
+  indexes: "Índices",
+  references: "Referencias",
+  referencedBy: "Referenciado por",
+  localNote: "LOCAL",
+  shadowedComment: "Comentario de la base de datos: {comment}",
+  addNote: "Agregar una nota",
+  editNote: "Editar nota",
+  newGroup: "Nuevo grupo…",
+  groupName: "Nombre del grupo",
+  groupColour: "Color",
+  deleteGroup: "Eliminar grupo",
+  enumValues: "Valores",
+  usedBy: "Usado por",
+  openDiagram: "Abrir diagrama del esquema",
+  saving: "Guardando…",
+  saved: "Guardado",
+  saveFailed: "No se pudieron guardar las notas: {error}",
+  warnings: {
+    tableSkipped: {
+      title: "No se pudo documentar una tabla",
+      detail: "{table} fue omitida: {reason}. Falta en esta documentación.",
+    },
+    noForeignKeyMetadata: {
+      title: "No hay relaciones disponibles",
+      detail: "{engine} no reporta metadatos de claves foráneas, por lo que no se pudieron derivar relaciones. El diagrama está completo para este motor.",
+    },
+    commentsUnsupported: {
+      title: "Comentarios de base de datos no disponibles",
+      detail: "{engine} no admite comentarios en tablas o columnas, por lo que toda descripción aquí proviene de las notas de este proyecto.",
+    },
+    orphanedNotes: {
+      title: "Algunas notas ya no coinciden con nada",
+      detail: "{count} nota(s) hacen referencia a una tabla o columna que ya no existe. No se eliminó nada — vuelva a asignarlas o elimínelas en el archivo de notas.",
+    },
+    dbmlOmitted: {
+      title: "No representable en DBML",
+      detail: "{item} en {table} está documentado aquí pero se omitió del DBML exportado: {reason}.",
+    },
+  },
+};

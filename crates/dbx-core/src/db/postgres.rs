@@ -464,10 +464,8 @@ pub(crate) enum PgColType {
     Other,
 }
 
-const POSTGRES_FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
-
 fn pg_scalar_type_requires_text_protocol(oid: u32, col_type: PgColType) -> bool {
-    oid >= POSTGRES_FIRST_NORMAL_OBJECT_ID && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
+    Type::from_oid(oid).is_none() && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
 }
 
 fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
@@ -477,9 +475,9 @@ fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
 
     match pg_type.kind() {
         Kind::Enum(_) => false,
-        Kind::Array(element_type) => element_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        Kind::Array(element_type) => Type::from_oid(element_type.oid()).is_none(),
         Kind::Simple => pg_scalar_type_requires_text_protocol(pg_type.oid(), col_type),
-        _ => pg_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        _ => Type::from_oid(pg_type.oid()).is_none(),
     }
 }
 
@@ -4787,7 +4785,7 @@ mod tests {
 
     #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
-        assert!(pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID, PgColType::Other));
+        assert!(pg_scalar_type_requires_text_protocol(8_880, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::GenericArray));
     }
@@ -4822,12 +4820,25 @@ mod tests {
 
     #[test]
     fn postgres_builtin_or_supported_type_keeps_binary_protocol() {
-        assert!(!pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID - 1, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::VARCHAR, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4_ARRAY, PgColType::GenericArray));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Vector));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Geometry));
+    }
+
+    #[test]
+    fn postgres_compatible_builtin_names_with_unknown_low_oids_require_text_protocol() {
+        let compatible_date = Type::new("date".to_string(), 8_881, Kind::Simple, "pg_catalog".to_string());
+        let compatible_tinyint = Type::new("tinyint".to_string(), 8_882, Kind::Simple, "pg_catalog".to_string());
+
+        assert!(Type::from_oid(compatible_date.oid()).is_none());
+        assert!(Type::from_oid(compatible_tinyint.oid()).is_none());
+        assert!(pg_type_requires_text_protocol(
+            &compatible_date,
+            PgColType::Temporal { fallback: PgTemporalFallback::Probe }
+        ));
+        assert!(pg_type_requires_text_protocol(&compatible_tinyint, PgColType::Other));
     }
 
     #[test]

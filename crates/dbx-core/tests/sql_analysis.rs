@@ -411,6 +411,38 @@ fn sqlserver_proc_identifiers_remain_identifiers_outside_create() {
 }
 
 #[test]
+fn sqlserver_alter_table_single_add_supports_multiple_columns() {
+    for sql in [
+        "ALTER TABLE dbo.demo\nADD isOldWell BIT NULL,\n    isNewWell BIT NULL;",
+        "ALTER TABLE [dbo].[demo] ADD amount DECIMAL(10, 2) DEFAULT (0), [display_name] NVARCHAR(50) NULL;",
+        "ALTER TABLE dbo.demo ADD enabled BIT NULL, CHECK (enabled IN (0, 1));",
+    ] {
+        analyze_sql_references(sql, Some("sqlserver"))
+            .unwrap_or_else(|error| panic!("SQL Server single-ADD multi-column ALTER TABLE should analyze: {error}"));
+    }
+}
+
+#[test]
+fn sqlserver_alter_table_add_normalization_preserves_boundaries() {
+    analyze_sql_references("ALTER TABLE dbo.demo ADD isOldWell BIT NULL, ADD isNewWell BIT NULL;", Some("sqlserver"))
+        .expect("existing repeated-ADD parser behavior should remain valid");
+
+    let missing_comma =
+        analyze_sql_references("ALTER TABLE dbo.demo ADD isOldWell BIT NULL isNewWell BIT NULL;", Some("sqlserver"))
+            .expect_err("missing column separators must remain invalid");
+    assert!(missing_comma.contains("isNewWell"));
+
+    analyze_sql_references(
+        "ALTER TABLE dbo.demo ADD amount DECIMAL(10, 2) NULL, label NVARCHAR(20) NULL; SELECT label FROM dbo.demo;",
+        Some("sqlserver"),
+    )
+    .expect("data-type commas and multiple statements should remain parseable");
+
+    analyze_sql_references("ALTER TABLE dbo.demo ADD first_flag BIT NULL, second_flag BIT NULL;", Some("postgres"))
+        .expect_err("other dialects must not inherit SQL Server ALTER TABLE normalization");
+}
+
+#[test]
 fn sqlserver_query_hints_do_not_raise_parser_errors() {
     let analysis = analyze_sql_references(
         "SELECT o.name FROM sys.objects o WHERE o.type = 'U' OPTION (RECOMPILE);",

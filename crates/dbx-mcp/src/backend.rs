@@ -74,6 +74,19 @@ fn effective_mcp_policy_with_legacy_allow_writes(
     policy
 }
 
+/// Wire-level options for a documentation snapshot. Mirrors
+/// `dbx_core::docs::CollectOptions` minus the fields the backend fills in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocsSnapshotOptions {
+    #[serde(default)]
+    pub schemas: Vec<String>,
+    #[serde(default)]
+    pub tables: Vec<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+}
+
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
@@ -151,6 +164,15 @@ pub trait DbxBackend: Send + Sync {
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
+    }
+    async fn collect_docs_snapshot(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        options: DocsSnapshotOptions,
+    ) -> Result<dbx_core::docs::SchemaSnapshot, String> {
+        let _ = (connection, database, options);
+        Err("Documentation snapshots are not supported by this backend.".to_string())
     }
 }
 
@@ -438,6 +460,28 @@ impl DbxBackend for LocalBackend {
         dbx_core::schema::get_columns_core(&self.state, &connection.id, database, schema, table).await
     }
 
+    async fn collect_docs_snapshot(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        options: DocsSnapshotOptions,
+    ) -> Result<dbx_core::docs::SchemaSnapshot, String> {
+        let collect_options = dbx_core::docs::CollectOptions {
+            database: database.to_string(),
+            schemas: options.schemas,
+            tables: options.tables,
+            project_name: options.project_name.unwrap_or_else(|| connection.name.clone()),
+        };
+        dbx_core::docs::collect_snapshot(
+            &self.state,
+            connection,
+            &collect_options,
+            &|_progress| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .await
+    }
+
     async fn execute_redis_command(
         &self,
         connection: &ConnectionConfig,
@@ -461,220 +505,7 @@ impl DbxBackend for LocalBackend {
         database: &str,
         command: &MongoCommand,
     ) -> Result<dbx_core::db::QueryResult, String> {
-        use dbx_core::mongo_ops;
-
-        let connection_id = &connection.id;
-        match command {
-            MongoCommand::Version => mongo_ops::mongo_server_version_core(&self.state, connection_id, database)
-                .await
-                .map(|version| scalar_query_result("version", Value::String(version))),
-            MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
-            MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
-                let result = mongo_ops::mongo_find_documents_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    *skip,
-                    *limit,
-                    Some(filter),
-                    projection.as_deref(),
-                    sort.as_deref(),
-                    collation.as_deref(),
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-            MongoCommand::FindOne { collection, filter, projection, options } => {
-                let result = mongo_ops::mongo_find_one_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    Some(filter),
-                    projection.as_deref(),
-                    options.as_deref(),
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-            MongoCommand::Count { collection, filter, accurate } => {
-                let mode = if *accurate { "accurate" } else { "legacy" };
-                let total = mongo_ops::mongo_count_documents_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    Some(filter),
-                    Some(mode),
-                )
-                .await?;
-                Ok(scalar_query_result("count", Value::from(total)))
-            }
-            MongoCommand::Aggregate { collection, pipeline, options } => {
-                let result = mongo_ops::mongo_aggregate_documents_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    pipeline,
-                    Some(100),
-                    options.as_deref(),
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-            MongoCommand::Distinct { collection, field, filter } => {
-                let result = mongo_ops::mongo_distinct_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    field,
-                    filter.as_deref(),
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-            MongoCommand::GetIndexes { collection } => {
-                let result = mongo_ops::mongo_aggregate_documents_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    r#"[{"$indexStats":{}}]"#,
-                    Some(100),
-                    None,
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-            MongoCommand::CollectionStats { collection, metric, scale } => {
-                let stats = mongo_ops::mongo_collection_stats_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    scale.clone(),
-                )
-                .await?;
-                let value = serde_json::to_value(stats).map_err(|error| error.to_string())?;
-                if metric == "stats" {
-                    Ok(mongo_documents_query_result(vec![value]))
-                } else {
-                    let key = match metric.as_str() {
-                        "dataSize" => "size",
-                        "storageSize" => "storageSize",
-                        "totalIndexSize" => "totalIndexSize",
-                        _ => metric,
-                    };
-                    let metric_value = value.get(key).cloned().unwrap_or(Value::Null);
-                    Ok(scalar_query_result(metric, metric_value))
-                }
-            }
-            MongoCommand::Insert { collection, documents } => {
-                let affected =
-                    mongo_ops::mongo_insert_documents_core(&self.state, connection_id, database, collection, documents)
-                        .await?;
-                Ok(affected_query_result(affected))
-            }
-            MongoCommand::Update { collection, filter, update, options, many } => {
-                let affected = mongo_ops::mongo_update_documents_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    filter,
-                    update,
-                    *many,
-                    options.as_deref(),
-                )
-                .await?;
-                Ok(affected_query_result(affected))
-            }
-            MongoCommand::Delete { collection, filter, many } => {
-                let affected = mongo_ops::mongo_delete_documents_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    filter,
-                    *many,
-                )
-                .await?;
-                Ok(affected_query_result(affected))
-            }
-            MongoCommand::CreateIndex { collection, keys, options } => {
-                let name = mongo_ops::mongo_create_index_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    keys,
-                    options.as_deref(),
-                )
-                .await?;
-                Ok(scalar_query_result("name", Value::String(name)))
-            }
-            MongoCommand::DropIndexes { collection, indexes, single } => {
-                let result = mongo_ops::mongo_drop_indexes_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    indexes.as_deref(),
-                    *single,
-                )
-                .await?;
-                Ok(mongo_drop_indexes_query_result(
-                    result.dropped_names,
-                    result.failures.into_iter().map(|failure| (failure.name, failure.message)).collect(),
-                    result.affected_rows,
-                ))
-            }
-            MongoCommand::DropCollection { collection } => {
-                mongo_ops::mongo_drop_collection_core(&self.state, connection_id, database, collection).await?;
-                Ok(affected_query_result(1))
-            }
-            MongoCommand::FindOneAndUpdate { collection, filter, update, options } => {
-                let result = mongo_ops::mongo_find_one_and_update_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    filter,
-                    update,
-                    options.as_deref(),
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-            MongoCommand::FindOneAndReplace { collection, filter, replacement, options } => {
-                let result = mongo_ops::mongo_find_one_and_replace_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    filter,
-                    replacement,
-                    options.as_deref(),
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-            MongoCommand::FindOneAndDelete { collection, filter, options } => {
-                let result = mongo_ops::mongo_find_one_and_delete_core(
-                    &self.state,
-                    connection_id,
-                    database,
-                    collection,
-                    filter,
-                    options.as_deref(),
-                )
-                .await?;
-                Ok(mongo_documents_query_result(result.documents))
-            }
-        }
+        dbx_core::mongo_ops::execute_mongo_command_core(&self.state, &connection.id, database, command, 100).await
     }
 
     async fn close_client_session(
@@ -954,6 +785,30 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid column list response: {error}"))
+    }
+
+    async fn collect_docs_snapshot(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        options: DocsSnapshotOptions,
+    ) -> Result<dbx_core::docs::SchemaSnapshot, String> {
+        self.ensure_connected(connection).await?;
+        self.request(
+            reqwest::Method::POST,
+            "/api/docs/snapshot",
+            Some(json!({
+                "connectionId": connection.id,
+                "database": database,
+                "schemas": options.schemas,
+                "tables": options.tables,
+                "projectName": options.project_name.clone().unwrap_or_else(|| connection.name.clone()),
+            })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid docs snapshot response: {error}"))
     }
 
     async fn execute_redis_command(
@@ -1659,5 +1514,56 @@ mod tests {
 
         assert_eq!(local_plugin_dir(&explicit, data_dir), PathBuf::from("D:/DBX/plugins-custom"));
         assert_eq!(local_plugin_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/plugins"));
+    }
+
+    struct StubBackend;
+
+    #[async_trait]
+    impl DbxBackend for StubBackend {
+        async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+            Err("unused".to_string())
+        }
+        async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
+            Ok(vec![])
+        }
+        async fn execute_agent_tool(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: &str,
+            _tool_name: &str,
+            _arguments: Value,
+            _permissions: AgentSqlPermissions,
+        ) -> ToolResult {
+            unimplemented!("not exercised by this test")
+        }
+        async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+            Ok(config)
+        }
+        async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_docs_snapshot_defaults_to_unsupported() {
+        let backend = StubBackend;
+        let connection = new_connection_config(
+            "c1".to_string(),
+            "local".to_string(),
+            DatabaseType::Postgres,
+            "127.0.0.1".to_string(),
+            5432,
+            "user".to_string(),
+            "password".to_string(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+        let result = backend.collect_docs_snapshot(&connection, "shop", DocsSnapshotOptions::default()).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not supported"));
     }
 }

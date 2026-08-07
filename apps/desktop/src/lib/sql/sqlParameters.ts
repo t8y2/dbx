@@ -176,7 +176,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === ":" && supportsNamedParameters && isSyntaxEnabled("named")) {
       const name = readParameterName(sql, i + 1);
-      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i) && !duckDbStructFieldSeparators.has(i) && !triggerPseudoRecordFieldStarts.has(i)) {
+      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i) && !duckDbStructFieldSeparators.has(i) && !isDuckDbCompactPrefixAliasSeparator(sql, i, options?.databaseType) && !triggerPseudoRecordFieldStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -228,6 +228,12 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "duckdb") return false;
+  const previous = sql[index - 1] ?? "";
+  return PARAMETER_NAME_CHAR_RE.test(previous) || previous === '"';
 }
 
 function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {

@@ -627,6 +627,9 @@ func TestListDatabasesSQLUsesXuguDictionary(t *testing.T) {
 	if !strings.Contains(sqlText, "ALL_DATABASES") || strings.Contains(sqlText, "SYS_DATABASES") {
 		t.Fatalf("database listing should query low-privilege ALL_DATABASES, got: %s", xuguListDatabasesSQL)
 	}
+	if strings.Contains(sqlText, "CURRENT_DB_ID") {
+		t.Fatalf("database listing must remain global instead of being scoped to CURRENT_DB_ID: %s", xuguListDatabasesSQL)
+	}
 }
 
 func TestFallbackDatabasesFromParams(t *testing.T) {
@@ -707,6 +710,65 @@ func TestSchemaListingSQLUsesLowPrivilegeDictionary(t *testing.T) {
 
 	if !strings.Contains(sqlText, "ALL_SCHEMAS") || strings.Contains(sqlText, "SYS_SCHEMAS") {
 		t.Fatalf("schema listing should query low-privilege ALL_SCHEMAS, got: %s", xuguListSchemasSQL)
+	}
+	if !strings.Contains(sqlText, "DB_ID = CURRENT_DB_ID") {
+		t.Fatalf("schema listing must be scoped to the selected database: %s", xuguListSchemasSQL)
+	}
+}
+
+func TestXuguMetadataQueriesAreCurrentDatabaseScoped(t *testing.T) {
+	queries := map[string]string{
+		"schemas":        xuguListSchemasSQL,
+		"primary keys":   xuguPrimaryKeyColumnsSQL,
+		"columns":        xuguListColumnsSQL,
+		"legacy columns": xuguLegacyListColumnsSQL,
+		"indexes":        xuguListIndexesSQL,
+		"table metadata": xuguTableMetadataSQL,
+		"identity":       xuguTableIdentitySQL,
+		"constraints":    xuguTableConstraintsSQL,
+		"foreign keys":   xuguTableForeignKeysSQL,
+		"partitions":     xuguTablePartitionsSQL,
+		"subpartitions":  xuguTableSubpartitionsSQL,
+		"sequences":      xuguCatalogSequenceNameSelectSQL,
+		"synonyms":       xuguCatalogSynonymSelectSQL,
+	}
+	for name, query := range queries {
+		if !strings.Contains(strings.ToUpper(query), "CURRENT_DB_ID") {
+			t.Errorf("%s metadata query is not scoped to the selected database: %s", name, query)
+		}
+	}
+
+	for name, query := range map[string]string{
+		"tables":  xuguListTablesQuery("APP_TEST", metadataListConstraints{}).SQL,
+		"objects": xuguListObjectsQuery("APP_TEST", metadataListConstraints{}).SQL,
+	} {
+		if !strings.Contains(strings.ToUpper(query), "CURRENT_DB_ID") {
+			t.Errorf("%s listing query is not scoped to the selected database: %s", name, query)
+		}
+	}
+
+	for _, objectType := range []string{"VIEW", "TRIGGER", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"} {
+		query, _, err := objectSourceQuery("APP_TEST", "OBJECT", objectType)
+		if err != nil {
+			t.Fatalf("object source query for %s: %v", objectType, err)
+		}
+		if !strings.Contains(strings.ToUpper(query), "CURRENT_DB_ID") {
+			t.Errorf("%s source query is not scoped to the selected database: %s", objectType, query)
+		}
+	}
+
+	for name, query := range map[string]string{
+		"catalog table lookup":     xuguCatalogTableNameQuery("APP_TEST", "T", false),
+		"catalog table fallback":   xuguCatalogTableNameQuery("APP_TEST", "T", true),
+		"sequence metadata":        xuguSequenceMetadataQuery("APP_TEST", "S"),
+		"sequence exact lookup":    xuguCatalogSequenceNameQuery("APP_TEST", "S", false),
+		"sequence fallback lookup": xuguCatalogSequenceNameQuery("APP_TEST", "S", true),
+		"synonym exact lookup":     xuguCatalogSynonymQuery("APP_TEST", "S", false),
+		"synonym fallback lookup":  xuguCatalogSynonymQuery("APP_TEST", "S", true),
+	} {
+		if !strings.Contains(strings.ToUpper(query), "CURRENT_DB_ID") {
+			t.Errorf("%s is not scoped to the selected database: %s", name, query)
+		}
 	}
 }
 

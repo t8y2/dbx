@@ -4478,6 +4478,7 @@ for line in sys.stdin:
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "conn-1".to_string(),
             name: "Connection".to_string(),
             note: String::new(),
@@ -5806,6 +5807,7 @@ for line in sys.stdin:
     #[test]
     fn external_driver_query_params_include_database_and_schema_context() {
         let config = ConnectionConfig {
+            docs_notes_path: None,
             id: "jdbc-1".to_string(),
             name: "JDBC".to_string(),
             note: String::new(),

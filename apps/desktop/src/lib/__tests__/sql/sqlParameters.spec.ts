@@ -321,6 +321,30 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["column", "nested_column", "later"]);
   });
 
+  it("ignores compact DuckDB prefix alias separators", () => {
+    const sql = 'select total:price * quantity, "order":sum(amount) from sales';
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "duckdb" })).toBe(sql);
+    expect(extractSqlParameters(sql, { databaseType: "postgres" })).toEqual(["price", "sum"]);
+  });
+
+  it("keeps named parameters inside DuckDB prefix alias expressions", () => {
+    const sql = "from r:range(:row_count) select total:r.range + :offset";
+
+    expect(extractSqlParameters(sql, { databaseType: "duckdb" })).toEqual(["row_count", "offset"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          row_count: { kind: "number", value: "3" },
+          offset: { kind: "number", value: "10" },
+        },
+        { databaseType: "duckdb" },
+      ),
+    ).toBe("from r:range(3) select total:r.range + 10");
+  });
+
   it("ignores Doris VARIANT field type separators", () => {
     const sql = `
       create table \`events\` (

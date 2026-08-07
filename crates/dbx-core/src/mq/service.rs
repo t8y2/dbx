@@ -866,6 +866,7 @@ mod tests {
 
     fn mq_connection(read_only: bool) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "readonly-mq".to_string(),
             name: "Read only MQ".to_string(),
             note: String::new(),

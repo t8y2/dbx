@@ -40,6 +40,7 @@ import {
   Plus,
   ScrollText,
   Code2,
+  Wrench,
   ListFilter,
   Clipboard,
   UsersRound,
@@ -154,6 +155,7 @@ import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
 import { createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
@@ -1682,6 +1684,22 @@ function openProcedureExecution() {
   const node = activeNode.value;
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   emit("open-procedure", node);
+}
+
+async function compileXuguObject() {
+  const node = activeNode.value;
+  if (currentDatabaseType() !== "xugu" || !node.connectionId || !node.database) return;
+  const sql = buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label });
+  if (!sql) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
+    toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
+    await connectionStore.refreshTreeNode(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function requestDropObject() {
@@ -4545,6 +4563,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "index" || node.type === "fkey" || (node.type === "trigger" && !!node.tableName)) {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+      items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
+    }
     if (node.type === "index" && canOpenStructureEditor.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.editIndex"), action: openStructureEditor, icon: PencilRuler });
@@ -4576,6 +4597,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (node.type === "procedure") {
       items.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecution, icon: Play });
     }
+    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+      items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
+    }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (canRenameObject.value) {
       items.push({
@@ -4606,6 +4630,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
+    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+      items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
+    }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
@@ -4828,6 +4855,11 @@ function handleRowKeydown(node: TreeNode, event: KeyboardEvent) {
   onKeydown(event);
 }
 
+function openPrimaryVisibleFilter(node: TreeNode) {
+  activateRuntimeNode(node);
+  openVisibleDatabasesDialog();
+}
+
 function openDataInNewTab(node: TreeNode) {
   activateRuntimeNode(node);
   openDataInNewTabImmediately(node);
@@ -4848,6 +4880,7 @@ defineExpose({
   handleRowClick,
   handleRowDoubleClick,
   handleRowKeydown,
+  openPrimaryVisibleFilter,
   openDataInNewTab,
   requestPaste,
   toggleNode,

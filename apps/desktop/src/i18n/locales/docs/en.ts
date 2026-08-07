@@ -1,0 +1,48 @@
+export default {
+  title: "Documentation",
+  groupBySchema: "Schemas",
+  groupByTableGroup: "Table Groups",
+  noGroup: "(no group)",
+  noSchema: "(no schema)",
+  search: "Search tables, columns, groups…",
+  columns: "Columns",
+  indexes: "Indexes",
+  references: "References",
+  referencedBy: "Referenced by",
+  localNote: "LOCAL",
+  shadowedComment: "Database comment: {comment}",
+  addNote: "Add a note",
+  editNote: "Edit note",
+  newGroup: "New group…",
+  groupName: "Group name",
+  groupColour: "Colour",
+  deleteGroup: "Delete group",
+  enumValues: "Values",
+  usedBy: "Used by",
+  openDiagram: "Open schema diagram",
+  saving: "Saving…",
+  saved: "Saved",
+  saveFailed: "Could not save notes: {error}",
+  warnings: {
+    tableSkipped: {
+      title: "A table could not be documented",
+      detail: "{table} was skipped: {reason}. It is missing from this documentation.",
+    },
+    noForeignKeyMetadata: {
+      title: "No relationships available",
+      detail: "{engine} does not report foreign key metadata, so no relationship edges could be derived. The diagram is complete for this engine.",
+    },
+    commentsUnsupported: {
+      title: "Database comments unavailable",
+      detail: "{engine} does not support table or column comments, so every description here comes from this project's own notes.",
+    },
+    orphanedNotes: {
+      title: "Some notes no longer match anything",
+      detail: "{count} note(s) refer to a table or column that no longer exists. Nothing was deleted — re-map or remove them in the notes file.",
+    },
+    dbmlOmitted: {
+      title: "Not representable in DBML",
+      detail: "{item} on {table} is documented here but omitted from the exported DBML: {reason}.",
+    },
+  },
+};

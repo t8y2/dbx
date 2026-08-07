@@ -1,0 +1,48 @@
+export default {
+  title: "ドキュメント",
+  groupBySchema: "スキーマ",
+  groupByTableGroup: "テーブルグループ",
+  noGroup: "(グループなし)",
+  noSchema: "(スキーマなし)",
+  search: "テーブル、カラム、グループを検索…",
+  columns: "カラム",
+  indexes: "インデックス",
+  references: "参照",
+  referencedBy: "参照元",
+  localNote: "ローカル",
+  shadowedComment: "データベースのコメント: {comment}",
+  addNote: "メモを追加",
+  editNote: "メモを編集",
+  newGroup: "新しいグループ…",
+  groupName: "グループ名",
+  groupColour: "色",
+  deleteGroup: "グループを削除",
+  enumValues: "値",
+  usedBy: "使用元",
+  openDiagram: "スキーマ図を開く",
+  saving: "保存中…",
+  saved: "保存済み",
+  saveFailed: "メモを保存できませんでした: {error}",
+  warnings: {
+    tableSkipped: {
+      title: "ドキュメント化できないテーブルがあります",
+      detail: "{table} はスキップされました: {reason}。このドキュメントには含まれていません。",
+    },
+    noForeignKeyMetadata: {
+      title: "リレーションシップを表示できません",
+      detail: "{engine} は外部キーのメタデータを報告しないため、リレーションシップを導出できませんでした。この図はこのエンジンについては完全です。",
+    },
+    commentsUnsupported: {
+      title: "データベースのコメントは利用できません",
+      detail: "{engine} はテーブルやカラムのコメントをサポートしていないため、ここでの説明はすべてこのプロジェクトのメモから提供されています。",
+    },
+    orphanedNotes: {
+      title: "対象がなくなったメモがあります",
+      detail: "{count} 件のメモが、既に存在しないテーブルまたはカラムを参照しています。何も削除されていません。メモファイルで再割り当てまたは削除してください。",
+    },
+    dbmlOmitted: {
+      title: "DBMLでは表現できません",
+      detail: "{table} の {item} はここに記載されていますが、エクスポートされたDBMLからは除外されています: {reason}。",
+    },
+  },
+};

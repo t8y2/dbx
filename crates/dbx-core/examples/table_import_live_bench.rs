@@ -151,6 +151,7 @@ fn env_required(name: &str) -> Result<String, String> {
 fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConfig, String> {
     let database_name = env_required("DBX_BENCH_DATABASE")?;
     Ok(ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),

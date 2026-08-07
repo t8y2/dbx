@@ -1,0 +1,48 @@
+export default {
+  title: "文件",
+  groupBySchema: "Schema",
+  groupByTableGroup: "資料表分組",
+  noGroup: "(無分組)",
+  noSchema: "(無 Schema)",
+  search: "搜尋資料表、欄位、分組…",
+  columns: "欄位",
+  indexes: "索引",
+  references: "參照",
+  referencedBy: "被參照",
+  localNote: "本機",
+  shadowedComment: "資料庫註解: {comment}",
+  addNote: "新增備註",
+  editNote: "編輯備註",
+  newGroup: "新增分組…",
+  groupName: "分組名稱",
+  groupColour: "顏色",
+  deleteGroup: "刪除分組",
+  enumValues: "值",
+  usedBy: "被使用於",
+  openDiagram: "開啟 Schema 圖",
+  saving: "儲存中…",
+  saved: "已儲存",
+  saveFailed: "無法儲存備註: {error}",
+  warnings: {
+    tableSkipped: {
+      title: "有一張資料表無法產生文件",
+      detail: "{table} 被略過: {reason}。此文件中缺少該資料表。",
+    },
+    noForeignKeyMetadata: {
+      title: "沒有可用的關聯",
+      detail: "{engine} 未回報外鍵中繼資料，因此無法推導出任何關聯。此圖對該資料庫引擎而言已經完整。",
+    },
+    commentsUnsupported: {
+      title: "資料庫註解無法使用",
+      detail: "{engine} 不支援資料表或欄位註解，因此這裡的所有說明均僅來自本專案的備註。",
+    },
+    orphanedNotes: {
+      title: "部分備註已不再對應任何內容",
+      detail: "{count} 筆備註參照的資料表或欄位已不存在。沒有任何內容被刪除 — 請在備註檔案中重新對應或移除它們。",
+    },
+    dbmlOmitted: {
+      title: "無法在 DBML 中表示",
+      detail: "{table} 上的 {item} 已在此處記錄，但已從匯出的 DBML 中省略: {reason}。",
+    },
+  },
+};

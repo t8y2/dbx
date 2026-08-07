@@ -202,6 +202,40 @@ pub async fn redis_hash_del(
 }
 
 #[tauri::command]
+pub async fn redis_hash_field_set_ttl(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    field: String,
+    ttl: i64,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "HEXPIRE").await?;
+    dbx_core::redis_ops::redis_hash_field_set_ttl_in_db_core(&state, &connection_id, db, &key_raw, &field, ttl).await
+}
+
+#[tauri::command]
+pub async fn redis_hash_field_set_expire_at(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    field: String,
+    expire_at: i64,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "HEXPIREAT").await?;
+    dbx_core::redis_ops::redis_hash_field_set_expire_at_in_db_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        &field,
+        expire_at,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn redis_list_push(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

@@ -63,15 +63,26 @@ public final class RocketMqAgent {
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_LIST_LIMIT = 200;
     private static final int CONSUMER_GROUP_ENRICH_CONCURRENCY = 8;
-    private static final long CONSUMER_GROUP_ENRICH_BUDGET_MS = 8_000;
-    /** Wall-clock budget for parallel getAllSubscriptionGroup across masters. */
-    private static final long CONSUMER_GROUP_COLLECT_BUDGET_MS = 12_000;
     private static final int CONSUMER_GROUP_COLLECT_CONCURRENCY = 8;
-    private static final long CONSUMER_LAG_BUDGET_MS = 10_000;
     private static final int CONSUMER_LAG_CONCURRENCY = 8;
+    /**
+     * Phase baselines at {@link #DEFAULT_REQUEST_TIMEOUT_MS}. Scaled via
+     * {@link #scaledOperationBudgetMs} so Advanced query timeout expands headroom without letting
+     * collect+enrich+lag each consume a full RPC window.
+     */
+    private static final long CONSUMER_GROUP_COLLECT_BUDGET_BASELINE_MS = 12_000;
+    private static final long CONSUMER_GROUP_ENRICH_BUDGET_BASELINE_MS = 8_000;
+    private static final long CONSUMER_LAG_BUDGET_BASELINE_MS = 10_000;
+    private static final long TOPIC_LIST_ROUTE_BUDGET_BASELINE_MS = 8_000;
+    /** Host-side Docker collision-fallbacks are usually blackholed; keep remoting short. */
+    private static final long COLLISION_FALLBACK_PROBE_TIMEOUT_MS = 2_000;
+    /**
+     * LitePullConsumer.poll wait for local pull cache — not an RPC budget.
+     * Must stay short: empty queues block for the full timeout, and peek walks queues serially.
+     */
+    private static final long MESSAGE_POLL_TIMEOUT_MS = 3_000;
     /** Nameserver route enrichment for listTopics fallback when bulk broker config is unavailable. */
     private static final int TOPIC_LIST_ROUTE_CONCURRENCY = 8;
-    private static final long TOPIC_LIST_ROUTE_BUDGET_MS = 8_000;
     private static final String AUTO_CREATE_TOPIC_KEY = "TBW102";
     /** RocketMQ 5.x topic attribute key for message type (NORMAL/DELAY/FIFO/TRANSACTION). */
     private static final String TOPIC_MESSAGE_TYPE_ATTRIBUTE = "message.type";
@@ -494,7 +505,7 @@ public final class RocketMqAgent {
             keyword,
             admin::examineTopicRouteInfo,
             TOPIC_LIST_ROUTE_CONCURRENCY,
-            TOPIC_LIST_ROUTE_BUDGET_MS
+            scaledOperationBudgetMs(conn, TOPIC_LIST_ROUTE_BUDGET_BASELINE_MS)
         );
         topics.sort(Comparator.comparing(m -> String.valueOf(m.get("name"))));
 
@@ -873,7 +884,7 @@ public final class RocketMqAgent {
                 consumer.assign(Collections.singletonList(queue));
                 consumer.seek(queue, offset);
                 consumer.setPullBatchSize(1);
-                List<MessageExt> polled = consumer.poll(3000);
+                List<MessageExt> polled = consumer.poll(MESSAGE_POLL_TIMEOUT_MS);
                 if (polled == null || polled.isEmpty()) {
                     continue;
                 }
@@ -1125,45 +1136,43 @@ public final class RocketMqAgent {
 
     private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigs(
         DefaultMQAdminExt admin, JsonObject conn) throws Exception {
-        long requestTimeoutMs = intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS);
-        // Prefer connection RPC timeout over the legacy 5s hard-code so slow-but-alive brokers
-        // still contribute within the shared wall-clock budget.
-        long perBrokerMs = Math.min(Math.max(1_000L, requestTimeoutMs), CONSUMER_GROUP_COLLECT_BUDGET_MS);
+        long budgetMs = scaledOperationBudgetMs(conn, CONSUMER_GROUP_COLLECT_BUDGET_BASELINE_MS);
+        MasterBrokerAddrPlan plan = resolveMasterBrokerAddrPlan(admin, conn);
+        // Fallbacks are usually Docker-internal and blackholed from host agents; keep their
+        // remoting short so raising Advanced query timeout cannot stretch collect wall time.
+        long fallbackPerBrokerMs = Math.min(budgetMs, COLLISION_FALLBACK_PROBE_TIMEOUT_MS);
         return collectConsumerGroupConfigs(
-            admin,
-            conn,
+            plan,
             CONSUMER_GROUP_COLLECT_CONCURRENCY,
-            CONSUMER_GROUP_COLLECT_BUDGET_MS,
-            perBrokerMs
+            budgetMs,
+            budgetMs,
+            fallbackPerBrokerMs,
+            (brokerAddr, timeoutMs) -> {
+                SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, timeoutMs);
+                if (wrapper == null || wrapper.getSubscriptionGroupTable() == null) {
+                    return Map.of();
+                }
+                return wrapper.getSubscriptionGroupTable();
+            }
         );
     }
 
     /**
-     * Topic-filtered lists skip the parallel full-cluster collect for speed, but must still
-     * walk every reachable master. An intermediate broker can return a duplicate dump (map size
-     * unchanged) while a later master still holds FIFO-only groups.
+     * Topic-filtered lists still need every reachable master's subscription dump for FIFO typing,
+     * but must not serially walk unreachable collision-fallbacks. Reuse the two-phase parallel collect.
      */
     private static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigsForTopicFilter(
         DefaultMQAdminExt admin, JsonObject conn) {
-        long timeoutMs = Math.max(1_000L, intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS));
-        Map<String, SubscriptionGroupConfig> configs = new TreeMap<>();
         try {
-            for (String brokerAddr : resolveMasterBrokerAddrs(admin, conn)) {
-                try {
-                    SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, timeoutMs);
-                    if (wrapper == null || wrapper.getSubscriptionGroupTable() == null
-                        || wrapper.getSubscriptionGroupTable().isEmpty()) {
-                        continue;
-                    }
-                    mergeSubscriptionGroupConfigs(configs, wrapper.getSubscriptionGroupTable());
-                } catch (Exception ignored) {
-                    // Try next master.
-                }
-            }
+            return collectConsumerGroupConfigs(admin, conn);
         } catch (Exception ignored) {
-            // No reachable masters.
+            return new TreeMap<>();
         }
-        return configs;
+    }
+
+    @FunctionalInterface
+    interface SubscriptionGroupBrokerProbe {
+        Map<String, SubscriptionGroupConfig> load(String brokerAddr, long timeoutMs) throws Exception;
     }
 
     /**
@@ -1194,19 +1203,47 @@ public final class RocketMqAgent {
     }
 
     /**
-     * Parallel subscription-group dump with a total budget. Slow/unreachable brokers are
-     * skipped so a large cluster does not burn the entire Agent RPC window.
+     * Two-phase parallel subscription-group dump. Remapped masters first; collision-fallbacks
+     * only when the remapped merge is empty — same host-side Docker tradeoff as consume-stats.
+     * Slow/unreachable brokers are skipped so a large cluster does not burn the Agent RPC window.
      */
     static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigs(
-        DefaultMQAdminExt admin,
-        JsonObject conn,
+        MasterBrokerAddrPlan plan,
         int concurrency,
         long budgetMs,
-        long perBrokerTimeoutMs
+        long remappedPerBrokerTimeoutMs,
+        long fallbackPerBrokerTimeoutMs,
+        SubscriptionGroupBrokerProbe probe
     ) throws Exception {
-        List<String> brokers = resolveMasterBrokerAddrs(admin, conn);
+        Map<String, SubscriptionGroupConfig> configs = collectConsumerGroupConfigsFromBrokers(
+            new ArrayList<>(plan.remappedAddrs()),
+            concurrency,
+            budgetMs,
+            remappedPerBrokerTimeoutMs,
+            probe
+        );
+        if (configs.isEmpty() && plan.fallbackCount() > 0) {
+            Map<String, SubscriptionGroupConfig> fallbackConfigs = collectConsumerGroupConfigsFromBrokers(
+                new ArrayList<>(plan.collisionFallbackAddrs()),
+                concurrency,
+                budgetMs,
+                fallbackPerBrokerTimeoutMs,
+                probe
+            );
+            mergeSubscriptionGroupConfigs(configs, fallbackConfigs);
+        }
+        return configs;
+    }
+
+    static Map<String, SubscriptionGroupConfig> collectConsumerGroupConfigsFromBrokers(
+        List<String> brokers,
+        int concurrency,
+        long budgetMs,
+        long perBrokerTimeoutMs,
+        SubscriptionGroupBrokerProbe probe
+    ) throws Exception {
         Map<String, SubscriptionGroupConfig> configs = new TreeMap<>();
-        if (brokers.isEmpty()) {
+        if (brokers == null || brokers.isEmpty()) {
             return configs;
         }
         int workers = Math.max(1, Math.min(concurrency, brokers.size()));
@@ -1221,9 +1258,9 @@ public final class RocketMqAgent {
             tasks.add(() -> {
                 Map<String, SubscriptionGroupConfig> partial = new HashMap<>();
                 try {
-                    SubscriptionGroupWrapper wrapper = admin.getAllSubscriptionGroup(brokerAddr, brokerTimeout);
-                    if (wrapper != null && wrapper.getSubscriptionGroupTable() != null) {
-                        partial.putAll(wrapper.getSubscriptionGroupTable());
+                    Map<String, SubscriptionGroupConfig> loaded = probe.load(brokerAddr, brokerTimeout);
+                    if (loaded != null && !loaded.isEmpty()) {
+                        partial.putAll(loaded);
                     }
                 } catch (Exception ignored) {
                     // Skip unreachable brokers; return whatever others collected.
@@ -1370,6 +1407,11 @@ public final class RocketMqAgent {
         return examineConsumeStatsOnMasters(admin, groupId, topic, resolveMasterBrokerAddrPlan(admin, conn));
     }
 
+    @FunctionalInterface
+    interface ConsumeStatsBrokerProbe {
+        ConsumeStats examine(String brokerAddr, String groupId, String topic, long timeout) throws Exception;
+    }
+
     /**
      * Probe consume stats on a pre-resolved master plan. Callers that fan out per group
      * (lag attach) should resolve the plan once so each task does not re-hit clusterInfo.
@@ -1379,19 +1421,39 @@ public final class RocketMqAgent {
         // RocketMQ 5.3.1: 3-arg examineConsumeStats(clusterName, group, topic) is NOT broker-scoped.
         // Must use 4-arg (brokerAddr, group, topic, timeout) or remapped Docker addrs never hit brokers.
         long timeout = adminTimeoutMillis(admin);
+        long fallbackTimeout = Math.min(timeout, COLLISION_FALLBACK_PROBE_TIMEOUT_MS);
+        return examineConsumeStatsOnMasters(
+            groupId,
+            topic,
+            plan,
+            timeout,
+            fallbackTimeout,
+            (brokerAddr, g, t, to) -> admin.examineConsumeStats(brokerAddr, g, t, to)
+        );
+    }
+
+    /**
+     * Two-phase probe: remapped masters first; collision-fallbacks only when the remapped merge
+     * is empty. Fail-closed ({@link #shouldFailClosedOnCollisionEmpty}) only guards empty merge,
+     * so non-empty remapped success must not spend adminTimeout on unreachable Docker IPs.
+     * Fallback remoting stays short — same host-side Docker tradeoff as subscription collect.
+     */
+    static ConsumeStats examineConsumeStatsOnMasters(
+        String groupId,
+        String topic,
+        MasterBrokerAddrPlan plan,
+        long remappedTimeout,
+        long fallbackTimeout,
+        ConsumeStatsBrokerProbe probe
+    ) throws Exception {
         ConsumeStats merged = new ConsumeStats();
         int remappedSuccess = 0;
         int fallbackSuccess = 0;
         Exception lastError = null;
-        for (String brokerAddr : plan.allAddrs()) {
-            boolean collisionFallback = plan.isCollisionFallback(brokerAddr);
+        for (String brokerAddr : plan.remappedAddrs()) {
             try {
-                ConsumeStats stats = admin.examineConsumeStats(brokerAddr, groupId, topic, timeout);
-                if (collisionFallback) {
-                    fallbackSuccess++;
-                } else {
-                    remappedSuccess++;
-                }
+                ConsumeStats stats = probe.examine(brokerAddr, groupId, topic, remappedTimeout);
+                remappedSuccess++;
                 if (stats != null && stats.getOffsetTable() != null) {
                     merged.getOffsetTable().putAll(stats.getOffsetTable());
                     merged.setConsumeTps(merged.getConsumeTps() + stats.getConsumeTps());
@@ -1402,10 +1464,24 @@ public final class RocketMqAgent {
         }
         boolean mergedEmpty = merged.getOffsetTable() == null || merged.getOffsetTable().isEmpty();
         // Remap collisions append Docker-internal originals as best-effort fallbacks. Host-side
-        // agents usually cannot reach them; those failures must not trip empty-merge fail-closed
-        // when a remapped master already returned offsets. When remapped probes all fail, gate on
-        // fallbacks. Empty merge + unreachable collision siblings is still fail-closed: a single
-        // published host:port can answer for the wrong master and look like healthy zero lag.
+        // agents usually cannot reach them; skip those probes once remapped masters already
+        // returned offsets. Empty merge + unreachable collision siblings is still fail-closed:
+        // a single published host:port can answer for the wrong master and look like zero lag.
+        if (mergedEmpty) {
+            for (String brokerAddr : plan.collisionFallbackAddrs()) {
+                try {
+                    ConsumeStats stats = probe.examine(brokerAddr, groupId, topic, fallbackTimeout);
+                    fallbackSuccess++;
+                    if (stats != null && stats.getOffsetTable() != null) {
+                        merged.getOffsetTable().putAll(stats.getOffsetTable());
+                        merged.setConsumeTps(merged.getConsumeTps() + stats.getConsumeTps());
+                    }
+                } catch (Exception e) {
+                    lastError = e;
+                }
+            }
+            mergedEmpty = merged.getOffsetTable() == null || merged.getOffsetTable().isEmpty();
+        }
         if (shouldFailClosedOnCollisionEmpty(mergedEmpty, plan.fallbackCount(), fallbackSuccess)) {
             throw new MQClientException(
                 "Failed to examine consume stats for group " + groupId
@@ -1676,7 +1752,10 @@ public final class RocketMqAgent {
         }
         try {
             List<Future<Long>> results =
-                executor.invokeAll(tasks, Math.max(1, CONSUMER_LAG_BUDGET_MS), TimeUnit.MILLISECONDS);
+                executor.invokeAll(
+                    tasks,
+                    Math.max(1, scaledOperationBudgetMs(conn, CONSUMER_LAG_BUDGET_BASELINE_MS)),
+                    TimeUnit.MILLISECONDS);
             for (int i = 0; i < page.size(); i++) {
                 Future<Long> future = i < results.size() ? results.get(i) : null;
                 if (future == null || future.isCancelled()) {
@@ -1717,7 +1796,7 @@ public final class RocketMqAgent {
             page,
             groupId -> examineConsumerConnectionInfoRemapped(admin, conn, groupId),
             CONSUMER_GROUP_ENRICH_CONCURRENCY,
-            CONSUMER_GROUP_ENRICH_BUDGET_MS
+            scaledOperationBudgetMs(conn, CONSUMER_GROUP_ENRICH_BUDGET_BASELINE_MS)
         );
     }
 
@@ -2373,7 +2452,7 @@ public final class RocketMqAgent {
                 consumer.assign(Collections.singletonList(queue));
                 consumer.seek(queue, seekOffset);
                 consumer.setPullBatchSize(count - messages.size());
-                List<MessageExt> polled = consumer.poll(3000);
+                List<MessageExt> polled = consumer.poll(MESSAGE_POLL_TIMEOUT_MS);
                 for (MessageExt message : polled) {
                     messages.add(peekedMessageFromRecord(topic, message));
                     if (messages.size() >= count) {
@@ -2557,6 +2636,8 @@ public final class RocketMqAgent {
             : new DefaultMQProducer("_DBX_ROCKETMQ_PRODUCER");
         nextProducer.setNamesrvAddr(namesrvAddr(conn));
         nextProducer.setInstanceName("DBX_" + UUID.randomUUID());
+        // Follow Advanced query timeout — SDK default sendMsgTimeout is only 3s.
+        nextProducer.setSendMsgTimeout(operationBudgetMsAsInt(conn));
         nextProducer.start();
         return nextProducer;
     }
@@ -2736,6 +2817,14 @@ public final class RocketMqAgent {
             LinkedHashSet<String> all = new LinkedHashSet<>(remapped);
             all.addAll(collisionFallbacks);
             return all;
+        }
+
+        LinkedHashSet<String> remappedAddrs() {
+            return new LinkedHashSet<>(remapped);
+        }
+
+        LinkedHashSet<String> collisionFallbackAddrs() {
+            return new LinkedHashSet<>(collisionFallbacks);
         }
 
         int remappedCount() {
@@ -3315,9 +3404,10 @@ public final class RocketMqAgent {
     private static BrokerTopicConfigSnapshot collectBrokerTopicConfigSnapshot(
         DefaultMQAdminExt admin, JsonObject conn, ClusterInfo clusterInfo) throws Exception {
         List<String> brokerAddrs = resolveMasterBrokerAddrs(admin, conn, null, clusterInfo);
+        long timeoutMs = operationBudgetMs(conn);
         return collectBrokerTopicConfigs(
             brokerAddrs,
-            brokerAddr -> admin.getAllTopicConfig(brokerAddr, DEFAULT_REQUEST_TIMEOUT_MS)
+            brokerAddr -> admin.getAllTopicConfig(brokerAddr, timeoutMs)
         );
     }
 
@@ -3581,6 +3671,31 @@ public final class RocketMqAgent {
     static int intOrDefault(JsonObject object, String key, int fallback) {
         Integer value = integerOrNull(object, key);
         return value == null ? fallback : value;
+    }
+
+    /**
+     * Full Advanced query timeout via {@code request_timeout_ms}. Use for single-shot ops
+     * (send/admin construct/topic-config per call). Multi-phase list paths must use
+     * {@link #scaledOperationBudgetMs} so phases still fit under one Rust RPC window.
+     * Message {@code LitePullConsumer.poll} stays on {@link #MESSAGE_POLL_TIMEOUT_MS}.
+     */
+    static long operationBudgetMs(JsonObject conn) {
+        return Math.max(1_000L, intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS));
+    }
+
+    /**
+     * Scale a legacy phase baseline with Advanced query timeout. At the 30s default, baselines are
+     * unchanged (12/8/10/8); at 120s they expand 4× but never exceed the RPC window.
+     */
+    static long scaledOperationBudgetMs(JsonObject conn, long baselineMs) {
+        long requestMs = operationBudgetMs(conn);
+        long scaled = baselineMs * requestMs / DEFAULT_REQUEST_TIMEOUT_MS;
+        return Math.max(1_000L, Math.min(requestMs, scaled));
+    }
+
+    /** {@link #operationBudgetMs} clamped to {@code int} for APIs like {@code setSendMsgTimeout}. */
+    static int operationBudgetMsAsInt(JsonObject conn) {
+        return (int) Math.min(Integer.MAX_VALUE, operationBudgetMs(conn));
     }
 
     static long longOrDefault(JsonObject object, String key, long fallback) {

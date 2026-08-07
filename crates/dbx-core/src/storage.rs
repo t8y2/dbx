@@ -4140,6 +4140,7 @@ mod tests {
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Pulsar".to_string(),
             note: String::new(),
@@ -4204,6 +4205,7 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
             note: String::new(),

@@ -2014,7 +2014,8 @@ impl AppState {
                     Some(&db_config.password),
                     db_config.ssl,
                     connect_timeout,
-                );
+                )
+                .with_database(db_config.database.as_deref());
                 db::vector_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::VectorDb(client)
             }
@@ -4986,6 +4987,7 @@ mod tests {
 
     fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "conn".to_string(),
             name: "MySQL".to_string(),
             note: String::new(),

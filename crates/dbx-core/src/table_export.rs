@@ -140,8 +140,32 @@ fn resolve_requested_export_columns(
     (resolved_columns, resolved_column_types, resolved_primary_keys)
 }
 
-fn requested_export_needs_column_extras(database_type: DatabaseType, format: &str) -> bool {
+fn requested_mysql_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
     database_type == DatabaseType::Mysql && format.eq_ignore_ascii_case("sql")
+}
+
+fn resolve_requested_export_column_types(
+    requested_columns: &[String],
+    requested_column_types: &[Option<String>],
+    table_columns: &[crate::db::ColumnInfo],
+) -> Vec<Option<String>> {
+    requested_columns
+        .iter()
+        .enumerate()
+        .map(|(index, requested)| {
+            requested_column_types
+                .get(index)
+                .cloned()
+                .flatten()
+                .filter(|column_type| !column_type.trim().is_empty())
+                .or_else(|| {
+                    table_columns
+                        .iter()
+                        .find(|column| column.name.eq_ignore_ascii_case(requested))
+                        .map(|column| column.data_type.clone())
+                })
+        })
+        .collect()
 }
 
 fn resolve_requested_export_column_extras(
@@ -213,13 +237,14 @@ fn table_page_sql(
     request: &TableExportRequest,
     db_type: &DatabaseType,
     col_names: &[String],
+    column_types: &[Option<String>],
     primary_keys: &[String],
     use_keyset: bool,
     last_pk_values: &[Value],
     offset: u64,
     batch_size: usize,
 ) -> String {
-    if use_keyset {
+    let sql = if use_keyset {
         keyset_pagination_sql_with_identifier_quote(
             col_names,
             &request.table_name,
@@ -243,6 +268,75 @@ fn table_page_sql(
             primary_keys,
             request.identifier_quote.as_deref(),
         )
+    };
+    replace_mysql_spatial_export_select_list(sql, request, db_type, col_names, column_types)
+}
+
+fn mysql_spatial_export_column_expression(column: &str, identifier_quote: Option<&str>) -> String {
+    let quoted = crate::sql_dialect::quote_table_data_identifier(Some(DatabaseType::Mysql), column, identifier_quote);
+    format!(
+        "CASE WHEN {quoted} IS NULL THEN NULL ELSE CONCAT('DBX_WKB:', ST_SRID({quoted}), ':', HEX(ST_AsWKB({quoted}))) END AS {quoted}"
+    )
+}
+
+fn mysql_spatial_export_select_list(
+    request: &TableExportRequest,
+    db_type: &DatabaseType,
+    col_names: &[String],
+    column_types: &[Option<String>],
+) -> Option<String> {
+    if *db_type != DatabaseType::Mysql || !request.format.eq_ignore_ascii_case("sql") {
+        return None;
+    }
+    let mut has_spatial_column = false;
+    let expressions = col_names
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            if column_types
+                .get(index)
+                .and_then(|column_type| column_type.as_deref())
+                .is_some_and(crate::database_export::is_mysql_spatial_export_type)
+            {
+                has_spatial_column = true;
+                mysql_spatial_export_column_expression(column, request.identifier_quote.as_deref())
+            } else {
+                crate::sql_dialect::quote_table_data_identifier(
+                    Some(*db_type),
+                    column,
+                    request.identifier_quote.as_deref(),
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    has_spatial_column.then(|| expressions.join(", "))
+}
+
+fn replace_mysql_spatial_export_select_list(
+    sql: String,
+    request: &TableExportRequest,
+    db_type: &DatabaseType,
+    col_names: &[String],
+    column_types: &[Option<String>],
+) -> String {
+    let Some(replacement) = mysql_spatial_export_select_list(request, db_type, col_names, column_types) else {
+        return sql;
+    };
+    let original = col_names
+        .iter()
+        .map(|column| {
+            crate::sql_dialect::quote_table_data_identifier(Some(*db_type), column, request.identifier_quote.as_deref())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let prefix = format!("SELECT {original}");
+    if sql.starts_with(&prefix) {
+        format!("SELECT {replacement}{}", &sql[prefix.len()..])
+    } else {
+        log::warn!(
+            "MySQL spatial table export could not replace its SELECT list; geometry columns will be exported as WKT"
+        );
+        sql
     }
 }
 
@@ -250,6 +344,7 @@ fn table_cursor_sql(
     request: &TableExportRequest,
     db_type: &DatabaseType,
     col_names: &[String],
+    column_types: &[Option<String>],
     primary_keys: &[String],
 ) -> String {
     let full_table = crate::sql_dialect::table_data_qualified_table_name(
@@ -258,13 +353,19 @@ fn table_cursor_sql(
         &request.table_name,
         request.identifier_quote.as_deref(),
     );
-    let col_list = col_names
-        .iter()
-        .map(|column| {
-            crate::sql_dialect::quote_table_data_identifier(Some(*db_type), column, request.identifier_quote.as_deref())
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let col_list = mysql_spatial_export_select_list(request, db_type, col_names, column_types).unwrap_or_else(|| {
+        col_names
+            .iter()
+            .map(|column| {
+                crate::sql_dialect::quote_table_data_identifier(
+                    Some(*db_type),
+                    column,
+                    request.identifier_quote.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
     let predicate = crate::sql_dialect::normalize_where_input(request.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     let order_by = request
@@ -338,12 +439,13 @@ async fn execute_external_driver_export_page(
     request: &TableExportRequest,
     db_type: &DatabaseType,
     col_names: &[String],
+    column_types: &[Option<String>],
     primary_keys: &[String],
     active_batch_size: usize,
     result_session_id: Option<String>,
     cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
-    let sql = table_cursor_sql(request, db_type, col_names, primary_keys);
+    let sql = table_cursor_sql(request, db_type, col_names, column_types, primary_keys);
     let max_rows = request.row_limit.unwrap_or(i32::MAX as usize).min(i32::MAX as usize).max(1);
     let timeout_secs = table_export_query_timeout_secs(state, pool_key).await;
     execute_sql_statement_with_options(
@@ -403,6 +505,7 @@ async fn fetch_table_export_batch(
     request: &TableExportRequest,
     db_type: &DatabaseType,
     col_names: &[String],
+    column_types: &[Option<String>],
     primary_keys: &[String],
     use_keyset: bool,
     last_pk_values: &[Value],
@@ -457,7 +560,7 @@ async fn fetch_table_export_batch(
         match table_export_cursor_kind(state, pool_key).await {
             Some(TableExportCursorKind::Agent) => {
                 *table_read_attempted = true;
-                let sql = table_cursor_sql(request, db_type, col_names, primary_keys);
+                let sql = table_cursor_sql(request, db_type, col_names, column_types, primary_keys);
                 let max_rows = request.row_limit.unwrap_or(i32::MAX as usize);
                 let query_timeout = table_export_query_timeout_secs(state, pool_key).await;
                 let params = AgentTableReadStartParams {
@@ -498,6 +601,7 @@ async fn fetch_table_export_batch(
                     request,
                     db_type,
                     col_names,
+                    column_types,
                     primary_keys,
                     active_batch_size,
                     None,
@@ -553,6 +657,7 @@ async fn fetch_table_export_batch(
                     request,
                     db_type,
                     col_names,
+                    column_types,
                     primary_keys,
                     active_batch_size,
                     Some(session_id.clone()),
@@ -589,6 +694,7 @@ async fn fetch_table_export_batch(
         request,
         db_type,
         col_names,
+        column_types,
         primary_keys,
         use_keyset,
         last_pk_values,
@@ -605,6 +711,7 @@ async fn fetch_paginated_table_export_batch(
     request: &TableExportRequest,
     db_type: &DatabaseType,
     col_names: &[String],
+    column_types: &[Option<String>],
     primary_keys: &[String],
     use_keyset: bool,
     last_pk_values: &[Value],
@@ -615,6 +722,7 @@ async fn fetch_paginated_table_export_batch(
         request,
         db_type,
         col_names,
+        column_types,
         primary_keys,
         use_keyset,
         last_pk_values,
@@ -739,7 +847,7 @@ async fn try_export_native_table_stream(
     cancelled: Arc<AtomicBool>,
     cancel_token: CancellationToken,
 ) -> Result<bool, String> {
-    let sql = table_cursor_sql(request, db_type, col_names, primary_keys);
+    let sql = table_cursor_sql(request, db_type, col_names, column_types, primary_keys);
     let mut rows_exported = 0_u64;
     let progress_interval = batch_size.max(1) as u64;
 
@@ -1169,25 +1277,29 @@ async fn export_table_data_core_inner(
     // directly, which avoids expensive metadata round-trips on JDBC drivers.
     let requested_columns = request.columns.as_ref().filter(|columns| !columns.is_empty());
     let (col_names, column_types, column_extras, primary_keys) = if let Some(requested_columns) = requested_columns {
-        let (col_names, column_types, primary_keys) = resolve_requested_export_columns(
+        let (col_names, requested_column_types, primary_keys) = resolve_requested_export_columns(
             db_type,
             requested_columns,
             request.column_types.as_deref(),
             request.primary_keys.as_deref(),
         );
-        let column_extras = if requested_export_needs_column_extras(db_type, &request.format) {
-            let table_columns = crate::schema::get_columns_core(
-                state,
-                &request.connection_id,
-                &request.database,
-                request.schema.as_deref().unwrap_or(""),
-                &request.table_name,
-            )
-            .await?;
-            resolve_requested_export_column_extras(&col_names, &table_columns)
-        } else {
-            Vec::new()
-        };
+        let (column_types, column_extras) =
+            if requested_mysql_sql_export_needs_column_metadata(db_type, &request.format) {
+                let table_columns = crate::schema::get_columns_core(
+                    state,
+                    &request.connection_id,
+                    &request.database,
+                    request.schema.as_deref().unwrap_or(""),
+                    &request.table_name,
+                )
+                .await?;
+                (
+                    resolve_requested_export_column_types(&col_names, &requested_column_types, &table_columns),
+                    resolve_requested_export_column_extras(&col_names, &table_columns),
+                )
+            } else {
+                (requested_column_types, Vec::new())
+            };
         (col_names, column_types, column_extras, primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
@@ -1330,6 +1442,7 @@ async fn export_table_data_core_inner(
                     request,
                     &db_type,
                     &col_names,
+                    &column_types,
                     &primary_keys,
                     use_keyset,
                     &last_pk_values,
@@ -1418,6 +1531,7 @@ async fn export_table_data_core_inner(
                     request,
                     &db_type,
                     &col_names,
+                    &column_types,
                     &primary_keys,
                     use_keyset,
                     &last_pk_values,
@@ -1517,6 +1631,7 @@ async fn export_table_data_core_inner(
                     request,
                     &db_type,
                     &col_names,
+                    &column_types,
                     &primary_keys,
                     use_keyset,
                     &last_pk_values,
@@ -1610,6 +1725,7 @@ async fn export_table_data_core_inner(
                     request,
                     &db_type,
                     &col_names,
+                    &column_types,
                     &primary_keys,
                     use_keyset,
                     &last_pk_values,
@@ -1692,6 +1808,7 @@ async fn export_table_data_core_inner(
                     request,
                     &db_type,
                     &col_names,
+                    &column_types,
                     &primary_keys,
                     use_keyset,
                     &last_pk_values,
@@ -1773,6 +1890,7 @@ async fn export_table_data_core_inner(
                     request,
                     &db_type,
                     &col_names,
+                    &column_types,
                     &primary_keys,
                     use_keyset,
                     &last_pk_values,
@@ -2140,6 +2258,7 @@ mod tests {
             &request,
             &DatabaseType::Oracle,
             &[String::from("id"), String::from("status")],
+            &[],
             &[String::from("id")],
         );
 
@@ -2179,15 +2298,15 @@ mod tests {
         let primary_keys = vec!["id".to_string()];
 
         assert_eq!(
-            table_cursor_sql(&request, &DatabaseType::Gaussdb, &columns, &primary_keys),
+            table_cursor_sql(&request, &DatabaseType::Gaussdb, &columns, &[], &primary_keys),
             "SELECT id, `DisplayName` FROM app_schema.`order` ORDER BY id ASC"
         );
         assert_eq!(
-            table_page_sql(&request, &DatabaseType::Gaussdb, &columns, &primary_keys, false, &[], 100, 100),
+            table_page_sql(&request, &DatabaseType::Gaussdb, &columns, &[], &primary_keys, false, &[], 100, 100),
             "SELECT id, `DisplayName` FROM app_schema.`order` ORDER BY id LIMIT 100 OFFSET 100"
         );
         assert_eq!(
-            table_page_sql(&request, &DatabaseType::Gaussdb, &columns, &primary_keys, true, &[json!(10)], 0, 100,),
+            table_page_sql(&request, &DatabaseType::Gaussdb, &columns, &[], &primary_keys, true, &[json!(10)], 0, 100,),
             "SELECT id, `DisplayName` FROM app_schema.`order` WHERE id > 10 ORDER BY id ASC LIMIT 100"
         );
         assert_eq!(
@@ -2201,6 +2320,49 @@ mod tests {
             ),
             "SELECT COUNT(*) FROM app_schema.`order`"
         );
+    }
+
+    #[test]
+    fn mysql_sql_table_export_selects_spatial_columns_as_wkb_markers() {
+        let request = TableExportRequest {
+            export_id: "export-mysql-spatial".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "app".to_string(),
+            schema: None,
+            identifier_quote: None,
+            table_name: "spatial_data".to_string(),
+            file_path: "spatial_data.sql".to_string(),
+            format: "sql".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: true,
+            batch_size: Some(100),
+            row_limit: None,
+            date_time_format: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+        };
+        let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
+        let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
+        let primary_keys = vec!["id".to_string()];
+
+        let cursor_sql = table_cursor_sql(&request, &DatabaseType::Mysql, &columns, &column_types, &primary_keys);
+        assert!(cursor_sql.contains("ST_SRID(`geom`), ':', HEX(ST_AsWKB(`geom`))"));
+        assert!(cursor_sql.contains("AS `geom`"));
+        assert!(!cursor_sql.contains("SELECT `id`, `geom`, `name`"));
+
+        let page_sql =
+            table_page_sql(&request, &DatabaseType::Mysql, &columns, &column_types, &primary_keys, false, &[], 0, 100);
+        assert!(page_sql.contains("ST_AsWKB(`geom`)"));
+        assert!(page_sql.contains("LIMIT 100 OFFSET 0"));
+
+        let mut csv_request = request;
+        csv_request.format = "csv".to_string();
+        let csv_sql = table_cursor_sql(&csv_request, &DatabaseType::Mysql, &columns, &column_types, &primary_keys);
+        assert_eq!(csv_sql, "SELECT `id`, `geom`, `name` FROM `spatial_data` ORDER BY `id` ASC");
     }
 
     #[test]
@@ -2237,7 +2399,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
         };
-        let sql = table_cursor_sql(&request, &DatabaseType::Oracle, &columns, &primary_keys);
+        let sql = table_cursor_sql(&request, &DatabaseType::Oracle, &columns, &[], &primary_keys);
         assert_eq!(sql, "SELECT \"ID\", \"NAME\" FROM \"APP\".\"USERS\"");
 
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
@@ -2268,26 +2430,36 @@ mod tests {
     }
 
     #[test]
-    fn requested_mysql_sql_export_resolves_generated_column_extras_only_for_sql() {
+    fn requested_mysql_sql_export_resolves_column_metadata_only_for_sql() {
         let table_columns = vec![
             crate::db::ColumnInfo {
                 name: "ID".to_string(),
+                data_type: "int".to_string(),
                 extra: Some("auto_increment".to_string()),
                 ..Default::default()
             },
             crate::db::ColumnInfo {
                 name: "virtual_total".to_string(),
+                data_type: "geometry".to_string(),
                 extra: Some("VIRTUAL GENERATED".to_string()),
                 ..Default::default()
             },
         ];
         let requested_columns = vec!["virtual_total".to_string(), "id".to_string(), "missing".to_string()];
 
-        assert!(requested_export_needs_column_extras(DatabaseType::Mysql, "SQL"));
+        assert!(requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, "SQL"));
         for format in ["csv", "json", "xlsx"] {
-            assert!(!requested_export_needs_column_extras(DatabaseType::Mysql, format));
+            assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, format));
         }
-        assert!(!requested_export_needs_column_extras(DatabaseType::Postgres, "sql"));
+        assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Postgres, "sql"));
+        assert_eq!(
+            resolve_requested_export_column_types(
+                &requested_columns,
+                &[Some("".to_string()), Some("bigint".to_string())],
+                &table_columns,
+            ),
+            vec![Some("geometry".to_string()), Some("bigint".to_string()), None]
+        );
         assert_eq!(
             resolve_requested_export_column_extras(&requested_columns, &table_columns),
             vec![Some("VIRTUAL GENERATED".to_string()), Some("auto_increment".to_string()), None]

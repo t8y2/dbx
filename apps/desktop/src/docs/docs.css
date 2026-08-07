@@ -1,0 +1,42 @@
+/* Group colour. A group stores one number (the hue); lightness and chroma are
+ * fixed here per theme, so no hue can produce an illegible swatch.
+ *
+ * Base values use hsl() because DBX supports WebViews without oklch — the same
+ * bare `--h` number works in both functions. The oklch values below are the
+ * enhancement, matching how globals.css defines its own tokens. */
+.docs-group {
+  --group-c: hsl(var(--h, 220), 55%, 38%);
+  --group-tint: hsl(var(--h, 220), 55%, 94%);
+}
+
+.dark .docs-group {
+  --group-c: hsl(var(--h, 220), 50%, 72%);
+  --group-tint: hsl(var(--h, 220), 30%, 18%);
+}
+
+/* GroupEditor previews a hue on a light and a dark ground side by side. The
+ * dark half just carries `.dark`, which works in either theme; the light half
+ * needs this, because in dark mode `.dark .docs-group` would otherwise paint
+ * dark-theme values onto a white ground and the preview would lie. Same
+ * specificity as the rule above and declared after it, so it wins. */
+.docs-ground-light .docs-group {
+  --group-c: hsl(var(--h, 220), 55%, 38%);
+  --group-tint: hsl(var(--h, 220), 55%, 94%);
+}
+
+@supports (color: oklch(1 0 0)) {
+  .docs-group {
+    --group-c: oklch(0.55 0.15 var(--h, 220));
+    --group-tint: oklch(0.96 0.03 var(--h, 220));
+  }
+
+  .dark .docs-group {
+    --group-c: oklch(0.76 0.13 var(--h, 220));
+    --group-tint: oklch(0.28 0.05 var(--h, 220));
+  }
+
+  .docs-ground-light .docs-group {
+    --group-c: oklch(0.55 0.15 var(--h, 220));
+    --group-tint: oklch(0.96 0.03 var(--h, 220));
+  }
+}

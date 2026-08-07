@@ -144,7 +144,7 @@ Ask the MCP client to:
 | `dbx_list_connections` | List connections visible to the MCP session |
 | `dbx_add_connection` | Add a connection to DBX storage |
 | `dbx_remove_connection` | Remove a connection from DBX storage |
-| `dbx_list_tables` | List tables, views, or collections |
+| `dbx_list_tables` | List tables, views, collections, or message queue topics |
 | `dbx_describe_table` | Return columns and table metadata |
 | `dbx_get_schema_context` | Return compact schema context suitable for an AI model |
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
@@ -455,7 +455,7 @@ MCP 配置：
 | `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
 | `dbx_add_connection` | 添加 DBX 连接配置 |
 | `dbx_remove_connection` | 删除 DBX 连接配置 |
-| `dbx_list_tables` | 列出表、视图或集合 |
+| `dbx_list_tables` | 列出表、视图、集合或消息队列 Topic |
 | `dbx_describe_table` | 获取字段和表结构 |
 | `dbx_get_schema_context` | 获取适合 AI 使用的紧凑 Schema 上下文 |
 | `dbx_execute_query` | 执行 SQL 或支持的 MongoDB Shell 命令，最多返回 100 行 |

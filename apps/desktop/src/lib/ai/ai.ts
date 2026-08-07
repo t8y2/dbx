@@ -253,7 +253,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
 
   const isZh = isChineseLocale(currentLocale());
 
-  const lines: string[] = [...buildBasePromptLines(isZh), ...buildModePromptLines(mode, isZh), ...buildActionPromptLines(action, isZh), ...buildCustomInstructionLines(custom, isZh)];
+  const lines: string[] = [...buildBasePromptLines(isZh), ...buildModePromptLines(mode, isZh, context.databaseType), ...buildActionPromptLines(action, isZh), ...buildCustomInstructionLines(custom, isZh)];
 
   if (schemaScope === "focused_table") {
     lines.push(
@@ -363,8 +363,24 @@ function buildVectorModePromptLines(context: AiContext, mode: AiAssistantMode, i
   ];
 }
 
-function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
+function buildModePromptLines(mode: AiAssistantMode, isZh: boolean, databaseType: DatabaseType): string[] {
   const currentTimeGuidance = currentTimeToolGuidance();
+  if (databaseType === "mongodb") {
+    if (mode === "agent") {
+      return [
+        isZh ? "你处于 MongoDB Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_current_time。" : "You are in MongoDB Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_current_time.",
+        isZh
+          ? "execute_query 接收 MongoDB shell 风格命令，不是 SQL，例如 db.collection.find({})、db.collection.findOne({})、db.collection.aggregate([])。用户提出数据查询意图时，必须调用该工具获取真实结果后再回答。"
+          : "execute_query accepts MongoDB shell-style commands, not SQL, for example db.collection.find({}), db.collection.findOne({}), or db.collection.aggregate([]). For data queries, call the tool and answer from its actual results.",
+        currentTimeGuidance,
+        isZh ? "禁止不经确认直接执行 MongoDB 写命令；如果安全执行条件不满足，先说明原因，再给只读预览或澄清问题。" : "Never execute MongoDB write commands without confirmation. If safe execution requirements are not met, explain why first, then provide a read-only preview or a clarifying question.",
+      ];
+    }
+    return [
+      isZh ? "你处于 MongoDB Ask 模式。只生成 MongoDB shell 风格命令和说明，不要生成 SQL，也不要暗示已经执行或即将自动执行。" : "You are in MongoDB Ask mode. Generate MongoDB shell-style commands and explanations, not SQL, and do not imply that anything has run or will auto-run.",
+      currentTimeGuidance,
+    ];
+  }
   if (mode === "agent") {
     return [
       isZh ? "你处于 Agent 模式。你有以下工具可用：list_tables、get_columns、execute_query、get_sample_data、get_current_time。" : "You are in Agent mode. You have the following tools available: list_tables, get_columns, execute_query, get_sample_data, get_current_time.",

@@ -127,13 +127,123 @@ fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
         Err(error) => {
             let mut fallback_tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
             normalize_sqlserver_create_proc_tokens(&mut fallback_tokens);
-            if remove_sqlserver_query_hint_tokens(&mut fallback_tokens) {
-                Parser::new(&dialect).with_tokens_with_locations(fallback_tokens).parse_statements()
-            } else {
-                Err(error)
+            let mut changed = normalize_sqlserver_alter_table_add_tokens(&mut fallback_tokens);
+            changed |= remove_sqlserver_query_hint_tokens(&mut fallback_tokens);
+            if changed {
+                if let Ok(statements) =
+                    Parser::new(&dialect).with_tokens_with_locations(fallback_tokens).parse_statements()
+                {
+                    return Ok(statements);
+                }
             }
+            Err(error)
         }
     }
+}
+
+fn normalize_sqlserver_alter_table_add_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
+    let mut insertions = Vec::new();
+    let mut index = 0usize;
+
+    while index < tokens.len() {
+        if unquoted_token_keyword(&tokens[index]) != Some(Keyword::ALTER) {
+            index += 1;
+            continue;
+        }
+        let Some(table_index) = next_significant_token_index(tokens, index + 1) else {
+            break;
+        };
+        if unquoted_token_keyword(&tokens[table_index]) != Some(Keyword::TABLE) {
+            index += 1;
+            continue;
+        }
+
+        let statement_end = sqlserver_statement_end_index(tokens, table_index + 1);
+        let Some(add_index) = sqlserver_alter_table_add_index(tokens, table_index + 1, statement_end) else {
+            index = statement_end.saturating_add(1);
+            continue;
+        };
+        let add_token = tokens[add_index].clone();
+        let mut depth = 0usize;
+        for token_index in add_index + 1..statement_end {
+            match tokens[token_index].token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Comma if depth == 0 => {
+                    let Some(next_index) = next_significant_token_index(tokens, token_index + 1) else {
+                        continue;
+                    };
+                    if next_index >= statement_end {
+                        continue;
+                    }
+                    if is_sqlserver_alter_table_operation_starter(&tokens[next_index]) {
+                        break;
+                    }
+                    insertions.push((next_index, add_token.clone()));
+                }
+                _ => {}
+            }
+        }
+        index = statement_end.saturating_add(1);
+    }
+
+    let changed = !insertions.is_empty();
+    for (index, token) in insertions.into_iter().rev() {
+        tokens.insert(index, token);
+    }
+    changed
+}
+
+fn sqlserver_statement_end_index(tokens: &[TokenWithSpan], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token.token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::SemiColon | Token::EOF if depth == 0 => return index,
+            _ => {}
+        }
+    }
+    tokens.len()
+}
+
+fn sqlserver_alter_table_add_index(tokens: &[TokenWithSpan], start: usize, end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+        match token.token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && unquoted_token_keyword(token) == Some(Keyword::ADD) => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_sqlserver_alter_table_operation_starter(token: &TokenWithSpan) -> bool {
+    let Token::Word(word) = &token.token else {
+        return false;
+    };
+    if word.quote_style.is_some() {
+        return false;
+    }
+
+    matches!(
+        word.value.to_ascii_uppercase().as_str(),
+        "ADD"
+            | "ALTER"
+            | "DISABLE"
+            | "DROP"
+            | "ENABLE"
+            | "NOCHECK"
+            | "PARTITION"
+            | "REBUILD"
+            | "RENAME"
+            | "REPLICA"
+            | "SET"
+            | "SWAP"
+            | "SWITCH"
+    )
 }
 
 fn remove_sqlserver_query_hint_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
@@ -312,6 +422,13 @@ fn normalize_sqlserver_create_proc_tokens(tokens: &mut [TokenWithSpan]) {
 fn token_keyword(token: &TokenWithSpan) -> Option<Keyword> {
     match &token.token {
         Token::Word(word) => Some(word.keyword),
+        _ => None,
+    }
+}
+
+fn unquoted_token_keyword(token: &TokenWithSpan) -> Option<Keyword> {
+    match &token.token {
+        Token::Word(word) if word.quote_style.is_none() => Some(word.keyword),
         _ => None,
     }
 }

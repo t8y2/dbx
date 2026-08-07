@@ -144,6 +144,12 @@ export interface ConnectionConfig {
   attached_databases?: AttachedDatabaseConfig[];
   init_script?: string;
   color?: string;
+  /**
+   * Where this connection's documentation notes are stored. Absent means the
+   * per-connection default inside the app data directory; an explicit path
+   * lets the notes file live in a repository and be reviewed in pull requests.
+   */
+  docs_notes_path?: string;
   transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
   query_timeout_secs?: number;
@@ -925,6 +931,12 @@ export interface ObjectBrowserViewport {
   viewMode: ObjectBrowserViewMode;
 }
 
+export interface ExternalSqlFileVersion {
+  sizeBytes: number;
+  modifiedNs: string;
+  contentHash: string;
+}
+
 export interface QueryTab {
   id: string;
   title: string;
@@ -938,6 +950,9 @@ export interface QueryTab {
   sql: string;
   savedSqlId?: string;
   externalSqlPath?: string;
+  externalSqlFileVersion?: ExternalSqlFileVersion;
+  externalSqlIgnoredFileVersion?: ExternalSqlFileVersion;
+  externalSqlFileMissing?: boolean;
   originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;
@@ -1062,6 +1077,8 @@ export interface QueryTab {
   };
   tableMetaUpdatedAt?: number;
   pendingDataChangeCount?: number;
+  /** Ephemeral editor draft that has not yet been applied to the data grid. */
+  hasPendingDataEditorDraft?: boolean;
   /** 冷缓存打开表数据时元数据仍在途：行标识未知，编辑/保存必须等待其落地 */
   tableMetaPending?: boolean;
   /** 取消请求单调计数：isCancelling 是瞬态的（取消失败/查询先完成会被清），

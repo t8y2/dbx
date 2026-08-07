@@ -104,14 +104,15 @@ impl RocketMqAdmin {
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
         let mut client = AgentDriverClient::spawn(launch).await?;
 
-        // Handshake
+        // Handshake / connect use Advanced connect timeout; ops RPC keep query timeout.
         let _: serde_json::Value =
-            client.call_with_timeout("handshake", serde_json::json!({}), cfg.rpc_timeout()).await?;
+            client.call_with_timeout("handshake", serde_json::json!({}), Some(cfg.connect_timeout())).await?;
 
         // Build the connection params from MqAdminConfig
         let conn_params = build_connection_params(&cfg);
         let connect_params = serde_json::json!({ "connection": conn_params });
-        let _: serde_json::Value = client.call_with_timeout("connect", connect_params, cfg.rpc_timeout()).await?;
+        let _: serde_json::Value =
+            client.call_with_timeout("connect", connect_params, Some(cfg.connect_timeout())).await?;
 
         log::info!("RocketMQ admin connected via agent (namesrv: {})", namesrv_addr(&cfg));
 
@@ -840,6 +841,7 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
         "secret_key": secret_key,
         "tls_skip_verify": cfg.tls_skip_verify,
         "request_timeout_ms": cfg.request_timeout_ms(),
+        "connect_timeout_ms": cfg.connect_timeout_ms(),
     })
 }
 
@@ -964,12 +966,10 @@ async fn probe_namesrv_tcp(namesrv: &str, budget: Duration) -> Result<(), String
     }
 
     let deadline = tokio::time::Instant::now() + budget;
-    // Multi-NS HA: cap each attempt so a blackholed first node leaves budget for later hosts.
-    let per_attempt = if hosts.len() <= 1 {
-        budget
-    } else {
-        (budget / hosts.len() as u32).clamp(Duration::from_millis(500), Duration::from_secs(3))
-    };
+    // Multi-NS HA: share budget across hosts so a blackholed first node leaves time for later ones.
+    // Floor 500ms; no hard 3s cap so Advanced connect timeout can raise the per-host attempt.
+    let per_attempt =
+        if hosts.len() <= 1 { budget } else { (budget / hosts.len() as u32).max(Duration::from_millis(500)) };
     let mut last_error = String::new();
     for host in &hosts {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1101,6 +1101,21 @@ mod tests {
         assert_eq!(params.get("access_key").and_then(|v| v.as_str()), Some("rocket"));
         assert_eq!(params.get("secret_key").and_then(|v| v.as_str()), Some("secret"));
         assert_eq!(params.get("request_timeout_ms").and_then(|v| v.as_u64()), Some(30_000));
+        assert_eq!(
+            params.get("connect_timeout_ms").and_then(|v| v.as_u64()),
+            Some(crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS.saturating_mul(1000).max(1_000))
+        );
+    }
+
+    #[test]
+    fn connection_params_follow_advanced_timeouts() {
+        let mut cfg = rocketmq_config(serde_json::json!({ "namesrvAddr": "127.0.0.1:9876" }), MqAuth::None);
+        cfg.query_timeout_secs = 120;
+        cfg.connect_timeout_secs = 15;
+
+        let params = build_connection_params(&cfg);
+        assert_eq!(params.get("request_timeout_ms").and_then(|v| v.as_u64()), Some(120_000));
+        assert_eq!(params.get("connect_timeout_ms").and_then(|v| v.as_u64()), Some(15_000));
     }
 
     #[test]

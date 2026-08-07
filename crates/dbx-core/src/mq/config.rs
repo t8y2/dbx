@@ -118,6 +118,11 @@ impl MqAdminConfig {
         Duration::from_secs(self.connect_timeout_secs.max(1))
     }
 
+    /// Milliseconds for agent `connect_timeout_ms` (Advanced connect timeout).
+    pub fn connect_timeout_ms(&self) -> u64 {
+        self.connect_timeout_secs.saturating_mul(1000).max(1_000)
+    }
+
     pub fn token_signing_configured(&self) -> bool {
         self.token_signing.as_ref().is_some_and(MqTokenSigningConfig::is_configured)
     }
@@ -151,6 +156,7 @@ mod tests {
 
     fn connection_with_external(value: serde_json::Value) -> ConnectionConfig {
         let mut cfg = ConnectionConfig {
+            docs_notes_path: None,
             id: "c1".to_string(),
             name: "mq".to_string(),
             note: String::new(),
@@ -285,6 +291,7 @@ mod tests {
         assert_eq!(mqc.query_timeout_secs, 120);
         assert_eq!(mqc.connect_timeout_secs, 15);
         assert_eq!(mqc.request_timeout_ms(), 120_000);
+        assert_eq!(mqc.connect_timeout_ms(), 15_000);
         assert_eq!(mqc.rpc_timeout(), Some(std::time::Duration::from_secs(120)));
     }
 

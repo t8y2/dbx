@@ -32,7 +32,14 @@ pub enum MqttAuth {
     #[serde(rename = "password")]
     Password { username: String, password: String },
     #[serde(rename = "certificate")]
-    Certificate { ca_cert_path: Option<String>, client_cert_path: Option<String>, client_key_path: Option<String> },
+    Certificate {
+        #[serde(rename = "caCertPath")]
+        ca_cert_path: Option<String>,
+        #[serde(rename = "clientCertPath")]
+        client_cert_path: Option<String>,
+        #[serde(rename = "clientKeyPath")]
+        client_key_path: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +95,9 @@ pub struct MqttConnectionConfig {
     /// WebSocket 路径（仅 WebSocket 传输时使用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ws_path: Option<String>,
+    /// 已保存的订阅 Topic，跨重连和应用重启恢复。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_topics: Vec<MqttSavedTopic>,
 }
 
 fn default_keep_alive() -> u64 {
@@ -117,6 +127,7 @@ impl Default for MqttConnectionConfig {
             connect_timeout_secs: default_connect_timeout(),
             max_packet_size_bytes: default_max_packet_size(),
             ws_path: None,
+            saved_topics: Vec::new(),
         }
     }
 }
@@ -132,6 +143,9 @@ impl MqttConnectionConfig {
         }
         if parsed.client_id.trim().is_empty() {
             return Err("MQTT Client ID 不能为空".to_string());
+        }
+        if matches!(parsed.auth, MqttAuth::Certificate { .. }) && !parsed.tls {
+            return Err("MQTT 证书认证必须启用 TLS".to_string());
         }
         if !(1024..=268_435_455).contains(&parsed.max_packet_size_bytes) {
             return Err("MQTT 最大报文大小必须在 1024 到 268435455 字节之间".to_string());
@@ -168,6 +182,17 @@ impl MqttConnectionConfig {
             Some(MqttTlsVerificationMode::VerifyServerCert)
         }
     }
+}
+
+/// 已保存的 MQTT 订阅配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MqttSavedTopic {
+    pub topic: String,
+    #[serde(default)]
+    pub qos: MqttQoS,
+    #[serde(default)]
+    pub no_local: bool,
 }
 
 /// MQTT 消息服务质量

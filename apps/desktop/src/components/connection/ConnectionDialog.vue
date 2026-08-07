@@ -107,6 +107,28 @@ import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudfla
 import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
 import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
+import {
+  createJdbcProductConnectionFieldsByMode,
+  isJdbcProductDefaultDriverClass,
+  isJdbcProductManagedMavenCoordinate,
+  isJdbcProductManagedMavenPath,
+  jdbcProductConnectionDefaults,
+  jdbcProductManagedRuntimePaths,
+  jdbcProductMode,
+  jdbcProductRuntimeSelectionId,
+  rememberJdbcProductConnectionFields,
+  type JdbcProductConnectionFieldsByMode,
+} from "@/lib/database/jdbcProductProfile";
+import {
+  ensureRegisteredJdbcProductRuntimeDrivers,
+  isRegisteredJdbcProductRuntimeInstallError,
+  jdbcProductDriverProfiles,
+  jdbcProductIconTypes,
+  jdbcProductPickerOptions,
+  jdbcProductProfileDefinition,
+  jdbcProductProfileForConfig,
+  jdbcProductProfileIdsForCategory,
+} from "@/lib/database/jdbcProductProfiles";
 
 type DbOption = { value: string; label: string };
 type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
@@ -123,6 +145,7 @@ type JdbcDriverSelectItem = {
   label: string;
   paths: string[];
   jdbcxRuntime: boolean;
+  managedProductRuntime?: boolean;
 };
 
 const DREMIO_ARROW_FLIGHT_SQL_JDBC_URL = "jdbc:arrow-flight-sql://127.0.0.1:32010";
@@ -197,6 +220,7 @@ const agentInstallLabel = ref("");
 const agentInstallProgress = ref<DriverInstallProgress | null>(null);
 const agentInstallError = ref("");
 const showConnectionErrorDialog = ref(false);
+const connectionErrorRawDetail = ref("");
 const connectionErrorDetail = ref("");
 const editingId = ref<string | null>(null);
 const draftTestConnectionId = ref(uuid());
@@ -274,6 +298,7 @@ const defaultForm = (): ConnectionForm => ({
   informix_server: "",
   external_config: undefined,
   init_script: undefined,
+  docs_notes_path: undefined,
   read_only: false,
   show_system_schemas: false,
   is_production: false,
@@ -535,7 +560,7 @@ function resizeNoteTextarea() {
   textarea.style.overflowY = textarea.scrollHeight > maxContentHeight ? "auto" : "hidden";
 }
 
-const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && isJdbcMissingRuntimeDependencyError(connectionErrorDetail.value));
+const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && (isJdbcMissingRuntimeDependencyError(connectionErrorRawDetail.value) || isRegisteredJdbcProductRuntimeInstallError(form.value, connectionErrorRawDetail.value)));
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
@@ -596,6 +621,13 @@ const dremioConnectionMode = ref<DremioConnectionMode>("legacy");
 const dremioConnectionUrls = ref<Record<DremioConnectionMode, string>>({
   "arrow-flight-sql": DREMIO_ARROW_FLIGHT_SQL_JDBC_URL,
   legacy: DREMIO_LEGACY_JDBC_URL,
+});
+const jdbcProductConnectionMode = ref("");
+const jdbcProductConnectionFields = ref<JdbcProductConnectionFieldsByMode>({});
+const activeJdbcProductProfile = computed(() => jdbcProductProfileForConfig(form.value));
+const activeJdbcProductMode = computed(() => {
+  const profile = activeJdbcProductProfile.value;
+  return profile ? jdbcProductMode(profile, jdbcProductConnectionMode.value) : undefined;
 });
 const hiveAuthMode = ref<HiveKerberosAuthMode>("none");
 const hivePrincipal = ref("");
@@ -710,14 +742,18 @@ const mqttClientId = ref("");
 const mqttProtocolVersion = ref<"v3" | "v4" | "v5">("v5");
 const mqttTransportMode = ref<"tcp" | "websocket">("tcp");
 const mqttWsPath = ref("/mqtt");
-const mqttAuthKind = ref<"none" | "password">("none");
+const mqttAuthKind = ref<"none" | "password" | "certificate">("none");
 const mqttUsername = ref("");
 const mqttPassword = ref("");
+const mqttCaCertPath = ref("");
+const mqttClientCertPath = ref("");
+const mqttClientKeyPath = ref("");
 const mqttTls = ref(false);
 const mqttTlsSkipVerify = ref(false);
 const mqttKeepAliveSecs = ref(60);
 const mqttConnectTimeoutSecs = ref(30);
 const mqttMaxPacketSizeBytes = ref(16 * 1024 * 1024);
+const mqttSavedTopics = ref<MqttConnectionConfig["savedTopics"]>([]);
 const nacosPrimaryAddressPlaceholder = computed(() => {
   return "http://127.0.0.1:8848/nacos";
 });
@@ -783,12 +819,16 @@ const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
     paths: bundle.artifacts.map((artifact) => artifact.path),
     jdbcxRuntime: bundle.artifacts.some((artifact) => isJdbcxRuntimePath(artifact.path)),
   }));
-  const bundles = jdbcMavenBundles.value.map((bundle) => ({
-    id: `maven:${bundle.id}`,
-    label: bundle.coordinate,
-    paths: bundle.artifacts.map((artifact) => artifact.path),
-    jdbcxRuntime: isJdbcxRuntimeBundle(bundle),
-  }));
+  const productProfile = activeJdbcProductProfile.value;
+  const productMode = activeJdbcProductMode.value;
+  const bundles = jdbcMavenBundles.value
+    .filter((bundle) => !productProfile || !isJdbcProductManagedMavenCoordinate(productProfile, bundle.coordinate))
+    .map((bundle) => ({
+      id: `maven:${bundle.id}`,
+      label: bundle.coordinate,
+      paths: bundle.artifacts.map((artifact) => artifact.path),
+      jdbcxRuntime: isJdbcxRuntimeBundle(bundle),
+    }));
   const manual = jdbcDrivers.value
     .filter((driver) => !driver.bundle_id)
     .map((driver) => ({
@@ -797,7 +837,22 @@ const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
       paths: [driver.path],
       jdbcxRuntime: isJdbcxRuntimePath(driver.path),
     }));
-  return [...localBundles, ...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
+  const productPaths = productProfile && productMode ? jdbcProductManagedRuntimePaths(productProfile, jdbcMavenBundles.value, productMode.id) : [];
+  const managedProductRuntime: JdbcDriverSelectItem[] =
+    productProfile && productMode && productPaths.length > 0
+      ? [
+          {
+            id: jdbcProductRuntimeSelectionId(productProfile, productMode.id),
+            label: t(productProfile.runtimeLabelKey, {
+              mode: t(productMode.labelKey),
+            }),
+            paths: productPaths,
+            jdbcxRuntime: false,
+            managedProductRuntime: true,
+          },
+        ]
+      : [];
+  return [...managedProductRuntime, ...localBundles, ...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
 });
 
 const jdbcDriverSelectItemById = computed(() => new Map(jdbcDriverSelectItems.value.map((item) => [item.id, item])));
@@ -1021,6 +1076,7 @@ const driverProfiles: Record<
     icon: "postgres",
     urlParams: "",
   },
+  ...jdbcProductDriverProfiles(),
 };
 
 function profileForConfig(config: ConnectionConfig) {
@@ -1231,15 +1287,29 @@ function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
   mqttKeepAliveSecs.value = Math.max(1, config?.keepAliveSecs || 60);
   mqttConnectTimeoutSecs.value = Math.max(1, config?.connectTimeoutSecs || 30);
   mqttMaxPacketSizeBytes.value = Math.min(268435455, Math.max(1024, config?.maxPacketSizeBytes || 16 * 1024 * 1024));
+  mqttSavedTopics.value = config?.savedTopics ?? [];
   const auth = config?.auth;
   if (auth && auth.kind === "password") {
     mqttAuthKind.value = "password";
     mqttUsername.value = auth.username || "";
     mqttPassword.value = auth.password || "";
+    mqttCaCertPath.value = "";
+    mqttClientCertPath.value = "";
+    mqttClientKeyPath.value = "";
+  } else if (auth && auth.kind === "certificate") {
+    mqttAuthKind.value = "certificate";
+    mqttUsername.value = "";
+    mqttPassword.value = "";
+    mqttCaCertPath.value = auth.caCertPath || "";
+    mqttClientCertPath.value = auth.clientCertPath || "";
+    mqttClientKeyPath.value = auth.clientKeyPath || "";
   } else {
     mqttAuthKind.value = "none";
     mqttUsername.value = "";
     mqttPassword.value = "";
+    mqttCaCertPath.value = "";
+    mqttClientCertPath.value = "";
+    mqttClientKeyPath.value = "";
   }
 }
 
@@ -1252,7 +1322,12 @@ function hydrateMqttFields(value: unknown) {
 }
 
 function buildMqttExternalConfig(): MqttConnectionConfig {
-  const auth: MqttConnectionConfig["auth"] = mqttAuthKind.value === "password" ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value } : { kind: "none" };
+  const auth: MqttConnectionConfig["auth"] =
+    mqttAuthKind.value === "password"
+      ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value }
+      : mqttAuthKind.value === "certificate"
+        ? { kind: "certificate", caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
+        : { kind: "none" };
 
   return {
     host: mqttHost.value.trim(),
@@ -1266,6 +1341,7 @@ function buildMqttExternalConfig(): MqttConnectionConfig {
     keepAliveSecs: Math.max(1, mqttKeepAliveSecs.value),
     connectTimeoutSecs: Math.max(1, mqttConnectTimeoutSecs.value),
     maxPacketSizeBytes: Math.min(268435455, Math.max(1024, mqttMaxPacketSizeBytes.value)),
+    savedTopics: mqttSavedTopics.value,
     wsPath: mqttTransportMode.value === "websocket" ? mqttWsPath.value || "/mqtt" : undefined,
   };
 }
@@ -1580,6 +1656,7 @@ function failAgentDriverInstall(error: unknown) {
 }
 
 function showConnectionError(message: string) {
+  connectionErrorRawDetail.value = message;
   connectionErrorDetail.value = translateBackendError(t, message);
   showConnectionErrorDialog.value = true;
 }
@@ -1648,6 +1725,19 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
   addJdbcDriverPaths(result.paths);
   form.value.jdbc_driver_paths = [...(config.jdbc_driver_paths ?? [])];
   selectedJdbcDriverPath.value = result.runtimeSelectionId;
+  if (result.paths.length > 0) {
+    jdbcManualClasspathOpen.value = false;
+  }
+}
+
+async function ensureRequiredJdbcProductRuntimeInstalled(config: ConnectionConfig): Promise<void> {
+  const result = await ensureRegisteredJdbcProductRuntimeDrivers(config, api);
+  if (!result) return;
+
+  jdbcMavenBundles.value = result.bundles;
+  jdbcDriverPathsInput.value = result.paths.join("\n");
+  form.value.jdbc_driver_paths = [...result.paths];
+  selectedJdbcDriverPath.value = result.runtimeSelectionId ?? "";
   if (result.paths.length > 0) {
     jdbcManualClasspathOpen.value = false;
   }
@@ -1940,6 +2030,64 @@ function dremioConnectionModeForConfig(config: Pick<ConnectionConfig, "connectio
   return haystack.includes("jdbc:dremio:") || haystack.includes("com.dremio.jdbc.driver") ? "legacy" : "arrow-flight-sql";
 }
 
+function currentJdbcProductConnectionFields() {
+  return {
+    connectionString: form.value.connection_string || "",
+    driverClass: form.value.jdbc_driver_class || "",
+  };
+}
+
+function applyJdbcProductConnectionMode(modeId: string) {
+  const profile = activeJdbcProductProfile.value;
+  if (!profile) return;
+  jdbcProductConnectionFields.value = rememberJdbcProductConnectionFields(profile, jdbcProductConnectionFields.value, jdbcProductConnectionMode.value, currentJdbcProductConnectionFields());
+  jdbcProductConnectionMode.value = modeId;
+  const fields = jdbcProductConnectionFields.value[modeId] ?? jdbcProductConnectionDefaults(profile, modeId);
+  form.value.connection_string = fields.connectionString;
+  form.value.jdbc_driver_class = fields.driverClass;
+  resetTestState();
+}
+
+function resetJdbcProductConnectionFields(profile = activeJdbcProductProfile.value, config?: Pick<ConnectionConfig, "connection_string" | "jdbc_driver_class">) {
+  if (!profile) {
+    jdbcProductConnectionMode.value = "";
+    jdbcProductConnectionFields.value = {};
+    return;
+  }
+  jdbcProductConnectionMode.value = config ? profile.detectMode(config) : jdbcProductMode(profile, "").id;
+  jdbcProductConnectionFields.value = createJdbcProductConnectionFieldsByMode(profile, config);
+}
+
+function restoreJdbcProductConnectionDefaultsIfEmpty() {
+  const profile = activeJdbcProductProfile.value;
+  if (!profile) return;
+  const defaults = jdbcProductConnectionDefaults(profile, jdbcProductConnectionMode.value);
+  form.value.connection_string = form.value.connection_string?.trim() || defaults.connectionString;
+  form.value.jdbc_driver_class = form.value.jdbc_driver_class?.trim() || defaults.driverClass;
+}
+
+function syncJdbcProductConnectionModeFromUrl() {
+  const profile = activeJdbcProductProfile.value;
+  if (!profile) return;
+  restoreJdbcProductConnectionDefaultsIfEmpty();
+  const nextMode = profile.detectMode(form.value);
+  if (nextMode === jdbcProductConnectionMode.value) {
+    jdbcProductConnectionFields.value = rememberJdbcProductConnectionFields(profile, jdbcProductConnectionFields.value, nextMode, currentJdbcProductConnectionFields());
+    return;
+  }
+
+  if (isJdbcProductDefaultDriverClass(profile, form.value.jdbc_driver_class)) {
+    form.value.jdbc_driver_class = jdbcProductConnectionDefaults(profile, nextMode).driverClass;
+  }
+  jdbcProductConnectionMode.value = nextMode;
+  jdbcProductConnectionFields.value = rememberJdbcProductConnectionFields(profile, jdbcProductConnectionFields.value, nextMode, currentJdbcProductConnectionFields());
+}
+
+function syncJdbcProfileModeFromUrl() {
+  syncDremioConnectionModeFromUrl();
+  syncJdbcProductConnectionModeFromUrl();
+}
+
 function isCustomCompatibleProfile() {
   return selectedType.value === "custom_mysql" || selectedType.value === "custom_postgres";
 }
@@ -1992,6 +2140,12 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       if (val === "dremio") {
         resetDremioConnectionUrls();
         applyDremioConnectionMode("legacy");
+      } else if (jdbcProductProfileDefinition(val)) {
+        const jdbcProductProfile = jdbcProductProfileDefinition(val)!;
+        resetJdbcProductConnectionFields(jdbcProductProfile);
+        const fields = jdbcProductConnectionDefaults(jdbcProductProfile, jdbcProductConnectionMode.value);
+        form.value.connection_string = fields.connectionString;
+        form.value.jdbc_driver_class = fields.driverClass;
       } else if (val === JDBCX_DRIVER_PROFILE) {
         form.value.connection_string = JDBCX_DEFAULT_URL;
         form.value.jdbc_driver_class = JDBCX_JDBC_DRIVER_CLASS;
@@ -2120,6 +2274,7 @@ watch(
         external_config: config.external_config,
         attached_databases: config.attached_databases || [],
         init_script: config.init_script,
+        docs_notes_path: config.docs_notes_path,
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
         is_production: config.is_production || false,
@@ -2171,6 +2326,7 @@ watch(
       }
       dremioConnectionMode.value = profile === "dremio" ? dremioConnectionModeForConfig(config) : "legacy";
       resetDremioConnectionUrls(dremioConnectionMode.value, profile === "dremio" ? config.connection_string : undefined);
+      resetJdbcProductConnectionFields(jdbcProductProfileForConfig(config), config);
       mongoUseUrl.value = !!config.connection_string;
       jdbcDriverPathsInput.value = (config.jdbc_driver_paths || []).join("\n");
       jdbcManualClasspathOpen.value = config.db_type === "prestosql" || (config.jdbc_driver_paths || []).length > 0;
@@ -2201,6 +2357,7 @@ watch(
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
       resetDremioConnectionUrls();
+      resetJdbcProductConnectionFields(undefined);
       dialogStep.value = "select";
       configTab.value = "connection";
     }
@@ -2419,6 +2576,7 @@ const iconTypeMap: Record<string, string> = {
   jdbc: "jdbc",
   custom_mysql: "mysql",
   custom_postgres: "postgres",
+  ...jdbcProductIconTypes(),
 };
 
 const dbOptions: DbOption[] = [
@@ -2506,12 +2664,13 @@ const dbOptions: DbOption[] = [
   { value: "custom_mysql", label: "Custom (MySQL)" },
   { value: "custom_postgres", label: "Custom (PostgreSQL)" },
   { value: "dremio", label: "Dremio" },
+  ...jdbcProductPickerOptions(),
 ];
 
 const dbCategoryDefinitions: Array<{
   key: DbCategoryKey;
   titleKey: string;
-  optionValues: readonly string[];
+  optionValues: string[];
 }> = [
   {
     key: "sql",
@@ -2559,6 +2718,10 @@ const dbCategoryDefinitions: Array<{
     optionValues: ["etcd", "zookeeper", "nacos"],
   },
 ];
+
+for (const category of dbCategoryDefinitions) {
+  category.optionValues.push(...jdbcProductProfileIdsForCategory(category.key));
+}
 
 // Keep the picker exhaustive as database drivers are added or reorganized.
 assertCompleteDatabaseCategories(
@@ -2625,6 +2788,7 @@ const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selecte
 const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql"]);
 const isJdbcConnection = computed(() => form.value.db_type === "jdbc");
 const isJdbcxConnection = computed(() => isJdbcConnection.value && form.value.driver_profile === JDBCX_DRIVER_PROFILE);
+const isJdbcProductConnection = computed(() => Boolean(activeJdbcProductProfile.value));
 const jdbcxHighPrivilegeExtensionsAllowed = computed({
   get: () => jdbcxHighPrivilegeExtensionsEnabled(form.value),
   set: (enabled: boolean) => {
@@ -2637,7 +2801,7 @@ const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionM
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
 
 const connectionUrlPlaceholder = computed(() => getUrlPlaceholder(form.value.db_type));
-const jdbcUsernamePlaceholder = computed(() => (form.value.driver_profile === "dremio" ? "" : "sa"));
+const jdbcUsernamePlaceholder = computed(() => (form.value.driver_profile === "dremio" || isJdbcProductConnection.value ? "" : "sa"));
 const filePathPlaceholder = computed(() => {
   if (form.value.db_type === "duckdb") return "/path/to/database.duckdb or :memory:";
   if (form.value.db_type === "access") return "/path/to/database.accdb";
@@ -3080,6 +3244,7 @@ async function testConnection() {
     await ensureRequiredAgentDriverInstalled(config);
     await ensureRequiredGaussdbMJdbcRuntime(config);
     await ensureRequiredJdbcxDriverInstalled(config);
+    await ensureRequiredJdbcProductRuntimeInstalled(config);
     const result = await testConnectionWithTimeout(config, runId);
     if (runId !== testRunId) return;
     let successfulConfig = config;
@@ -3542,6 +3707,13 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     if (config.db_type === "jdbc") {
       if (config.driver_profile === "dremio") {
         applyDremioJdbcMetadata(config);
+      } else if (jdbcProductProfileForConfig(config)) {
+        const jdbcProductProfile = jdbcProductProfileForConfig(config)!;
+        const defaults = jdbcProductConnectionDefaults(jdbcProductProfile, jdbcProductProfile.detectMode(config));
+        config.host = "";
+        config.port = 0;
+        config.connection_string = config.connection_string?.trim() || defaults.connectionString;
+        config.jdbc_driver_class = config.jdbc_driver_class?.trim() || defaults.driverClass;
       } else if (config.driver_profile === JDBCX_DRIVER_PROFILE) {
         config.host = "";
         config.port = 0;
@@ -3824,6 +3996,7 @@ function resetTestState() {
   testResult.value = null;
   clearTestedConnectionInfo();
   showConnectionErrorDialog.value = false;
+  connectionErrorRawDetail.value = "";
   connectionErrorDetail.value = "";
 }
 
@@ -4223,7 +4396,7 @@ async function copyConnectionErrorDetail() {
 }
 
 function openJdbcDriverManager() {
-  emit("openDriverStore", { target: "tab", tab: "jdbc" });
+  emit("openDriverStore", isJdbcProductConnection.value ? agentDriverFocus.value : { target: "tab", tab: "jdbc" });
 }
 
 function openJdbcDriverManagerFromError() {
@@ -4243,6 +4416,7 @@ function resetForm() {
   oceanbaseSubMode.value = "mysql";
   dremioConnectionMode.value = "legacy";
   resetDremioConnectionUrls();
+  resetJdbcProductConnectionFields(undefined);
   jdbcDriverPathsInput.value = "";
   selectedJdbcDriverPath.value = "";
   connectionUrlInput.value = "";
@@ -4302,6 +4476,7 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   if (form.value.db_type === "h2") {
     h2ConnectionMode.value = h2ConnectionModeForConfig(form.value);
   }
+  resetJdbcProductConnectionFields(jdbcProductProfileForConfig(form.value), form.value);
   if (draft.driverProfile === "oceanbase-oracle") {
     oceanbaseSubMode.value = "oracle";
     selectedType.value = "oceanbase";
@@ -4873,7 +5048,6 @@ async function browseJdbcDriverPaths() {
 }
 
 async function loadJdbcDrivers() {
-  if (!isDesktop) return;
   try {
     const [drivers, bundles, localBundles] = await Promise.all([api.listJdbcDrivers(), api.listJdbcMavenBundles(), api.listJdbcLocalBundles()]);
     jdbcDrivers.value = drivers;
@@ -4934,7 +5108,13 @@ function onJdbcDriverSelect(id: any) {
   const item = jdbcDriverSelectItemById.value.get(id);
   if (!item) return;
   selectedJdbcDriverPath.value = id;
-  if (isJdbcxConnection.value && item.jdbcxRuntime) {
+  if (item.managedProductRuntime && activeJdbcProductProfile.value) {
+    const existingPaths = jdbcDriverPathsInput.value
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .filter((path) => path && !isJdbcProductManagedMavenPath(activeJdbcProductProfile.value!, path));
+    jdbcDriverPathsInput.value = Array.from(new Set([...existingPaths, ...item.paths])).join("\n");
+  } else if (isJdbcxConnection.value && item.jdbcxRuntime) {
     const installedJdbcxRuntimePaths = new Set(jdbcDriverSelectItems.value.filter((candidate) => candidate.jdbcxRuntime).flatMap((candidate) => candidate.paths));
     const existingPaths = jdbcDriverPathsInput.value
       .split(/\r?\n/)
@@ -5257,9 +5437,27 @@ function openExternalUrl(url: string) {
                       </Button>
                     </div>
                   </div>
+                  <div v-if="activeJdbcProductProfile && activeJdbcProductProfile.modes.length > 1" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mode") }}</Label>
+                    <div class="col-span-3 flex gap-2">
+                      <Button v-for="mode in activeJdbcProductProfile.modes" :key="mode.id" type="button" size="sm" :variant="jdbcProductConnectionMode === mode.id ? 'default' : 'outline'" @click="applyJdbcProductConnectionMode(mode.id)">
+                        {{ t(mode.labelKey) }}
+                      </Button>
+                    </div>
+                  </div>
+                  <div v-if="activeJdbcProductProfile && activeJdbcProductMode" class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <div class="col-span-3 space-y-1 text-xs text-muted-foreground">
+                      <p>{{ t(activeJdbcProductMode.hintKey) }}</p>
+                      <p>
+                        {{ t(activeJdbcProductProfile.driverManagerHintPrefixKey) }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', agentDriverFocus)">{{ t("toolbar.driverManager") }}</a
+                        >{{ t(activeJdbcProductProfile.driverManagerHintSuffixKey) }}
+                      </p>
+                    </div>
+                  </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.jdbcUrl") }}</Label>
-                    <Input v-model="form.connection_string" class="col-span-3" :placeholder="t('connection.jdbcUrlPlaceholder')" @blur="syncDremioConnectionModeFromUrl" />
+                    <Input v-model="form.connection_string" class="col-span-3" :placeholder="t('connection.jdbcUrlPlaceholder')" @blur="syncJdbcProfileModeFromUrl" />
                   </div>
                   <div v-if="isJdbcxConnection" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelTopClass">{{ t("connection.jdbcxExtensions") }}</Label>
@@ -5325,17 +5523,17 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-start gap-4">
                     <span />
                     <div class="col-span-3 space-y-2">
-                      <p class="text-xs text-muted-foreground">
+                      <p v-if="!isJdbcProductConnection" class="text-xs text-muted-foreground">
                         {{ t("connection.jdbcPluginHint") }}
                       </p>
                       <div class="flex flex-wrap gap-2">
-                        <Button type="button" variant="outline" size="sm" @click="emit('openDriverStore', { target: 'tab', tab: 'jdbc' })">
+                        <Button type="button" variant="outline" size="sm" @click="openJdbcDriverManager">
                           <FolderOpen class="h-3.5 w-3.5" />
                           {{ t("toolbar.driverManager") }}
                         </Button>
-                        <Button type="button" variant="outline" size="sm" @click="openExternalUrl('https://dbxio.com')">
+                        <Button type="button" variant="outline" size="sm" @click="openExternalUrl(activeJdbcProductProfile?.docsUrl || 'https://dbxio.com')">
                           <ExternalLink class="h-3.5 w-3.5" />
-                          {{ t("connection.jdbcDocs") }}
+                          {{ activeJdbcProductProfile ? t(activeJdbcProductProfile.docsLabelKey) : t("connection.jdbcDocs") }}
                         </Button>
                       </div>
                     </div>
@@ -6028,11 +6226,16 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mqttProtocolVersion") }}</Label>
-                    <select v-model="mqttProtocolVersion" class="col-span-3 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
-                      <option value="v5">MQTT 5.0</option>
-                      <option value="v4">MQTT 3.1.1</option>
-                      <option value="v3">MQTT 3.1</option>
-                    </select>
+                    <Select v-model="mqttProtocolVersion">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="v5">MQTT 5.0</SelectItem>
+                        <SelectItem value="v4">MQTT 3.1.1</SelectItem>
+                        <SelectItem value="v3">MQTT 3.1</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.mqttTransport") }}</Label>
@@ -6050,6 +6253,7 @@ function openExternalUrl(url: string) {
                     <div class="col-span-3 flex gap-2">
                       <Button size="sm" :variant="mqttAuthKind === 'none' ? 'default' : 'outline'" @click="mqttAuthKind = 'none'">{{ t("connection.mqAuthNone") }}</Button>
                       <Button size="sm" :variant="mqttAuthKind === 'password' ? 'default' : 'outline'" @click="mqttAuthKind = 'password'">{{ t("connection.mqAuthBasic") }}</Button>
+                      <Button size="sm" :variant="mqttAuthKind === 'certificate' ? 'default' : 'outline'" @click="mqttAuthKind = 'certificate'">{{ t("connection.mqttAuthCertificate") }}</Button>
                     </div>
                   </div>
                   <template v-if="mqttAuthKind === 'password'">
@@ -6060,6 +6264,20 @@ function openExternalUrl(url: string) {
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.mqttPassword") }}</Label>
                       <Input v-model="mqttPassword" type="password" class="col-span-3" :placeholder="t('connection.mqttPasswordPlaceholder')" />
+                    </div>
+                  </template>
+                  <template v-else-if="mqttAuthKind === 'certificate'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttCaCertPath") }}</Label>
+                      <Input v-model="mqttCaCertPath" class="col-span-3" placeholder="/path/to/ca.pem" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttClientCertPath") }}</Label>
+                      <Input v-model="mqttClientCertPath" class="col-span-3" placeholder="/path/to/client.crt" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttClientKeyPath") }}</Label>
+                      <Input v-model="mqttClientKeyPath" class="col-span-3" placeholder="/path/to/client.key" />
                     </div>
                   </template>
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -7120,6 +7338,17 @@ function openExternalUrl(url: string) {
                     <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
                   </label>
+                </div>
+                <!-- Documentation notes are a relational-only feature, so this
+                     follows the same isSchemaAware gate as the row above. -->
+                <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelTopClass">{{ t("connection.docsNotesPath") }}</Label>
+                  <div class="col-span-3 space-y-1">
+                    <Input v-model="form.docs_notes_path" :placeholder="t('connection.docsNotesPathPlaceholder')" spellcheck="false" />
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("connection.docsNotesPathHint") }}
+                    </p>
+                  </div>
                 </div>
                 <div class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
                   <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">

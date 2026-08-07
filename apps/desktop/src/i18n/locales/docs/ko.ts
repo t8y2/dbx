@@ -1,0 +1,48 @@
+export default {
+  title: "문서",
+  groupBySchema: "스키마",
+  groupByTableGroup: "테이블 그룹",
+  noGroup: "(그룹 없음)",
+  noSchema: "(스키마 없음)",
+  search: "테이블, 컬럼, 그룹 검색…",
+  columns: "컬럼",
+  indexes: "인덱스",
+  references: "참조",
+  referencedBy: "참조된 위치",
+  localNote: "로컬",
+  shadowedComment: "데이터베이스 코멘트: {comment}",
+  addNote: "메모 추가",
+  editNote: "메모 편집",
+  newGroup: "새 그룹…",
+  groupName: "그룹 이름",
+  groupColour: "색상",
+  deleteGroup: "그룹 삭제",
+  enumValues: "값",
+  usedBy: "사용처",
+  openDiagram: "스키마 다이어그램 열기",
+  saving: "저장 중…",
+  saved: "저장됨",
+  saveFailed: "메모를 저장할 수 없습니다: {error}",
+  warnings: {
+    tableSkipped: {
+      title: "문서화할 수 없는 테이블이 있습니다",
+      detail: "{table} 을(를) 건너뛰었습니다: {reason}. 이 문서에서 누락되었습니다.",
+    },
+    noForeignKeyMetadata: {
+      title: "표시할 관계가 없습니다",
+      detail: "{engine} 은(는) 외래 키 메타데이터를 보고하지 않으므로 관계를 도출할 수 없습니다. 이 엔진에 대해서는 다이어그램이 완전합니다.",
+    },
+    commentsUnsupported: {
+      title: "데이터베이스 코멘트를 사용할 수 없습니다",
+      detail: "{engine} 은(는) 테이블 또는 컬럼 코멘트를 지원하지 않으므로 여기의 모든 설명은 이 프로젝트의 메모에서만 제공됩니다.",
+    },
+    orphanedNotes: {
+      title: "더 이상 일치하는 대상이 없는 메모가 있습니다",
+      detail: "{count} 개의 메모가 더 이상 존재하지 않는 테이블 또는 컬럼을 참조하고 있습니다. 삭제된 항목은 없습니다 — 메모 파일에서 다시 매핑하거나 제거하세요.",
+    },
+    dbmlOmitted: {
+      title: "DBML로 표현할 수 없습니다",
+      detail: "{table} 의 {item} 은(는) 여기에 문서화되어 있지만 내보낸 DBML에서는 제외되었습니다: {reason}.",
+    },
+  },
+};

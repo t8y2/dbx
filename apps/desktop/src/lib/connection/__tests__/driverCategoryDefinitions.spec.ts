@@ -70,7 +70,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
   it("covers all known agent driver keys with no stale entries", () => {
     // Golden set — mirrors the store-visible entries in agent_catalog.rs
     // plus EXTRA_DRIVER_STORE_ENTRIES (duckdb, kafka, rocketmq,
-    // rabbitmq, sqlserver-legacy) and the PrestoSQL built-in driver.
+    // rabbitmq, sqlserver-legacy) and the built-in JDBC driver rows.
     // When an Agent driver is added to the catalog its key MUST appear here;
     // removing a key from the map without removing it from the list below
     // will fail this test.
@@ -89,6 +89,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "exasol",
       "hive",
       "kylin",
+      "phoenix",
       "prestosql",
       "saphana",
       "snowflake",
@@ -145,8 +146,9 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
   });
 });
 
-describe("prestosql matches ConnectionDialog category", () => {
-  it("is mapped to analytics (same as ConnectionDialog dbCategoryDefinitions)", () => {
+describe("built-in JDBC drivers match ConnectionDialog categories", () => {
+  it("maps PrestoSQL and Apache Phoenix to analytics", () => {
     expect(getCategoryForAgentDriver("prestosql")).toBe("analytics");
+    expect(getCategoryForAgentDriver("phoenix")).toBe("analytics");
   });
 });

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { VueFlow, useVueFlow, type NodeChange, type EdgeChange, type NodeDragEvent, type EdgeMouseEvent, type NodeMouseEvent, type NodeTypesObject, type EdgeTypesObject } from "@vue-flow/core";
+import { VueFlow, useVueFlow, type NodeChange, type EdgeChange, type NodeDragEvent, type EdgeMouseEvent, type NodeMouseEvent, type NodeTypesObject, type EdgeTypesObject, type ViewportTransform } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
 import { MiniMap } from "@vue-flow/minimap";
 import "@vue-flow/core/dist/style.css";
@@ -61,7 +61,7 @@ const open = defineModel<boolean>("open", { default: false });
 const store = useConnectionStore();
 const graphStore = useGraphStore();
 const layerStore = useLayerStore();
-const { nodes, edges, applyNodeChanges, applyEdgeChanges, setNodes, setEdges, zoomIn: vfZoomIn, zoomOut: vfZoomOut, fitView } = useVueFlow();
+const { nodes, edges, applyNodeChanges, applyEdgeChanges, setNodes, setEdges, zoomIn: vfZoomIn, zoomOut: vfZoomOut, fitView, getViewport, setViewport } = useVueFlow();
 
 const diagramPaneRef = ref<HTMLElement | null>(null);
 const edgeWaypoints = ref<Record<string, Point[]>>({});
@@ -1460,6 +1460,11 @@ const isFullscreen = ref(false);
 /** Only exit fullscreen on dialog close when this page entered it. */
 let diagramOwnedFullscreen = false;
 let unlistenWindowResize: (() => void) | null = null;
+let fullscreenTransitionTarget: boolean | null = null;
+let viewportBeforeFullscreen: ViewportTransform | null = null;
+
+const FULLSCREEN_SYNC_ATTEMPTS = 40;
+const FULLSCREEN_SYNC_INTERVAL_MS = 50;
 
 const dialogStyle = computed(() => {
   if (isFullscreen.value) {
@@ -1483,22 +1488,61 @@ async function syncFullscreenState() {
   if (isTauriRuntime()) {
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      isFullscreen.value = await getCurrentWindow().isFullscreen();
+      const actualFullscreen = await getCurrentWindow().isFullscreen();
+      isFullscreen.value = fullscreenTransitionTarget ?? actualFullscreen;
     } catch {
-      isFullscreen.value = false;
+      isFullscreen.value = fullscreenTransitionTarget ?? false;
     }
   } else {
     isFullscreen.value = !!document.fullscreenElement;
   }
-  if (!isFullscreen.value) {
+  if (!isFullscreen.value && fullscreenTransitionTarget === null) {
     diagramOwnedFullscreen = false;
   }
 }
 
+async function waitForTauriFullscreenState(appWindow: { isFullscreen: () => Promise<boolean> }, expected: boolean) {
+  for (let attempt = 0; attempt < FULLSCREEN_SYNC_ATTEMPTS; attempt += 1) {
+    if ((await appWindow.isFullscreen()) === expected) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, FULLSCREEN_SYNC_INTERVAL_MS));
+  }
+}
+
+function captureDiagramViewport() {
+  if (diagramMode.value !== "table" || viewportBeforeFullscreen) return;
+  viewportBeforeFullscreen = { ...getViewport() };
+}
+
+async function restoreDiagramViewport() {
+  const viewport = viewportBeforeFullscreen;
+  viewportBeforeFullscreen = null;
+  if (!viewport || diagramMode.value !== "table") return;
+  await setViewport(viewport, { duration: 150 });
+}
+
+async function syncFullscreenLayout() {
+  const wasFullscreen = isFullscreen.value;
+  await syncFullscreenState();
+  if (wasFullscreen === isFullscreen.value) return;
+  await nextTick();
+  if (isFullscreen.value) fitDiagramView();
+  else await restoreDiagramViewport();
+}
+
 async function enterFullscreen() {
+  captureDiagramViewport();
   if (isTauriRuntime()) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().setFullscreen(true);
+    const appWindow = getCurrentWindow();
+    fullscreenTransitionTarget = true;
+    try {
+      await appWindow.setFullscreen(true);
+      isFullscreen.value = true;
+      await waitForTauriFullscreenState(appWindow, true);
+    } finally {
+      fullscreenTransitionTarget = null;
+      await syncFullscreenState();
+    }
   } else {
     await document.documentElement.requestFullscreen();
   }
@@ -1512,15 +1556,24 @@ async function exitFullscreen() {
   const owned = diagramOwnedFullscreen;
   if (isTauriRuntime()) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    const currently = await getCurrentWindow().isFullscreen();
-    if (currently) await getCurrentWindow().setFullscreen(false);
+    const appWindow = getCurrentWindow();
+    fullscreenTransitionTarget = false;
+    try {
+      const currently = await appWindow.isFullscreen();
+      if (currently) await appWindow.setFullscreen(false);
+      isFullscreen.value = false;
+      await waitForTauriFullscreenState(appWindow, false);
+    } finally {
+      fullscreenTransitionTarget = null;
+      await syncFullscreenState();
+    }
   } else if (document.fullscreenElement) {
     await document.exitFullscreen();
   }
   if (owned) diagramOwnedFullscreen = false;
   await syncFullscreenState();
   await nextTick();
-  fitDiagramView();
+  await restoreDiagramViewport();
 }
 
 async function toggleFullscreen() {
@@ -1529,18 +1582,14 @@ async function toggleFullscreen() {
 }
 
 function handleWebFullscreenChange() {
-  void syncFullscreenState().then(() => {
-    void nextTick().then(() => {
-      fitDiagramView();
-    });
-  });
+  void syncFullscreenLayout();
 }
 
 async function setupFullscreenListeners() {
   if (isTauriRuntime()) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     unlistenWindowResize = await getCurrentWindow().onResized(() => {
-      void syncFullscreenState();
+      void syncFullscreenLayout();
     });
   } else {
     document.addEventListener("fullscreenchange", handleWebFullscreenChange);

@@ -377,6 +377,10 @@ async fn main() {
         .route("/schema/extensions", get(routes::schema::list_extensions))
         .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
         .route("/schema/ddl", get(routes::schema::get_ddl))
+        .route("/docs/snapshot", post(routes::docs::collect_snapshot))
+        .route("/docs/annotations/load", post(routes::docs::load_annotations))
+        .route("/docs/annotations/apply", post(routes::docs::apply_annotations))
+        .route("/docs/annotations/save", post(routes::docs::save_annotations))
         .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
@@ -507,6 +511,8 @@ async fn main() {
         .route("/redis/delete-key", post(routes::redis::delete_key))
         .route("/redis/hash-set", post(routes::redis::hash_set))
         .route("/redis/hash-del", post(routes::redis::hash_del))
+        .route("/redis/hash-field-set-ttl", post(routes::redis::hash_field_set_ttl))
+        .route("/redis/hash-field-set-expire-at", post(routes::redis::hash_field_set_expire_at))
         .route("/redis/list-push", post(routes::redis::list_push))
         .route("/redis/list-set", post(routes::redis::list_set))
         .route("/redis/list-remove", post(routes::redis::list_remove))
@@ -799,6 +805,14 @@ async fn main() {
 
     if public_base_path != "/" {
         app = Router::new().nest(&public_base_path, app);
+        // axum 的 nest 不匹配“子路径根目录”(带尾斜杠,如 /dbx/),导致子路径部署时首页 404。
+        // 在 nest 外层显式把根目录挂到 index.html,浏览器地址栏保持 /dbx/ 不变,
+        // 相对资源与前端路径推断都依赖这个 URL 形态。见 issue #5518。
+        if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {
+            use tower_http::services::ServeFile;
+            let index_path = format!("{static_dir}/index.html");
+            app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(index_path));
+        }
     }
 
     // Bind address

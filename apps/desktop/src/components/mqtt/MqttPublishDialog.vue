@@ -32,7 +32,7 @@ const qosHints = computed(() => [t("connection.mqttQosAtMostOnce"), t("connectio
 const payloadPlaceholder = computed(() => {
   switch (encoding.value) {
     case "json":
-      return t("connection.mqttPayloadPlaceholderJson");
+      return t("connection.mqttPayloadPlaceholderJson", { example: '{"key": "value"}' });
     case "base64":
       return t("connection.mqttPayloadPlaceholderBase64");
     case "hex":

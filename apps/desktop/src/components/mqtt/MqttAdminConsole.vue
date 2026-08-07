@@ -20,6 +20,7 @@ const brokerInfo = ref<MqttBrokerInfo | null>(null);
 const topicTree = ref<MqttTopicNode | null>(null);
 const messages = ref<MqttMessage[]>([]);
 const subscribedTopics = ref<[string, string][]>([]);
+const noLocalSubscribe = ref(false);
 const selectedTopic = ref<string>(props.initialTopic ?? "");
 const loading = ref(true);
 const error = ref<string | null>(null);
@@ -52,9 +53,9 @@ async function refreshData() {
   }
 }
 
-async function handleSubscribe(topic: string) {
+async function handleSubscribe(topic: string, noLocal = noLocalSubscribe.value) {
   try {
-    await mqttSubscribe(props.connectionId, topic, "atmostonce");
+    await mqttSubscribe(props.connectionId, topic, "atmostonce", noLocal);
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -194,6 +195,7 @@ onUnmounted(() => {
             "
           >
             <input class="flex-1 h-7 px-2 text-xs rounded border bg-transparent" :placeholder="t('connection.mqttSubscribePlaceholder')" />
+            <label class="flex items-center gap-1 text-[10px] whitespace-nowrap"><input v-model="noLocalSubscribe" type="checkbox" />{{ t("connection.mqttNoLocal") }}</label>
             <Button size="sm" variant="ghost" class="h-7 text-xs" type="submit">{{ t("connection.mqttSubscribe") }}</Button>
           </form>
         </div>
@@ -216,13 +218,13 @@ onUnmounted(() => {
               </select>
             </div>
           </div>
-          <div class="flex-1 overflow-auto">
+          <div class="flex-1 overflow-auto flex flex-col">
             <div v-if="messages.length === 0" class="text-xs text-muted-foreground p-4 text-center">{{ t("connection.mqttNoMessages") }}</div>
             <div
               v-for="(msg, i) in messages"
               :key="i"
-              class="px-3 py-2 border-b last:border-b-0 cursor-pointer text-xs"
-              :class="msg.direction === 'sent' ? 'bg-emerald-50/60 dark:bg-emerald-950/20 hover:bg-emerald-100/60 dark:hover:bg-emerald-950/40' : 'hover:bg-muted/50'"
+              class="px-3 py-2 border-b last:border-b-0 cursor-pointer text-xs self-start w-full"
+              :class="msg.direction === 'sent' ? 'bg-emerald-50/60 dark:bg-emerald-950/20 hover:bg-emerald-100/60 dark:hover:bg-emerald-950/40 ml-auto max-w-[85%] rounded-l-md' : 'hover:bg-muted/50 mr-auto max-w-[85%] rounded-r-md'"
               @click="handleTopicClick(msg.topic)"
             >
               <div class="flex items-center gap-2 mb-0.5">

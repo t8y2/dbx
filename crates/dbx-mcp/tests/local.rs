@@ -259,6 +259,12 @@ async fn executes_mongo_shell_commands_without_desktop_process() {
     server_task.abort();
 }
 
+#[test]
+#[cfg(feature = "mq-admin")]
+fn mcp_default_features_include_message_queue_admin() {
+    assert_eq!(dbx_core::mq::MqSystemKind::Kafka.as_str(), "kafka");
+}
+
 async fn call_query(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>, sql: &str) -> String {
     let arguments = json!({
         "connection_id": "mongo-e2e",

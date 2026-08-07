@@ -57,4 +57,13 @@ describe("AI SQL dialect prompt", () => {
     expect(prompt).not.toContain("Never execute writes without confirmation");
     expect(prompt).toContain("Ask mode");
   });
+
+  it("MongoDB agent mode uses shell commands instead of SQL", () => {
+    const prompt = buildSystemPrompt("general", context({ databaseType: "mongodb", connectionName: "MongoDB", database: "benchmark" }), "agent");
+
+    expect(prompt).toContain("MongoDB Agent mode");
+    expect(prompt).toContain("execute_query accepts MongoDB shell-style commands, not SQL");
+    expect(prompt).toContain("db.collection.findOne({})");
+    expect(prompt).not.toContain("get_sample_data");
+  });
 });

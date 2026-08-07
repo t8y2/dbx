@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "vitest";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "../../apps/desktop/src/lib/connection/databaseCategoryOptions.ts";
+import { JDBC_PRODUCT_PROFILES } from "../../apps/desktop/src/lib/database/jdbcProductProfiles.ts";
 
 test("database categories cover every option exactly once", () => {
   assert.doesNotThrow(() => assertCompleteDatabaseCategories(["mysql", "redis", "kafka"], [["mysql"], ["redis", "kafka"]]));
@@ -27,13 +28,22 @@ test("ConnectionDialog database categories stay exhaustive", () => {
   assert.ok(categoriesMatch, "dbCategoryDefinitions not found");
 
   const optionValues = [...optionsMatch[1].matchAll(/value:\s*"([^"]+)"/g)].map((match) => match[1]);
-  const categoryBlocks = [...categoriesMatch[1].matchAll(/optionValues:\s*\[([^\]]*)\]/g)].map((match) =>
-    [...match[1].matchAll(/"([^"]+)"/g)].map((valueMatch) => valueMatch[1]),
-  );
+  const categoryBlocks = [...categoriesMatch[1].matchAll(/optionValues:\s*\[([^\]]*)\]/g)].map((match) => [...match[1].matchAll(/"([^"]+)"/g)].map((valueMatch) => valueMatch[1]));
+  optionValues.push(...JDBC_PRODUCT_PROFILES.map((profile) => profile.id));
+  categoryBlocks.push(JDBC_PRODUCT_PROFILES.map((profile) => profile.id));
 
   assert.doesNotThrow(() => assertCompleteDatabaseCategories(optionValues, categoryBlocks));
+  assert.match(source, /for \(const category of dbCategoryDefinitions\)/);
+  assert.match(source, /jdbcProductProfileIdsForCategory\(category\.key\)/);
+  assert.match(source, /\.\.\.jdbcProductIconTypes\(\)/);
   assert.ok(optionValues.includes("rabbitmq"), "rabbitmq must remain in dbOptions");
-  assert.ok(categoryBlocks.some((values) => values.includes("rabbitmq")), "rabbitmq must remain categorized");
+  assert.ok(
+    categoryBlocks.some((values) => values.includes("rabbitmq")),
+    "rabbitmq must remain categorized",
+  );
   assert.ok(optionValues.includes("uxdb"), "uxdb must remain in dbOptions");
-  assert.ok(categoryBlocks.some((values) => values.includes("uxdb")), "uxdb must remain categorized");
+  assert.ok(
+    categoryBlocks.some((values) => values.includes("uxdb")),
+    "uxdb must remain categorized",
+  );
 });

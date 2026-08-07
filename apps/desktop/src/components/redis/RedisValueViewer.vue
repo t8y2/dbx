@@ -170,6 +170,12 @@ const stringValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<JsonHighlighter>();
+const showHashFieldTtlDialog = ref(false);
+const editingHashField = ref<string | null>(null);
+const savingHashFieldTtl = ref(false);
+const hashFieldTtlMode = ref<RedisExpiryMode>("none");
+const hashFieldTtlInput = ref("");
+const hashFieldExpireAt = shallowRef<CalendarDateTime | null>(null);
 
 // Decompressed view state. Decompression yields to the event loop so the
 // loading state paints before the synchronous bounded inflate runs; the result
@@ -497,11 +503,15 @@ const hasRetainedMemberDraft = computed(() => {
   }
   return memberEditValue.value !== original;
 });
-const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value || editingZsetMemberKey.value !== null);
+const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value);
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const collectionTotal = computed(() => (data.value ? redisValueCollectionTotal(data.value) : null));
+const hashFieldTtlSupported = computed(() => {
+  if (redisKind.value !== "hash") return false;
+  return (collectionItems.value as RedisHashItem[]).some((item) => item.field_ttl !== undefined);
+});
 const hashGridStyle = computed(() => ({
-  gridTemplateColumns: `${hashFieldWidth.value}px minmax(12rem, 1fr) 84px`,
+  gridTemplateColumns: hashFieldTtlSupported.value ? `${hashFieldWidth.value}px minmax(12rem, 1fr) minmax(7rem, 9rem) 84px` : `${hashFieldWidth.value}px minmax(12rem, 1fr) 84px`,
 }));
 const zsetGridStyle = computed(() => ({
   gridTemplateColumns: `60px ${zsetScoreWidth.value}px minmax(0, 1fr) 104px`,
@@ -643,7 +653,7 @@ let zsetResizeStartWidth = 0;
 function shouldPauseAutoValueRefresh(): boolean {
   const loadedPageSize = data.value ? redisValueCollectionItems(data.value).length : 0;
   const hasExpandedCollectionPage = collectionItems.value.length > loadedPageSize;
-  return showMemberDetail.value || editingZsetMemberKey.value !== null || valueSearchOpen.value || Boolean(hashSearchQuery.value.trim()) || Boolean(activeHashSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
+  return showMemberDetail.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value || valueSearchOpen.value || Boolean(hashSearchQuery.value.trim()) || Boolean(activeHashSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
 }
 
 type PendingDelete = { kind: "key" } | { kind: "hash"; field: string } | { kind: "list"; index: number } | { kind: "set"; member: string } | { kind: "zset"; member: string };
@@ -1463,13 +1473,20 @@ function generateInsertStatements(): string | null {
       break;
     }
     case "hash": {
-      const pairs = (collectionItems.value as RedisHashItem[]).map((item) => {
+      const hashItems = collectionItems.value as RedisHashItem[];
+      const pairs = hashItems.map((item) => {
         const field = blobWriteText(item.field);
         const value = blobWriteText(item.value);
         return field == null || value == null ? null : `${escapeRedisArg(field)} ${escapeRedisArg(value)}`;
       });
       if (pairs.some((item) => item == null)) return null;
       commands.push(`HSET ${escapeRedisArg(key)} ${(pairs as string[]).join(" ")}`);
+      for (const item of hashItems) {
+        const field = blobWriteText(item.field);
+        if (field != null && item.field_ttl !== undefined && item.field_ttl > 0) {
+          commands.push(`HEXPIRE ${escapeRedisArg(key)} ${item.field_ttl} FIELDS 1 ${escapeRedisArg(field)}`);
+        }
+      }
       break;
     }
     case "stream": {
@@ -1992,6 +2009,90 @@ function cancelEditTtl() {
 }
 
 // Hash
+function hashFieldItem(field: string | null): RedisHashItem | null {
+  if (!field || redisKind.value !== "hash") return null;
+  return (collectionItems.value as RedisHashItem[]).find((item) => redisBlobText(item.field) === field) ?? null;
+}
+
+function hashFieldTtlLabel(item: RedisHashItem): string {
+  if (item.field_ttl === undefined) return "-";
+  if (item.field_ttl === -1) return t("redis.noExpiry");
+  return formatTtl(item.field_ttl, t) ?? "-";
+}
+
+function currentHashFieldTtl(): number {
+  return hashFieldItem(editingHashField.value)?.field_ttl ?? -1;
+}
+
+function startEditHashFieldTtl(field: string | null) {
+  if (!field || savingHashFieldTtl.value || hashFieldItem(field)?.field_ttl === undefined) return;
+  const ttl = hashFieldItem(field)?.field_ttl ?? -1;
+  editingHashField.value = field;
+  hashFieldTtlMode.value = redisExpiryModeForTtl(ttl);
+  hashFieldTtlInput.value = ttl > 0 ? String(ttl) : "";
+  hashFieldExpireAt.value = null;
+  showHashFieldTtlDialog.value = true;
+}
+
+watch(hashFieldTtlMode, (mode, previousMode) => {
+  const ttl = currentHashFieldTtl();
+  if (mode === "at" && previousMode !== "at" && ttl > 0) {
+    hashFieldExpireAt.value = unixSecondsToCalendarDateTime(Math.ceil(Date.now() / 1_000) + ttl);
+  }
+});
+
+function cancelEditHashFieldTtl(force = false) {
+  if (savingHashFieldTtl.value && !force) return;
+  showHashFieldTtlDialog.value = false;
+  editingHashField.value = null;
+  hashFieldTtlInput.value = "";
+  hashFieldExpireAt.value = null;
+}
+
+function handleHashFieldTtlOpenChange(open: boolean) {
+  if (open) {
+    showHashFieldTtlDialog.value = true;
+  } else {
+    cancelEditHashFieldTtl();
+  }
+}
+
+async function reloadHashPreservingSearch() {
+  const query = activeHashSearchQuery.value || hashSearchQuery.value.trim();
+  await load({ selectDefaultMember: false });
+  if (query) {
+    hashSearchQuery.value = query;
+    await onHashSearch();
+  }
+}
+
+async function saveHashFieldTtl() {
+  if (savingHashFieldTtl.value || !editingHashField.value) return;
+  const validation = validateRedisExpiry(hashFieldTtlMode.value, hashFieldTtlInput.value, hashFieldExpireAt.value);
+  if (!validation.valid) {
+    toast(expiryValidationMessage(validation.reason), 3000);
+    return;
+  }
+
+  savingHashFieldTtl.value = true;
+  const field = editingHashField.value;
+  try {
+    if (validation.policy.mode === "none") {
+      await api.redisHashFieldSetTtl(props.connectionId, props.db, props.keyRaw, field, -1);
+    } else if (validation.policy.mode === "ttl") {
+      await api.redisHashFieldSetTtl(props.connectionId, props.db, props.keyRaw, field, validation.policy.ttl);
+    } else {
+      await api.redisHashFieldSetExpireAt(props.connectionId, props.db, props.keyRaw, field, validation.policy.expireAt);
+    }
+    cancelEditHashFieldTtl(true);
+    await reloadHashPreservingSearch();
+  } catch (error) {
+    toast(errorMessage(error), 3000);
+  } finally {
+    savingHashFieldTtl.value = false;
+  }
+}
+
 async function hashSet() {
   if (!newField.value.trim()) {
     toast(t("redis.fieldRequired"), 3000);
@@ -2584,6 +2685,7 @@ defineExpose({ focusSearch });
             <ArrowDown v-else-if="hashSortBy === 'value' && hashSortDir === 'desc'" class="h-3 w-3 shrink-0" />
             <ArrowUpDown v-else class="h-3 w-3 shrink-0 text-muted-foreground/40" />
           </div>
+          <div v-if="hashFieldTtlSupported" class="px-3 py-1 text-xs font-medium text-muted-foreground">{{ t("redis.columnTTL") }}</div>
           <div />
         </div>
         <RecycleScroller class="flex-1 overflow-y-auto" :items="hashCollectionRows" :item-size="REDIS_COLLECTION_ROW_HEIGHT" :buffer="600" :skip-hover="true" key-field="id">
@@ -2597,6 +2699,19 @@ defineExpose({ focusSearch });
             >
               <div class="px-3 py-1.5 text-blue-500 truncate border-r">{{ formatValue(row.value.field) }}</div>
               <div class="px-3 py-1.5 truncate text-muted-foreground">{{ formatValue(row.value.value) }}</div>
+              <div v-if="hashFieldTtlSupported" class="px-2 py-1 flex items-center min-w-0">
+                <Button
+                  v-if="redisBlobText(row.value.field) && row.value.field_ttl !== undefined"
+                  variant="ghost"
+                  size="sm"
+                  class="h-6 min-w-0 max-w-full justify-start px-1.5 text-xs font-normal text-muted-foreground hover:text-foreground"
+                  :title="t('redis.expiry')"
+                  @click.stop="startEditHashFieldTtl(redisBlobText(row.value.field))"
+                >
+                  <span class="truncate">{{ hashFieldTtlLabel(row.value) }}</span>
+                </Button>
+                <span v-else class="px-1.5 text-xs text-muted-foreground">-</span>
+              </div>
               <div class="flex items-center justify-center gap-1">
                 <Button
                   variant="ghost"
@@ -2977,6 +3092,36 @@ defineExpose({ focusSearch });
     </template>
 
     <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
+
+    <Dialog :open="showHashFieldTtlDialog" @update:open="handleHashFieldTtlOpenChange">
+      <DialogContent class="w-[calc(100vw-2rem)] sm:max-w-[460px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("redis.expiry") }}: {{ editingHashField ? formatValue(editingHashField) : "" }}</DialogTitle>
+        </DialogHeader>
+        <div class="grid gap-3 py-2">
+          <Select v-model="hashFieldTtlMode" :disabled="savingHashFieldTtl">
+            <SelectTrigger :aria-label="t('redis.expiry')">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">{{ t("redis.expiryNone") }}</SelectItem>
+              <SelectItem value="ttl">{{ t("redis.expiryTtl") }}</SelectItem>
+              <SelectItem value="at">{{ t("redis.expiryAt") }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input v-if="hashFieldTtlMode === 'ttl'" v-model="hashFieldTtlInput" :disabled="savingHashFieldTtl" inputmode="numeric" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="saveHashFieldTtl" />
+          <DateTimePicker v-else-if="hashFieldTtlMode === 'at'" v-model="hashFieldExpireAt" :locale="locale" :disabled="savingHashFieldTtl" />
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" :disabled="savingHashFieldTtl" @click="cancelEditHashFieldTtl">{{ t("dangerDialog.cancel") }}</Button>
+          <Button :disabled="savingHashFieldTtl" @click="saveHashFieldTtl">
+            <Loader2 v-if="savingHashFieldTtl" class="h-4 w-4 animate-spin" />
+            <Save v-else class="h-4 w-4" />
+            {{ t("grid.save") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog :open="showMemberDetail" @update:open="handleMemberDetailOpenChange">
       <DialogContent data-redis-member-detail class="relative flex h-[min(760px,85vh)] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[960px]" :style="editorFontFamilyStyle" @close-auto-focus="finishMemberDetailClose" @pointer-down-outside.prevent @interact-outside.prevent>

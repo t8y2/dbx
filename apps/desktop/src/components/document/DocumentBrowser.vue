@@ -265,6 +265,13 @@ const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
 });
+const selectedDocumentIdLabel = computed(() => {
+  if (isNew.value) return "New";
+  const id = selectedDoc.value?._id;
+  if (id === undefined || id === null) return "";
+  return typeof id === "object" ? stringifyDocumentStoreValue(id, documentStoreProvider.value.kind) : String(id);
+});
+const selectedDocumentIdWidth = computed(() => `${Math.min(Math.max(Array.from(selectedDocumentIdLabel.value).length + 2, 5), 52)}ch`);
 const documentSearchText = computed(() => editJson.value);
 const documentSearchMatches = computed(() => findDocumentTextMatches(documentSearchText.value, documentSearchQuery.value));
 const documentSearchActiveIndex = computed(() => {
@@ -2200,7 +2207,7 @@ defineExpose({ focusSearch });
         <div class="h-full flex flex-col min-w-0 overflow-hidden">
           <template v-if="selectedIdx !== null || isNew">
             <div class="h-9 flex items-center gap-2 px-4 border-b bg-muted/30 shrink-0">
-              <Badge variant="secondary" class="text-xs">{{ isNew ? "New" : selectedDoc?._id }}</Badge>
+              <Badge as="input" variant="secondary" class="max-w-[50%] cursor-text select-text text-xs outline-none" :style="{ width: selectedDocumentIdWidth }" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
               <span class="flex-1" />
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">

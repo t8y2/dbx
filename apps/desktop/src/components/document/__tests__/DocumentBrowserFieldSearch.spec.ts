@@ -541,8 +541,17 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     const viewer = root!.querySelector<HTMLElement>("[data-document-json-viewer]")!;
     const jsonText = viewer.querySelector<HTMLElement>(".json-string")!;
+    const documentId = root!.querySelector<HTMLInputElement>('input[aria-label^="_id:"]')!;
     expect(root!.firstElementChild?.classList.contains("select-none")).toBe(true);
+    expect(documentId.readOnly).toBe(true);
+    expect(documentId.value).toBe("document-1");
+    expect(documentId.classList.contains("select-text")).toBe(true);
     expect(viewer.querySelector(".json-viewer")?.classList.contains("select-text")).toBe(true);
+
+    documentId.setSelectionRange(0, documentId.value.length);
+    expect(documentId.selectionStart).toBe(0);
+    expect(documentId.selectionEnd).toBe(documentId.value.length);
+    expect(window.getSelection()?.toString()).toBe("");
 
     jsonText.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await flushUi();

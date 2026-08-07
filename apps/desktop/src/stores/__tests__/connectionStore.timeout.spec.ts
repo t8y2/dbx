@@ -82,6 +82,36 @@ describe("connectionStore timeout recovery", () => {
     expect(store.connections[0]?.keepalive_interval_secs).toBe(30);
   });
 
+  it("keeps legacy overrides and refreshes inherited timeouts when loading connections", async () => {
+    const saveConnections = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "legacy", query_timeout_secs: 30 }), postgresConnection({ id: "inherited", query_timeout_secs: 60 })]),
+      loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
+      loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTunnelProfiles: vi.fn().mockResolvedValue([]),
+      saveConnections,
+      saveEditorSettings: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      globalQueryTimeoutSecs: 12,
+      queryTimeoutInheritConnectionIds: ["inherited"],
+    });
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    expect(store.getConfig("legacy")).toMatchObject({ query_timeout_secs: 30, query_timeout_inherit: false });
+    expect(store.getConfig("inherited")).toMatchObject({ query_timeout_secs: 12, query_timeout_inherit: true });
+    expect(saveConnections).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ id: "inherited", query_timeout_secs: 12 })]));
+  });
+
   it("clears connection node loading when health check timeout forces reconnect failure", async () => {
     const checkConnectionHealth = vi.fn(() => new Promise(() => undefined));
     const connectDb = vi.fn().mockRejectedValue(new Error("reconnect failed"));

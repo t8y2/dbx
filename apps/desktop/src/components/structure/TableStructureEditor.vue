@@ -2317,7 +2317,7 @@ async function applyChanges() {
   try {
     const result = hasSqliteTypeChange.value
       ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
-      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection));
+      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs));
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
       invalidateTableMetadataCache({ connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName });

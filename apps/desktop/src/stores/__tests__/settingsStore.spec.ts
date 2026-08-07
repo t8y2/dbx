@@ -220,6 +220,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ cellDetailMetadataCollapsed: true }).cellDetailMetadataCollapsed).toBe(true);
   });
 
+  it("normalizes the global query timeout and inherited connection ids", () => {
+    expect(normalizeEditorSettings({}).globalQueryTimeoutSecs).toBe(60);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: -1 }).globalQueryTimeoutSecs).toBe(0);
+    expect(normalizeEditorSettings({ globalQueryTimeoutSecs: 301 }).globalQueryTimeoutSecs).toBe(300);
+    expect(normalizeEditorSettings({ queryTimeoutInheritConnectionIds: ["one", "one", " ", "two"] }).queryTimeoutInheritConnectionIds).toEqual(["one", "two"]);
+  });
+
   it("normalizes toolbar item settings from older saved settings", () => {
     const settings = normalizeEditorSettings({
       toolbarItems: {

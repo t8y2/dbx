@@ -974,6 +974,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function normalizeConnection(config: ConnectionConfig): ConnectionConfig {
     config = { ...config };
     migrateSqlServerLegacyCompatibilityConfig(config);
+    const queryTimeoutInherit = config.query_timeout_inherit ?? settingsStore.editorSettings.queryTimeoutInheritConnectionIds.includes(config.id);
     const labelMap: Record<string, string> = {
       mysql: "MySQL",
       postgres: "PostgreSQL",
@@ -1065,7 +1066,8 @@ export const useConnectionStore = defineStore("connection", () => {
       transport_layers: Array.isArray(config.transport_layers) ? config.transport_layers : [],
       show_system_schemas: config.show_system_schemas === true,
       connect_timeout_secs: config.connect_timeout_secs || 10,
-      query_timeout_secs: config.query_timeout_secs ?? 30,
+      query_timeout_secs: queryTimeoutInherit ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? 30),
+      query_timeout_inherit: queryTimeoutInherit,
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
       keepalive_interval_secs: config.keepalive_interval_secs ?? DEFAULT_KEEPALIVE_INTERVAL_SECS,
       redis_database_aliases: normalizeRedisDatabaseAliases(config.redis_database_aliases),
@@ -2267,6 +2269,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
+    await persistQueryTimeoutInheritance(normalized.id, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
     if (existing >= 0) {
@@ -2379,6 +2382,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const removedIds = new Set(connectionIds);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     await persistConnections(nextConnections);
+    await persistQueryTimeoutInheritanceIds(settingsStore.editorSettings.queryTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)));
     connections.value = nextConnections;
     let nextPinnedOrder = pinnedTreeNodeOrder.value;
     for (const id of removedIds) {
@@ -2424,6 +2428,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
     const nextConnections = [...connections.value];
     nextConnections[idx] = config;
+    await persistQueryTimeoutInheritance(config.id, config.query_timeout_inherit === true);
     await persistConnections(nextConnections);
     connections.value = nextConnections;
     rebuildTreeNodes();
@@ -6376,6 +6381,27 @@ export const useConnectionStore = defineStore("connection", () => {
     await api.saveConnections(nextConnections.filter((connection) => connection.one_time !== true));
   }
 
+  async function persistQueryTimeoutInheritanceIds(ids: string[]) {
+    settingsStore.updateEditorSettings({ queryTimeoutInheritConnectionIds: ids });
+    await settingsStore.persistEditorSettings();
+  }
+
+  async function persistQueryTimeoutInheritance(connectionId: string, inherit: boolean) {
+    const ids = new Set(settingsStore.editorSettings.queryTimeoutInheritConnectionIds);
+    if (inherit) ids.add(connectionId);
+    else ids.delete(connectionId);
+    const next = [...ids];
+    if (next.length === settingsStore.editorSettings.queryTimeoutInheritConnectionIds.length && next.every((id, index) => id === settingsStore.editorSettings.queryTimeoutInheritConnectionIds[index])) return;
+    await persistQueryTimeoutInheritanceIds(next);
+  }
+
+  async function applyGlobalQueryTimeout(globalQueryTimeoutSecs: number) {
+    const nextConnections = connections.value.map((connection) => (connection.query_timeout_inherit === true && connection.query_timeout_secs !== globalQueryTimeoutSecs ? { ...connection, query_timeout_secs: globalQueryTimeoutSecs } : connection));
+    if (nextConnections.every((connection, index) => connection === connections.value[index])) return;
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
+  }
+
   function persistSidebarLayoutDebounced() {
     if (layoutPersistTimer) clearTimeout(layoutPersistTimer);
     layoutPersistTimer = setTimeout(() => {
@@ -6885,6 +6911,9 @@ export const useConnectionStore = defineStore("connection", () => {
         const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);
         setPinnedTreeNodeOrder(pinnedOrder);
         connections.value = saved.map(normalizeConnection);
+        if (connections.value.some((connection, index) => connection.query_timeout_inherit === true && connection.query_timeout_secs !== saved[index]?.query_timeout_secs)) {
+          await persistConnections();
+        }
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
         sidebarLayout.value = reconcileLayout(
@@ -6962,6 +6991,7 @@ export const useConnectionStore = defineStore("connection", () => {
     pasteConnectionClipboard,
     addEphemeralConnection,
     updateConnection,
+    applyGlobalQueryTimeout,
     updateConnectionDatabaseInfo,
     setDefaultDatabase,
     clearDefaultDatabase,

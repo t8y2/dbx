@@ -2867,7 +2867,7 @@ async function lastPage() {
       const countTarget = await buildCurrentCountTarget();
       const sql = countTarget?.sql;
       if (!sql) return;
-      const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
+      const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
       const total = Number(result.rows?.[0]?.[0] ?? 0);
       if (!Number.isFinite(total) || total < 0) return;
       manualTotalRowCount.value = total;
@@ -2915,7 +2915,7 @@ async function calculateTotalRowCount() {
     if (!props.connectionId) return;
     const countTarget = await buildCurrentCountTarget();
     if (!countTarget?.sql) return;
-    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
+    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (Number.isFinite(total) && total >= 0) {
       manualTotalRowCount.value = total;

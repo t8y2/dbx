@@ -153,6 +153,7 @@ export interface ConnectionConfig {
   transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
   query_timeout_secs?: number;
+  query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
   keepalive_interval_secs?: number;
   ssl?: boolean;

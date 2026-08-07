@@ -272,7 +272,8 @@ const defaultForm = (): ConnectionForm => ({
   color: "",
   transport_layers: [],
   connect_timeout_secs: 10,
-  query_timeout_secs: 30,
+  query_timeout_secs: settingsStore.editorSettings.globalQueryTimeoutSecs,
+  query_timeout_inherit: true,
   idle_timeout_secs: 60,
   keepalive_interval_secs: 30,
   ssl: false,
@@ -2248,7 +2249,8 @@ watch(
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_secs || 10,
-        query_timeout_secs: config.query_timeout_secs ?? 30,
+        query_timeout_secs: config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? 30),
+        query_timeout_inherit: config.query_timeout_inherit === true,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
         ssl: config.ssl || false,
@@ -3472,7 +3474,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   const connectTimeout = Number(config.connect_timeout_secs);
   config.connect_timeout_secs = Number.isFinite(connectTimeout) && connectTimeout > 0 ? connectTimeout : 10;
   const queryTimeout = Number(config.query_timeout_secs);
-  config.query_timeout_secs = Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
+  config.query_timeout_secs = config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
   const idleTimeout = Number(config.idle_timeout_secs);
   config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
   const keepaliveInterval = Number(config.keepalive_interval_secs);
@@ -7313,7 +7315,13 @@ function openExternalUrl(url: string) {
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
-                  <Input v-model.number="form.query_timeout_secs" type="number" min="0" max="300" step="1" class="col-span-3" />
+                  <div class="col-span-3 flex items-center gap-3">
+                    <Input v-model.number="form.query_timeout_secs" type="number" min="0" max="300" step="1" class="min-w-0 flex-1" :disabled="form.query_timeout_inherit === true" />
+                    <label class="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                      <Switch v-model="form.query_timeout_inherit" />
+                      {{ t("connection.useGlobalQueryTimeout", { seconds: settingsStore.editorSettings.globalQueryTimeoutSecs }) }}
+                    </label>
+                  </div>
                 </div>
                 <div v-show="form.db_type === 'mongodb'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.idleTimeout") }}</Label>

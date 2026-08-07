@@ -453,6 +453,8 @@ export interface EditorSettings {
   activeCustomThemeId: string;
   executeMode: "all" | "current";
   executeModeDefaultVersion: number;
+  globalQueryTimeoutSecs: number;
+  queryTimeoutInheritConnectionIds: string[];
   showExecutionTargetPicker: boolean;
   showStatementRunButtons: boolean;
   showCurrentStatementFrame: boolean;
@@ -633,6 +635,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   activeCustomThemeId: "default",
   executeMode: "current",
   executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+  globalQueryTimeoutSecs: 60,
+  queryTimeoutInheritConnectionIds: [],
   showExecutionTargetPicker: false,
   showStatementRunButtons: true,
   showCurrentStatementFrame: true,
@@ -726,6 +730,11 @@ const EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY = "dbx-export-batch-size-default-m
 const LEGACY_DEFAULT_EXPORT_BATCH_SIZE = 10000;
 const MIN_UI_SCALE = 0.75;
 const MAX_UI_SCALE = 2;
+
+export function normalizeGlobalQueryTimeoutSecs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.globalQueryTimeoutSecs;
+  return Math.min(300, Math.max(0, Math.round(value)));
+}
 
 function normalizeUiScale(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.uiScale;
@@ -944,6 +953,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
+    globalQueryTimeoutSecs: normalizeGlobalQueryTimeoutSecs(settings.globalQueryTimeoutSecs),
+    queryTimeoutInheritConnectionIds: Array.isArray(settings.queryTimeoutInheritConnectionIds) ? [...new Set(settings.queryTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
     showStatementRunButtons: typeof settings.showStatementRunButtons === "boolean" ? settings.showStatementRunButtons : DEFAULT_EDITOR_SETTINGS.showStatementRunButtons,
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
@@ -1433,6 +1444,10 @@ export const useSettingsStore = defineStore("settings", () => {
       }
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
+    if (partial.globalQueryTimeoutSecs !== undefined) editorSettings.value.globalQueryTimeoutSecs = normalizeGlobalQueryTimeoutSecs(partial.globalQueryTimeoutSecs);
+    if (partial.queryTimeoutInheritConnectionIds !== undefined) {
+      editorSettings.value.queryTimeoutInheritConnectionIds = [...new Set(partial.queryTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+    }
     if (partial.showExecutionTargetPicker !== undefined) editorSettings.value.showExecutionTargetPicker = partial.showExecutionTargetPicker;
     if (partial.showStatementRunButtons !== undefined) editorSettings.value.showStatementRunButtons = partial.showStatementRunButtons === true;
     if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;

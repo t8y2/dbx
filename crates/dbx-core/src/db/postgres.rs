@@ -1015,6 +1015,7 @@ async fn postgres_query_one_cached(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PreparedSelectOutcome {
     Complete(QueryResult),
     TextFallback { column_types: Vec<String>, unsupported_type: String },
@@ -1586,6 +1587,7 @@ const POSTGRES_CONNECTION_IDENTITY_SQL: &str = "SELECT pg_backend_pid(), \
 /// are weak so they disappear once the pooled connection (and its driver
 /// task) is dropped.
 fn postgres_notice_buffers() -> &'static Mutex<HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>> {
+    #[allow(clippy::type_complexity)]
     static BUFFERS: OnceLock<Mutex<HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>>> = OnceLock::new();
     BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -1599,8 +1601,10 @@ fn postgres_notice_buffers() -> &'static Mutex<HashMap<PostgresConnectionKey, We
 /// never be retried from `drain_postgres_notices`, which can run inside the
 /// read-only transaction used for EXPLAIN, where a failing query would abort
 /// the user's statement.
+#[allow(clippy::type_complexity)]
 fn postgres_client_keys(
 ) -> &'static Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>> {
+    #[allow(clippy::type_complexity)]
     static KEYS: OnceLock<
         Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>>,
     > = OnceLock::new();

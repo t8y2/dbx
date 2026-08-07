@@ -65,6 +65,18 @@ pub async fn mqtt_subscribe(
     persist_mqtt_topics(state.inner(), &connection_id, &client).await
 }
 
+/// 保存订阅配置，不向 broker 发送 SUBSCRIBE。
+#[tauri::command]
+pub async fn mqtt_save_topic_config(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    config: MqttSavedTopic,
+) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    client.save_topic_config(config).await?;
+    persist_mqtt_topics(state.inner(), &connection_id, &client).await
+}
+
 /// 取消订阅 topic
 #[tauri::command]
 pub async fn mqtt_unsubscribe(
@@ -74,6 +86,18 @@ pub async fn mqtt_unsubscribe(
 ) -> Result<(), String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
     service::unsubscribe(&client, &topic).await?;
+    persist_mqtt_topics(state.inner(), &connection_id, &client).await
+}
+
+/// 删除已保存的订阅配置；当前订阅由调用方先取消。
+#[tauri::command]
+pub async fn mqtt_delete_topic_config(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: String,
+) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    client.delete_topic_config(&topic).await?;
     persist_mqtt_topics(state.inner(), &connection_id, &client).await
 }
 
@@ -96,6 +120,16 @@ pub async fn mqtt_list_topics(
 ) -> Result<Vec<(String, MqttQoS)>, String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
     service::list_topics(&client).await
+}
+
+/// 获取全部已保存的订阅配置（包含未启用配置）。
+#[tauri::command]
+pub async fn mqtt_list_saved_topic_configs(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<MqttSavedTopic>, String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    Ok(client.desired_topic_configs().await)
 }
 
 /// 获取 topic 树结构

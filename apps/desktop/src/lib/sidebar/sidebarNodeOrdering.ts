@@ -36,8 +36,8 @@ export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">,
 
   if (parent.type === "connection") {
     const savedSqlNodes = normalized.filter((child) => child.type === "saved-sql-root");
-    const userAdminNodes = normalized.filter((child) => child.type === "user-admin");
-    const regularChildren = normalized.filter((child) => child.type !== "user-admin" && child.type !== "saved-sql-root");
+    const userAdminNodes = normalized.filter((child) => child.type === "user-admin" || child.type === "dameng-users" || child.type === "dameng-roles");
+    const regularChildren = normalized.filter((child) => child.type !== "user-admin" && child.type !== "dameng-users" && child.type !== "dameng-roles" && child.type !== "saved-sql-root");
     const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...userAdminNodes];
 
     if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate" || databaseType === "chromadb") {

@@ -28,6 +28,8 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "vector-collection",
   "elasticsearch-index",
   "user-admin",
+  "dameng-users",
+  "dameng-roles",
   "saved-sql-file",
   "table-search-control",
   "load-more",

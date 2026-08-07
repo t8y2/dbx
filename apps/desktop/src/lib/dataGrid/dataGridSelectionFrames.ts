@@ -70,6 +70,17 @@ export function dataGridSelectionFrameKindAtCell(frames: readonly CellSelectionR
   return dataGridFrameIsMultiCell(frame) ? "range" : "single";
 }
 
+/**
+ * 是否用「一圈外框」代替逐格描边。框选热路径下只算一次，避免每个可见格再查 frame kind。
+ * sparse（frames 为空）与 1×1 单格均为 false。
+ */
+export function dataGridSelectionUsesOuterFrame(frames: readonly CellSelectionRange[]): boolean {
+  for (const frame of frames) {
+    if (dataGridFrameIsMultiCell(frame)) return true;
+  }
+  return false;
+}
+
 export interface DataGridSelectionEdgeFlags {
   top: boolean;
   right: boolean;
@@ -77,14 +88,52 @@ export interface DataGridSelectionEdgeFlags {
   left: boolean;
 }
 
+/** bitmask: top=1, right=2, bottom=4, left=8。不在外框上时返回 0。 */
+export type DataGridSelectionEdgeMask = number;
+
+export function dataGridSelectionEdgeMaskFromFlags(flags: DataGridSelectionEdgeFlags): DataGridSelectionEdgeMask {
+  return (flags.top ? 1 : 0) | (flags.right ? 2 : 0) | (flags.bottom ? 4 : 0) | (flags.left ? 8 : 0);
+}
+
+function edgeFlagsForFrame(frame: CellSelectionRange, rowIndex: number, colIndex: number): DataGridSelectionEdgeFlags | null {
+  if (rowIndex < frame.startRow || rowIndex > frame.endRow || colIndex < frame.startCol || colIndex > frame.endCol) return null;
+  return {
+    top: rowIndex === frame.startRow,
+    right: colIndex === frame.endCol,
+    bottom: rowIndex === frame.endRow,
+    left: colIndex === frame.startCol,
+  };
+}
+
 /** 单元格在选区外框上的边：相邻格不在任何 frame 内的那一侧即为外框边。
- * 不在任何 frame 内时返回 null。 */
+ * 不在任何 frame 内时返回 null。单 frame（框选）走边界比较，避免四次邻格探测。 */
 export function dataGridSelectionEdgeFlags(frames: readonly CellSelectionRange[], rowIndex: number, colIndex: number): DataGridSelectionEdgeFlags | null {
-  if (frames.length === 0 || !dataGridFrameContainsCell(frames, rowIndex, colIndex)) return null;
+  if (frames.length === 0) return null;
+  if (frames.length === 1) return edgeFlagsForFrame(frames[0]!, rowIndex, colIndex);
+  if (!dataGridFrameContainsCell(frames, rowIndex, colIndex)) return null;
   return {
     top: !dataGridFrameContainsCell(frames, rowIndex - 1, colIndex),
     right: !dataGridFrameContainsCell(frames, rowIndex, colIndex + 1),
     bottom: !dataGridFrameContainsCell(frames, rowIndex + 1, colIndex),
     left: !dataGridFrameContainsCell(frames, rowIndex, colIndex - 1),
   };
+}
+
+/** DOM 用：返回外框边 bitmask（0 = 不在外框上，或不需要外框）。仅多格 frame 的边界格非 0。 */
+export function dataGridSelectionEdgeMask(frames: readonly CellSelectionRange[], rowIndex: number, colIndex: number): DataGridSelectionEdgeMask {
+  if (frames.length === 0) return 0;
+  if (frames.length === 1) {
+    const frame = frames[0]!;
+    if (!dataGridFrameIsMultiCell(frame)) return 0;
+    const flags = edgeFlagsForFrame(frame, rowIndex, colIndex);
+    return flags ? dataGridSelectionEdgeMaskFromFlags(flags) : 0;
+  }
+  const frame = dataGridFrameAtCell(frames, rowIndex, colIndex);
+  if (!frame || !dataGridFrameIsMultiCell(frame)) return 0;
+  return dataGridSelectionEdgeMaskFromFlags({
+    top: !dataGridFrameContainsCell(frames, rowIndex - 1, colIndex),
+    right: !dataGridFrameContainsCell(frames, rowIndex, colIndex + 1),
+    bottom: !dataGridFrameContainsCell(frames, rowIndex + 1, colIndex),
+    left: !dataGridFrameContainsCell(frames, rowIndex, colIndex - 1),
+  });
 }

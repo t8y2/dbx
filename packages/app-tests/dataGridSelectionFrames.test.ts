@@ -4,7 +4,9 @@ import {
   dataGridFrameContainsCell,
   dataGridFrameCoversRow,
   dataGridSelectionEdgeFlags,
+  dataGridSelectionEdgeMask,
   dataGridSelectionFrameKindAtCell,
+  dataGridSelectionUsesOuterFrame,
   resolveDataGridSelectionFrames,
 } from "../../apps/desktop/src/lib/dataGrid/dataGridSelectionFrames.ts";
 
@@ -127,4 +129,23 @@ test("frame coverage drives row-number highlight", () => {
   assert.equal(dataGridFrameCoversRow(frames, 9), true);
   assert.equal(dataGridFrameCoversRow(frames, 5), false);
   assert.equal(dataGridFrameCoversRow([], 2), false);
+});
+
+test("outer-frame mode is true only when a multi-cell frame exists", () => {
+  assert.equal(dataGridSelectionUsesOuterFrame([{ startRow: 0, endRow: 2, startCol: 1, endCol: 3 }]), true);
+  assert.equal(dataGridSelectionUsesOuterFrame([{ startRow: 7, endRow: 7, startCol: 2, endCol: 2 }]), false);
+  assert.equal(dataGridSelectionUsesOuterFrame([]), false);
+});
+
+test("edge mask encodes outer borders for CSS class selection", () => {
+  const frames = [{ startRow: 2, endRow: 4, startCol: 1, endCol: 3 }];
+
+  // interior → 0
+  assert.equal(dataGridSelectionEdgeMask(frames, 3, 2), 0);
+  // top-left: top|left = 1|8 = 9
+  assert.equal(dataGridSelectionEdgeMask(frames, 2, 1), 9);
+  // bottom-right: right|bottom = 2|4 = 6
+  assert.equal(dataGridSelectionEdgeMask(frames, 4, 3), 6);
+  // single-cell frame never paints outer-frame classes
+  assert.equal(dataGridSelectionEdgeMask([{ startRow: 7, endRow: 7, startCol: 2, endCol: 2 }], 7, 2), 0);
 });

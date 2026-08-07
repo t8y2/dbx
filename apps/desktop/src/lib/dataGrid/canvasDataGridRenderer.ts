@@ -1,5 +1,5 @@
 import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
-import { dataGridFrameCoversRow, dataGridFrameIsMultiCell, dataGridSelectionFrameKindAtCell } from "@/lib/dataGrid/dataGridSelectionFrames";
+import { dataGridFrameCoversRow, dataGridFrameIsMultiCell, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame } from "@/lib/dataGrid/dataGridSelectionFrames";
 import type { CellSelectionRange } from "@/lib/dataGrid/gridSelection";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
@@ -320,6 +320,10 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     columnAligns,
     rightAlignedActionCell,
   } = options;
+  // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
+  const paintSelectionOuterFrame = dataGridSelectionUsesOuterFrame(selectionFrames);
+  const suppressAllSelectedCellBorders = selectionFrames.length > 0 && selectionFrames.every(dataGridFrameIsMultiCell);
+  const selectionRowCoverage = selectionFrames.length > 0;
   const fallbackRatio = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
   const { pixelWidth, pixelHeight, scaleX, scaleY } = resolveCanvasBackingStoreMetrics({
     width,
@@ -389,7 +393,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
     // 选区覆盖指示（Navicat 风格）：行落在选区范围内时行号淡色高亮；
     // 优先级低于行选中/状态色/活动行，与 DOM 的级联顺序一致
-    const rowInSelection = !rowSelectionVisual && selectionFrames.length > 0 && dataGridFrameCoversRow(selectionFrames, item.displayIndex);
+    const rowInSelection = !rowSelectionVisual && selectionRowCoverage && dataGridFrameCoversRow(selectionFrames, item.displayIndex);
     const rowNumberFill = rowSelectionVisual
       ? theme.rowNumberSelected
       : item.status === "draft"
@@ -453,10 +457,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
       const isDirtyCell = item.isDirtyCol[actualColIdx];
       const selectedFillVisual = rowSelectionVisual || selectedCell;
-      // Navicat 风格：多格范围选区内部零描边（末尾统一画一圈细外框）；
-      // 单个单元格或离散点选（Ctrl）保留细边框
-      const selectionFrameKind = selectedCell ? dataGridSelectionFrameKindAtCell(selectionFrames, item.displayIndex, visibleColIdx) : null;
-      const selectedBorderVisual = selectedCell && selectionFrameKind !== "range";
+      // Navicat 风格：多格范围内部零描边（末尾统一画外框）；单格 / Ctrl 点选保留细边框
+      const selectedBorderVisual = !selectedCell ? false : suppressAllSelectedCellBorders ? false : paintSelectionOuterFrame ? dataGridSelectionFrameKindAtCell(selectionFrames, item.displayIndex, visibleColIdx) !== "range" : true;
       const isSearchMatch = paintSearchMatches && searchMatchKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
       const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
       const clippedX = Math.max(drawX, rowNumberWidth);
@@ -618,8 +620,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
   // 选区外框：多格范围选区画一圈主题色细外框（1.5px，比单格的 1px 略粗），
   // 内部零描边（Navicat 风格）；1×1 单格外框已由逐格细边框覆盖，这里跳过
-  const multiCellFrames = selectionFrames.filter(dataGridFrameIsMultiCell);
-  if (multiCellFrames.length > 0) {
+  if (paintSelectionOuterFrame) {
     const frozenWidth = frozenColumnCount > 0 && frozenColumnCount <= renderedColumnWidths.length ? (offsets[frozenColumnCount] ?? 0) : 0;
     const frozenRight = rowNumberWidth + frozenWidth;
     // 列边缘的屏幕 x：冻结区内的边缘不随水平滚动，其余减去 scrollLeft
@@ -630,7 +631,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.save();
     ctx.strokeStyle = theme.cellSelectedSingleBorder;
     ctx.lineWidth = 1.5;
-    for (const frame of multiCellFrames) {
+    for (const frame of selectionFrames) {
+      if (!dataGridFrameIsMultiCell(frame)) continue;
       const minX = frame.startCol >= frozenColumnCount ? frozenRight : rowNumberWidth;
       const minRightX = frame.endCol + 1 > frozenColumnCount ? frozenRight : rowNumberWidth;
       const left = Math.min(Math.max(columnEdgeX(frame.startCol), minX), width);

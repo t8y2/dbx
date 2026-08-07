@@ -170,7 +170,7 @@ import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGri
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { summarizeSelection } from "@/lib/dataGrid/gridSelection";
-import { dataGridFrameCoversRow, dataGridSelectionEdgeFlags, dataGridSelectionFrameKindAtCell, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
+import { dataGridFrameCoversRow, dataGridSelectionEdgeMask, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
 import {
   createDataGridCellContextMenuItems,
   createDataGridColumnContextMenuItems,
@@ -2379,6 +2379,7 @@ function onScrollerScroll(e: Event) {
     clampGridScrollerBounds(target);
     updateDomGridVisibleItemsDuringScroll(target);
     syncHeaderScroll(e);
+    if (domGridScrollTop.value !== target.scrollTop) domGridScrollTop.value = target.scrollTop;
     recordScrollPosition({ top: target.scrollTop, left: target.scrollLeft });
     maybeCheckInfiniteScroll(target);
   } else {
@@ -3791,6 +3792,7 @@ const selection = useDataGridSelection({
 
 const {
   isSelectingAll,
+  isSelectingCells,
   selectedRange,
   selectedCells,
   selectedCellKeys,
@@ -3827,8 +3829,21 @@ const multiRowCount = computed(() => {
   return 1;
 });
 
-const selectionSummary = computed(() => (hasCellSelection.value ? summarizeSelection(selectedCells.value) : null));
+// 框选拖拽中不物化 selectedCells / 不做数值汇总（大选区下这是 DOM 卡顿主因）
+const selectionSummary = computed(() => {
+  if (!hasCellSelection.value) return null;
+  if (isSelectingCells.value) {
+    return {
+      cellCount: selectedCellCount.value,
+      rowCount: multiRowCount.value,
+      numericCount: 0,
+      sum: 0,
+    };
+  }
+  return summarizeSelection(selectedCells.value);
+});
 const selectionSummarySumText = computed(() => {
+  if (isSelectingCells.value) return "…";
   const summary = selectionSummary.value;
   if (!summary) return "0";
   const sum = Object.is(summary.sum, -0) ? 0 : summary.sum;
@@ -3848,10 +3863,25 @@ const selectionFramesData = computed(() =>
     rowCount: displayRowCount.value,
   }),
 );
+const selectionUsesOuterFrame = computed(() => dataGridSelectionUsesOuterFrame(selectionFramesData.value.frames));
+// DOM 框选拖拽：overlay 只画外框（与 canvas strokeRect 一致），填充仍走格子 cell-selected
+const domSelectionDragOverlayActive = computed(() => {
+  if (!isSelectingCells.value || dataGridRenderMode.value === "canvas") return false;
+  const range = selectedRange.value;
+  if (!range) return false;
+  return range.startRow !== range.endRow || range.startCol !== range.endCol;
+});
+const domGridScrollTop = ref(0);
 
 function selectionFrameKindForCell(rowIndex: number, visibleColIdx: number): "single" | "range" | null {
   const frames = selectionFramesData.value.frames;
   if (frames.length === 0) return null;
+  // 框选热路径：已确定是多格外框时，选中格必为 range，避免再扫 frames
+  if (selectionUsesOuterFrame.value && frames.length === 1) {
+    const frame = frames[0]!;
+    if (rowIndex < frame.startRow || rowIndex > frame.endRow || visibleColIdx < frame.startCol || visibleColIdx > frame.endCol) return null;
+    return "range";
+  }
   return dataGridSelectionFrameKindAtCell(frames, rowIndex, visibleColIdx);
 }
 
@@ -3864,25 +3894,48 @@ function rowNumberShowsSelectionTint(item: RowItem): boolean {
   return frames.length > 0 && dataGridFrameCoversRow(frames, item.displayIndex);
 }
 
-// 多格范围的外框用单元格四边的 inset 阴影拼出（跟着单元格走，冻结列/虚拟滚动都不错位）；
-// 1×1 单格由 cell-selected--single 的 outline 负责，这里跳过
-function selectionFrameStyleForCell(rowIndex: number, visibleColIdx: number): CSSProperties | undefined {
-  const frames = selectionFramesData.value.frames;
-  if (frames.length === 0 || selectionFrameKindForCell(rowIndex, visibleColIdx) !== "range") return undefined;
-  const flags = dataGridSelectionEdgeFlags(frames, rowIndex, visibleColIdx);
-  if (!flags) return undefined;
-  const shadows: string[] = [];
-  const frameColor = "var(--data-grid-cell-selected-single-border, var(--primary))";
-  if (flags.top) shadows.push(`inset 0 1.5px 0 0 ${frameColor}`);
-  if (flags.right) shadows.push(`inset -1.5px 0 0 0 ${frameColor}`);
-  if (flags.bottom) shadows.push(`inset 0 -1.5px 0 0 ${frameColor}`);
-  if (flags.left) shadows.push(`inset 1.5px 0 0 0 ${frameColor}`);
-  return shadows.length > 0 ? { boxShadow: shadows.join(", ") } : undefined;
+// 多格范围的外框：松手后用单元格 bitmask class；拖拽中改由 overlay 画一圈外框（与 canvas 一致，文字仍在格子里）
+function selectionFrameEdgeClass(rowIndex: number, visibleColIdx: number): string {
+  if (domSelectionDragOverlayActive.value || !selectionUsesOuterFrame.value) return "";
+  const mask = dataGridSelectionEdgeMask(selectionFramesData.value.frames, rowIndex, visibleColIdx);
+  return mask === 0 ? "" : `cell-sel-frame-${mask}`;
 }
 
+const domSelectionDragOverlayStyle = computed((): CSSProperties | undefined => {
+  if (!domSelectionDragOverlayActive.value) return undefined;
+  const range = selectedRange.value;
+  if (!range) return undefined;
+  const startCol = range.startCol;
+  const endCol = range.endCol;
+  const startFrozen = startCol < frozenColumnCount.value;
+  const endFrozen = endCol < frozenColumnCount.value;
+  const left = rowNumberWidth.value + (renderedColumnOffsets.value[startCol] ?? 0) - (startFrozen ? 0 : gridHorizontalScrollLeft.value);
+  const right = rowNumberWidth.value + (renderedColumnOffsets.value[endCol] ?? 0) + (renderedColumnWidths.value[endCol] ?? 0) - (endFrozen ? 0 : gridHorizontalScrollLeft.value);
+  const top = range.startRow * CANVAS_DATA_GRID_ROW_HEIGHT - domGridScrollTop.value;
+  const bottom = (range.endRow + 1) * CANVAS_DATA_GRID_ROW_HEIGHT - domGridScrollTop.value;
+  const viewportWidth = gridViewportWidth.value;
+  const scroller = gridScrollerElement();
+  const viewportHeight = scroller?.clientHeight ?? 0;
+  const clippedLeft = Math.max(rowNumberWidth.value, left);
+  const clippedTop = Math.max(0, top);
+  const clippedRight = viewportWidth > 0 ? Math.min(viewportWidth, right) : right;
+  const clippedBottom = viewportHeight > 0 ? Math.min(viewportHeight, bottom) : bottom;
+  const width = clippedRight - clippedLeft;
+  const height = clippedBottom - clippedTop;
+  if (width < 1 || height < 1) return undefined;
+  return {
+    left: `${clippedLeft}px`,
+    top: `${clippedTop}px`,
+    width: `${width}px`,
+    height: `${height}px`,
+  };
+});
+
 function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
-  quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
-  if (!isScrolling.value) hoveredDetailCell.value = { rowIndex, col: actualColIdx };
+  if (!isSelectingCells.value) {
+    quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
+    if (!isScrolling.value) hoveredDetailCell.value = { rowIndex, col: actualColIdx };
+  }
   extendCellSelection(rowIndex, visibleColIdx);
 }
 
@@ -5938,6 +5991,7 @@ function onTransposeCellContext(rowIndex: number, actualColIdx: number, event: M
 }
 
 watch([selectedRange, showCellDetail, isEditingDetail], () => {
+  if (isSelectingCells.value) return;
   const selectedCell = currentSelectedCellPosition();
   const target = linkedCellDetailTarget({
     isOpen: showCellDetail.value,
@@ -9514,177 +9568,182 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
 
               <!-- Virtual scrolled rows -->
-              <RecycleScroller
-                v-else-if="hasVisibleRows"
-                ref="scrollerRef"
-                class="data-grid-scroller dbx-data-grid-font-family flex-1 overflow-x-auto overscroll-none"
-                :class="{ 'is-scrolling': isScrolling, 'has-horizontal-scrollbar': hasGridHorizontalOverflow }"
-                :items="displayItems"
-                :item-size="26"
-                :buffer="600"
-                :skip-hover="true"
-                key-field="id"
-                @scroll="onScrollerScroll"
-                @wheel="onDomGridWheel"
-              >
-                <template #default="{ item }">
-                  <div
-                    class="data-grid-row flex border-b border-border h-6.5 w-(--total-w)"
-                    :class="{
-                      'data-grid-row--deleted opacity-70': item.isDeleted,
-                      'data-grid-row--new': item.isNew && !isRowActive(item.displayIndex),
-                      'data-grid-row--draft': item.isDraft && !isRowActive(item.displayIndex),
-                      'data-grid-row--striped': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
-                      'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
-                      'relative z-20 overflow-visible': editingCell?.rowId === item.id,
-                    }"
-                    :style="dataGridRowStyle(item)"
-                    :data-row-index="item.displayIndex"
-                  >
+              <div v-else-if="hasVisibleRows" class="relative min-h-0 flex-1">
+                <RecycleScroller
+                  ref="scrollerRef"
+                  class="data-grid-scroller dbx-data-grid-font-family h-full overflow-x-auto overscroll-none"
+                  :class="{ 'is-scrolling': isScrolling, 'has-horizontal-scrollbar': hasGridHorizontalOverflow }"
+                  :items="displayItems"
+                  :item-size="26"
+                  :buffer="600"
+                  :skip-hover="true"
+                  key-field="id"
+                  @scroll="onScrollerScroll"
+                  @wheel="onDomGridWheel"
+                >
+                  <template #default="{ item }">
                     <div
-                      class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10"
-                      :class="[rowNumberStatusClass(item), { 'data-grid-row-number--selected': isRowSelected(item.id), 'data-grid-row-number--in-selection': rowNumberShowsSelectionTint(item) }]"
-                      @mousedown="onRowNumberMouseDown(item, $event)"
-                      @dblclick.stop="toggleTranspose(item.displayIndex)"
-                      @contextmenu="onRowContext(item.id, item.displayIndex)"
-                    >
-                      {{ rowNumberText(item) }}
-                    </div>
-                    <div class="shrink-0" :style="{ width: `${horizontalColumnWindowBeforeWidth}px` }" />
-                    <div
-                      v-for="col in renderedGridColumns"
-                      :key="col.actualColIdx"
-                      class="data-grid-cell group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none inline-block items-center tabular-nums"
-                      :style="[renderedColumnStyle(col.visibleColIdx), selectionFrameStyleForCell(item.displayIndex, col.visibleColIdx)]"
+                      class="data-grid-row flex border-b border-border h-6.5 w-(--total-w)"
                       :class="{
-                        'data-grid-cell--frozen': col.visibleColIdx < frozenColumnCount,
-                        'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
-                        'text-right': columnAligns[col.visibleColIdx] === 'right',
-                        'text-muted-foreground italic': isNull(item.data[col.actualColIdx]),
-                        'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
-                        'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                        'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
-                        'cell-selected--single': selectionFrameKindForCell(item.displayIndex, col.visibleColIdx) === 'single' && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                        'cell-selected--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                        'cell-selected-dirty--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
-                        'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                        'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
-                        'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
-                        'cell-current-search-match': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
-                        'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
-                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
-                        'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
-                        'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx),
-                        'line-through': item.isDeleted,
-                        'overflow-visible z-20 border-r-transparent': editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx,
-                        'overflow-hidden': !(editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx),
+                        'data-grid-row--deleted opacity-70': item.isDeleted,
+                        'data-grid-row--new': item.isNew && !isRowActive(item.displayIndex),
+                        'data-grid-row--draft': item.isDraft && !isRowActive(item.displayIndex),
+                        'data-grid-row--striped': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
+                        'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
+                        'relative z-20 overflow-visible': editingCell?.rowId === item.id,
                       }"
-                      @mousedown="
-                        prepareDataCellMouseDown(item, col.actualColIdx);
-                        handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);
-                      "
-                      @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
-                      @mouseleave="onCellMouseleave(item.displayIndex, col.actualColIdx)"
-                      @dblclick="onDomCellDblClick(item, item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)"
-                      :data-visible-col-index="col.visibleColIdx"
-                      @contextmenu="onCellContext(item.id, item.displayIndex, col.actualColIdx, col.visibleColIdx, $event)"
+                      :style="dataGridRowStyle(item)"
+                      :data-row-index="item.displayIndex"
                     >
-                      <template v-if="editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx">
-                        <TemporalCellEditor
-                          v-if="temporalEditorConfigForColumn(col.actualColIdx)"
-                          v-model="editValue"
-                          :kind="temporalEditorConfigForColumn(col.actualColIdx)!.kind"
-                          :fraction-precision="temporalEditorConfigForColumn(col.actualColIdx)!.fractionPrecision"
-                          @cancel="cancelEdit"
-                          @commit="commitGridEdit"
-                        />
-                        <EnumCellEditor
-                          v-else-if="isBooleanGridCell(item, col.actualColIdx)"
-                          v-model="booleanEditorModelValue"
-                          :values="BOOLEAN_CELL_EDITOR_VALUES"
-                          :nullable="isBooleanGridColumnNullable(col.actualColIdx)"
-                          :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
-                          @cancel="cancelEdit"
-                          @commit="commitBooleanGridEdit"
-                        />
-                        <EnumCellEditor
-                          v-else-if="isEnumGridColumn(col.actualColIdx)"
-                          v-model="editValue"
-                          :values="enumValuesForGridColumn(col.actualColIdx)"
-                          :nullable="isEnumGridColumnNullable(col.actualColIdx)"
-                          :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
-                          @cancel="cancelEdit"
-                          @commit="commitGridEdit"
-                        />
-                        <textarea
-                          v-else-if="cellUsesExpandedEditor(item.id, col.actualColIdx)"
-                          v-model="editValue"
-                          data-expanded-cell-editor="true"
-                          rows="1"
-                          :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
-                          autocapitalize="off"
-                          autocorrect="off"
-                          spellcheck="false"
-                          class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-2.5 py-1 leading-[18px] outline-none z-10"
-                          @blur="commitEditFromCellBlur"
-                          @click.stop
-                          @focus="onCellEditTextareaInput"
-                          @input="onCellEditTextareaInput"
-                          @keydown.stop="onCellEditKeydown"
-                          @paste.stop="onCellEditTextareaPaste"
-                        />
-                        <input
-                          v-else
-                          v-model="editValue"
-                          :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
-                          autocapitalize="off"
-                          autocorrect="off"
-                          spellcheck="false"
-                          class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 leading-[22px] outline-none z-10"
-                          @blur="commitEditFromCellBlur"
-                          @click.stop
-                          @input="onCellEditTextareaInput"
-                          @keydown.stop="onCellEditKeydown"
-                          @paste.stop="onCellEditTextareaPaste"
-                        />
-                      </template>
-                      <template v-else>
-                        <template v-if="draftCellPlaceholder(item, col.actualColIdx)">
-                          <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(item, col.actualColIdx) }}</span>
+                      <div
+                        class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10"
+                        :class="[rowNumberStatusClass(item), { 'data-grid-row-number--selected': isRowSelected(item.id), 'data-grid-row-number--in-selection': rowNumberShowsSelectionTint(item) }]"
+                        @mousedown="onRowNumberMouseDown(item, $event)"
+                        @dblclick.stop="toggleTranspose(item.displayIndex)"
+                        @contextmenu="onRowContext(item.id, item.displayIndex)"
+                      >
+                        {{ rowNumberText(item) }}
+                      </div>
+                      <div class="shrink-0" :style="{ width: `${horizontalColumnWindowBeforeWidth}px` }" />
+                      <div
+                        v-for="col in renderedGridColumns"
+                        :key="col.actualColIdx"
+                        class="data-grid-cell group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none inline-block items-center tabular-nums"
+                        :style="renderedColumnStyle(col.visibleColIdx)"
+                        :class="[
+                          selectionFrameEdgeClass(item.displayIndex, col.visibleColIdx),
+                          {
+                            'data-grid-cell--frozen': col.visibleColIdx < frozenColumnCount,
+                            'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
+                            'text-right': columnAligns[col.visibleColIdx] === 'right',
+                            'text-muted-foreground italic': isNull(item.data[col.actualColIdx]),
+                            'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
+                            'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                            'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                            'cell-selected--single': !selectionUsesOuterFrame && selectionFrameKindForCell(item.displayIndex, col.visibleColIdx) === 'single' && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                            'cell-selected--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                            'cell-selected-dirty--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                            'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                            'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                            'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
+                            'cell-current-search-match': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
+                            'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
+                            'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
+                            'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
+                            'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx),
+                            'line-through': item.isDeleted,
+                            'overflow-visible z-20 border-r-transparent': editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx,
+                            'overflow-hidden': !(editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx),
+                          },
+                        ]"
+                        @mousedown="
+                          prepareDataCellMouseDown(item, col.actualColIdx);
+                          handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);
+                        "
+                        @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
+                        @mouseleave="onCellMouseleave(item.displayIndex, col.actualColIdx)"
+                        @dblclick="onDomCellDblClick(item, item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)"
+                        :data-visible-col-index="col.visibleColIdx"
+                        @contextmenu="onCellContext(item.id, item.displayIndex, col.actualColIdx, col.visibleColIdx, $event)"
+                      >
+                        <template v-if="editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx">
+                          <TemporalCellEditor
+                            v-if="temporalEditorConfigForColumn(col.actualColIdx)"
+                            v-model="editValue"
+                            :kind="temporalEditorConfigForColumn(col.actualColIdx)!.kind"
+                            :fraction-precision="temporalEditorConfigForColumn(col.actualColIdx)!.fractionPrecision"
+                            @cancel="cancelEdit"
+                            @commit="commitGridEdit"
+                          />
+                          <EnumCellEditor
+                            v-else-if="isBooleanGridCell(item, col.actualColIdx)"
+                            v-model="booleanEditorModelValue"
+                            :values="BOOLEAN_CELL_EDITOR_VALUES"
+                            :nullable="isBooleanGridColumnNullable(col.actualColIdx)"
+                            :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
+                            @cancel="cancelEdit"
+                            @commit="commitBooleanGridEdit"
+                          />
+                          <EnumCellEditor
+                            v-else-if="isEnumGridColumn(col.actualColIdx)"
+                            v-model="editValue"
+                            :values="enumValuesForGridColumn(col.actualColIdx)"
+                            :nullable="isEnumGridColumnNullable(col.actualColIdx)"
+                            :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
+                            @cancel="cancelEdit"
+                            @commit="commitGridEdit"
+                          />
+                          <textarea
+                            v-else-if="cellUsesExpandedEditor(item.id, col.actualColIdx)"
+                            v-model="editValue"
+                            data-expanded-cell-editor="true"
+                            rows="1"
+                            :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
+                            autocapitalize="off"
+                            autocorrect="off"
+                            spellcheck="false"
+                            class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-2.5 py-1 leading-[18px] outline-none z-10"
+                            @blur="commitEditFromCellBlur"
+                            @click.stop
+                            @focus="onCellEditTextareaInput"
+                            @input="onCellEditTextareaInput"
+                            @keydown.stop="onCellEditKeydown"
+                            @paste.stop="onCellEditTextareaPaste"
+                          />
+                          <input
+                            v-else
+                            v-model="editValue"
+                            :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
+                            autocapitalize="off"
+                            autocorrect="off"
+                            spellcheck="false"
+                            class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 leading-[22px] outline-none z-10"
+                            @blur="commitEditFromCellBlur"
+                            @click.stop
+                            @input="onCellEditTextareaInput"
+                            @keydown.stop="onCellEditKeydown"
+                            @paste.stop="onCellEditTextareaPaste"
+                          />
                         </template>
-                        <template v-else>{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</template>
-                        <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
-                          <LightDropdownMenu
-                            v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
-                            :items="binaryCellDownloadMenuItems"
-                            :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)"
-                            align="end"
-                            content-class="w-44"
-                            :match-trigger-width="false"
-                            @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)"
-                            @select="(mode: string) => downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode as BinaryCellDownloadMode)"
-                          >
-                            <template #trigger="{ open, toggle }">
-                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                <Upload class="h-3 w-3" />
-                              </button>
-                            </template>
-                          </LightDropdownMenu>
-                          <button
-                            class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                            :title="t('grid.cellDetails')"
-                            @mousedown.stop
-                            @click.stop="showCellDetailsForVisibleCell(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
-                          >
-                            <Info class="h-3 w-3" />
-                          </button>
-                        </div>
-                      </template>
+                        <template v-else>
+                          <template v-if="draftCellPlaceholder(item, col.actualColIdx)">
+                            <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(item, col.actualColIdx) }}</span>
+                          </template>
+                          <template v-else>{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</template>
+                          <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                            <LightDropdownMenu
+                              v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
+                              :items="binaryCellDownloadMenuItems"
+                              :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)"
+                              align="end"
+                              content-class="w-44"
+                              :match-trigger-width="false"
+                              @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)"
+                              @select="(mode: string) => downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode as BinaryCellDownloadMode)"
+                            >
+                              <template #trigger="{ open, toggle }">
+                                <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
+                                  <Upload class="h-3 w-3" />
+                                </button>
+                              </template>
+                            </LightDropdownMenu>
+                            <button
+                              class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                              :title="t('grid.cellDetails')"
+                              @mousedown.stop
+                              @click.stop="showCellDetailsForVisibleCell(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
+                            >
+                              <Info class="h-3 w-3" />
+                            </button>
+                          </div>
+                        </template>
+                      </div>
+                      <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.afterWidth}px` }" />
                     </div>
-                    <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.afterWidth}px` }" />
-                  </div>
-                </template>
-              </RecycleScroller>
+                  </template>
+                </RecycleScroller>
+                <div v-if="domSelectionDragOverlayStyle" class="data-grid-selection-drag-overlay pointer-events-none absolute z-20" :style="domSelectionDragOverlayStyle" />
+              </div>
               <!-- Infinite scroll loading indicator for RecycleScroller -->
               <div v-if="infiniteScrollEnabled && infiniteScrollLoading && !gridSurfaceBusy" class="flex items-center justify-center py-2 text-xs text-muted-foreground">
                 <Loader2 class="w-3 h-3 animate-spin mr-1" />
@@ -10904,6 +10963,87 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .cell-selected-dirty--sparse {
   outline: 1px solid var(--data-grid-cell-selected-single-border, var(--primary));
   outline-offset: -1px;
+}
+
+/* DOM 框选拖拽外框：与 canvas 一样只描 1.5px 外框；填充仍由格子上的 cell-selected 负责（文字在底色之上） */
+.data-grid-selection-drag-overlay {
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--data-grid-cell-selected-single-border, var(--primary));
+}
+
+/* 多格选区外框：bitmask class（top=1,right=2,bottom=4,left=8），避免框选时写 inline box-shadow */
+.cell-sel-frame-1 {
+  box-shadow: inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-2 {
+  box-shadow: inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-3 {
+  box-shadow:
+    inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-4 {
+  box-shadow: inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-5 {
+  box-shadow:
+    inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-6 {
+  box-shadow:
+    inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-7 {
+  box-shadow:
+    inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-8 {
+  box-shadow: inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-9 {
+  box-shadow:
+    inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-10 {
+  box-shadow:
+    inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-11 {
+  box-shadow:
+    inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-12 {
+  box-shadow:
+    inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-13 {
+  box-shadow:
+    inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-14 {
+  box-shadow:
+    inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
+}
+.cell-sel-frame-15 {
+  box-shadow:
+    inset 0 1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset -1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 0 -1.5px 0 0 var(--data-grid-cell-selected-single-border, var(--primary)),
+    inset 1.5px 0 0 0 var(--data-grid-cell-selected-single-border, var(--primary));
 }
 
 .ddl-code :deep(.ddl-kw) {

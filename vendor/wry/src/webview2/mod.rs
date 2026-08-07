@@ -22,7 +22,7 @@ use windows::{
     Globalization::*,
     Graphics::Gdi::*,
     System::{Com::*, LibraryLoader::GetModuleHandleW},
-    UI::{Input::KeyboardAndMouse::SetFocus, Shell::*, WindowsAndMessaging::*},
+    UI::{Input::KeyboardAndMouse::{SetFocus, VK_F6}, Shell::*, WindowsAndMessaging::*},
   },
 };
 
@@ -470,6 +470,32 @@ impl InnerWebView {
 
     // Webview handlers
     unsafe { Self::attach_handlers(hwnd, &webview, &mut attributes, &mut token, env)? };
+
+    // Swallow the WebView2 "Focus Next Pane" browser accelerator (F6 / Shift+F6).
+    // DBX has no F6 binding, and Chromium's focus cycling against the frameless
+    // Overlay-titlebar window can drop the compositor into a black screen
+    // (reproduced in both dev and packaged builds). Marking the key as handled
+    // stops the WebView from performing its default focus action.
+    unsafe {
+      let accelerator_key_handler = AcceleratorKeyPressedEventHandler::create(Box::new(
+        move |_, args| {
+          let Some(args) = args else { return Ok(()) };
+          let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+          args.KeyEventKind(&mut kind)?;
+          if kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+            || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+          {
+            let mut virtual_key = 0u32;
+            args.VirtualKey(&mut virtual_key)?;
+            if virtual_key == VK_F6.0 as u32 {
+              args.SetHandled(true)?;
+            }
+          }
+          Ok(())
+        },
+      ));
+      controller.add_AcceleratorKeyPressed(&accelerator_key_handler, &mut token)?;
+    }
 
     // IPC handler
     unsafe { Self::attach_ipc_handler(&webview, &mut attributes, &mut token)? };

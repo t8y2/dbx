@@ -15,7 +15,9 @@ dirs-sys = { path = "vendor/dirs-sys" }
 pageant = { path = "vendor/pageant" }
 # Wry 0.55 probes and creates WebView2 with a null browser folder. Pass the
 # bundled Fixed Runtime path explicitly so Windows 7 does not fall back to an
-# unavailable system Runtime.
+# unavailable system Runtime. The vendored copy also intercepts the WebView2
+# F6 "Focus Next Pane" accelerator to prevent a black screen on frameless
+# Overlay-titlebar windows (see vendor/wry/src/webview2/mod.rs).
 wry = { path = "vendor/wry" }
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
 postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }

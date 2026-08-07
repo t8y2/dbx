@@ -5934,7 +5934,7 @@ export default withEnglishFallback({
     applySuccess: "使用者操作已執行",
     applyFailed: "執行失敗：{message}",
     enableDdlAnyPrivHint: "提示：DM8 預設停用 DDL 的 ANY 權限授予（ENABLE_DDL_ANY_PRIV=0）。授 ANY 類權限請用 SYSDBA 執行 sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1) 開啟；授一般權限請確認目前帳號持有該權限的 ADMIN OPTION。",
-    anyPrivilegeDisabled: "ANY 類權限已被 DM8 停用（ENABLE_DDL_ANY_PRIV=0），無法授予或回收", 
+    anyPrivilegeDisabled: "ANY 類權限已被 DM8 停用（ENABLE_DDL_ANY_PRIV=0），無法授予或回收",
   },
   damengRoleAdmin: {
     title: "達夢角色",
@@ -5975,7 +5975,7 @@ export default withEnglishFallback({
     applySuccess: "角色操作已執行",
     applyFailed: "執行失敗：{message}",
     enableDdlAnyPrivHint: "提示：DM8 預設停用 DDL 的 ANY 權限授予（ENABLE_DDL_ANY_PRIV=0）。授 ANY 類權限請用 SYSDBA 執行 sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1) 開啟；授一般權限請確認目前帳號持有該權限的 ADMIN OPTION。",
-    anyPrivilegeDisabled: "ANY 類權限已被 DM8 停用（ENABLE_DDL_ANY_PRIV=0），無法授予或回收", 
+    anyPrivilegeDisabled: "ANY 類權限已被 DM8 停用（ENABLE_DDL_ANY_PRIV=0），無法授予或回收",
   },
   etcd: {
     prefixPlaceholder: "搜尋 Key 路徑，例如 /app/ 或 service",

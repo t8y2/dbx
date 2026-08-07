@@ -88,12 +88,12 @@ export type DamengUserGroup = "admin" | "auditor" | "security" | "system" | "oth
 
 export const DAMENG_USER_GROUPS: readonly DamengUserGroup[] = ["admin", "auditor", "security", "system", "other"];
 
-  /**
-   * Groups a username: the four system accounts map to their category; a regular
-   * user is grouped by the management roles they hold (DBA -> admin,
-   * DB_AUDIT_ADMIN -> auditor, DB_POLICY_ADMIN -> security), everything else to
-   * "other". Pass the user's directly granted roles (e.g. from DBA_ROLE_PRIVS).
-   */
+/**
+ * Groups a username: the four system accounts map to their category; a regular
+ * user is grouped by the management roles they hold (DBA -> admin,
+ * DB_AUDIT_ADMIN -> auditor, DB_POLICY_ADMIN -> security), everything else to
+ * "other". Pass the user's directly granted roles (e.g. from DBA_ROLE_PRIVS).
+ */
 export function damengUserGroup(username: string, grantedRoles?: Iterable<string>): DamengUserGroup {
   const normalized = username.trim().toUpperCase();
   const system = DAMENG_SYSTEM_USER_CATEGORIES[normalized];
@@ -167,7 +167,6 @@ export function isDamengSystemUser(username: string): boolean {
   return DAMENG_SYSTEM_USERS.some((systemUser) => systemUser === normalized);
 }
 
-
 /**
  * Whether the given connection user may ALTER USER (change password) for the
  * target user, following the DM (达梦) security model:
@@ -230,7 +229,7 @@ WHERE GRANTEE = ${quoteDamengString(user)}
 ORDER BY GRANTED_ROLE`;
 }
 
-  export function damengRoleGraphSql(): string {
+export function damengRoleGraphSql(): string {
   return `SELECT GRANTEE, GRANTED_ROLE FROM DBA_ROLE_PRIVS`;
 }
 

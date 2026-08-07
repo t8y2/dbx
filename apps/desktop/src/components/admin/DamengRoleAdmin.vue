@@ -97,9 +97,7 @@ const availableUsersForGrant = computed(() => {
 });
 const availablePrivilegesForGrant = computed(() => {
   const granted = new Set(grantedPrivileges.value.map((grant) => grant.privilege.toUpperCase()));
-  const catalog = systemPrivilegeMap.value
-    ? damengAvailableSystemPrivileges(DAMENG_SYSTEM_PRIVILEGES, systemPrivilegeMap.value)
-    : DAMENG_SYSTEM_PRIVILEGES;
+  const catalog = systemPrivilegeMap.value ? damengAvailableSystemPrivileges(DAMENG_SYSTEM_PRIVILEGES, systemPrivilegeMap.value) : DAMENG_SYSTEM_PRIVILEGES;
   return catalog.filter((privilege) => !granted.has(privilege.toUpperCase()));
 });
 const canCreateRole = computed(() => createRoleName.value.trim() !== "");
@@ -342,7 +340,6 @@ onMounted(() => {
               <Badge v-if="role.passwordRequired === 'YES'" variant="outline" class="h-5 px-1.5 text-[10px]">PWD</Badge>
               <Badge v-if="isDamengPredefinedRole(role.role)" variant="outline" class="h-5 border-amber-500/50 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">{{ t("damengRoleAdmin.builtinRole") }}</Badge>
             </div>
-
           </button>
           <div v-if="!loadingRoles && filteredRoles.length === 0" class="p-6 text-center text-xs text-muted-foreground">
             {{ t("damengRoleAdmin.emptyRoles") }}
@@ -357,7 +354,6 @@ onMounted(() => {
             <div class="flex items-center gap-2">
               <span class="truncate text-sm font-semibold">{{ selectedRole.role }}</span>
             </div>
-
           </div>
           <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="selectedIsBuiltinRole" :title="selectedIsBuiltinRole ? t('damengRoleAdmin.builtinRoleProtected') : ''" @click="previewDropRole">
             <Trash2 class="h-3.5 w-3.5" />
@@ -395,7 +391,14 @@ onMounted(() => {
                 <Badge v-if="isSystemMember(member.grantee)" variant="outline" class="h-5 border-amber-500/50 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">{{ t("damengRoleAdmin.systemUser") }}</Badge>
                 <Badge v-if="isDamengPredefinedRole(member.grantee)" variant="outline" class="h-5 border-amber-500/50 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">{{ t("damengRoleAdmin.builtinRole") }}</Badge>
                 <Badge v-if="member.adminOption" variant="outline" class="h-5 px-1.5 text-[10px]">ADMIN OPTION</Badge>
-                <Button size="sm" variant="ghost" class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive" :disabled="isSystemMember(member.grantee) || (selectedIsBuiltinRole && isDamengPredefinedRole(member.grantee))" :title="isSystemMember(member.grantee) ? t('damengRoleAdmin.systemUserProtected') : selectedIsBuiltinRole && isDamengPredefinedRole(member.grantee) ? t('damengRoleAdmin.builtinRoleProtected') : ''" @click="previewRevokeMember(member)">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
+                  :disabled="isSystemMember(member.grantee) || (selectedIsBuiltinRole && isDamengPredefinedRole(member.grantee))"
+                  :title="isSystemMember(member.grantee) ? t('damengRoleAdmin.systemUserProtected') : selectedIsBuiltinRole && isDamengPredefinedRole(member.grantee) ? t('damengRoleAdmin.builtinRoleProtected') : ''"
+                  @click="previewRevokeMember(member)"
+                >
                   <Trash2 class="h-3 w-3" />
                   {{ t("damengRoleAdmin.revokeFromUser") }}
                 </Button>
@@ -409,7 +412,14 @@ onMounted(() => {
           <div v-else>
             <div class="mb-2 flex items-center gap-2">
               <span class="text-xs font-medium">{{ t("damengRoleAdmin.grantedPrivileges") }} ({{ grantedPrivileges.length }})</span>
-              <Button size="sm" variant="outline" class="ml-auto h-7 gap-1 px-2 text-xs" :disabled="selectedIsBuiltinRole || availablePrivilegesForGrant.length === 0" :title="selectedIsBuiltinRole ? t('damengRoleAdmin.builtinRoleProtected') : availablePrivilegesForGrant.length === 0 ? t('damengRoleAdmin.noPrivilegesToGrant') : ''" @click="openGrantPrivilegeDialog">
+              <Button
+                size="sm"
+                variant="outline"
+                class="ml-auto h-7 gap-1 px-2 text-xs"
+                :disabled="selectedIsBuiltinRole || availablePrivilegesForGrant.length === 0"
+                :title="selectedIsBuiltinRole ? t('damengRoleAdmin.builtinRoleProtected') : availablePrivilegesForGrant.length === 0 ? t('damengRoleAdmin.noPrivilegesToGrant') : ''"
+                @click="openGrantPrivilegeDialog"
+              >
                 <UserRoundPlus class="h-3.5 w-3.5" />
                 {{ t("damengRoleAdmin.grantPrivilege") }}
               </Button>
@@ -419,7 +429,14 @@ onMounted(() => {
                 <ShieldCheck class="h-3.5 w-3.5 shrink-0 text-primary" />
                 <span class="min-w-0 flex-1 truncate font-mono text-xs">{{ grant.privilege }}</span>
                 <Badge v-if="grant.adminOption" variant="outline" class="h-5 px-1.5 text-[10px]">ADMIN OPTION</Badge>
-                <Button size="sm" variant="ghost" class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive" :disabled="selectedIsBuiltinRole || isPrivilegeGrantDisabled(grant.privilege)" :title="selectedIsBuiltinRole ? t('damengRoleAdmin.builtinRoleProtected') : isPrivilegeGrantDisabled(grant.privilege) ? t('damengRoleAdmin.anyPrivilegeDisabled') : ''" @click="previewRevokePrivilege(grant)">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
+                  :disabled="selectedIsBuiltinRole || isPrivilegeGrantDisabled(grant.privilege)"
+                  :title="selectedIsBuiltinRole ? t('damengRoleAdmin.builtinRoleProtected') : isPrivilegeGrantDisabled(grant.privilege) ? t('damengRoleAdmin.anyPrivilegeDisabled') : ''"
+                  @click="previewRevokePrivilege(grant)"
+                >
                   <Trash2 class="h-3 w-3" />
                   {{ t("damengRoleAdmin.revokePrivilege") }}
                 </Button>

@@ -3086,7 +3086,7 @@ export default withEnglishFallback({
     applySuccess: "ユーザー操作を実行しました",
     applyFailed: "実行に失敗しました: {message}",
     enableDdlAnyPrivHint: "ヒント: DM8はデフォルトでDDL ANY権限の付与を無効にしています（ENABLE_DDL_ANY_PRIV=0）。ANY系権限を付与するにはSYSDBAで実行: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1)。ANY以外の権限は、現在のアカウントがその権限のADMIN OPTIONを持っている必要があります。",
-    anyPrivilegeDisabled: "ANY系権限はDM8で無効化されています（ENABLE_DDL_ANY_PRIV=0）ため、付与・取り消しはできません", 
+    anyPrivilegeDisabled: "ANY系権限はDM8で無効化されています（ENABLE_DDL_ANY_PRIV=0）ため、付与・取り消しはできません",
   },
   damengRoleAdmin: {
     title: "Dameng ロール",
@@ -3127,7 +3127,7 @@ export default withEnglishFallback({
     applySuccess: "ロール操作を実行しました",
     applyFailed: "実行に失敗しました: {message}",
     enableDdlAnyPrivHint: "ヒント: DM8はデフォルトでDDL ANY権限の付与を無効にしています（ENABLE_DDL_ANY_PRIV=0）。ANY系権限を付与するにはSYSDBAで実行: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1)。ANY以外の権限は、現在のアカウントがその権限のADMIN OPTIONを持っている必要があります。",
-    anyPrivilegeDisabled: "ANY系権限はDM8で無効化されています（ENABLE_DDL_ANY_PRIV=0）ため、付与・取り消しはできません", 
+    anyPrivilegeDisabled: "ANY系権限はDM8で無効化されています（ENABLE_DDL_ANY_PRIV=0）ため、付与・取り消しはできません",
   },
   objects: {
     all: "すべて",

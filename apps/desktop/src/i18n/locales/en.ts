@@ -3181,7 +3181,7 @@ export default {
     applySuccess: "User operation applied",
     applyFailed: "Execution failed: {message}",
     enableDdlAnyPrivHint: "Hint: DM8 disables granting DDL ANY privileges by default (ENABLE_DDL_ANY_PRIV=0). To grant ANY-type privileges, run as SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). For non-ANY privileges, make sure the current account holds the ADMIN OPTION for that privilege.",
-    anyPrivilegeDisabled: "ANY-type privileges are disabled by DM8 (ENABLE_DDL_ANY_PRIV=0) and cannot be granted or revoked", 
+    anyPrivilegeDisabled: "ANY-type privileges are disabled by DM8 (ENABLE_DDL_ANY_PRIV=0) and cannot be granted or revoked",
   },
   damengRoleAdmin: {
     title: "Dameng Roles",
@@ -3222,7 +3222,7 @@ export default {
     applySuccess: "Role operation applied",
     applyFailed: "Execution failed: {message}",
     enableDdlAnyPrivHint: "Hint: DM8 disables granting DDL ANY privileges by default (ENABLE_DDL_ANY_PRIV=0). To grant ANY-type privileges, run as SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). For non-ANY privileges, make sure the current account holds the ADMIN OPTION for that privilege.",
-    anyPrivilegeDisabled: "ANY-type privileges are disabled by DM8 (ENABLE_DDL_ANY_PRIV=0) and cannot be granted or revoked", 
+    anyPrivilegeDisabled: "ANY-type privileges are disabled by DM8 (ENABLE_DDL_ANY_PRIV=0) and cannot be granted or revoked",
   },
   objects: {
     all: "All",

@@ -3025,8 +3025,9 @@ export default withEnglishFallback({
     applySql: "Executar SQL",
     applySuccess: "Operação de usuário aplicada",
     applyFailed: "Falha na execução: {message}",
-    enableDdlAnyPrivHint: "Dica: o DM8 desabilita a concessão de privilégios ANY de DDL por padrão (ENABLE_DDL_ANY_PRIV=0). Para conceder privilégios ANY, execute como SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Para privilégios não ANY, certifique-se de que a conta atual tenha a ADMIN OPTION desse privilégio.",
-    anyPrivilegeDisabled: "Privilégios do tipo ANY estão desabilitados pelo DM8 (ENABLE_DDL_ANY_PRIV=0) e não podem ser concedidos ou revogados", 
+    enableDdlAnyPrivHint:
+      "Dica: o DM8 desabilita a concessão de privilégios ANY de DDL por padrão (ENABLE_DDL_ANY_PRIV=0). Para conceder privilégios ANY, execute como SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Para privilégios não ANY, certifique-se de que a conta atual tenha a ADMIN OPTION desse privilégio.",
+    anyPrivilegeDisabled: "Privilégios do tipo ANY estão desabilitados pelo DM8 (ENABLE_DDL_ANY_PRIV=0) e não podem ser concedidos ou revogados",
   },
   damengRoleAdmin: {
     title: "Funções Dameng",
@@ -3066,8 +3067,9 @@ export default withEnglishFallback({
     applySql: "Executar SQL",
     applySuccess: "Operação de função aplicada",
     applyFailed: "Falha na execução: {message}",
-    enableDdlAnyPrivHint: "Dica: o DM8 desabilita a concessão de privilégios ANY de DDL por padrão (ENABLE_DDL_ANY_PRIV=0). Para conceder privilégios ANY, execute como SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Para privilégios não ANY, certifique-se de que a conta atual tenha a ADMIN OPTION desse privilégio.",
-    anyPrivilegeDisabled: "Privilégios do tipo ANY estão desabilitados pelo DM8 (ENABLE_DDL_ANY_PRIV=0) e não podem ser concedidos ou revogados", 
+    enableDdlAnyPrivHint:
+      "Dica: o DM8 desabilita a concessão de privilégios ANY de DDL por padrão (ENABLE_DDL_ANY_PRIV=0). Para conceder privilégios ANY, execute como SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Para privilégios não ANY, certifique-se de que a conta atual tenha a ADMIN OPTION desse privilégio.",
+    anyPrivilegeDisabled: "Privilégios do tipo ANY estão desabilitados pelo DM8 (ENABLE_DDL_ANY_PRIV=0) e não podem ser concedidos ou revogados",
   },
   objects: {
     all: "Todos",

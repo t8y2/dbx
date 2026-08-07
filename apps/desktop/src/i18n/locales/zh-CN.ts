@@ -3105,7 +3105,7 @@ export default withEnglishFallback({
     applySuccess: "用户操作已执行",
     applyFailed: "执行失败：{message}",
     enableDdlAnyPrivHint: "提示：DM8 默认禁用 DDL 的 ANY 权限授予（ENABLE_DDL_ANY_PRIV=0）。授 ANY 类权限请用 SYSDBA 执行 sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1) 开启；授普通权限请确认当前账号持有该权限的 ADMIN OPTION。",
-    anyPrivilegeDisabled: "ANY 类权限已被 DM8 禁用（ENABLE_DDL_ANY_PRIV=0），无法授予或回收", 
+    anyPrivilegeDisabled: "ANY 类权限已被 DM8 禁用（ENABLE_DDL_ANY_PRIV=0），无法授予或回收",
   },
   damengRoleAdmin: {
     title: "达梦角色",
@@ -3146,7 +3146,7 @@ export default withEnglishFallback({
     applySuccess: "角色操作已执行",
     applyFailed: "执行失败：{message}",
     enableDdlAnyPrivHint: "提示：DM8 默认禁用 DDL 的 ANY 权限授予（ENABLE_DDL_ANY_PRIV=0）。授 ANY 类权限请用 SYSDBA 执行 sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1) 开启；授普通权限请确认当前账号持有该权限的 ADMIN OPTION。",
-    anyPrivilegeDisabled: "ANY 类权限已被 DM8 禁用（ENABLE_DDL_ANY_PRIV=0），无法授予或回收", 
+    anyPrivilegeDisabled: "ANY 类权限已被 DM8 禁用（ENABLE_DDL_ANY_PRIV=0），无法授予或回收",
   },
   objects: {
     all: "全部",

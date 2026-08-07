@@ -3031,7 +3031,7 @@ export default withEnglishFallback({
     applySuccess: "사용자 작업이 실행되었습니다",
     applyFailed: "실행 실패: {message}",
     enableDdlAnyPrivHint: "힌트: DM8은 기본적으로 DDL ANY 권한 부여를 비활성화합니다(ENABLE_DDL_ANY_PRIV=0). ANY 권한을 부여하려면 SYSDBA로 실행: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). ANY가 아닌 권한은 현재 계정에 해당 권한의 ADMIN OPTION이 있어야 합니다.",
-    anyPrivilegeDisabled: "ANY 유형 권한은 DM8에서 비활성화되어(ENABLE_DDL_ANY_PRIV=0) 부여하거나 회수할 수 없습니다", 
+    anyPrivilegeDisabled: "ANY 유형 권한은 DM8에서 비활성화되어(ENABLE_DDL_ANY_PRIV=0) 부여하거나 회수할 수 없습니다",
   },
   damengRoleAdmin: {
     title: "Dameng 역할",
@@ -3072,7 +3072,7 @@ export default withEnglishFallback({
     applySuccess: "역할 작업이 실행되었습니다",
     applyFailed: "실행 실패: {message}",
     enableDdlAnyPrivHint: "힌트: DM8은 기본적으로 DDL ANY 권한 부여를 비활성화합니다(ENABLE_DDL_ANY_PRIV=0). ANY 권한을 부여하려면 SYSDBA로 실행: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). ANY가 아닌 권한은 현재 계정에 해당 권한의 ADMIN OPTION이 있어야 합니다.",
-    anyPrivilegeDisabled: "ANY 유형 권한은 DM8에서 비활성화되어(ENABLE_DDL_ANY_PRIV=0) 부여하거나 회수할 수 없습니다", 
+    anyPrivilegeDisabled: "ANY 유형 권한은 DM8에서 비활성화되어(ENABLE_DDL_ANY_PRIV=0) 부여하거나 회수할 수 없습니다",
   },
   objects: {
     all: "전체",

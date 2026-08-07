@@ -58,7 +58,7 @@ import {
   damengEnableDdlAnyPrivSql,
   isDamengAnyPrivilege,
   parseDamengEnableDdlAnyPriv,
-  } from "@/lib/database/damengPrincipalAdmin";
+} from "@/lib/database/damengPrincipalAdmin";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -99,15 +99,12 @@ const collapsedGroups = ref<Record<string, boolean>>({});
 
 function groupLabel(group: DamengUserGroup): string {
   if (group === "other") return t("damengUserAdmin.groupOther");
-  const key =
-    "damengUserAdmin.systemUser" + group.charAt(0).toUpperCase() + group.slice(1);
+  const key = "damengUserAdmin.systemUser" + group.charAt(0).toUpperCase() + group.slice(1);
   return t(key);
 }
 
 function usersInGroup(group: DamengUserGroup): DamengUser[] {
-  return filteredUsers.value.filter(
-    (user) => damengUserGroup(user.username, userRoleGrants.value.get(user.username.trim().toUpperCase())) === group,
-  );
+  return filteredUsers.value.filter((user) => damengUserGroup(user.username, userRoleGrants.value.get(user.username.trim().toUpperCase())) === group);
 }
 
 function toggleGroup(group: DamengUserGroup) {
@@ -142,25 +139,19 @@ const selectedIsSystemUser = computed(() => !!selectedUser.value && isDamengSyst
  * Whether the current connection user is allowed to change the selected
  * user's password, following the DM security model (see canDamengAlterUserPassword).
  */
-const canAlterPasswordForSelected = computed(() =>
-  canDamengAlterUserPassword(props.connection.username, selectedUser.value?.username),
-);
+const canAlterPasswordForSelected = computed(() => canDamengAlterUserPassword(props.connection.username, selectedUser.value?.username));
 
 const selectedUserCategory = computed(() => (selectedUser.value ? damengSystemUserCategory(selectedUser.value.username) : undefined));
 const selectedUserCategoryLabel = computed(() => {
   if (!selectedUserCategory.value) return "";
-  const key =
-    "damengUserAdmin.systemUser" +
-    selectedUserCategory.value.charAt(0).toUpperCase() +
-    selectedUserCategory.value.slice(1);
+  const key = "damengUserAdmin.systemUser" + selectedUserCategory.value.charAt(0).toUpperCase() + selectedUserCategory.value.slice(1);
   return t(key);
 });
 
 function userCategoryLabel(username: string): string {
   const category = damengSystemUserCategory(username);
   if (!category) return "";
-  const key =
-    "damengUserAdmin.systemUser" + category.charAt(0).toUpperCase() + category.slice(1);
+  const key = "damengUserAdmin.systemUser" + category.charAt(0).toUpperCase() + category.slice(1);
   return t(key);
 }
 const availableRolesForGrant = computed(() => {
@@ -172,9 +163,7 @@ const availableRolesForGrant = computed(() => {
 });
 const availablePrivilegesForGrant = computed(() => {
   const granted = new Set(grantedPrivileges.value.map((grant) => grant.privilege.toUpperCase()));
-  const catalog = systemPrivilegeMap.value
-    ? damengAvailableSystemPrivileges(DAMENG_SYSTEM_PRIVILEGES, systemPrivilegeMap.value)
-    : DAMENG_SYSTEM_PRIVILEGES;
+  const catalog = systemPrivilegeMap.value ? damengAvailableSystemPrivileges(DAMENG_SYSTEM_PRIVILEGES, systemPrivilegeMap.value) : DAMENG_SYSTEM_PRIVILEGES;
   return catalog.filter((privilege) => !granted.has(privilege.toUpperCase()));
 });
 const canCreateUser = computed(() => createUsername.value.trim() !== "" && createPassword.value !== "");
@@ -511,7 +500,14 @@ onMounted(() => {
                 <span class="ml-auto text-[10px] opacity-70">{{ usersInGroup(group).length }}</span>
               </button>
               <div v-if="!collapsedGroups[group]">
-                <button v-for="user in usersInGroup(group)" :key="user.username" type="button" class="mb-1 w-full rounded border px-2 py-2 text-left text-xs transition hover:bg-accent" :class="selectedUsername === user.username ? 'border-primary bg-primary/10' : 'border-transparent'" @click="selectUser(user)">
+                <button
+                  v-for="user in usersInGroup(group)"
+                  :key="user.username"
+                  type="button"
+                  class="mb-1 w-full rounded border px-2 py-2 text-left text-xs transition hover:bg-accent"
+                  :class="selectedUsername === user.username ? 'border-primary bg-primary/10' : 'border-transparent'"
+                  @click="selectUser(user)"
+                >
                   <div class="flex items-center gap-2">
                     <span class="min-w-0 flex-1 truncate font-medium">{{ user.username }}</span>
                     <Badge v-if="userCategoryLabel(user.username)" variant="outline" class="h-5 border-amber-500/50 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">{{ userCategoryLabel(user.username) }}</Badge>
@@ -538,9 +534,7 @@ onMounted(() => {
               <Badge v-else variant="outline" class="h-5 px-1.5 text-[10px]">{{ t("damengUserAdmin.open") }}</Badge>
               <Badge v-if="selectedUserCategoryLabel" variant="outline" class="h-5 border-amber-500/50 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">{{ selectedUserCategoryLabel }}</Badge>
             </div>
-            <div class="truncate text-xs text-muted-foreground">
-              {{ t("damengUserAdmin.defaultTablespace") }}: {{ selectedUser.defaultTablespace || "-" }} · {{ t("damengUserAdmin.created") }}: {{ selectedUser.created || "-" }}
-            </div>
+            <div class="truncate text-xs text-muted-foreground">{{ t("damengUserAdmin.defaultTablespace") }}: {{ selectedUser.defaultTablespace || "-" }} · {{ t("damengUserAdmin.created") }}: {{ selectedUser.created || "-" }}</div>
           </div>
           <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="!canAlterPasswordForSelected" :title="canAlterPasswordForSelected ? '' : t('damengUserAdmin.cannotChangePassword')" @click="openChangePasswordDialog">
             <KeyRound class="h-3.5 w-3.5" />
@@ -575,7 +569,14 @@ onMounted(() => {
           <div v-else-if="detailTab === 'roles'">
             <div class="mb-2 flex items-center gap-2">
               <span class="text-xs font-medium">{{ t("damengUserAdmin.grantedRoles") }} ({{ grantedRoles.length }})</span>
-              <Button size="sm" variant="outline" class="ml-auto h-7 gap-1 px-2 text-xs" :disabled="selectedIsSystemUser || availableRolesForGrant.length === 0" :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : availableRolesForGrant.length === 0 ? t('damengUserAdmin.noRolesToGrant') : ''" @click="openGrantRoleDialog">
+              <Button
+                size="sm"
+                variant="outline"
+                class="ml-auto h-7 gap-1 px-2 text-xs"
+                :disabled="selectedIsSystemUser || availableRolesForGrant.length === 0"
+                :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : availableRolesForGrant.length === 0 ? t('damengUserAdmin.noRolesToGrant') : ''"
+                @click="openGrantRoleDialog"
+              >
                 <UserRoundPlus class="h-3.5 w-3.5" />
                 {{ t("damengUserAdmin.grantRole") }}
               </Button>
@@ -587,7 +588,15 @@ onMounted(() => {
                 <Badge v-if="grant.adminOption" variant="outline" class="h-5 px-1.5 text-[10px]">ADMIN OPTION</Badge>
                 <Badge v-if="isDamengPredefinedRole(grant.grantedRole)" variant="outline" class="h-5 border-amber-500/50 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">{{ t("damengUserAdmin.builtinRole") }}</Badge>
                 <Badge v-if="grant.inherited" variant="secondary" class="h-5 px-1.5 text-[10px]" :title="grant.via">{{ t("damengUserAdmin.inheritedFrom", { via: grant.via ?? "" }) }}</Badge>
-                <Button v-if="!grant.inherited" size="sm" variant="ghost" class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive" :disabled="selectedIsSystemUser || isDamengPredefinedRole(grant.grantedRole)" :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : isDamengPredefinedRole(grant.grantedRole) ? t('damengUserAdmin.builtinRoleProtected') : ''" @click="previewRevokeRole(grant)">
+                <Button
+                  v-if="!grant.inherited"
+                  size="sm"
+                  variant="ghost"
+                  class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
+                  :disabled="selectedIsSystemUser || isDamengPredefinedRole(grant.grantedRole)"
+                  :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : isDamengPredefinedRole(grant.grantedRole) ? t('damengUserAdmin.builtinRoleProtected') : ''"
+                  @click="previewRevokeRole(grant)"
+                >
                   <Trash2 class="h-3 w-3" />
                   {{ t("damengUserAdmin.revokeRole") }}
                 </Button>
@@ -601,7 +610,14 @@ onMounted(() => {
           <div v-else>
             <div class="mb-2 flex items-center gap-2">
               <span class="text-xs font-medium">{{ t("damengUserAdmin.grantedPrivileges") }} ({{ grantedPrivileges.length }})</span>
-              <Button size="sm" variant="outline" class="ml-auto h-7 gap-1 px-2 text-xs" :disabled="selectedIsSystemUser || availablePrivilegesForGrant.length === 0" :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : availablePrivilegesForGrant.length === 0 ? t('damengUserAdmin.noPrivilegesToGrant') : ''" @click="openGrantPrivilegeDialog">
+              <Button
+                size="sm"
+                variant="outline"
+                class="ml-auto h-7 gap-1 px-2 text-xs"
+                :disabled="selectedIsSystemUser || availablePrivilegesForGrant.length === 0"
+                :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : availablePrivilegesForGrant.length === 0 ? t('damengUserAdmin.noPrivilegesToGrant') : ''"
+                @click="openGrantPrivilegeDialog"
+              >
                 <UserRoundPlus class="h-3.5 w-3.5" />
                 {{ t("damengUserAdmin.grantPrivilege") }}
               </Button>
@@ -611,7 +627,14 @@ onMounted(() => {
                 <ShieldCheck class="h-3.5 w-3.5 shrink-0 text-primary" />
                 <span class="min-w-0 flex-1 truncate font-mono text-xs">{{ grant.privilege }}</span>
                 <Badge v-if="grant.adminOption" variant="outline" class="h-5 px-1.5 text-[10px]">ADMIN OPTION</Badge>
-                <Button size="sm" variant="ghost" class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive" :disabled="selectedIsSystemUser || isPrivilegeGrantDisabled(grant.privilege)" :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : isPrivilegeGrantDisabled(grant.privilege) ? t('damengUserAdmin.anyPrivilegeDisabled') : ''" @click="previewRevokePrivilege(grant)">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
+                  :disabled="selectedIsSystemUser || isPrivilegeGrantDisabled(grant.privilege)"
+                  :title="selectedIsSystemUser ? t('damengUserAdmin.systemUserProtected') : isPrivilegeGrantDisabled(grant.privilege) ? t('damengUserAdmin.anyPrivilegeDisabled') : ''"
+                  @click="previewRevokePrivilege(grant)"
+                >
                   <Trash2 class="h-3 w-3" />
                   {{ t("damengUserAdmin.revokePrivilege") }}
                 </Button>

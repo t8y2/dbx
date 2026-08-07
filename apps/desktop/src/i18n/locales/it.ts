@@ -3023,8 +3023,9 @@ export default withEnglishFallback({
     applySql: "Esegui SQL",
     applySuccess: "Operazione utente applicata",
     applyFailed: "Esecuzione non riuscita: {message}",
-    enableDdlAnyPrivHint: "Suggerimento: DM8 disabilita la concessione dei privilegi ANY DDL per impostazione predefinita (ENABLE_DDL_ANY_PRIV=0). Per concedere privilegi ANY, esegui come SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Per privilegi non ANY, assicurati che l'account corrente abbia l'ADMIN OPTION per quel privilegio.",
-    anyPrivilegeDisabled: "I privilegi di tipo ANY sono disabilitati da DM8 (ENABLE_DDL_ANY_PRIV=0) e non possono essere concessi o revocati", 
+    enableDdlAnyPrivHint:
+      "Suggerimento: DM8 disabilita la concessione dei privilegi ANY DDL per impostazione predefinita (ENABLE_DDL_ANY_PRIV=0). Per concedere privilegi ANY, esegui come SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Per privilegi non ANY, assicurati che l'account corrente abbia l'ADMIN OPTION per quel privilegio.",
+    anyPrivilegeDisabled: "I privilegi di tipo ANY sono disabilitati da DM8 (ENABLE_DDL_ANY_PRIV=0) e non possono essere concessi o revocati",
   },
   damengRoleAdmin: {
     title: "Ruoli Dameng",
@@ -3064,8 +3065,9 @@ export default withEnglishFallback({
     applySql: "Esegui SQL",
     applySuccess: "Operazione ruolo applicata",
     applyFailed: "Esecuzione non riuscita: {message}",
-    enableDdlAnyPrivHint: "Suggerimento: DM8 disabilita la concessione dei privilegi ANY DDL per impostazione predefinita (ENABLE_DDL_ANY_PRIV=0). Per concedere privilegi ANY, esegui come SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Per privilegi non ANY, assicurati che l'account corrente abbia l'ADMIN OPTION per quel privilegio.",
-    anyPrivilegeDisabled: "I privilegi di tipo ANY sono disabilitati da DM8 (ENABLE_DDL_ANY_PRIV=0) e non possono essere concessi o revocati", 
+    enableDdlAnyPrivHint:
+      "Suggerimento: DM8 disabilita la concessione dei privilegi ANY DDL per impostazione predefinita (ENABLE_DDL_ANY_PRIV=0). Per concedere privilegi ANY, esegui come SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Per privilegi non ANY, assicurati che l'account corrente abbia l'ADMIN OPTION per quel privilegio.",
+    anyPrivilegeDisabled: "I privilegi di tipo ANY sono disabilitati da DM8 (ENABLE_DDL_ANY_PRIV=0) e non possono essere concessi o revocati",
   },
   objects: {
     all: "Tutti",

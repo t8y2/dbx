@@ -2598,6 +2598,10 @@ mod tests {
         TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
+    use super::{
+        object_types_include_custom_types, object_types_include_relations, object_types_include_routines,
+        object_types_only_custom_types, supports_pg_custom_type_objects,
+    };
     use crate::connection::{AppState, PoolKind};
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use crate::storage::Storage;
@@ -2768,6 +2772,73 @@ mod tests {
         server.await.unwrap();
         drop(state);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn supports_pg_custom_type_objects_only_for_verified_family() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss, DatabaseType::Gaussdb] {
+            assert!(supports_pg_custom_type_objects(&test_connection_config(db_type)), "{db_type:?}");
+        }
+        for db_type in [
+            DatabaseType::Kingbase,
+            DatabaseType::Vastbase,
+            DatabaseType::Highgo,
+            DatabaseType::Uxdb,
+            DatabaseType::Kwdb,
+            DatabaseType::Redshift,
+        ] {
+            assert!(!supports_pg_custom_type_objects(&test_connection_config(db_type)), "{db_type:?}");
+        }
+    }
+
+    #[test]
+    fn object_types_include_custom_types_only_when_unfiltered_or_type_requested() {
+        assert!(object_types_include_custom_types(None));
+        assert!(object_types_include_custom_types(Some(&["TYPE".to_string()])));
+        assert!(object_types_include_custom_types(Some(&["type_body".to_string()])));
+        assert!(object_types_include_custom_types(Some(&["table".to_string(), "type".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["TABLE".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["FUNCTION".to_string()])));
+    }
+
+    #[test]
+    fn object_types_select_independent_catalog_branches() {
+        assert!(object_types_include_relations(None));
+        assert!(object_types_include_routines(None));
+        assert!(object_types_include_custom_types(None));
+
+        assert!(object_types_include_relations(Some(&["TABLE".to_string()])));
+        assert!(object_types_include_relations(Some(&["VIEW".to_string()])));
+        assert!(object_types_include_relations(Some(&["SEQUENCE".to_string()])));
+        assert!(!object_types_include_routines(Some(&["TABLE".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["TABLE".to_string()])));
+
+        assert!(object_types_include_routines(Some(&["PROCEDURE".to_string()])));
+        assert!(object_types_include_routines(Some(&["FUNCTION".to_string()])));
+        assert!(!object_types_include_relations(Some(&["FUNCTION".to_string()])));
+        assert!(!object_types_include_custom_types(Some(&["FUNCTION".to_string()])));
+
+        assert!(object_types_include_custom_types(Some(&["TYPE".to_string()])));
+        assert!(!object_types_include_relations(Some(&["TYPE".to_string()])));
+        assert!(!object_types_include_routines(Some(&["TYPE".to_string()])));
+
+        // The sidebar type group sends the TYPE_BODY companion kind as well;
+        // it must select the type branch alone, never relations or routines.
+        let type_group = ["TYPE".to_string(), "TYPE_BODY".to_string()];
+        assert!(object_types_include_custom_types(Some(&type_group)));
+        assert!(!object_types_include_relations(Some(&type_group)));
+        assert!(!object_types_include_routines(Some(&type_group)));
+    }
+
+    #[test]
+    fn object_types_only_custom_types_detects_dedicated_type_requests() {
+        assert!(!object_types_only_custom_types(None));
+        assert!(object_types_only_custom_types(Some(&["TYPE".to_string()])));
+        assert!(object_types_only_custom_types(Some(&["TYPE".to_string(), "TYPE_BODY".to_string()])));
+        assert!(object_types_only_custom_types(Some(&["type_body".to_string()])));
+        assert!(!object_types_only_custom_types(Some(&["TYPE".to_string(), "TABLE".to_string()])));
+        assert!(!object_types_only_custom_types(Some(&["TABLE".to_string()])));
+        assert!(!object_types_only_custom_types(Some(&[])));
     }
 
     #[test]
@@ -4760,10 +4831,19 @@ async fn list_objects_once(
                     return Ok(unpaged_object_list(objects));
                 }
                 Ok(objects) => {
+                    if object_types_only_custom_types(object_types) {
+                        // A dedicated type request: the agent is authoritative.
+                        // The native fallback never lists types, so running it
+                        // would turn a real empty schema or a catalog error into
+                        // a misleading empty type group.
+                        return Ok(unpaged_object_list(objects));
+                    }
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list)
+                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                    .await
+                                    .map(unpaged_object_list)
                             }
                             Ok(None) => return Ok(unpaged_object_list(objects)),
                             Err(error) => {
@@ -4780,18 +4860,25 @@ async fn list_objects_once(
                     return Ok(unpaged_object_list(objects));
                 }
                 Err(agent_error) => {
+                    if object_types_only_custom_types(object_types) {
+                        // Preserve the type catalog error instead of masking it
+                        // with a relation/function fallback that cannot serve
+                        // user-defined types.
+                        return Err(agent_error);
+                    }
                     if let Some(config) = fallback_config.as_ref() {
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list).map_err(
-                                |fallback_error| {
+                            return db::postgres::list_objects(&pool, schema, true, true, false)
+                                .await
+                                .map(unpaged_object_list)
+                                .map_err(|fallback_error| {
                                     crate::db::agent_driver::append_legacy_error_context(
                                         &agent_error,
                                         &format!("Native PostgreSQL metadata fallback failed: {fallback_error}"),
                                     )
-                                },
-                            );
+                                });
                         }
                     }
                     return Err(agent_error);
@@ -4826,7 +4913,15 @@ async fn list_objects_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(unpaged_object_list)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(unpaged_object_list),
+        PoolKind::Postgres(p) => {
+            let include_relations = object_types_include_relations(object_types);
+            let include_routines = object_types_include_routines(object_types);
+            let include_custom_types = db_config.as_ref().is_some_and(supports_pg_custom_type_objects)
+                && object_types_include_custom_types(object_types);
+            db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types)
+                .await
+                .map(unpaged_object_list)
+        }
         _ => {
             drop(connections);
             Ok(unpaged_object_list(
@@ -4893,7 +4988,9 @@ async fn list_completion_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema).await.map(filter_completion_objects)
+                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                    .await
+                                    .map(filter_completion_objects)
                             }
                             Ok(None) => objects,
                             Err(error) => {
@@ -4916,7 +5013,7 @@ async fn list_completion_objects_once(
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema)
+                            return db::postgres::list_objects(&pool, schema, true, true, false)
                                 .await
                                 .map(filter_completion_objects)
                                 .map_err(|fallback_error| {
@@ -4948,7 +5045,9 @@ async fn list_completion_objects_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(filter_completion_objects)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(filter_completion_objects),
+        PoolKind::Postgres(p) => {
+            db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
+        }
         PoolKind::SqlServer(_) => {
             drop(connections);
             let outcome =
@@ -6223,6 +6322,52 @@ fn is_native_postgres_config(config: &ConnectionConfig) -> bool {
 
 fn is_cloudberry_config(config: &ConnectionConfig) -> bool {
     matches!(config.driver_profile.as_deref(), Some("cloudberry"))
+}
+
+/// Whether a native PostgreSQL connection should list user-defined types.
+///
+/// Only databases with a verified `pg_type` catalog contract are enabled.
+/// Other PG-protocol connections (Redshift, QuestDB, Cloudberry, KWDB, ...)
+/// keep the legacy object list even though they share `PoolKind::Postgres`.
+fn supports_pg_custom_type_objects(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Postgres | DatabaseType::OpenGauss | DatabaseType::Gaussdb)
+}
+
+/// Whether a typed object-list request needs the pg_class relation branch.
+///
+/// `None` means the caller wants the full object list (object browser “all
+/// objects” view), so every branch is selected. Group loads only request their
+/// own kinds (e.g. `["TABLE"]`), which skips the other catalog scans entirely.
+fn object_types_include_relations(object_types: Option<&[String]>) -> bool {
+    object_types.is_none_or(|types| {
+        types.iter().any(|t| {
+            matches!(
+                t.to_ascii_uppercase().as_str(),
+                "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "SEQUENCE" | "FOREIGN_TABLE" | "PARTITIONED_TABLE"
+            )
+        })
+    })
+}
+
+fn object_types_include_routines(object_types: Option<&[String]>) -> bool {
+    object_types
+        .is_none_or(|types| types.iter().any(|t| matches!(t.to_ascii_uppercase().as_str(), "PROCEDURE" | "FUNCTION")))
+}
+
+fn object_types_include_custom_types(object_types: Option<&[String]>) -> bool {
+    object_types
+        .is_none_or(|types| types.iter().any(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY")))
+}
+
+/// Whether the object-type filter exclusively asks for user-defined types.
+///
+/// Used to keep agent errors visible: the native PostgreSQL fallback never
+/// lists custom types, so running it for a dedicated type request would mask a
+/// real catalog failure as an empty type group.
+fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
+    object_types.is_some_and(|types| {
+        !types.is_empty() && types.iter().all(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY"))
+    })
 }
 
 fn is_default_oracle_agent_config(config: &ConnectionConfig) -> bool {

@@ -2985,17 +2985,61 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool, ha
      WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow"
 }
 
+/// SQL for listing user-defined types in one schema.
+///
+/// Only explicitly created types are returned: base types (b), standalone
+/// composite types (c), domains (d), enums (e), ranges (r) and multiranges (m).
+/// Relation auto-generated row types (table/view/materialized view/foreign
+/// table/partitioned table) are excluded via `typrelid = 0 OR relkind = 'c'`,
+/// and array companion types are excluded via `typelem = 0`. The type branch
+/// has no usable timestamp/stat columns, so created_at/updated_at are always
+/// NULL. Column order must match the relation and routine branches.
+fn list_object_custom_types_sql() -> &'static str {
+    "SELECT t.typname AS object_name, \
+       'TYPE' AS object_type, \
+       d.description AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       NULL::text AS signature, \
+       5 AS sort_order \
+     FROM pg_catalog.pg_type t \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
+     LEFT JOIN pg_catalog.pg_description d \
+       ON d.objoid = t.oid \
+      AND d.classoid = 'pg_catalog.pg_type'::regclass \
+      AND d.objsubid = 0 \
+     WHERE n.nspname = $1 \
+       AND t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm') \
+       AND t.typelem = 0 \
+       AND (t.typrelid = 0 OR c.relkind = 'c')"
+}
+
 fn list_objects_sql(
     include_timestamps: bool,
     has_proc_prokind: bool,
     has_proc_prosp: bool,
     has_function_identity_arguments: bool,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
 ) -> String {
-    let sql = format!(
-        "{} UNION ALL {} ORDER BY sort_order, object_name",
-        list_object_relations_sql(include_timestamps),
-        list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp)
-    );
+    let mut parts: Vec<String> = Vec::new();
+    if include_relations {
+        parts.push(list_object_relations_sql(include_timestamps).to_string());
+    }
+    if include_routines {
+        parts.push(list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp).to_string());
+    }
+    if include_custom_types {
+        parts.push(list_object_custom_types_sql().to_string());
+    }
+    let mut sql = parts.join(" UNION ALL ");
+    if !parts.is_empty() {
+        sql = format!("{sql} ORDER BY sort_order, object_name");
+    }
     if has_function_identity_arguments {
         sql
     } else {
@@ -3061,18 +3105,49 @@ async fn list_objects_rows(
     has_proc_prokind: bool,
     has_proc_prosp: bool,
     has_function_identity_arguments: bool,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
 ) -> Result<Vec<Row>, String> {
-    let sql = list_objects_sql(include_timestamps, has_proc_prokind, has_proc_prosp, has_function_identity_arguments);
+    let sql = list_objects_sql(
+        include_timestamps,
+        has_proc_prokind,
+        has_proc_prosp,
+        has_function_identity_arguments,
+        include_relations,
+        include_routines,
+        include_custom_types,
+    );
+    if sql.is_empty() {
+        // No branch was selected (e.g. an object_types filter the catalog
+        // cannot serve); skip the round-trip instead of executing empty SQL.
+        return Ok(Vec::new());
+    }
     postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
 }
 
-pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
+pub async fn list_objects(
+    pool: &Pool,
+    schema: &str,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
+) -> Result<Vec<ObjectInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
-    // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
-    let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
-    let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+    // Routine catalog probes are only needed when the routine branch runs.
+    // Skipping them for relation/type-only requests avoids three extra
+    // pg_proc/pg_attribute round-trips and keeps compatible catalogs that lack
+    // prokind/prosp from breaking a plain type listing.
+    let (has_proc_prokind, has_proc_prosp, has_function_identity_arguments) = if include_routines {
+        let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+        // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
+        // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
+        let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
+        let has_function_identity_arguments = postgres_has_function_identity_arguments(&client).await?;
+        (has_proc_prokind, has_proc_prosp, has_function_identity_arguments)
+    } else {
+        (false, false, false)
+    };
     let rows = match list_objects_rows(
         &client,
         schema,
@@ -3080,6 +3155,9 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
         has_proc_prokind,
         has_proc_prosp,
         has_function_identity_arguments,
+        include_relations,
+        include_routines,
+        include_custom_types,
     )
     .await
     {
@@ -3093,6 +3171,9 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
                 has_proc_prokind,
                 has_proc_prosp,
                 has_function_identity_arguments,
+                include_relations,
+                include_routines,
+                include_custom_types,
             )
             .await
             {
@@ -5891,6 +5972,108 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires DBX_TEST_GAUSSDB_URL pointing at a writable GaussDB database"]
+    async fn gaussdb_list_custom_types_excludes_relation_row_types_and_arrays() {
+        let url = std::env::var("DBX_TEST_GAUSSDB_URL").expect("DBX_TEST_GAUSSDB_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect gaussdb");
+        let schema = format!("dbx_types_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let address_type = format!("{schema_ident}.address");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip text)")).await?;
+            execute_query(&pool, &format!("COMMENT ON TYPE {status_type} IS '订单状态'")).await?;
+            execute_query(
+                &pool,
+                &format!("CREATE TABLE {orders_table} (id bigint, state {status_type}, ship_to {address_type})"),
+            )
+            .await?;
+            let custom = list_objects(&pool, &schema, false, false, true).await?;
+            let all = list_objects(&pool, &schema, true, true, true).await?;
+            Ok::<_, String>((custom, all))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (custom, all) = exercise.expect("exercise gaussdb custom type listing");
+
+        // GaussDB supports enum and composite user types but not domains.
+        let mut type_names: Vec<&str> = custom.iter().map(|o| o.name.as_str()).collect();
+        type_names.sort_unstable();
+        assert_eq!(type_names, vec!["address", "status"], "custom types = {custom:?}");
+        for object in &custom {
+            assert_eq!(object.object_type, "TYPE");
+            assert_eq!(object.schema.as_deref(), Some(schema.as_str()));
+        }
+        let status = custom.iter().find(|o| o.name == "status").expect("status type");
+        assert_eq!(status.comment.as_deref(), Some("订单状态"), "type comment was lost: {custom:?}");
+
+        let all_names: Vec<&str> = all.iter().map(|o| o.name.as_str()).collect();
+        assert!(all_names.contains(&"orders"), "table missing from full listing: {all:?}");
+        assert!(
+            all_names.iter().all(|name| !name.starts_with('_')),
+            "auto-generated array companions leaked into the listing: {all:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_list_custom_types_excludes_relation_row_types_and_arrays() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_types_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let status_type = format!("{schema_ident}.status");
+        let email_domain = format!("{schema_ident}.email");
+        let address_type = format!("{schema_ident}.address");
+        let orders_table = format!("{schema_ident}.orders");
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            execute_query(&pool, &format!("CREATE TYPE {status_type} AS ENUM ('draft', 'published')")).await?;
+            execute_query(&pool, &format!("CREATE DOMAIN {email_domain} AS text CHECK (VALUE ~ '.+@.+')")).await?;
+            execute_query(&pool, &format!("CREATE TYPE {address_type} AS (city text, zip text)")).await?;
+            execute_query(
+                &pool,
+                &format!("CREATE TABLE {orders_table} (id bigint, state {status_type}, ship_to {address_type})"),
+            )
+            .await?;
+            let custom = list_objects(&pool, &schema, false, false, true).await?;
+            let all = list_objects(&pool, &schema, true, true, true).await?;
+            Ok::<_, String>((custom, all))
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        let (custom, all) = exercise.expect("exercise custom type listing");
+
+        // The type-only request returns exactly the user-created enum, domain
+        // and composite type, sorted by name. The table's auto-generated row
+        // type (orders) and the array companions (_status, _email, _address)
+        // must stay out.
+        let mut type_names: Vec<&str> = custom.iter().map(|o| o.name.as_str()).collect();
+        type_names.sort_unstable();
+        assert_eq!(type_names, vec!["address", "email", "status"], "custom types = {custom:?}");
+        for object in &custom {
+            assert_eq!(object.object_type, "TYPE");
+            assert_eq!(object.schema.as_deref(), Some(schema.as_str()));
+        }
+
+        let all_names: Vec<&str> = all.iter().map(|o| o.name.as_str()).collect();
+        assert!(all_names.contains(&"orders"), "table missing from full listing: {all:?}");
+        assert!(
+            all_names.iter().all(|name| !name.starts_with('_')),
+            "auto-generated array companions leaked into the listing: {all:?}"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL 18 database"]
     async fn postgres_custom_type_fallback_refreshes_stale_cached_metadata() {
         let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
@@ -7024,7 +7207,7 @@ mod tests {
 
     #[test]
     fn list_objects_sql_includes_routines() {
-        let sql = list_objects_sql(true, true, false, true);
+        let sql = list_objects_sql(true, true, false, true, true, true, false);
         assert!(sql.contains("pg_catalog.pg_class"));
         assert!(sql.contains("pg_catalog.pg_proc"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
@@ -7037,11 +7220,100 @@ mod tests {
         assert!(sql.contains("pg_xact_commit_timestamp"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_includes_custom_types_when_enabled() {
+        let sql = list_objects_sql(true, true, false, true, true, true, true);
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(sql.contains("pg_catalog.pg_class"));
+        assert!(sql.contains("pg_catalog.pg_description"));
+        assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"));
+        assert!(sql.contains("t.typelem = 0"));
+        assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
+        assert!(sql.contains("'TYPE' AS object_type"));
+        assert!(sql.contains("5 AS sort_order"));
+        assert!(sql.contains("n.nspname = $1"));
+    }
+
+    #[test]
+    fn list_objects_sql_omits_custom_types_when_disabled() {
+        let sql = list_objects_sql(true, true, false, true, true, true, false);
+        assert!(!sql.contains("pg_type"));
+        assert!(!sql.contains("t.typtype"));
+    }
+
+    #[test]
+    fn list_objects_sql_type_only_skips_relations_and_routines() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("pg_catalog.pg_type"));
+        assert!(!sql.contains("FROM pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_stat_file"));
+        assert!(!sql.contains("pg_get_function_identity_arguments"));
+    }
+
+    #[test]
+    fn list_objects_sql_table_only_skips_routines_and_custom_types() {
+        let sql = list_objects_sql(true, true, false, true, true, false, false);
+        assert!(sql.contains("pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_routine_only_skips_relations_and_custom_types() {
+        let sql = list_objects_sql(true, true, false, true, false, true, false);
+        assert!(sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_sql_empty_scope_produces_no_sql() {
+        let sql = list_objects_sql(true, true, false, true, false, false, false);
+        assert!(sql.is_empty());
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_branch_in_both_timestamp_variants() {
+        // The pg_type branch carries the same filters whether the timestamp
+        // query or the timestamp fallback query is used.
+        for sql in [
+            list_objects_sql(true, true, false, true, false, false, true),
+            list_objects_sql(false, true, false, true, false, false, true),
+        ] {
+            assert!(sql.contains("pg_catalog.pg_type"));
+            assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"));
+            assert!(sql.contains("t.typelem = 0"));
+            assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
+            assert!(sql.contains("'TYPE' AS object_type"));
+        }
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_keeps_comment_join_semantics() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("d.objoid = t.oid"));
+        assert!(sql.contains("d.classoid = 'pg_catalog.pg_type'::regclass"));
+        assert!(sql.contains("d.objsubid = 0"));
+        assert!(sql.contains("d.description AS object_comment"));
+    }
+
+    #[test]
+    fn list_objects_sql_custom_types_uses_null_timestamps() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true);
+        assert!(sql.contains("NULL::text AS created_at"));
+        assert!(sql.contains("NULL::text AS updated_at"));
+        assert!(sql.contains("NULL::text AS parent_schema"));
+        assert!(sql.contains("NULL::text AS parent_name"));
+        assert!(sql.contains("NULL::text AS signature"));
     }
 
     #[test]
     fn list_objects_sql_without_timestamps_omits_stat_file() {
-        let sql = list_objects_sql(false, true, false, true);
+        let sql = list_objects_sql(false, true, false, true, true, true, false);
         assert!(!sql.contains("pg_stat_file"));
         assert!(sql.contains("NULL::text AS created_at"));
         assert!(sql.contains("NULL::text AS updated_at"));
@@ -7049,7 +7321,7 @@ mod tests {
 
     #[test]
     fn redshift_compatible_list_objects_sql_uses_legacy_argument_formatter() {
-        let sql = list_objects_sql(false, false, false, false);
+        let sql = list_objects_sql(false, false, false, false, true, true, false);
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(!sql.contains("pg_get_function_identity_arguments"));
     }
@@ -7120,31 +7392,31 @@ mod tests {
 
     #[test]
     fn both_list_objects_sql_variants_use_parameter() {
-        assert!(list_objects_sql(true, true, true, true).contains("$1"));
-        assert!(list_objects_sql(false, true, true, true).contains("$1"));
-        assert!(list_objects_sql(true, true, false, true).contains("$1"));
-        assert!(list_objects_sql(false, true, false, true).contains("$1"));
-        assert!(list_objects_sql(true, false, true, true).contains("$1"));
-        assert!(list_objects_sql(false, false, true, true).contains("$1"));
-        assert!(list_objects_sql(true, false, false, true).contains("$1"));
-        assert!(list_objects_sql(false, false, false, true).contains("$1"));
+        assert!(list_objects_sql(true, true, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, true, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, false, true, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, false, true, true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, false, false, true, true, true, false).contains("$1"));
     }
 
     #[test]
     fn both_list_objects_sql_variants_include_pg_proc() {
-        assert!(list_objects_sql(true, true, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, true, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false, true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false, false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false, false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, true, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, false, true, true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, false, true, true, true, false).contains("pg_catalog.pg_proc"));
     }
 
     #[test]
     fn legacy_list_objects_sql_avoids_pg11_proc_kind_column() {
-        let sql = list_objects_sql(true, false, false, true);
+        let sql = list_objects_sql(true, false, false, true, true, true, false);
         assert!(!sql.contains("p.prokind"));
         assert!(!sql.contains("p.prosp"));
         assert!(sql.contains("NOT p.proisagg"));
@@ -7156,7 +7428,7 @@ mod tests {
 
     #[test]
     fn gaussdb_compatible_list_objects_sql_uses_prosp_when_prokind_is_missing() {
-        let sql = list_objects_sql(true, false, true, true);
+        let sql = list_objects_sql(true, false, true, true, true, true, false);
         assert!(!sql.contains("p.prokind"));
         assert!(sql.contains("CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type"));
         assert!(sql.contains("CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order"));
@@ -7167,7 +7439,7 @@ mod tests {
 
     #[test]
     fn gaussdb_compatible_list_objects_sql_uses_prosp_with_prokind_when_available() {
-        let sql = list_objects_sql(true, true, true, true);
+        let sql = list_objects_sql(true, true, true, true, true, true, false);
         assert!(
             sql.contains("CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type")
         );

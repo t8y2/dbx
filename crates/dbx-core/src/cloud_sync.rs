@@ -1418,6 +1418,8 @@ mod tests {
                 pi_agent_cli_env: Default::default(),
                 opencode_cli_path: None,
                 opencode_cli_env: Default::default(),
+                cursor_cli_path: None,
+                cursor_cli_env: Default::default(),
             },
         }
     }
@@ -2245,23 +2247,33 @@ mod tests {
         cfg.config.model = "openai/gpt-5.4-mini".to_string();
         cfg.config.opencode_cli_path = Some("/opt/homebrew/bin/opencode".to_string());
         cfg.config.opencode_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        let mut cursor_cfg = make_test_config("cursor-synced", false);
+        cursor_cfg.config.provider = crate::ai::AiProvider::CursorCli;
+        cursor_cfg.config.model = "composer-2.5".to_string();
+        cursor_cfg.config.cursor_cli_path = Some("~/.local/bin/agent".to_string());
+        cursor_cfg.config.cursor_cli_env.insert("NO_PROXY".to_string(), "localhost".to_string());
         let payload = SensitiveSyncPayload {
             connection_secrets: vec![],
-            ai_configs: Some(vec![cfg]),
+            ai_configs: Some(vec![cfg, cursor_cfg]),
             ai_config: None,
             tunnel_profiles: None,
         };
         apply_sensitive_payload(&storage, &payload).await.unwrap();
         let loaded = storage.load_ai_configs().await.unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "synced");
-        assert!(matches!(loaded[0].config.provider, crate::ai::AiProvider::OpenCodeCli));
-        assert_eq!(loaded[0].config.model, "openai/gpt-5.4-mini");
-        assert_eq!(loaded[0].config.opencode_cli_path.as_deref(), Some("/opt/homebrew/bin/opencode"));
+        assert_eq!(loaded.len(), 2);
+        let opencode = loaded.iter().find(|item| item.name == "synced").unwrap();
+        assert!(matches!(opencode.config.provider, crate::ai::AiProvider::OpenCodeCli));
+        assert_eq!(opencode.config.model, "openai/gpt-5.4-mini");
+        assert_eq!(opencode.config.opencode_cli_path.as_deref(), Some("/opt/homebrew/bin/opencode"));
         assert_eq!(
-            loaded[0].config.opencode_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            opencode.config.opencode_cli_env.get("HTTPS_PROXY").map(String::as_str),
             Some("http://127.0.0.1:7890")
         );
+        let cursor = loaded.iter().find(|item| item.name == "cursor-synced").unwrap();
+        assert!(matches!(cursor.config.provider, crate::ai::AiProvider::CursorCli));
+        assert_eq!(cursor.config.model, "composer-2.5");
+        assert_eq!(cursor.config.cursor_cli_path.as_deref(), Some("~/.local/bin/agent"));
+        assert_eq!(cursor.config.cursor_cli_env.get("NO_PROXY").map(String::as_str), Some("localhost"));
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 
 import { createApp, nextTick, ref } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
-import { createI18n } from "vue-i18n";
+import i18n from "@/i18n";
 import Input from "@/components/ui/input/Input.vue";
 
 const mountedApps: Array<ReturnType<typeof createApp>> = [];
@@ -17,20 +17,7 @@ async function mountInput(template: string) {
     },
     template,
   });
-  app.use(
-    createI18n({
-      legacy: false,
-      locale: "en",
-      messages: {
-        en: {
-          common: {
-            increase: "Increase",
-            decrease: "Decrease",
-          },
-        },
-      },
-    }),
-  );
+  app.use(i18n);
   app.mount(host);
   mountedApps.push(app);
   await nextTick();

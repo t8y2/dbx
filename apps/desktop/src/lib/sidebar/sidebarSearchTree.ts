@@ -3,23 +3,20 @@ import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sideb
 
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
 
-const normalizedLabelCache = new WeakMap<TreeNode, { label: string; normalized: string }>();
-
 function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null) {
   const lm = matchLabel(label);
   if (!comment) return lm;
-  const cm = matchLabel(comment.toLowerCase());
+  const cm = matchLabel(comment);
   if (lm && cm) return lm.score >= cm.score ? lm : cm;
   return lm ?? cm;
 }
 
 function normalizedLabel(node: TreeNode): string {
-  const cached = normalizedLabelCache.get(node);
-  if (cached?.label === node.label) return cached.normalized;
-
-  const normalized = node.label.toLowerCase();
-  normalizedLabelCache.set(node, { label: node.label, normalized });
-  return normalized;
+  // Keep the original case. The matcher lowercases internally for comparison;
+  // preserving case here lets it tokenize camelCase labels ("camelCaseTable"
+  // -> "camel" | "Case" | "Table") instead of treating them as one lowercase
+  // blob.
+  return node.label;
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {

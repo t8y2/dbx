@@ -5,6 +5,12 @@ export function hasExistingColumnTypeChange(columns: readonly EditableStructureC
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }
 
+const POSTGRES_SERIAL_PSEUDO_TYPES = new Set(["smallserial", "serial", "bigserial"]);
+
+function withPostgresArrayTypes(types: readonly string[]): string[] {
+  return [...types, ...types.filter((type) => !POSTGRES_SERIAL_PSEUDO_TYPES.has(type)).map((type) => `${type}[]`)];
+}
+
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
   mysql: [
     "tinyint",
@@ -58,7 +64,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "multipolygon",
     "geometrycollection",
   ],
-  postgres: [
+  postgres: withPostgresArrayTypes([
     "smallint",
     "int2",
     "integer",
@@ -122,7 +128,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "tstzrange",
     "daterange",
     "oid",
-  ],
+  ]),
   sqlite: ["integer", "real", "text", "blob", "numeric"],
   rqlite: ["integer", "real", "text", "blob", "numeric"],
   turso: ["integer", "real", "text", "blob", "numeric"],
@@ -1161,7 +1167,7 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
   } else if (_dbType === "manticoresearch") {
     return key !== "bit" && key !== "float_vector";
   } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "uxdb" || _dbType === "vastbase" || _dbType === "kingbase") {
-    return POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+    return key.endsWith("[]") || POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
   } else if (isOracleLikeStructureType(_dbType)) {
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);

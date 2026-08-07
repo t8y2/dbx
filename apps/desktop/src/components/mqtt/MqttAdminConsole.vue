@@ -109,7 +109,7 @@ async function handleToggleEnabled(config: MqttSavedTopic) {
 }
 
 async function handleDelete(config: MqttSavedTopic) {
-  if (!window.confirm(`确定要删除订阅配置“${config.topic}”吗？`)) return;
+  if (!window.confirm(t("connection.mqttDeleteSubscriptionConfirm", { topic: config.topic }))) return;
   try {
     if (subscribedTopics.value.some(([topic]) => topic === config.topic)) await mqttUnsubscribe(props.connectionId, config.topic);
     await mqttDeleteTopicConfig(props.connectionId, config.topic);
@@ -152,35 +152,37 @@ function validTopicFilter(topic: string): boolean {
 async function saveSubscription() {
   const topic = formTopic.value.trim();
   if (!validTopicFilter(topic)) {
-    error.value = "Topic Filter 格式无效：+ 必须独占一个层级，# 必须位于最后一个层级。";
+    error.value = t("connection.mqttSubscriptionTopicFilterInvalid");
     return;
   }
   if (savedTopics.value.some((config) => config.topic === topic && config.topic !== editingTopic.value)) {
-    error.value = "该 Topic Filter 已经存在。";
+    error.value = t("connection.mqttSubscriptionTopicFilterDuplicate");
     return;
   }
   if (formNoLocal.value && !mqtt5.value) {
-    error.value = "MQTT 3.x 不支持禁止本地转发，请切换到 MQTT 5.0。";
+    error.value = t("connection.mqttSubscriptionNoLocalProtocolError");
     return;
   }
 
   savingSubscription.value = true;
   error.value = null;
+  const previousTopic = editingTopic.value;
+  const topicChanged = previousTopic != null && previousTopic !== topic;
+  const previousWasActive = previousTopic != null && subscribedTopics.value.some(([current]) => current === previousTopic);
   try {
-    if (editingTopic.value && editingTopic.value !== topic) {
-      if (subscribedTopics.value.some(([current]) => current === editingTopic.value)) await mqttUnsubscribe(props.connectionId, editingTopic.value);
-      await mqttDeleteTopicConfig(props.connectionId, editingTopic.value);
-    } else if (editingTopic.value && subscribedTopics.value.some(([current]) => current === editingTopic.value)) {
-      await mqttUnsubscribe(props.connectionId, editingTopic.value);
-    }
-    // Persist first as disabled. A successful SUBACK promotes it to enabled.
-    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, false);
+    // Save the new configuration first so a broker failure cannot remove the
+    // previous configuration or leave the edited topic without a retry path.
+    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, formEnabled.value);
     if (formEnabled.value) await mqttSubscribe(props.connectionId, topic, formQos.value, formNoLocal.value);
+    else if (!topicChanged && previousWasActive) await mqttUnsubscribe(props.connectionId, topic);
+    if (topicChanged && previousWasActive && previousTopic) await mqttUnsubscribe(props.connectionId, previousTopic);
+    if (topicChanged && previousTopic) await mqttDeleteTopicConfig(props.connectionId, previousTopic);
     selectedTopic.value = topic;
     showSubscriptionDialog.value = false;
     await refreshData();
   } catch (e) {
-    error.value = String(e);
+    error.value = t("connection.mqttSubscriptionOperationFailed", { error: String(e) });
+    await refreshData();
   } finally {
     savingSubscription.value = false;
   }
@@ -269,18 +271,18 @@ onUnmounted(stopPolling);
     <div class="flex min-h-0 flex-1">
       <div class="flex w-[22rem] shrink-0 flex-col border-r">
         <div class="flex items-center justify-between border-b px-3 py-2">
-          <span class="text-xs font-semibold uppercase text-muted-foreground">订阅配置</span>
+          <span class="text-xs font-semibold uppercase text-muted-foreground">{{ t("connection.mqttSubscriptionConfig") }}</span>
           <div class="flex items-center gap-1">
-            <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" @click="refreshData">刷新</Button>
-            <Button size="sm" class="h-7 px-2 text-xs" @click="openSubscriptionDialog">+ 新建</Button>
+            <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" @click="refreshData">{{ t("connection.mqttRefresh") }}</Button>
+            <Button size="sm" class="h-7 px-2 text-xs" @click="openSubscriptionDialog">+ {{ t("connection.mqttNewSubscription") }}</Button>
           </div>
         </div>
         <div class="border-b p-2">
-          <input v-model="topicSearch" class="h-8 w-full rounded border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" placeholder="搜索订阅过滤器..." />
+          <input v-model="topicSearch" class="h-8 w-full rounded border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :placeholder="t('connection.mqttSearchSubscriptionsPlaceholder')" />
         </div>
         <div class="min-h-0 flex-1 overflow-auto">
           <div v-if="loading" class="p-3 text-xs text-muted-foreground">{{ t("common.loading") }}</div>
-          <div v-else-if="!savedTopics.length" class="p-3 text-xs text-muted-foreground">暂无订阅配置，请点击“新建”。</div>
+          <div v-else-if="!savedTopics.length" class="p-3 text-xs text-muted-foreground">{{ t("connection.mqttNoSavedSubscriptions") }}</div>
           <TopicTreeNode
             v-for="child in topicTree.children"
             :key="child.fullPath"
@@ -299,7 +301,7 @@ onUnmounted(stopPolling);
         <div class="border-t p-2">
           <form class="flex gap-1" @submit.prevent="handleSubscribe((($event.target as HTMLFormElement).querySelector('input') as HTMLInputElement)?.value.trim() || '')">
             <input class="h-7 min-w-0 flex-1 rounded border bg-transparent px-2 text-xs" :placeholder="t('connection.mqttSubscribePlaceholder')" />
-            <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" type="submit">快速订阅</Button>
+            <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" type="submit">{{ t("connection.mqttQuickSubscribe") }}</Button>
           </form>
           <label class="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground"><input v-model="noLocalSubscribe" type="checkbox" :disabled="!mqtt5" />{{ t("connection.mqttNoLocal") }}</label>
         </div>
@@ -349,36 +351,39 @@ onUnmounted(stopPolling);
     <Dialog v-model:open="showSubscriptionDialog">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{{ editingTopic ? "编辑订阅配置" : "新建订阅配置" }}</DialogTitle>
+          <DialogTitle>{{ editingTopic ? t("connection.mqttEditSubscription") : t("connection.mqttNewSubscription") }}</DialogTitle>
         </DialogHeader>
         <div class="grid gap-3">
           <label class="grid gap-1.5 text-xs font-medium">
-            <span>Topic Filter</span>
-            <input v-model="formTopic" class="h-8 rounded border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" placeholder="例如 device/+/status" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
-            <span class="text-[11px] font-normal text-muted-foreground">支持单层通配符 + 和多层通配符 #。</span>
+            <span>{{ t("connection.mqttTopicFilter") }}</span>
+            <input v-model="formTopic" class="h-8 rounded border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :placeholder="t('connection.mqttTopicFilterPlaceholder')" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
+            <span class="text-[11px] font-normal text-muted-foreground">{{ t("connection.mqttTopicFilterHint") }}</span>
           </label>
           <label class="grid gap-1.5 text-xs font-medium">
             <span>QoS</span>
             <select v-model="formQos" class="h-8 rounded border bg-transparent px-2 text-xs" :disabled="savingSubscription">
-              <option value="atmostonce">QoS 0 — 最多一次</option>
-              <option value="atleastonce">QoS 1 — 至少一次</option>
-              <option value="exactlyonce">QoS 2 — 恰好一次</option>
+              <option value="atmostonce">QoS 0 — {{ t("connection.mqttQosAtMostOnce") }}</option>
+              <option value="atleastonce">QoS 1 — {{ t("connection.mqttQosAtLeastOnce") }}</option>
+              <option value="exactlyonce">QoS 2 — {{ t("connection.mqttQosExactlyOnce") }}</option>
             </select>
           </label>
           <label class="flex items-center gap-2 text-xs font-medium">
             <input v-model="formNoLocal" type="checkbox" :disabled="savingSubscription || !mqtt5" />
-            <span>禁止本地转发（No Local）</span>
-            <span v-if="!mqtt5" class="font-normal text-muted-foreground">仅 MQTT 5.0 支持</span>
+            <span>{{ t("connection.mqttNoLocal") }}（No Local）</span>
+            <span v-if="!mqtt5" class="font-normal text-muted-foreground">{{ t("connection.mqttNoLocalMqtt5Only") }}</span>
           </label>
           <label class="flex items-start gap-2 text-xs font-medium">
             <input v-model="formEnabled" type="checkbox" :disabled="savingSubscription" />
-            <span><span>启用订阅</span><span class="block font-normal text-muted-foreground">保存后立即订阅，重新连接时自动恢复</span></span>
+            <span
+              ><span>{{ t("connection.mqttEnableSubscription") }}</span
+              ><span class="block font-normal text-muted-foreground">{{ t("connection.mqttEnableSubscriptionHint") }}</span></span
+            >
           </label>
           <p v-if="error" class="text-xs text-destructive">{{ error }}</p>
         </div>
         <DialogFooter>
-          <Button variant="ghost" :disabled="savingSubscription" @click="showSubscriptionDialog = false">取消</Button>
-          <Button :disabled="savingSubscription" @click="saveSubscription">{{ savingSubscription ? "保存中…" : "保存" }}</Button>
+          <Button variant="ghost" :disabled="savingSubscription" @click="showSubscriptionDialog = false">{{ t("common.cancel") }}</Button>
+          <Button :disabled="savingSubscription" @click="saveSubscription">{{ savingSubscription ? t("connection.mqttSaving") : t("common.save") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

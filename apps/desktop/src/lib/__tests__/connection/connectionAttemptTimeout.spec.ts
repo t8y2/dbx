@@ -34,7 +34,7 @@ describe("connectionAttemptTimeout", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "access", connect_timeout_secs: 45, transport_layers: [] })).toBe(47_000);
   });
 
-  it("includes HTTP tunnel connection timeout values", () => {
+  it("adds HTTP tunnel setup and tunneled endpoint probe budgets", () => {
     expect(
       connectionAttemptTimeoutMs({
         db_type: "mysql",
@@ -45,6 +45,25 @@ describe("connectionAttemptTimeout", () => {
             id: "http",
             url: "https://dbx.example.com/dbx_tunnel.php",
             connect_timeout_secs: 25,
+          },
+        ],
+      }),
+    ).toBe(37_000);
+  });
+
+  it("adds SSH setup and tunneled endpoint probe budgets", () => {
+    expect(
+      connectionAttemptTimeoutMs({
+        db_type: "postgres",
+        connect_timeout_secs: 10,
+        transport_layers: [
+          {
+            type: "ssh",
+            id: "ssh",
+            host: "bastion.example.com",
+            port: 22,
+            user: "dbx",
+            connect_timeout_secs: 5,
           },
         ],
       }),
@@ -81,7 +100,7 @@ describe("connectionAttemptTimeout", () => {
         },
         (profileId) => (profileId === profile.id ? profile : undefined),
       ),
-    ).toBe(42_000);
+    ).toBe(52_000);
   });
 
   it("keeps disabled shared layers outside the attempt deadline", () => {

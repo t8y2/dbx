@@ -47,6 +47,7 @@ export interface BuildExportInsertStatementsOptions {
 
 export interface BuildExportPageSqlOptions {
   databaseType?: DatabaseType;
+  driverProfile?: string;
   identifierQuote?: string;
   schema?: string;
   tableName: string;
@@ -84,6 +85,7 @@ export function buildInsertStatements(options: BuildExportInsertStatementsOption
 export async function buildExportPageSql(options: BuildExportPageSqlOptions): Promise<string> {
   return buildTableSelectSql({
     databaseType: options.databaseType,
+    driverProfile: options.driverProfile,
     identifierQuote: options.identifierQuote,
     schema: options.schema,
     tableName: options.tableName,
@@ -94,6 +96,10 @@ export async function buildExportPageSql(options: BuildExportPageSqlOptions): Pr
 
 export function generateDatabaseExportId(): string {
   return uuid();
+}
+
+export function shouldUseDatabaseBackupSnapshot(databaseType: DatabaseType | undefined, includeData: boolean, desktopRuntime: boolean): boolean {
+  return desktopRuntime && includeData && (databaseType === "mysql" || databaseType === "postgres");
 }
 
 export async function runDatabaseExportUntilTerminal(request: api.DatabaseExportRequest, onProgress: (progress: api.ExportProgress) => void): Promise<api.ExportProgress> {

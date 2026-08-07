@@ -11,6 +11,7 @@ import ko from "@/i18n/locales/ko";
 import ptBR from "@/i18n/locales/pt-BR";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
+import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 const LOCALES = {
   en,
@@ -54,6 +55,16 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // Every backend message changed away from hardcoded Chinese, paired with the
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
+  {
+    name: "Apache Phoenix JDBC driver missing",
+    message: PHOENIX_DRIVER_NOT_INSTALLED_ERROR,
+    key: "connection.phoenixDriverNotInstalled",
+  },
+  {
+    name: "shared JDBC plugin missing for Apache Phoenix",
+    message: PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR,
+    key: "connection.phoenixDriverNotInstalled",
+  },
   {
     name: "SSH TOTP prompt cancelled",
     message: "SSH layer 1 failed: SSH keyboard-interactive authentication was cancelled",

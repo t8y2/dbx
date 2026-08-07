@@ -5,6 +5,7 @@ import type { MqUserInfo, MqVhostPermission } from "@/types/mq";
 import { mqCreateUser, mqDeleteUser, mqGrantUserPermission, mqListNamespaces, mqListUserPermissions, mqListUsers, mqRevokeUserPermission } from "@/lib/backend/api";
 import { isAllVhostsNamespace, RABBITMQ_MQ_TENANT } from "@/lib/mq/mqConsoleDefaults";
 import { formatError } from "@/lib/backend/errorUtils";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 interface Props {
@@ -16,6 +17,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const users = ref<MqUserInfo[]>([]);
 const usersLoading = ref(false);
@@ -58,12 +60,12 @@ const filteredPermissions = computed(() => {
   return permissions.value.filter((permission) => permission.user === selectedUser.value);
 });
 
-function guardWritable(): boolean {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqUserPermissions.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadUsers() {
@@ -114,7 +116,10 @@ function toggleUserFilter(user: MqUserInfo) {
 }
 
 function openCreateDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqUserPermissions.readOnly");
+    return;
+  }
   createForm.value = { name: "", password: "", tagsText: "" };
   dialogError.value = undefined;
   showCreateDialog.value = true;
@@ -129,6 +134,7 @@ function parseTags(text: string): string[] | undefined {
 }
 
 async function handleCreateUser() {
+  if (!(await guardWritable(t("mqUserPermissions.createUser")))) return;
   const name = createForm.value.name.trim();
   const password = createForm.value.password;
   if (!name) {
@@ -153,12 +159,16 @@ async function handleCreateUser() {
 }
 
 function openDeleteDialog(user: MqUserInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqUserPermissions.readOnly");
+    return;
+  }
   deleteTarget.value = user;
   showDeleteDialog.value = true;
 }
 
 async function confirmDelete() {
+  if (!(await guardWritable(t("mqUserPermissions.delete")))) return;
   const target = deleteTarget.value;
   if (!target) return;
   deleting.value = true;
@@ -175,7 +185,10 @@ async function confirmDelete() {
 }
 
 function openGrantDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqUserPermissions.readOnly");
+    return;
+  }
   const currentVhost = props.namespace && !isAllVhostsNamespace(props.namespace) ? props.namespace : "";
   grantForm.value = {
     user: selectedUser.value ?? users.value[0]?.name ?? "",
@@ -194,6 +207,7 @@ function patternOrDefault(value: string): string | undefined {
 }
 
 async function handleGrant() {
+  if (!(await guardWritable(t("mqUserPermissions.grant")))) return;
   const user = grantForm.value.user.trim();
   const virtualHost = grantForm.value.virtualHost.trim();
   if (!user) {
@@ -222,12 +236,16 @@ async function handleGrant() {
 }
 
 function openRevokeDialog(permission: MqVhostPermission) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqUserPermissions.readOnly");
+    return;
+  }
   revokeTarget.value = permission;
   showRevokeDialog.value = true;
 }
 
 async function confirmRevoke() {
+  if (!(await guardWritable(t("mqUserPermissions.revoke")))) return;
   const target = revokeTarget.value;
   if (!target) return;
   revoking.value = true;
@@ -457,6 +475,8 @@ watch(
 </template>
 
 <style scoped>
+@import "../shared/mqPanel.css";
+
 .user-permissions-panel {
   display: flex;
   flex-direction: column;
@@ -639,48 +659,6 @@ td {
   align-items: center;
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: var(--color-hover);
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -719,16 +697,6 @@ button:disabled {
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
 }
 
 .dialog-body {

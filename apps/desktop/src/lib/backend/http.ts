@@ -183,8 +183,10 @@ import type {
   NacosConnectionInfo,
   NacosRNacosConsoleCaptcha,
   NacosInstanceInfo,
+  NacosInstanceRef,
+  NacosInstanceRegistration,
   NacosInstanceQuery,
-  NacosInstanceUpdate,
+  NacosInstanceUpdateRequest,
   NacosDashboardQuery,
   NacosDashboardSnapshot,
   NacosNamespaceCreate,
@@ -193,11 +195,14 @@ import type {
   NacosRawRequest,
   NacosRawResponse,
   NacosServiceList,
+  NacosServiceDetail,
   NacosServiceQuery,
+  NacosServiceUpsert,
   NacosSearchProgress,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
+import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -833,6 +838,26 @@ export async function listAvailableExtensions(connectionId: string, database: st
 
 export async function listDialectDataTypes(dialectName: string): Promise<string[]> {
   return get(`/api/dialect/data-types?${qs({ dialect_name: dialectName })}`);
+}
+
+// ---------------------------------------------------------------------------
+// Docs
+// ---------------------------------------------------------------------------
+
+export async function collectDocsSnapshot(connectionId: string, database: string, schemas: string[], tables: string[], projectName?: string): Promise<SchemaSnapshot> {
+  return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
+  return post("/api/docs/annotations/load", { connectionId });
+}
+
+export async function applyDocsAnnotations(connectionId: string, snapshot: SchemaSnapshot, annotations: AnnotationFile): Promise<SchemaSnapshot> {
+  return post("/api/docs/annotations/apply", { connectionId, snapshot, annotations });
+}
+
+export async function saveDocsAnnotations(connectionId: string, annotations: AnnotationFile): Promise<void> {
+  return post("/api/docs/annotations/save", { connectionId, annotations });
 }
 
 // ---------------------------------------------------------------------------
@@ -1860,11 +1885,19 @@ export async function readExternalSqlFile(_path: string): Promise<string> {
   throw new Error("Opening external SQL file paths is only available in the desktop app");
 }
 
-export async function writeExternalSqlFile(_path: string, _content: string): Promise<void> {
+export async function readExternalSqlFileSnapshot(_path: string): Promise<import("@/lib/backend/tauri").ExternalSqlFileSnapshot> {
+  throw new Error("Opening external SQL file paths is only available in the desktop app");
+}
+
+export async function inspectExternalSqlFile(_path: string): Promise<import("@/lib/backend/tauri").ExternalSqlFileStatus> {
+  throw new Error("Inspecting external SQL file paths is only available in the desktop app");
+}
+
+export async function writeExternalSqlFile(_path: string, _content: string, _options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<import("@/lib/backend/tauri").ExternalSqlFileWriteResult> {
   throw new Error("Saving external SQL file paths is only available in the desktop app");
 }
 
-export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<string | null> {
+export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<{ path: string; version: import("@/types/database").ExternalSqlFileVersion } | null> {
   throw new Error("Saving SQL files locally is only available in the desktop app");
 }
 
@@ -2375,6 +2408,14 @@ export async function redisHashDel(connectionId: string, db: number, keyRaw: str
   return post("/api/redis/hash-del", { connectionId, db, keyRaw, field });
 }
 
+export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {
+  return post("/api/redis/hash-field-set-ttl", { connectionId, db, keyRaw, field, ttl });
+}
+
+export async function redisHashFieldSetExpireAt(connectionId: string, db: number, keyRaw: string, field: string, expireAt: number): Promise<void> {
+  return post("/api/redis/hash-field-set-expire-at", { connectionId, db, keyRaw, field, expireAt });
+}
+
 export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
   return post("/api/redis/list-push", { connectionId, db, keyRaw, value, ttl });
 }
@@ -2806,12 +2847,36 @@ export async function nacosListServices(connectionId: string, query: NacosServic
   return post("/api/nacos/services/list", { connectionId, query });
 }
 
+export async function nacosGetService(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceDetail> {
+  return post("/api/nacos/services/get", { connectionId, query });
+}
+
+export async function nacosCreateService(connectionId: string, req: NacosServiceUpsert): Promise<void> {
+  return post("/api/nacos/services/create", { connectionId, req });
+}
+
+export async function nacosUpdateService(connectionId: string, req: NacosServiceUpsert): Promise<void> {
+  return post("/api/nacos/services/update", { connectionId, req });
+}
+
+export async function nacosDeleteService(connectionId: string, query: NacosServiceQuery): Promise<void> {
+  return post("/api/nacos/services/delete", { connectionId, query });
+}
+
 export async function nacosListInstances(connectionId: string, query: NacosInstanceQuery): Promise<NacosInstanceInfo[]> {
   return post("/api/nacos/instances/list", { connectionId, query });
 }
 
-export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdate): Promise<void> {
+export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdateRequest): Promise<void> {
   return post("/api/nacos/instances/update", { connectionId, req });
+}
+
+export async function nacosRegisterInstance(connectionId: string, req: NacosInstanceRegistration): Promise<void> {
+  return post("/api/nacos/instances/register", { connectionId, req });
+}
+
+export async function nacosDeregisterInstance(connectionId: string, req: NacosInstanceRef): Promise<void> {
+  return post("/api/nacos/instances/deregister", { connectionId, req });
 }
 
 export async function nacosGetDashboard(connectionId: string, query: NacosDashboardQuery): Promise<NacosDashboardSnapshot> {

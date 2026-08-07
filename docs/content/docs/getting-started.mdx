@@ -88,6 +88,18 @@ This guide gets you through three things:
 
     The `latest` tag pulls the current release. This uses the cross-platform `dbx-data` named volume. For faster pulls in China, use `docker.cnb.cool/dbxio.com/dbx:latest` instead.
 
+    ### Environment Variables
+
+    The Docker image supports the following startup variables. Set one with `-e NAME=value`; for example, production deployments should add `-e DBX_PASSWORD=your-password`:
+
+    | Variable | Default | Purpose |
+    | --- | --- | --- |
+    | `DBX_PASSWORD` | Not set | Web login password; recommended for production |
+    | `DBX_DISABLE_PASSWORD` | `false` | Set to `true` or `1` to disable login protection |
+    | `DBX_DATA_DIR` | `/app/data` | Persistent data directory |
+    | `DBX_PORT` | `4224` | Container listen port |
+    | `DBX_PUBLIC_BASE_PATH` | `/` | Deploy below a subpath, such as `/dbx` |
+
     Then open `http://localhost:4224`.
 
     `deploy/docker-compose.yml` builds the current checkout. To deploy a published image, use `deploy/docker-compose.release.yml`:

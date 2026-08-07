@@ -25,6 +25,10 @@ vi.mock("@/lib/backend/api", () => ({
   mqSendMessage: backend.mqSendMessage,
 }));
 
+vi.mock("@/composables/useMqMutationGuard", () => ({
+  useMqMutationGuard: () => ({ confirmMqWrite: vi.fn().mockResolvedValue(true) }),
+}));
+
 import MessageQueryPanel from "@/components/mq/MessageQueryPanel.vue";
 
 const TOPIC = {

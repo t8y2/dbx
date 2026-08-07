@@ -505,18 +505,59 @@ pub(crate) fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_j
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn decode_mysql_geometry(bytes: &[u8]) -> Option<super::wkb::DecodedGeometry> {
+fn bytes_to_upper_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    output
+}
+
+// Native MySQL geometry values normally begin with a four-byte little-endian
+// SRID prefix. A bare WKB value can have 0 or 1 at byte four as well, so only
+// treat that prefix as present when the remaining bytes parse as WKB.
+fn mysql_geometry_wkb_parts(bytes: &[u8]) -> Option<(&[u8], u32)> {
     if bytes.len() >= 5 && matches!(bytes[4], 0 | 1) {
         let prefix: [u8; 4] = bytes[..4].try_into().ok()?;
-        if let Some(mut geometry) = super::wkb::decode_wkb_geometry(&bytes[4..]) {
-            if geometry.srid.is_none() {
-                let srid = u32::from_le_bytes(prefix);
-                geometry.srid = (srid != 0).then_some(srid);
-            }
-            return Some(geometry);
+        if super::wkb::decode_wkb_geometry(&bytes[4..]).is_some() {
+            return Some((&bytes[4..], u32::from_le_bytes(prefix)));
         }
     }
-    super::wkb::decode_wkb_geometry(bytes)
+    super::wkb::decode_wkb_geometry(bytes).map(|_| (bytes, 0))
+}
+
+fn mysql_geometry_to_export_marker(bytes: &[u8]) -> Option<String> {
+    let (wkb, srid) = mysql_geometry_wkb_parts(bytes)?;
+    Some(format!("DBX_WKB:{srid}:{}", bytes_to_upper_hex(wkb)))
+}
+
+fn mysql_value_to_json_for_export(
+    row: &mysql_async::Row,
+    idx: usize,
+    spatial_as_wkb: bool,
+) -> Result<serde_json::Value, String> {
+    if !spatial_as_wkb
+        || !row.columns_ref().get(idx).is_some_and(|column| column.column_type() == ColumnType::MYSQL_TYPE_GEOMETRY)
+    {
+        return Ok(mysql_value_to_json(row, idx));
+    }
+    let Some(bytes) = row_get::<Vec<u8>, _>(row, idx) else {
+        return Ok(mysql_value_to_json(row, idx));
+    };
+    mysql_geometry_to_export_marker(&bytes)
+        .map(serde_json::Value::String)
+        .ok_or_else(|| "Cannot export MySQL geometry value as WKB".to_string())
+}
+
+fn decode_mysql_geometry(bytes: &[u8]) -> Option<super::wkb::DecodedGeometry> {
+    let (wkb, srid) = mysql_geometry_wkb_parts(bytes)?;
+    let mut geometry = super::wkb::decode_wkb_geometry(wkb)?;
+    if geometry.srid.is_none() {
+        geometry.srid = (srid != 0).then_some(srid);
+    }
+    Some(geometry)
 }
 
 fn mysql_spatial_column_builder(columns: &[mysql_async::Column]) -> SpatialColumnBuilder {
@@ -1984,6 +2025,17 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
     list_tables_filtered(pool, database, None, None, None, None, None).await
 }
 
+fn normalize_mysql_table_type(table_type: &str) -> String {
+    let trimmed = table_type.trim();
+    if trimmed.is_empty() {
+        return "TABLE".to_string();
+    }
+    if trimmed.eq_ignore_ascii_case("VIEW") || trimmed.eq_ignore_ascii_case("SYSTEM VIEW") {
+        return "VIEW".to_string();
+    }
+    trimmed.to_string()
+}
+
 pub async fn list_tables_filtered(
     pool: &MySqlPool,
     database: &str,
@@ -2014,7 +2066,7 @@ pub async fn list_tables_filtered(
             let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
             (!name.is_empty()).then_some(TableInfo {
                 name,
-                table_type: get_str_by_name(row, "TABLE_TYPE"),
+                table_type: normalize_mysql_table_type(&get_str_by_name(row, "TABLE_TYPE")),
                 comment: get_opt_str(row, "TABLE_COMMENT")
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
@@ -2088,8 +2140,8 @@ fn list_tables_sql(
             .map(|object_type| object_type.to_ascii_uppercase().replace(' ', "_"))
             .any(|object_type| object_type == "VIEW");
         match (wants_table, wants_view) {
-            (true, false) => sql.push_str(" AND TABLE_TYPE <> 'VIEW'"),
-            (false, true) => sql.push_str(" AND TABLE_TYPE = 'VIEW'"),
+            (true, false) => sql.push_str(" AND TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')"),
+            (false, true) => sql.push_str(" AND TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')"),
             (false, false) => sql.push_str(" AND 1 = 0"),
             (true, true) => {}
         }
@@ -2514,14 +2566,8 @@ async fn list_table_names_show_filtered(
             if name.is_empty() {
                 return None;
             }
-            let table_type = get_str(row, 1);
-            Some(TableInfo {
-                name,
-                table_type: if table_type.is_empty() { "TABLE".to_string() } else { table_type },
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            })
+            let table_type = normalize_mysql_table_type(&get_str(row, 1));
+            Some(TableInfo { name, table_type, comment: None, parent_schema: None, parent_name: None })
         })
         .collect();
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2822,18 +2868,18 @@ fn list_tables_objects_sql(
     let wants_tables = requested_object_type(object_types, "TABLE");
     let wants_views = requested_object_type(object_types, "VIEW");
     let type_filter = match (wants_tables, wants_views) {
-        (true, false) => " AND TABLE_TYPE <> 'VIEW'",
-        (false, true) => " AND TABLE_TYPE = 'VIEW'",
+        (true, false) => " AND TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')",
+        (false, true) => " AND TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')",
         _ => "",
     };
     format!(
         "SELECT TABLE_NAME AS object_name, \
-           CASE WHEN TABLE_TYPE = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS object_type, \
+           CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 'VIEW' ELSE 'TABLE' END AS object_type, \
            TABLE_COMMENT AS object_comment, \
            CREATE_TIME AS created_at, \
            UPDATE_TIME AS updated_at, \
            NULL AS parent_schema, NULL AS parent_name, \
-           CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS sort_order \
+           CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 1 ELSE 0 END AS sort_order \
          FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = {db}{type_filter} \
          ORDER BY sort_order, object_name{pagination}",
@@ -4006,7 +4052,7 @@ pub async fn stream_query_rows(
     mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    stream_query_result_on_conn(&mut conn, sql, bare, max_rows, dialect, cancelled, |item| {
+    stream_query_result_on_conn(&mut conn, sql, bare, max_rows, dialect, cancelled, false, |item| {
         if let MySqlQueryStreamItem::Row(row) = item {
             on_row(&row)?;
         }
@@ -4022,17 +4068,18 @@ pub async fn stream_query_result_on_conn(
     max_rows: Option<usize>,
     dialect: MySqlQueryDialect,
     cancelled: &AtomicBool,
+    spatial_as_wkb: bool,
     mut on_item: impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let row_limit = max_rows.unwrap_or(usize::MAX);
 
     if bare || prefers_text_protocol_query(sql, dialect) {
-        stream_query_result_text(conn, sql, row_limit, cancelled, &mut on_item).await
+        stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await
     } else {
-        match stream_query_result_prepared(conn, sql, row_limit, cancelled, &mut on_item).await {
+        match stream_query_result_prepared(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await {
             Ok(rows) => Ok(rows),
             Err(err) if mysql_error_should_retry_with_text_protocol(&err) => {
-                stream_query_result_text(conn, sql, row_limit, cancelled, &mut on_item).await
+                stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await
             }
             Err(err) => Err(err),
         }
@@ -4044,6 +4091,7 @@ async fn stream_query_result_text(
     sql: &str,
     row_limit: usize,
     cancelled: &AtomicBool,
+    spatial_as_wkb: bool,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
@@ -4069,7 +4117,9 @@ async fn stream_query_result_text(
             break;
         }
         let row = row.map_err(|e| e.to_string())?;
-        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
+        let values: Vec<serde_json::Value> = (0..row.len())
+            .map(|i| mysql_value_to_json_for_export(&row, i, spatial_as_wkb))
+            .collect::<Result<_, _>>()?;
         on_item(MySqlQueryStreamItem::Row(values))?;
         rows_exported += 1;
     }
@@ -4082,6 +4132,7 @@ async fn stream_query_result_prepared(
     sql: &str,
     row_limit: usize,
     cancelled: &AtomicBool,
+    spatial_as_wkb: bool,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
@@ -4107,7 +4158,9 @@ async fn stream_query_result_prepared(
             break;
         }
         let row = row.map_err(|e| e.to_string())?;
-        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
+        let values: Vec<serde_json::Value> = (0..row.len())
+            .map(|i| mysql_value_to_json_for_export(&row, i, spatial_as_wkb))
+            .collect::<Result<_, _>>()?;
         on_item(MySqlQueryStreamItem::Row(values))?;
         rows_exported += 1;
     }
@@ -5033,6 +5086,23 @@ mod tests {
         let decoded = decode_mysql_geometry(&raw).unwrap();
         assert_eq!(decoded.wkt, "POINT(1 2)");
         assert_eq!(decoded.srid, None);
+        assert_eq!(
+            mysql_geometry_to_export_marker(&raw).as_deref(),
+            Some("DBX_WKB:0:0101000000000000000000F03F0000000000000040")
+        );
+    }
+
+    #[test]
+    fn mysql_geometry_export_marker_strips_internal_srid_prefix() {
+        let mut raw = 4326_u32.to_le_bytes().to_vec();
+        raw.extend_from_slice(&[
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40,
+        ]);
+        assert_eq!(
+            mysql_geometry_to_export_marker(&raw).as_deref(),
+            Some("DBX_WKB:4326:0101000000000000000000F03F0000000000000040")
+        );
     }
 
     #[test]
@@ -5278,13 +5348,22 @@ mod tests {
     fn mysql_list_tables_sql_filters_table_type_before_pagination() {
         let tables = vec!["TABLE".to_string()];
         let table_sql = list_tables_sql("app", None, Some(1000), None, Some(&tables), None);
-        assert!(table_sql.contains("TABLE_TYPE <> 'VIEW'"));
-        assert!(table_sql.find("TABLE_TYPE <> 'VIEW'") < table_sql.find("ORDER BY TABLE_NAME"));
+        assert!(table_sql.contains("TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')"));
+        assert!(table_sql.find("TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')") < table_sql.find("ORDER BY TABLE_NAME"));
         assert!(table_sql.find("ORDER BY TABLE_NAME") < table_sql.find("LIMIT 1000"));
 
         let views = vec!["VIEW".to_string()];
         let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views), None);
-        assert!(view_sql.contains("TABLE_TYPE = 'VIEW'"));
+        assert!(view_sql.contains("TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')"));
+    }
+
+    #[test]
+    fn mysql_system_views_are_normalized_as_views() {
+        assert_eq!(normalize_mysql_table_type("SYSTEM VIEW"), "VIEW");
+        assert_eq!(normalize_mysql_table_type("view"), "VIEW");
+        assert_eq!(normalize_mysql_table_type("BASE TABLE"), "BASE TABLE");
+        assert_eq!(normalize_mysql_table_type("MATERIALIZED VIEW"), "MATERIALIZED VIEW");
+        assert_eq!(normalize_mysql_table_type(""), "TABLE");
     }
 
     #[test]
@@ -5690,7 +5769,8 @@ mod tests {
         let object_types = vec!["VIEW".to_string()];
         let sql = list_tables_objects_sql("app", Some(&object_types), Some(51), Some(100));
 
-        assert!(sql.contains("TABLE_TYPE = 'VIEW'"));
+        assert!(sql.contains("TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')"));
+        assert!(sql.contains("CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 'VIEW' ELSE 'TABLE' END"));
         assert!(sql.ends_with("LIMIT 51 OFFSET 100"));
     }
 

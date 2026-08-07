@@ -144,6 +144,7 @@ pub(super) fn build_drop_index_sql(
         StructureDialect::Postgres
             | StructureDialect::Oracle
             | StructureDialect::Dameng
+            | StructureDialect::Oscar
             | StructureDialect::Informix
             | StructureDialect::Sqlite
     ) && schema.is_some_and(|schema| !schema.trim().is_empty())

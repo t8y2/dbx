@@ -19,6 +19,7 @@
     "table-structure",
     "schema-diff",
     "field-lineage",
+    "database-docs",
     "table-import",
     "sql-file",
     "database-export",

@@ -208,12 +208,12 @@ function collectDirPaths(entries: SqlFileEntry[], into: Set<string>) {
 async function openFile(path: string) {
   if (!isTauriRuntime()) return;
   try {
-    const content = await api.readExternalSqlFile(path);
+    const snapshot = await api.readExternalSqlFileSnapshot(path);
     const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = connection ? resolveDefaultDatabase(connection, []) : "";
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, content);
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version);
   } catch (e: any) {
     if (isExternalSqlFileTooLargeError(e)) {
       executeFile(path);

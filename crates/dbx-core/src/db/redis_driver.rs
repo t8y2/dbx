@@ -104,6 +104,10 @@ pub struct RedisSetItem {
 pub struct RedisHashItem {
     pub field: RedisBlob,
     pub value: RedisBlob,
+    /// Remaining field TTL in seconds. `-1` means the field is persistent;
+    /// `None` means the Redis server does not expose hash-field expiration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_ttl: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1648,6 +1652,8 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
         | "HRANDFIELD"
         | "HSCAN"
         | "HSTRLEN"
+        | "HPTTL"
+        | "HTTL"
         | "HVALS"
         | "INFO"
         | "LASTSAVE"
@@ -1759,12 +1765,13 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
         | "TS.QUERYINDEX"
         | "TS.RANGE" => RedisCommandSafety::Allowed,
         "DEL" | "UNLINK" | "EXPIRE" | "EXPIREAT" | "PEXPIRE" | "PEXPIREAT" | "RENAME" | "RENAMENX" | "GETDEL"
-        | "HDEL" | "JSON.ARRPOP" | "JSON.ARRTRIM" | "JSON.CLEAR" | "JSON.DEL" | "JSON.FORGET" | "BLMOVE" | "BLMPOP"
-        | "BLPOP" | "BRPOP" | "BRPOPLPUSH" | "LPOP" | "LMOVE" | "LMPOP" | "RPOP" | "RPOPLPUSH" | "LREM" | "LTRIM"
-        | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN"
-        | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT"
-        | "SDIFFSTORE" | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE"
-        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
+        | "HDEL" | "HEXPIRE" | "HEXPIREAT" | "HPEXPIRE" | "HPEXPIREAT" | "HPERSIST" | "JSON.ARRPOP"
+        | "JSON.ARRTRIM" | "JSON.CLEAR" | "JSON.DEL" | "JSON.FORGET" | "BLMOVE" | "BLMPOP" | "BLPOP" | "BRPOP"
+        | "BRPOPLPUSH" | "LPOP" | "LMOVE" | "LMPOP" | "RPOP" | "RPOPLPUSH" | "LREM" | "LTRIM" | "SPOP" | "SREM"
+        | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN" | "ZREMRANGEBYLEX"
+        | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT" | "SDIFFSTORE"
+        | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE" | "ZUNIONSTORE" | "PFMERGE"
+        | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
         "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
         | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
         | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
@@ -2336,7 +2343,8 @@ where
         }
         "hash" => {
             let len: u64 = redis::cmd("HLEN").arg(key).query_async(con).await.unwrap_or(0);
-            let (cursor, items) = hscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
+            let (cursor, mut items) = hscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
+            attach_hash_field_ttls(con, key, &mut items).await?;
             RedisValueData::Hash { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
         "stream" => {
@@ -2864,7 +2872,12 @@ pub async fn hash_set<C>(con: &mut C, key: &[u8], field: &str, value: &str, ttl:
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
+    let previous_field_ttl = if ttl.is_none() { read_hash_field_ttl(con, key, field.as_bytes()).await? } else { None };
     redis::cmd("HSET").arg(key).arg(field).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    if let Some(previous_ttl) = previous_field_ttl.filter(|ttl| *ttl > 0) {
+        let remaining_ttl = previous_ttl.max(1);
+        set_hash_field_ttl(con, key, field, remaining_ttl).await?;
+    }
     apply_expire_if_needed(con, key, ttl).await
 }
 
@@ -3078,6 +3091,66 @@ where
     }
 }
 
+pub async fn set_hash_field_ttl<C>(con: &mut C, key: &[u8], field: &str, ttl: i64) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    if ttl <= 0 {
+        let raw: RedisRawValue = redis::cmd("HPERSIST")
+            .arg(key)
+            .arg("FIELDS")
+            .arg(1)
+            .arg(field)
+            .query_async(con)
+            .await
+            .map_err(|e| e.to_string())?;
+        return parse_hash_field_expiry_result(raw, "HPERSIST", true);
+    }
+
+    let raw: RedisRawValue = redis::cmd("HEXPIRE")
+        .arg(key)
+        .arg(ttl)
+        .arg("FIELDS")
+        .arg(1)
+        .arg(field)
+        .query_async(con)
+        .await
+        .map_err(|e| e.to_string())?;
+    parse_hash_field_expiry_result(raw, "HEXPIRE", false)
+}
+
+pub async fn set_hash_field_expire_at<C>(con: &mut C, key: &[u8], field: &str, expire_at: i64) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue = redis::cmd("HEXPIREAT")
+        .arg(key)
+        .arg(expire_at)
+        .arg("FIELDS")
+        .arg(1)
+        .arg(field)
+        .query_async(con)
+        .await
+        .map_err(|e| e.to_string())?;
+    parse_hash_field_expiry_result(raw, "HEXPIREAT", false)
+}
+
+fn parse_hash_field_expiry_result(raw: RedisRawValue, command: &str, allow_persist_noop: bool) -> Result<(), String> {
+    let RedisRawValue::Array(mut values) = raw else {
+        return Err(format!("Invalid {command} response"));
+    };
+    let Some(result) = values.pop().and_then(redis_value_to_string).and_then(|value| value.parse::<i64>().ok()) else {
+        return Err(format!("Invalid {command} response"));
+    };
+    match result {
+        1 => Ok(()),
+        -1 if allow_persist_noop => Ok(()),
+        2 => Err(format!("{command} removed the hash field because it was already expired")),
+        -2 => Err("Redis hash field no longer exists".to_string()),
+        _ => Err(format!("{command} was not applied to the hash field")),
+    }
+}
+
 pub async fn delete_keys<C>(con: &mut C, keys: &[Vec<u8>]) -> Result<u64, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -3133,11 +3206,12 @@ where
             Ok(RedisCollectionPage::Zset { items, scan_cursor: has_more.then_some(next) })
         }
         "hash" => {
-            let (next_cursor, items) = if let Some(query) = filter_query.filter(|query| !query.is_empty()) {
+            let (next_cursor, mut items) = if let Some(query) = filter_query.filter(|query| !query.is_empty()) {
                 hscan_filtered_page_raw(con, key, cursor, count, query).await?
             } else {
                 hscan_page_raw(con, key, cursor, count, None).await?
             };
+            attach_hash_field_ttls(con, key, &mut items).await?;
             Ok(RedisCollectionPage::Hash { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
         _ => Err(format!("Pagination not supported for type: {key_type}")),
@@ -3189,6 +3263,76 @@ where
     }
 
     Ok((cur, items))
+}
+
+async fn attach_hash_field_ttls<C>(con: &mut C, key: &[u8], items: &mut [RedisHashItem]) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    let mut command = redis::cmd("HTTL");
+    command.arg(key).arg("FIELDS").arg(items.len());
+    for item in items.iter() {
+        let field = base64::engine::general_purpose::STANDARD
+            .decode(&item.field.raw_base64)
+            .map_err(|error| format!("Invalid Redis hash field encoding: {error}"))?;
+        command.arg(field);
+    }
+
+    let raw: RedisRawValue = match command.query_async(con).await {
+        Ok(raw) => raw,
+        Err(error) if is_optional_hash_field_expiry_error(&error) => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if matches!(raw, RedisRawValue::Nil) {
+        return Ok(());
+    }
+    let RedisRawValue::Array(values) = raw else {
+        return Ok(());
+    };
+    if values.len() != items.len() {
+        return Ok(());
+    }
+    for (item, value) in items.iter_mut().zip(values) {
+        let Some(ttl) = redis_value_to_string(value).and_then(|value| value.parse::<i64>().ok()) else {
+            return Ok(());
+        };
+        item.field_ttl = (ttl != -2).then_some(ttl);
+    }
+    Ok(())
+}
+
+async fn read_hash_field_ttl<C>(con: &mut C, key: &[u8], field: &[u8]) -> Result<Option<i64>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue = match redis::cmd("HTTL").arg(key).arg("FIELDS").arg(1).arg(field).query_async(con).await {
+        Ok(raw) => raw,
+        Err(error) if is_optional_hash_field_expiry_error(&error) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if matches!(raw, RedisRawValue::Nil) {
+        return Ok(None);
+    }
+    let RedisRawValue::Array(mut values) = raw else {
+        return Ok(None);
+    };
+    let Some(ttl) = values.pop().and_then(redis_value_to_string).and_then(|value| value.parse::<i64>().ok()) else {
+        return Ok(None);
+    };
+    Ok((ttl >= 0).then_some(ttl))
+}
+
+fn is_optional_hash_field_expiry_error(error: &redis::RedisError) -> bool {
+    let detail = error.detail().unwrap_or_default().to_ascii_lowercase();
+    detail.contains("unknown command")
+        || detail.contains("unsupported")
+        || detail.contains("syntax error")
+        || detail.contains("noperm")
+        || detail.contains("no permission")
 }
 
 fn hash_entry_matches_query(item: &RedisHashItem, query: &str) -> bool {
@@ -3286,7 +3430,7 @@ fn parse_scan_hash_entries(raw: RedisRawValue) -> Result<(u64, Vec<RedisHashItem
         let value = redis_value_to_bytes(value.clone())
             .map(|bytes| redis_blob_from_bytes(&bytes))
             .ok_or_else(|| "Invalid hash value payload".to_string())?;
-        items.push(RedisHashItem { field, value });
+        items.push(RedisHashItem { field, value, field_ttl: None });
     }
 
     Ok((cursor, items))
@@ -3484,7 +3628,11 @@ mod tests {
             RedisValueData::Hash {
                 items: entries
                     .iter()
-                    .map(|(field, value)| RedisHashItem { field: text_blob(field), value: text_blob(value) })
+                    .map(|(field, value)| RedisHashItem {
+                        field: text_blob(field),
+                        value: text_blob(value),
+                        field_ttl: None,
+                    })
                     .collect(),
                 total: entries.len() as u64,
                 scan_cursor: None,
@@ -4633,7 +4781,7 @@ mod tests {
             panic!("expected hash collection page");
         };
         assert_eq!(scan_cursor, Some(512));
-        assert_eq!(items, vec![RedisHashItem { field: text_blob("user:1"), value: text_blob("Ada") }]);
+        assert_eq!(items, vec![RedisHashItem { field: text_blob("user:1"), value: text_blob("Ada"), field_ttl: None }]);
         assert_eq!(con.command_count("HSCAN"), 1);
         assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
     }
@@ -4650,9 +4798,96 @@ mod tests {
             panic!("expected hash collection page");
         };
         assert_eq!(scan_cursor, None);
-        assert_eq!(items, vec![RedisHashItem { field: text_blob("status"), value: text_blob("Ada Lovelace") }]);
+        assert_eq!(
+            items,
+            vec![RedisHashItem { field: text_blob("status"), value: text_blob("Ada Lovelace"), field_ttl: None }]
+        );
         assert_eq!(con.command_count("HSCAN"), 1);
         assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
+    }
+
+    #[tokio::test]
+    async fn hash_load_more_attaches_field_ttl_when_supported() {
+        let mut con = FakeRedisConnection::new(vec![
+            hscan_response("0", vec![("session", "Ada")]),
+            RedisRawValue::Array(vec![RedisRawValue::Int(42)]),
+        ]);
+
+        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, None, None).await.unwrap();
+
+        let RedisCollectionPage::Hash { items, scan_cursor } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items[0].field_ttl, Some(42));
+        assert_eq!(con.command_count("HTTL"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_load_more_keeps_persistent_field_ttl() {
+        let mut con = FakeRedisConnection::new(vec![
+            hscan_response("0", vec![("session", "Ada")]),
+            RedisRawValue::Array(vec![RedisRawValue::Int(-1)]),
+        ]);
+
+        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, None, None).await.unwrap();
+
+        let RedisCollectionPage::Hash { items, .. } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(items[0].field_ttl, Some(-1));
+    }
+
+    #[tokio::test]
+    async fn hash_load_more_degrades_when_field_ttl_is_unsupported() {
+        let unsupported = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "unknown command 'HTTL'".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(hscan_response("0", vec![("session", "Ada")])),
+            Err(unsupported),
+        ]);
+
+        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, None, None).await.unwrap();
+
+        let RedisCollectionPage::Hash { items, .. } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(items[0].field_ttl, None);
+    }
+
+    #[tokio::test]
+    async fn hash_set_preserves_existing_field_ttl() {
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Array(vec![RedisRawValue::Int(42)]),
+            RedisRawValue::Okay,
+            RedisRawValue::Array(vec![RedisRawValue::Int(1)]),
+        ]);
+
+        super::hash_set(&mut con, b"hash-key", "session", "Grace", None).await.unwrap();
+
+        assert_eq!(con.command_count("HTTL"), 1);
+        assert_eq!(con.command_count("HSET"), 1);
+        assert_eq!(con.command_count("HEXPIRE"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_field_expiry_commands_accept_expected_results() {
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Array(vec![RedisRawValue::Int(1)]),
+            RedisRawValue::Array(vec![RedisRawValue::Int(-1)]),
+            RedisRawValue::Array(vec![RedisRawValue::Int(1)]),
+        ]);
+
+        super::set_hash_field_ttl(&mut con, b"hash-key", "session", 60).await.unwrap();
+        super::set_hash_field_ttl(&mut con, b"hash-key", "session", -1).await.unwrap();
+        super::set_hash_field_expire_at(&mut con, b"hash-key", "session", 1_735_689_600).await.unwrap();
+
+        assert_eq!(con.command_count("HEXPIRE"), 1);
+        assert_eq!(con.command_count("HPERSIST"), 1);
+        assert_eq!(con.command_count("HEXPIREAT"), 1);
     }
 
     #[tokio::test]
@@ -5098,6 +5333,7 @@ mod tests {
 
     fn redis_test_connection_config() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "redis".to_string(),
             name: "Redis".to_string(),
             note: String::new(),

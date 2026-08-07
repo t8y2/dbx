@@ -199,7 +199,7 @@ describe("connectionStore timeout recovery", () => {
         host: "bastion.example.com",
         port: 22,
         user: "dbx",
-        connect_timeout_secs: 4,
+        connect_timeout_secs: 1,
       },
     ];
     const store = useConnectionStore();
@@ -213,7 +213,7 @@ describe("connectionStore timeout recovery", () => {
           host: "",
           port: 22,
           user: "root",
-          connect_timeout_secs: 1,
+          connect_timeout_secs: 4,
         },
       ],
     });
@@ -225,13 +225,13 @@ describe("connectionStore timeout recovery", () => {
       settled = true;
     });
 
-    await vi.advanceTimersByTimeAsync(3001);
+    await vi.advanceTimersByTimeAsync(4999);
     expect(settled).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(1);
     const error = await connect;
     expect(error).toBeInstanceOf(Error);
-    expect(error.message).toContain("timed out after 6s");
+    expect(error.message).toContain("timed out after 5s");
 
     resolveConnect(connection.id);
     await vi.advanceTimersByTimeAsync(1);

@@ -657,17 +657,19 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	defer rows.Close()
 	catalogIndexes := []vastbaseCatalogIndex{}
 	attributes := map[int]string{}
+	// UNION ALL 双分支各列可空性无法保证（Vastbase G100 在某些表/索引形态下会返回 NULL），
+	// 统一用可空类型扫描以容错 NULL，避免 convertAssign 崩溃（#5602）。
 	for rows.Next() {
-		var rowKind, attributeNumber int
-		var name, kind, columnNumbers, column string
+		var rowKind, attributeNumber sql.NullInt64
+		var name, kind, columnNumbers, column sql.NullString
 		var unique, primary bool
 		if err := rows.Scan(&rowKind, &name, &kind, &unique, &primary, &columnNumbers, &attributeNumber, &column); err != nil {
 			return nil, err
 		}
-		if rowKind == 0 {
-			catalogIndexes = append(catalogIndexes, vastbaseCatalogIndex{name: name, indexType: kind, unique: unique, primary: primary, columnNumbers: columnNumbers})
-		} else if attributeNumber > 0 && column != "" {
-			attributes[attributeNumber] = column
+		if rowKind.Int64 == 0 {
+			catalogIndexes = append(catalogIndexes, vastbaseCatalogIndex{name: name.String, indexType: kind.String, unique: unique, primary: primary, columnNumbers: columnNumbers.String})
+		} else if attributeNumber.Int64 > 0 && column.String != "" {
+			attributes[int(attributeNumber.Int64)] = column.String
 		}
 	}
 	if err := rows.Err(); err != nil {

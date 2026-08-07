@@ -65,16 +65,22 @@ function resolvedTimeoutLayer(layer: TransportLayerConfig, resolveTunnelProfile?
 export function connectionAttemptTimeoutMs(config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> & Partial<Pick<ConnectionConfig, "db_type">>, resolveTunnelProfile?: TunnelProfileResolver): number {
   const baseTimeoutSecs = positiveSeconds(config.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS);
   const agentMinTimeoutSecs = config.db_type === "access" ? ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS : AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS;
-  const timeouts = [DRIVER_STARTUP_FLOOR_TYPES.has(config.db_type as DatabaseType) ? Math.max(baseTimeoutSecs, agentMinTimeoutSecs) : baseTimeoutSecs];
+  let timeoutSecs = DRIVER_STARTUP_FLOOR_TYPES.has(config.db_type as DatabaseType) ? Math.max(baseTimeoutSecs, agentMinTimeoutSecs) : baseTimeoutSecs;
+  let hasEnabledTransportLayer = false;
   for (const unresolvedLayer of config.transport_layers ?? []) {
     const layer = resolvedTimeoutLayer(unresolvedLayer, resolveTunnelProfile);
     if (layer.enabled === false) continue;
+    hasEnabledTransportLayer = true;
     if (layer.type === "ssh" || layer.type === "http_tunnel") {
-      timeouts.push(positiveSeconds(layer.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS));
+      timeoutSecs += positiveSeconds(layer.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS);
     }
   }
+  // Transport setup, the tunneled endpoint probe, and the database connection
+  // happen sequentially in the backend. Keep the UI guard outside their total
+  // budget so it cannot cancel a connection attempt that is still progressing.
+  if (hasEnabledTransportLayer) timeoutSecs += baseTimeoutSecs;
   const fallbackBuffer = config.db_type === "mongodb" ? MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS : 0;
-  return Math.ceil(Math.max(...timeouts) * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + fallbackBuffer);
+  return Math.ceil(timeoutSecs * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + fallbackBuffer);
 }
 
 export function connectionAttemptTimeoutMessage(timeoutMs: number): string {

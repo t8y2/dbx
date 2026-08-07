@@ -1,12 +1,13 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.55"
+version = "0.4.56"
 edition = "2021"
 license = "Apache-2.0"
 
 [features]
-default = ["duckdb-sidecar"]
+default = ["duckdb-sidecar", "mq-admin"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
+mq-admin = ["dbx-core/mq-admin"]
 
 [[bin]]
 name = "dbx-mcp"

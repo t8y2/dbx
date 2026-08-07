@@ -9,6 +9,7 @@ const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
+const showDocsDialog = ref(false);
 const showTableImportDialog = ref(false);
 const showTableDataGenerateDialog = ref(false);
 const showFieldLineageDialog = ref(false);
@@ -43,6 +44,9 @@ const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
 const diagramFocusTableName = ref("");
+const docsPrefillConnectionId = ref("");
+const docsPrefillDatabase = ref("");
+const docsPrefillSchema = ref("");
 const tableImportPrefillConnectionId = ref("");
 const tableImportPrefillDatabase = ref("");
 const tableImportPrefillSchema = ref("");
@@ -169,6 +173,21 @@ export function useDialogSources() {
           diagramFocusTableName.value = v.tableName ?? "";
           showDiagramDialog.value = true;
           connectionStore.diagramSource = null;
+        }
+      },
+    );
+
+    watch(
+      () => connectionStore.docsSource,
+      (v) => {
+        if (v) {
+          docsPrefillConnectionId.value = v.connectionId;
+          docsPrefillDatabase.value = v.database;
+          docsPrefillSchema.value = v.schema ?? "";
+          showDocsDialog.value = true;
+          // Clearing the source is what makes the dialog re-openable: setting
+          // the same value twice would not re-trigger this watcher.
+          connectionStore.docsSource = null;
         }
       },
     );
@@ -321,6 +340,7 @@ export function useDialogSources() {
     showDataCompareDialog,
     showSqlFileDialog,
     showDiagramDialog,
+    showDocsDialog,
     showTableImportDialog,
     showTableDataGenerateDialog,
     showFieldLineageDialog,
@@ -354,6 +374,9 @@ export function useDialogSources() {
     diagramPrefillDatabase,
     diagramPrefillSchema,
     diagramFocusTableName,
+    docsPrefillConnectionId,
+    docsPrefillDatabase,
+    docsPrefillSchema,
     tableImportPrefillConnectionId,
     tableImportPrefillDatabase,
     tableImportPrefillSchema,

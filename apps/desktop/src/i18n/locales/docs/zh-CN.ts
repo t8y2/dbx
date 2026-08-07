@@ -1,0 +1,48 @@
+export default {
+  title: "文档",
+  groupBySchema: "Schema",
+  groupByTableGroup: "表分组",
+  noGroup: "(无分组)",
+  noSchema: "(无 Schema)",
+  search: "搜索表、列、分组…",
+  columns: "列",
+  indexes: "索引",
+  references: "引用",
+  referencedBy: "被引用",
+  localNote: "本地",
+  shadowedComment: "数据库注释: {comment}",
+  addNote: "添加备注",
+  editNote: "编辑备注",
+  newGroup: "新建分组…",
+  groupName: "分组名称",
+  groupColour: "颜色",
+  deleteGroup: "删除分组",
+  enumValues: "值",
+  usedBy: "被使用于",
+  openDiagram: "打开 Schema 图",
+  saving: "保存中…",
+  saved: "已保存",
+  saveFailed: "无法保存备注: {error}",
+  warnings: {
+    tableSkipped: {
+      title: "有一张表无法生成文档",
+      detail: "{table} 被跳过: {reason}。此文档中缺少该表。",
+    },
+    noForeignKeyMetadata: {
+      title: "没有可用的关系",
+      detail: "{engine} 不报告外键元数据，因此无法推导出任何关系。此图对该数据库引擎而言已经完整。",
+    },
+    commentsUnsupported: {
+      title: "数据库注释不可用",
+      detail: "{engine} 不支持表或列注释，因此这里的所有描述均仅来自本项目的备注。",
+    },
+    orphanedNotes: {
+      title: "部分备注已不再对应任何内容",
+      detail: "{count} 条备注引用的表或列已不存在。没有任何内容被删除 — 请在备注文件中重新映射或移除它们。",
+    },
+    dbmlOmitted: {
+      title: "无法在 DBML 中表示",
+      detail: "{table} 上的 {item} 已在此处记录，但已从导出的 DBML 中省略: {reason}。",
+    },
+  },
+};

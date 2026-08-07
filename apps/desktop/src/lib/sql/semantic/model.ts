@@ -675,7 +675,8 @@ function sourceForQualifier(sources: readonly SqlSemanticRowSource[], qualifierP
 
 function starQualifierParts(before: readonly SqlSemanticToken[], starIndex: number, dialect: SqlSemanticDialectAdapter): string[] {
   let index = starIndex - 1;
-  if (before[index]?.text === ".") index -= 1;
+  if (before[index]?.text !== ".") return [];
+  index -= 1;
   const qualifierParts: string[] = [];
   while (index >= 0) {
     const identifier = before[index];

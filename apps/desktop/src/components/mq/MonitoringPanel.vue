@@ -1044,11 +1044,12 @@ onUnmounted(() => {
   border-color: var(--monitor-border-strong);
   background: var(--monitor-hover);
   box-shadow: var(--monitor-shadow);
-  transform: translateY(-1px);
 }
 
+/* 桌面端不做位移/缩放按压反馈，仅靠颜色变化表达状态，避免按钮"抖动"观感 */
 .btn-sm:active:not(:disabled) {
-  transform: translateY(0) scale(0.98);
+  background: var(--monitor-accent-soft);
+  border-color: var(--monitor-accent);
 }
 
 .btn-sm:focus-visible {

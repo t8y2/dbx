@@ -4,8 +4,8 @@ export async function mqttGetBrokerInfo(connectionId: string) {
   return invoke("mqtt_get_broker_info", { connectionId });
 }
 
-export async function mqttSubscribe(connectionId: string, topic: string, qos?: string | null) {
-  return invoke("mqtt_subscribe", { connectionId, topic, qos: qos ?? null });
+export async function mqttSubscribe(connectionId: string, topic: string, qos?: string | null, noLocal?: boolean) {
+  return invoke("mqtt_subscribe", { connectionId, topic, qos: qos ?? null, noLocal: noLocal ?? false });
 }
 
 export async function mqttUnsubscribe(connectionId: string, topic: string) {

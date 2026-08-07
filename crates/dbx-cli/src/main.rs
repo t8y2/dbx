@@ -7,6 +7,7 @@ use dbx_core::{
     types::{ColumnInfo, QueryResult, TableInfo},
 };
 use dbx_mcp::{
+    backend::DocsSnapshotOptions,
     mongo::{self, MongoSafetyError},
     DbxBackend, LocalBackend, WebBackend,
 };
@@ -91,6 +92,8 @@ struct Flags {
     max_rows: Option<usize>,
     timeout_ms: Option<u64>,
     file: Option<PathBuf>,
+    out: Option<PathBuf>,
+    notes: Option<PathBuf>,
     allow_writes: bool,
     allow_dangerous: bool,
     help: bool,
@@ -107,6 +110,22 @@ impl CliError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self { code, message: message.into() }
     }
+}
+
+/// `--notes` names a file explicitly, so a missing one is a typo rather than
+/// "no notes yet".
+///
+/// `load_annotations` deliberately returns `Ok(None)` for a missing file,
+/// because the implicit per-connection notes path may legitimately not exist
+/// yet. That is the right behaviour there and the wrong behaviour here: without
+/// this check, `--notes ./typo.json` produces DBML with every note silently
+/// absent and no diagnostic at all, which reads exactly like a database that
+/// has no documentation.
+fn require_notes_file(path: &std::path::Path) -> Result<(), CliError> {
+    if path.exists() {
+        return Ok(());
+    }
+    Err(CliError::new("NOTES_NOT_FOUND", format!("Notes file {} does not exist.", path.display())))
 }
 
 #[derive(Serialize)]
@@ -222,6 +241,9 @@ async fn run_with_backend(backend: &dyn DbxBackend, flags: Flags) -> Result<Stri
     }
     if args.first().is_some_and(|arg| arg == "context") {
         return run_context(backend, &flags).await;
+    }
+    if args.first().is_some_and(|arg| arg == "dbml") {
+        return run_dbml(backend, &flags).await;
     }
     if args.first().is_some_and(|arg| arg == "open") {
         ensure_arg_count(args, 3, "dbx open")?;
@@ -436,6 +458,46 @@ async fn run_context(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, 
     Ok(output)
 }
 
+async fn run_dbml(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, CliError> {
+    let args = &flags.args;
+    let connection_name = required(args.get(1), "Connection name is required.")?;
+    let connection = find_connection(backend, connection_name).await?;
+    let database = selected_database(&connection, flags.database.as_deref());
+
+    let options = DocsSnapshotOptions {
+        schemas: flags.schema.clone().into_iter().collect(),
+        tables: flags.tables.clone(),
+        project_name: Some(connection.name.clone()),
+    };
+
+    let mut snapshot = backend.collect_docs_snapshot(&connection, &database, options).await.map_err(command_error)?;
+
+    if let Some(path) = flags.notes.as_ref() {
+        require_notes_file(path)?;
+        if let Some(annotations) = dbx_core::docs::annotations::load_annotations(path)
+            .map_err(|error| CliError::new("NOTES_INVALID", error))?
+        {
+            dbx_core::docs::annotations::apply_annotations(&mut snapshot, &annotations, connection.db_type);
+        }
+    }
+
+    let output = dbx_core::docs::to_dbml(&snapshot);
+
+    for warning in &output.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    match flags.out.as_ref() {
+        Some(path) => {
+            std::fs::write(path, &output.text).map_err(|error| {
+                CliError::new("WRITE_FAILED", format!("Failed to write {}: {error}", path.display()))
+            })?;
+            Ok(format!("Wrote {} bytes to {}", output.text.len(), path.display()))
+        }
+        None => Ok(output.text),
+    }
+}
+
 async fn find_connection(backend: &dyn DbxBackend, name: &str) -> Result<ConnectionConfig, CliError> {
     backend
         .load_connections()
@@ -461,6 +523,8 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         max_rows: None,
         timeout_ms: None,
         file: None,
+        out: None,
+        notes: None,
         allow_writes: false,
         allow_dangerous: false,
         help: false,
@@ -505,6 +569,8 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
                 flags.timeout_ms = Some(duration_ms(&option_value(argv, &mut index, "--timeout")?, "--timeout")?)
             }
             "--file" => flags.file = Some(PathBuf::from(option_value(argv, &mut index, "--file")?)),
+            "--out" => flags.out = Some(PathBuf::from(option_value(argv, &mut index, "--out")?)),
+            "--notes" => flags.notes = Some(PathBuf::from(option_value(argv, &mut index, "--notes")?)),
             "--allow-writes" => flags.allow_writes = true,
             "--allow-dangerous-sql" => flags.allow_dangerous = true,
             value if value.starts_with('-') => {
@@ -833,12 +899,31 @@ fn csv_cell(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
+    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn require_notes_file_accepts_an_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("notes.json");
+        std::fs::write(&path, "{}").expect("write");
+        assert!(require_notes_file(&path).is_ok());
+    }
+
+    #[test]
+    fn require_notes_file_rejects_a_mistyped_path() {
+        // The regression: without this, `--notes ./typo.json` emitted DBML with
+        // every note missing and printed nothing, indistinguishable from a
+        // database that genuinely has no documentation.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = require_notes_file(&dir.path().join("typo.json")).expect_err("missing file must error");
+        assert_eq!(error.code, "NOTES_NOT_FOUND");
+        assert!(error.message.contains("typo.json"), "message names the path: {}", error.message);
+    }
     use async_trait::async_trait;
     use dbx_core::{
         agent_events::ToolResult,
@@ -1056,5 +1141,41 @@ mod tests {
         ]))
         .unwrap();
         run_with_backend(&backend, cleanup).await.expect("final cleanup");
+    }
+
+    #[test]
+    fn parses_the_out_flag() {
+        let flags = parse_flags(&args(&["dbml", "local", "--out", "schema.dbml"])).expect("parse");
+        assert_eq!(flags.args, args(&["dbml", "local"]));
+        assert_eq!(flags.out.as_deref(), Some(std::path::Path::new("schema.dbml")));
+    }
+
+    #[test]
+    fn out_requires_a_value() {
+        let error = parse_flags(&args(&["dbml", "local", "--out"])).expect_err("should fail");
+        assert_eq!(error.code, "INVALID_OPTION");
+    }
+
+    #[test]
+    fn parses_the_notes_flag() {
+        let flags = parse_flags(&args(&["dbml", "local", "--notes", "docs/dbx-docs.json"])).expect("parse");
+        assert_eq!(flags.args, args(&["dbml", "local"]));
+        assert_eq!(flags.notes.as_deref(), Some(std::path::Path::new("docs/dbx-docs.json")));
+    }
+
+    #[test]
+    fn notes_requires_a_value() {
+        let error = parse_flags(&args(&["dbml", "local", "--notes"])).expect_err("should fail");
+        assert_eq!(error.code, "INVALID_OPTION");
+    }
+
+    #[test]
+    fn notes_appears_in_the_usage_text() {
+        assert!(usage().contains("--notes"), "got: {}", usage());
+    }
+
+    #[test]
+    fn dbml_appears_in_the_usage_text() {
+        assert!(usage().contains("dbx dbml <connection>"), "got: {}", usage());
     }
 }

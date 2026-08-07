@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"reflect"
@@ -242,6 +243,28 @@ func TestNormalizeValueKeepsNonBinaryBytesAsText(t *testing.T) {
 	}
 	if got := normalizeValue([]byte("legacy"), ""); got != "legacy" {
 		t.Fatalf("normalizeValue bytes without metadata = %#v, want %q", got, "legacy")
+	}
+}
+
+func TestQueryResultsMarshalNonFiniteFloatsAsStrings(t *testing.T) {
+	result := queryResult{Rows: [][]any{{math.NaN(), math.Inf(1), math.Inf(-1), 1234.56}}}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("non-finite Oracle floats must remain JSON-safe: %v", err)
+	}
+	if !strings.Contains(string(data), `[["NaN","+Inf","-Inf",1234.56]]`) {
+		t.Fatalf("unexpected query result JSON: %s", data)
+	}
+	if !math.IsNaN(result.Rows[0][0].(float64)) {
+		t.Fatalf("marshaling must not mutate the original rows: %#v", result.Rows)
+	}
+
+	data, err = json.Marshal(queryPageResult{Rows: [][]any{{math.NaN()}}})
+	if err != nil {
+		t.Fatalf("paged non-finite Oracle floats must remain JSON-safe: %v", err)
+	}
+	if !strings.Contains(string(data), `[["NaN"]]`) {
+		t.Fatalf("unexpected query page JSON: %s", data)
 	}
 }
 

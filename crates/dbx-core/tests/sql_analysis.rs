@@ -411,6 +411,96 @@ fn sqlserver_proc_identifiers_remain_identifiers_outside_create() {
 }
 
 #[test]
+fn sqlserver_alter_table_single_add_supports_multiple_columns() {
+    for sql in [
+        "ALTER TABLE dbo.demo\nADD isOldWell BIT NULL,\n    isNewWell BIT NULL;",
+        "ALTER TABLE [dbo].[demo] ADD amount DECIMAL(10, 2) DEFAULT (0), [display_name] NVARCHAR(50) NULL;",
+        "ALTER TABLE dbo.demo ADD enabled BIT NULL, CHECK (enabled IN (0, 1));",
+    ] {
+        analyze_sql_references(sql, Some("sqlserver"))
+            .unwrap_or_else(|error| panic!("SQL Server single-ADD multi-column ALTER TABLE should analyze: {error}"));
+    }
+}
+
+#[test]
+fn sqlserver_alter_table_add_normalization_preserves_boundaries() {
+    analyze_sql_references("ALTER TABLE dbo.demo ADD isOldWell BIT NULL, ADD isNewWell BIT NULL;", Some("sqlserver"))
+        .expect("existing repeated-ADD parser behavior should remain valid");
+
+    let missing_comma =
+        analyze_sql_references("ALTER TABLE dbo.demo ADD isOldWell BIT NULL isNewWell BIT NULL;", Some("sqlserver"))
+            .expect_err("missing column separators must remain invalid");
+    assert!(missing_comma.contains("isNewWell"));
+
+    analyze_sql_references(
+        "ALTER TABLE dbo.demo ADD amount DECIMAL(10, 2) NULL, label NVARCHAR(20) NULL; SELECT label FROM dbo.demo;",
+        Some("sqlserver"),
+    )
+    .expect("data-type commas and multiple statements should remain parseable");
+
+    analyze_sql_references("ALTER TABLE dbo.demo ADD first_flag BIT NULL, second_flag BIT NULL;", Some("postgres"))
+        .expect_err("other dialects must not inherit SQL Server ALTER TABLE normalization");
+}
+
+#[test]
+fn sqlserver_query_hints_do_not_raise_parser_errors() {
+    let analysis = analyze_sql_references(
+        "SELECT o.name FROM sys.objects o WHERE o.type = 'U' OPTION (RECOMPILE);",
+        Some("sqlserver"),
+    )
+    .expect("SQL Server OPTION query hint should analyze");
+
+    assert_eq!(analysis.tables.len(), 1);
+    assert_eq!(analysis.tables[0].schema.as_deref(), Some("sys"));
+    assert_eq!(analysis.tables[0].name, "objects");
+    assert_eq!(analysis.tables[0].alias.as_deref(), Some("o"));
+
+    let columns: Vec<_> =
+        analysis.columns.iter().map(|column| (column.qualifier.as_deref(), column.name.as_str())).collect();
+    assert_eq!(columns, vec![(Some("o"), "name"), (Some("o"), "type")]);
+}
+
+#[test]
+fn sqlserver_query_hints_support_arguments_ctes_and_multiple_statements() {
+    let sql = "WITH nodes AS (\
+               SELECT 1 AS depth \
+               UNION ALL \
+               SELECT depth + 1 FROM nodes WHERE depth < 3\
+               ) SELECT depth FROM nodes OPTION (MAXRECURSION 100, MAXDOP 2);\
+               SELECT name FROM sys.tables WHERE is_ms_shipped = 0 OPTION (HASH JOIN, USE HINT('DISABLE_OPTIMIZER_ROWGOAL'));";
+    let analysis =
+        analyze_sql_references(sql, Some("sqlserver")).expect("SQL Server query hints with arguments should analyze");
+
+    let tables: Vec<_> = analysis.tables.iter().map(|table| (table.schema.as_deref(), table.name.as_str())).collect();
+    assert_eq!(tables, vec![(Some("sys"), "tables")]);
+}
+
+#[test]
+fn sqlserver_option_functions_and_invalid_hints_are_not_suppressed() {
+    for argument in ["value", "recompile"] {
+        let sql = format!("SELECT option({argument}) FROM settings;");
+        let analysis =
+            analyze_sql_references(&sql, Some("sqlserver")).expect("ordinary OPTION function should remain parseable");
+        assert_eq!(analysis.tables[0].name, "settings");
+        assert_eq!(analysis.columns[0].name, argument);
+    }
+
+    let analysis = analyze_sql_references(
+        "SELECT option(recompile); SELECT name FROM sys.objects OPTION (RECOMPILE);",
+        Some("sqlserver"),
+    )
+    .expect("an OPTION function in an earlier statement must remain parseable");
+    assert_eq!(analysis.tables[0].name, "objects");
+    assert_eq!(analysis.columns[0].name, "recompile");
+    assert_eq!(analysis.columns[1].name, "name");
+
+    let error =
+        analyze_sql_references("SELECT * FROM sys.objects WHERE type = 'U' OPTION (CUSTOM_HINT 1);", Some("sqlserver"))
+            .expect_err("unknown OPTION clauses must still surface parser errors");
+    assert!(error.contains("OPTION"));
+}
+
+#[test]
 fn duckdb_parser_gap_queries_do_not_raise_syntax_errors() {
     for sql in ["FROM users;", "SUMMARIZE users;", "SUMMARISE users;"] {
         let analysis = analyze_sql_references(sql, Some("duckdb")).expect("duckdb parser gap query should analyze");

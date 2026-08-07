@@ -1783,6 +1783,20 @@ async fn agent_object_statistics_query(
         .await
 }
 
+#[cfg(feature = "mq-admin")]
+fn message_queue_topic_tables(topics: Vec<crate::mq::TopicInfo>) -> Vec<db::TableInfo> {
+    topics
+        .into_iter()
+        .map(|topic| db::TableInfo {
+            name: topic.name,
+            table_type: "TOPIC".to_string(),
+            comment: None,
+            parent_schema: topic.namespace,
+            parent_name: None,
+        })
+        .collect()
+}
+
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,
@@ -1798,6 +1812,25 @@ async fn list_tables_once(
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
+
+    #[cfg(feature = "mq-admin")]
+    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MessageQueue) {
+        let topics = crate::mq::service::mq_list_topics_core(
+            state,
+            connection_id,
+            crate::mq::NamespaceRef { tenant: database.to_string(), namespace: schema.to_string() },
+            crate::mq::ListTopicsOpts::default(),
+        )
+        .await?;
+        return Ok(filter_table_infos(
+            message_queue_topic_tables(topics),
+            filter,
+            limit,
+            offset,
+            object_types,
+            table_name_filter,
+        ));
+    }
 
     {
         let connections = state.connections.read().await;
@@ -2657,6 +2690,7 @@ mod tests {
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "test".to_string(),
             name: "test".to_string(),
             note: String::new(),
@@ -3165,6 +3199,26 @@ for line in sys.stdin:
             parent_schema: None,
             parent_name: None,
         }
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[test]
+    fn message_queue_topics_are_exposed_as_table_metadata() {
+        let tables = super::message_queue_topic_tables(vec![crate::mq::TopicInfo {
+            name: "orders".to_string(),
+            short_name: "orders".to_string(),
+            partitioned: true,
+            partitions: Some(3),
+            persistent: true,
+            internal: false,
+            message_type: None,
+            namespace: Some("default".to_string()),
+        }]);
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "orders");
+        assert_eq!(tables[0].table_type, "TOPIC");
+        assert_eq!(tables[0].parent_schema.as_deref(), Some("default"));
     }
 
     fn test_object_info(name: &str, object_type: &str) -> super::db::ObjectInfo {

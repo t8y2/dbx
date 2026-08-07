@@ -1284,6 +1284,9 @@ export const useQueryStore = defineStore("query", () => {
       sql: t.sql,
       savedSqlId: t.savedSqlId,
       externalSqlPath: t.externalSqlPath,
+      externalSqlFileVersion: t.externalSqlFileVersion,
+      externalSqlIgnoredFileVersion: t.externalSqlIgnoredFileVersion,
+      externalSqlFileMissing: t.externalSqlFileMissing,
       lastExecutedSql: t.lastExecutedSql,
       resultBaseSql: t.resultBaseSql,
       resultSortedSql: t.resultSortedSql,
@@ -1404,7 +1407,7 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string) {
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"]) {
     const normalizedPath = normalizeExternalSqlPath(path);
     const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
     if (existing) {
@@ -1424,6 +1427,7 @@ export const useQueryStore = defineStore("query", () => {
       sql,
       originalSql: sql,
       externalSqlPath: path,
+      externalSqlFileVersion: version,
       isExecuting: false,
       isCancelling: false,
       isExplaining: false,
@@ -1856,6 +1860,46 @@ export const useQueryStore = defineStore("query", () => {
 
   function markTabClean(tab: QueryTab | undefined) {
     if (tab) tab.originalSql = tab.sql;
+  }
+
+  function applyExternalSqlFileSnapshot(id: string, sql: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.sql = sql;
+    tab.originalSql = sql;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function markExternalSqlFileSaved(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.originalSql = tab.sql;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function updateExternalSqlFileVersion(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function ignoreExternalSqlFileVersion(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.externalSqlIgnoredFileVersion = version;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function acknowledgeExternalSqlFileMissing(id: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.externalSqlFileMissing = true;
   }
 
   function persistSavedSqlEditorPosition(tab: QueryTab | undefined) {
@@ -2339,6 +2383,7 @@ export const useQueryStore = defineStore("query", () => {
     try {
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: conn?.driver_profile,
         identifierQuote,
         database: tableMeta.database,
         schema: tableMeta.schema,
@@ -2545,16 +2590,22 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab) return;
     tab.savedSqlId = savedSqlId;
     tab.externalSqlPath = undefined;
+    tab.externalSqlFileVersion = undefined;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
     if (title) {
       tab.title = title;
       tab.customTitle = true;
     }
   }
 
-  function linkExternalSqlPath(id: string, path: string, title?: string) {
+  function linkExternalSqlPath(id: string, path: string, title?: string, version?: QueryTab["externalSqlFileVersion"]) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.externalSqlPath = path;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
     tab.savedSqlId = undefined;
     if (title) {
       tab.title = title;
@@ -5048,6 +5099,7 @@ export const useQueryStore = defineStore("query", () => {
         while (true) {
           const sql = await api.buildTableSelectSql({
             databaseType: effectiveDbType,
+            driverProfile: conn?.driver_profile,
             identifierQuote,
             database: tableMeta.database,
             schema: tableMeta.schema,
@@ -5355,6 +5407,11 @@ export const useQueryStore = defineStore("query", () => {
     completePendingCloseAfterSaveAll,
     isTabDirty,
     markTabClean,
+    applyExternalSqlFileSnapshot,
+    markExternalSqlFileSaved,
+    updateExternalSqlFileVersion,
+    ignoreExternalSqlFileVersion,
+    acknowledgeExternalSqlFileMissing,
     discardTabChanges,
     requestAppCloseConfirmation,
     closeOtherTabs,

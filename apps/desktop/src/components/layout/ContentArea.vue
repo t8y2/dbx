@@ -130,6 +130,10 @@ type SearchableBrowserHandle = {
   executeCommand?: (command: string) => Promise<boolean>;
 };
 
+type ElasticsearchJsonResponsePanelHandle = {
+  focusSearch: () => boolean;
+};
+
 const props = defineProps<{
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
@@ -210,6 +214,7 @@ const columnInfoLoading = ref(false);
 const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
+const elasticsearchJsonResponsePanelRef = ref<ElasticsearchJsonResponsePanelHandle>();
 const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
@@ -755,6 +760,7 @@ function onHandleCloseColumnPanel() {
 }
 
 function focusSearch(): boolean {
+  if (elasticsearchJsonResponsePanelRef.value?.focusSearch()) return true;
   if (props.activeTab.mode === "mongo") return documentBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
@@ -972,6 +978,10 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
+              :result-columns="activeTab.result?.columns"
+              :result-source-statement="activeTab.result?.sourceStatement"
+              :result-source-from="activeTab.result?.sourceFrom"
+              :result-source-to="activeTab.result?.sourceTo"
               :statement-execution-markers="activeStatementExecutionMarkers"
               :initial-viewport="activeTab.editorViewport"
               :initial-selection="activeTab.editorSelection"
@@ -1405,8 +1415,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
             </div>
 
             <template v-else>
-              <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
-              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
+              <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
+              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
               <DataGrid
                 v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"

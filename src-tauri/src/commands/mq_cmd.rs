@@ -268,6 +268,15 @@ pub async fn mq_list_subscriptions(
 }
 
 #[tauri::command]
+pub async fn mq_enrich_subscriptions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+) -> Result<Vec<dbx_core::mq::SubscriptionInfo>, String> {
+    dbx_core::mq::service::mq_enrich_subscriptions_core(&state, &connection_id, topic).await
+}
+
+#[tauri::command]
 pub async fn mq_create_subscription(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

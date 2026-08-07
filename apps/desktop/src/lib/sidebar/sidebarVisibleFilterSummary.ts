@@ -5,29 +5,38 @@ type SidebarVisibleFilterConnection = Pick<ConnectionConfig, "database" | "db_ty
 
 export type SidebarVisibleFilterSummary = {
   mode: "database" | "schema";
-  isExplicit: boolean;
+  isActive: boolean;
   selected: number | null;
   total: number | null;
 };
 
+export function connectionHasConfiguredSidebarVisibleFilter(connection: SidebarVisibleFilterConnection): boolean {
+  if (connectionUsesVisibleSchemaFilter(connection)) {
+    return Array.isArray(connection.visible_schemas?.[connection.database || ""]);
+  }
+  return Array.isArray(connection.visible_databases);
+}
+
 export function sidebarVisibleFilterSummary(connection: SidebarVisibleFilterConnection, objectNames?: readonly string[]): SidebarVisibleFilterSummary {
   const mode = connectionUsesVisibleSchemaFilter(connection) ? "schema" : "database";
   const configured = mode === "schema" ? connection.visible_schemas?.[connection.database || ""] : connection.visible_databases;
-  if (!objectNames) return { mode, isExplicit: Array.isArray(configured), selected: null, total: null };
+  const isExplicit = Array.isArray(configured);
+  if (!objectNames) return { mode, isActive: false, selected: null, total: null };
 
   const names = [...objectNames];
   const defaultNames = mode === "schema" ? filterSchemaNamesForVisiblePicker(names, connection) : filterDatabaseNamesForVisiblePicker(names, connection);
-  if (!Array.isArray(configured)) {
-    return { mode, isExplicit: false, selected: defaultNames.length, total: defaultNames.length };
+  if (!isExplicit) {
+    return { mode, isActive: false, selected: defaultNames.length, total: defaultNames.length };
   }
 
   const selectedNames = normalizeVisibleDatabaseSelection(configured, names);
   const defaultNameSet = new Set(defaultNames);
   const includesSystemObject = selectedNames.some((name) => !defaultNameSet.has(name));
+  const total = includesSystemObject ? names.length : defaultNames.length;
   return {
     mode,
-    isExplicit: true,
+    isActive: selectedNames.length < total,
     selected: selectedNames.length,
-    total: includesSystemObject ? names.length : defaultNames.length,
+    total,
   };
 }

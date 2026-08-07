@@ -40,6 +40,7 @@ import {
   Plus,
   ScrollText,
   Code2,
+  Wrench,
   ListFilter,
   Clipboard,
   UsersRound,
@@ -116,6 +117,7 @@ import {
   buildCopyTableDataSql,
   buildEmptyTableSql,
   buildTruncateTableSql,
+  collectDuplicateTableColumnComments,
   duplicateTableStructureRequiresScript,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
@@ -153,6 +155,7 @@ import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
 import { createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
@@ -324,7 +327,7 @@ const emit = defineEmits<{
   "rename-started": [];
   "group-created": [groupId: string];
   "request-group-rename": [groupId: string];
-  "node-toggled": [node: TreeNode, wasExpanded: boolean];
+  "node-toggled": [node: TreeNode, expanded: boolean];
   "search-toggle": [node: TreeNode];
   "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
   "open-ddl": [node: TreeNode];
@@ -751,7 +754,7 @@ function runRowClickAction(clickDetail: number) {
     return;
   }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
-  if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
+  if (!shouldRunTreeNodeRowAction(action, clickDetail, isGroupLabel(node))) return;
   if (action === "open-data") {
     scheduleOpenData(node);
   } else if (action === "open-source") {
@@ -1681,6 +1684,22 @@ function openProcedureExecution() {
   const node = activeNode.value;
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   emit("open-procedure", node);
+}
+
+async function compileXuguObject() {
+  const node = activeNode.value;
+  if (currentDatabaseType() !== "xugu" || !node.connectionId || !node.database) return;
+  const sql = buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label });
+  if (!sql) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
+    toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
+    await connectionStore.refreshTreeNode(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function requestDropObject() {
@@ -3100,6 +3119,19 @@ function isDuplicateStructureSource(node: TreeNode): node is DuplicateStructureS
   return node.type === "table" && !!node.connectionId && !!node.database;
 }
 
+/** Dameng CTAS does not copy comments; load column comments for COMMENT ON COLUMN. */
+async function loadDamengDuplicateColumnComments(connectionId: string, database: string, schema: string | undefined, sourceName: string, catalog?: string, sourceColumns?: ColumnInfo[]): Promise<{ columns?: ColumnInfo[]; columnComments: Array<{ name: string; comment: string }> }> {
+  let columns = sourceColumns;
+  if (!columns) {
+    try {
+      columns = await api.getColumns(connectionId, database, schema || "", sourceName, catalog);
+    } catch (error) {
+      console.warn(`Failed to load Dameng column comments for table clone: ${sourceName}`, error);
+    }
+  }
+  return { columns, columnComments: collectDuplicateTableColumnComments(columns ?? []) };
+}
+
 async function confirmDuplicateStructure() {
   const node = duplicateStructureSource.value || (isDuplicateStructureSource(activeNode.value) ? activeNode.value : null);
   const newName = duplicateTableName.value.trim();
@@ -3109,12 +3141,14 @@ async function confirmDuplicateStructure() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const databaseType = databaseTypeForNode(node);
+    const columnComments = databaseType === "dameng" ? (await loadDamengDuplicateColumnComments(node.connectionId, node.database, node.schema, node.label, node.catalog)).columnComments : [];
     const sql = await buildDuplicateTableStructureSql({
       databaseType,
       schema: node.schema,
       sourceName: node.label,
       targetName: newName,
       tableComment: node.comment,
+      columnComments,
     });
     await executeTreeNodeSqlWithProductionGuard(node, sql, {
       database: node.database,
@@ -3155,13 +3189,21 @@ async function confirmPasteTable() {
     try {
       await connectionStore.ensureConnected(entry.connectionId);
       const databaseType = entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined;
+      let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
+        let columnComments: Array<{ name: string; comment: string }> = [];
+        if (databaseType === "dameng") {
+          const loaded = await loadDamengDuplicateColumnComments(entry.connectionId, entry.database, entry.schema, entry.sourceName);
+          sourceColumns = loaded.columns;
+          columnComments = loaded.columnComments;
+        }
         const structureSql = await buildDuplicateTableStructureSql({
           databaseType,
           schema: entry.schema,
           sourceName: entry.sourceName,
           targetName,
           tableComment: entry.tableComment,
+          columnComments,
         });
         const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, structureSql, {
           database: entry.database,
@@ -3176,7 +3218,9 @@ async function confirmPasteTable() {
         queueRefreshTarget(entry);
       }
       if (copyData) {
-        const sourceColumns = await api.getColumns(entry.connectionId, entry.database, entry.schema || "", entry.sourceName);
+        if (!sourceColumns) {
+          sourceColumns = await api.getColumns(entry.connectionId, entry.database, entry.schema || "", entry.sourceName);
+        }
         const dataCopyColumnOptions = tableDataCopyColumnOptions(databaseType, sourceColumns);
         if (dataCopyColumnOptions.columns.length === 0) {
           throw new Error("No writable columns available for table data copy.");
@@ -4519,6 +4563,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "index" || node.type === "fkey" || (node.type === "trigger" && !!node.tableName)) {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+      items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
+    }
     if (node.type === "index" && canOpenStructureEditor.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.editIndex"), action: openStructureEditor, icon: PencilRuler });
@@ -4550,6 +4597,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (node.type === "procedure") {
       items.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecution, icon: Play });
     }
+    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+      items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
+    }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (canRenameObject.value) {
       items.push({
@@ -4580,6 +4630,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
+    if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
+      items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
+    }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
@@ -4728,13 +4781,13 @@ function activateRuntimeNode(node: TreeNode) {
   activeNode.value = node;
 }
 
-// Async loaders can rebuild a connection node while awaiting the backend.
-// Publish the live tree node so a stale rendered row cannot reset expansion.
+// Async loaders can rebuild a connection node while awaiting the backend. Keep
+// the live node active for later actions, but publish the rendered node so the
+// tree owner can synchronize display projections without losing the toggle.
 function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?: boolean) {
   const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
-  if (expandedOverride !== undefined) liveNode.isExpanded = expandedOverride;
   activeNode.value = liveNode;
-  emit("node-toggled", liveNode, wasExpanded);
+  emit("node-toggled", node, expandedOverride ?? !wasExpanded);
 }
 
 function activateActionTarget(target: SidebarActionTarget) {

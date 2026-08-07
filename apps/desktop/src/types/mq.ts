@@ -192,6 +192,8 @@ export interface SubscriptionInfo {
   consumerGroupType?: string;
   /** RocketMQ consumer group message model: CLUSTERING / BROADCASTING. */
   messageModel?: string;
+  /** When true, backlog probe failed — do not render msgBacklog as healthy zero. */
+  backlogUnavailable?: boolean;
 }
 
 export interface RocketMqConsumerGroupConfig {
@@ -228,9 +230,25 @@ export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: 
 
 export type SkipCount = { kind: "all" } | { kind: "count"; count: number };
 
+/** Per-queue consume progress (RocketMQ Dashboard consume-detail / Kafka lag rows). */
+export interface PartitionBacklog {
+  partition: number;
+  /** Consumer committed offset (`consumerOffset`). */
+  currentOffset: number;
+  /** Broker max offset (`brokerOffset`). */
+  endOffset: number;
+  lag: number;
+  brokerName?: string;
+  /** Last consume message store timestamp (ms). `0` means unavailable. */
+  lastTimestamp?: number;
+  consumerClient?: string;
+}
+
 export interface BacklogStats {
   msgBacklog: number;
   backlogSize: number;
+  /** Optional queue-level progress; omitted or empty when adapter only exposes totals. */
+  partitions?: PartitionBacklog[];
 }
 
 export interface ClusterInfo {

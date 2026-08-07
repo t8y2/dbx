@@ -178,6 +178,7 @@ mod tests {
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "mongo".to_string(),
             name: "MongoDB".to_string(),
             note: String::new(),

@@ -5,6 +5,7 @@ import type { MqSystemKind, TopicInfo, TopicRef, SendMessageRequest, SendMessage
 import { mqSendMessage, mqListTopics } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { resolveRabbitMqSendNamespace } from "@/lib/mq/mqConsoleDefaults";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import MessageBrowser from "./MessageBrowser.vue";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
@@ -23,6 +24,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const topicName = ref("");
 const messageKey = ref("");
@@ -82,12 +84,12 @@ onUnmounted(() => {
   if (successTimer) clearTimeout(successTimer);
 });
 
-function guardWritable() {
+async function guardWritable() {
   if (props.readOnly) {
     error.value = readOnlyMessage.value;
     return false;
   }
-  return true;
+  return confirmMqWrite(t("mqMessages.sendMessage"));
 }
 
 async function loadTopics() {
@@ -138,7 +140,7 @@ function parseHeaders(): Record<string, string> {
 }
 
 async function sendMessage() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable())) return;
   error.value = undefined;
   success.value = undefined;
 
@@ -327,6 +329,8 @@ watch(
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .send-message-panel {
   height: 100%;
   display: flex;
@@ -463,27 +467,6 @@ watch(
   box-shadow: 0 0 0 2px var(--color-primary-alpha);
 }
 
-.btn-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: 16px;
-  transition: all 0.15s;
-  flex-shrink: 0;
-}
-
-.btn-icon:hover:not(:disabled) {
-  background: var(--color-background-secondary);
-  color: var(--color-text);
-}
-
 .spin {
   display: inline-block;
   animation: spin-anim 0.8s linear infinite;
@@ -587,33 +570,9 @@ input[type="number"]:focus {
   padding-top: 4px;
 }
 
-.btn-primary,
-.btn-sm {
-  padding: 7px 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.15s;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 12px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: white;
-  font-weight: 500;
+/* Keep send CTA visually balanced next to optional secondary actions */
+.form-actions .btn-primary {
   min-width: 100px;
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
 }
 
 button:disabled,

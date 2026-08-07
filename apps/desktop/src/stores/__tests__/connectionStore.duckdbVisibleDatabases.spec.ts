@@ -89,7 +89,7 @@ describe("connectionStore DuckDB visible databases", () => {
       { type: "schema", database: "main", schema: "main", label: "main" },
       { type: "schema", database: "main", schema: "reporting", label: "reporting" },
     ]);
-    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isExplicit: true, selected: 1, total: 3 });
+    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isActive: true, selected: 1, total: 3 });
   });
 
   it("hides main schemas and unselected attached databases", async () => {
@@ -99,7 +99,7 @@ describe("connectionStore DuckDB visible databases", () => {
     await store.setVisibleDatabases(connection.id, ["warehouse"]);
 
     expect(rootEntries(store.treeNodes[0])).toEqual([{ type: "database", database: "warehouse", schema: undefined, label: "warehouse" }]);
-    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isExplicit: true, selected: 1, total: 3 });
+    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isActive: true, selected: 1, total: 3 });
   });
 
   it("restores main schemas and every attached database after clearing the filter", async () => {
@@ -115,7 +115,7 @@ describe("connectionStore DuckDB visible databases", () => {
       { type: "database", database: "analytics", schema: undefined, label: "analytics" },
       { type: "database", database: "warehouse", schema: undefined, label: "warehouse" },
     ]);
-    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isExplicit: false, selected: 3, total: 3 });
+    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isActive: false, selected: 3, total: 3 });
     expect(saveConnections).toHaveBeenLastCalledWith([expect.objectContaining({ id: connection.id, visible_databases: undefined })]);
   });
 });

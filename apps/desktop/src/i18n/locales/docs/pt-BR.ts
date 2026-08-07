@@ -1,0 +1,48 @@
+export default {
+  title: "Documentação",
+  groupBySchema: "Schemas",
+  groupByTableGroup: "Grupos de tabelas",
+  noGroup: "(sem grupo)",
+  noSchema: "(sem schema)",
+  search: "Buscar tabelas, colunas, grupos…",
+  columns: "Colunas",
+  indexes: "Índices",
+  references: "Referências",
+  referencedBy: "Referenciado por",
+  localNote: "LOCAL",
+  shadowedComment: "Comentário do banco de dados: {comment}",
+  addNote: "Adicionar uma nota",
+  editNote: "Editar nota",
+  newGroup: "Novo grupo…",
+  groupName: "Nome do grupo",
+  groupColour: "Cor",
+  deleteGroup: "Excluir grupo",
+  enumValues: "Valores",
+  usedBy: "Usado por",
+  openDiagram: "Abrir diagrama do schema",
+  saving: "Salvando…",
+  saved: "Salvo",
+  saveFailed: "Não foi possível salvar as notas: {error}",
+  warnings: {
+    tableSkipped: {
+      title: "Uma tabela não pôde ser documentada",
+      detail: "{table} foi ignorada: {reason}. Ela está faltando nesta documentação.",
+    },
+    noForeignKeyMetadata: {
+      title: "Nenhum relacionamento disponível",
+      detail: "{engine} não reporta metadados de foreign key, então nenhum relacionamento pôde ser derivado. O diagrama está completo para este engine.",
+    },
+    commentsUnsupported: {
+      title: "Comentários do banco de dados indisponíveis",
+      detail: "{engine} não suporta comentários em tabelas ou colunas, então toda descrição aqui vem apenas das notas deste projeto.",
+    },
+    orphanedNotes: {
+      title: "Algumas notas não correspondem mais a nada",
+      detail: "{count} nota(s) referenciam uma tabela ou coluna que não existe mais. Nada foi excluído — remapeie ou remova essas notas no arquivo de notas.",
+    },
+    dbmlOmitted: {
+      title: "Não representável em DBML",
+      detail: "{item} em {table} está documentado aqui mas foi omitido do DBML exportado: {reason}.",
+    },
+  },
+};

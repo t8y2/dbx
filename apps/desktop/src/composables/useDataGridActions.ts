@@ -57,6 +57,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const realColumns = tab.tableMeta?.columns.length ? tab.tableMeta.columns : undefined;
     return buildTableSelectSql({
       databaseType: effectiveDbType,
+      driverProfile: config?.driver_profile,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(tab.connectionId),
       database: tableMeta?.database,
       schema: tableMeta?.schema,

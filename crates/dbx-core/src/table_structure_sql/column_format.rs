@@ -323,7 +323,7 @@ pub(super) fn is_temporal_precision_type(dialect: StructureDialect, base_type: &
                 | "timestamp with time zone"
         ),
         StructureDialect::SqlServer => matches!(normalized.as_str(), "time" | "datetime2" | "datetimeoffset"),
-        StructureDialect::Oracle | StructureDialect::Dameng => {
+        StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar => {
             matches!(normalized.as_str(), "timestamp" | "timestamp with time zone" | "timestamp with local time zone")
         }
         _ => false,
@@ -334,7 +334,11 @@ pub(super) fn is_valid_temporal_precision(params: &str, dialect: StructureDialec
     let Ok(value) = params.parse::<u8>() else {
         return false;
     };
-    let max = if matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng) { 9 } else { 6 };
+    let max = if matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar) {
+        9
+    } else {
+        6
+    };
     value <= max && params == value.to_string()
 }
 

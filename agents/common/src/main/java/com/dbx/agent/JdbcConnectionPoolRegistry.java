@@ -1475,7 +1475,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             call("physical_set_network_timeout", () -> {
                 connection.setNetworkTimeout(networkTimeoutExecutor, networkTimeoutMillis);
                 return null;
-            }, factoryDataSource, timeoutMillis);
+            }, factoryDataSource, timeoutMillis, true);
         }
 
         private <T> T call(
@@ -1483,6 +1483,16 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             PhysicalConnectionCall<T> call,
             ConnectionFactoryDataSource factoryDataSource,
             long timeoutMillis
+        ) throws SQLException {
+            return call(operation, call, factoryDataSource, timeoutMillis, false);
+        }
+
+        private <T> T call(
+            String operation,
+            PhysicalConnectionCall<T> call,
+            ConnectionFactoryDataSource factoryDataSource,
+            long timeoutMillis,
+            boolean preserveCompletedFailure
         ) throws SQLException {
             CompletableFuture<T> outcome = new CompletableFuture<>();
             try {
@@ -1511,6 +1521,13 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
                 factoryDataSource.poison(failure);
                 throw failure;
             } catch (ExecutionException error) {
+                if (preserveCompletedFailure) {
+                    Throwable cause = error.getCause();
+                    if (cause instanceof SQLException sqlError) {
+                        throw sqlError;
+                    }
+                    throw new SQLException("JDBC physical operation failed: " + operation, cause);
+                }
                 SQLException failure = new PhysicalConnectionStateUnknownException(error.getCause());
                 factoryDataSource.poison(failure);
                 throw failure;

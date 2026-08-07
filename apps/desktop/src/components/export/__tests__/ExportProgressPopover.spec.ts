@@ -67,6 +67,96 @@ async function mountPopover() {
 }
 
 describe("ExportProgressPopover task duration", () => {
+  it("distinguishes manual exports from scheduled backups and uses a compact failure dot", async () => {
+    const tracker = useExportTracker();
+    tracker.addDatabaseExportTask("manual-export", "app", "/tmp/app.sql");
+    tracker.addDatabaseExportTask("scheduled-backup", "Nightly", "/tmp/backups", "scheduled");
+    tracker.updateDatabaseExportTask("manual-export", {
+      exportId: "manual-export",
+      currentObject: "",
+      objectIndex: 0,
+      totalObjects: 0,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Error",
+      error: "export failed",
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Database export: app");
+    expect(document.body.textContent).toContain("Database backup: Nightly");
+    const failureDot = document.body.querySelector<HTMLSpanElement>("button > span");
+    expect(failureDot?.classList.contains("h-2.5")).toBe(true);
+    expect(failureDot?.classList.contains("w-2.5")).toBe(true);
+    expect(failureDot?.classList.contains("right-0.5")).toBe(true);
+    expect(failureDot?.classList.contains("top-0.5")).toBe(true);
+    expect(failureDot?.textContent?.trim()).toBe("");
+  });
+
+  it("shows the current database export object without replacing the task title", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("database-export", "demo_2000_tables", "/tmp/demo.sql");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "t_0123_with_a_long_descriptive_name",
+      objectIndex: 123,
+      totalObjects: 2000,
+      rowsExported: 456,
+      totalRows: null,
+      status: "Running",
+      error: null,
+      preparing: false,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Database export: demo_2000_tables");
+    expect(document.body.textContent).toContain("Current: t_0123_with_a_long_descriptive_name (123/2,000)");
+    expect(document.body.querySelector('[title="t_0123_with_a_long_descriptive_name"]')).not.toBeNull();
+  });
+
+  it("shows the current object while database export metadata is being prepared", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("preparing-export", "demo", "/tmp/demo.sql");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "t_0001",
+      objectIndex: 0,
+      totalObjects: 0,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      error: null,
+      preparing: true,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Preparing: t_0001");
+  });
+
+  it.each(["Done", "Error", "Cancelled"] as const)("hides stale database object text after the task reaches %s", async (status) => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask(`terminal-${status}`, "Nightly", "/tmp/backups", "scheduled");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "Nightly",
+      objectIndex: 2,
+      totalObjects: status === "Error" ? 0 : 2,
+      rowsExported: 0,
+      totalRows: null,
+      status,
+      error: status === "Error" ? "backup failed" : null,
+      preparing: status === "Error",
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).not.toContain("Preparing: Nightly");
+    expect(document.body.textContent).not.toContain("Current: Nightly");
+  });
+
   it("shows frozen transfer elapsed time and live duration for table tasks", async () => {
     const tracker = useExportTracker();
     now = 1_000;

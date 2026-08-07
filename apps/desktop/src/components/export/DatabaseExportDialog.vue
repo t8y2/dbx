@@ -12,7 +12,7 @@ import * as api from "@/lib/backend/api";
 import type { ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
+import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
@@ -331,7 +331,7 @@ async function startExport() {
       {
         connectionId: connectionId.value,
         database: database.value,
-        enabled: includeData.value && (connectionType === "mysql" || connectionType === "postgres"),
+        enabled: shouldUseDatabaseBackupSnapshot(connectionType, includeData.value, isTauriRuntime()),
       },
       async (snapshotSessionId) => {
         const request: api.DatabaseExportRequest = {
@@ -350,7 +350,7 @@ async function startExport() {
           snapshotSessionId,
           batchSize: 1000,
         };
-        await api.exportDatabaseSql(request, (progress) => {
+        return runDatabaseExportUntilTerminal(request, (progress) => {
           exportProgress.value = { ...progress };
           updateDatabaseExportTask(progress.exportId, progress);
           if (progress.status === "Done") {
@@ -369,7 +369,7 @@ async function startExport() {
           }
         });
       },
-      () => !exportError.value && !exportCancelled.value,
+      (terminal) => terminal.status === "Done",
     );
   } catch (e: any) {
     exportError.value = e?.message || String(e);
@@ -465,7 +465,7 @@ async function startAllDatabasesExport() {
         {
           connectionId: connectionId.value,
           database: item.database,
-          enabled: includeData.value && (connectionType === "mysql" || connectionType === "postgres"),
+          enabled: shouldUseDatabaseBackupSnapshot(connectionType, includeData.value, isTauriRuntime()),
         },
         (snapshotSessionId) =>
           runDatabaseExportUntilTerminal(

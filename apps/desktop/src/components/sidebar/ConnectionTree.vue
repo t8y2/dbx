@@ -117,7 +117,22 @@ const tableSearchTimers = new Map<string, number>();
 const tableSearchFocusRestoreTokens = new Map<string, number>();
 let tableSearchFocusRestoreTokenSeq = 0;
 let latestTableSearchInteractionParentId: string | null = null;
+let latestTableSearchInteractionId = 0;
+let tableSearchInteractionIdSeq = 0;
 let localTableSearchFocusPending = false;
+
+type TableSearchSelection = {
+  start: number;
+  end: number;
+  direction: "forward" | "backward" | "none";
+};
+
+type TableSearchFocusRestore = {
+  interactionId: number;
+  parentNodeId: string;
+  shouldRestoreFocus: boolean;
+  selection: TableSearchSelection | null;
+};
 
 watch(
   searchQuery,
@@ -158,6 +173,7 @@ watch(
       store.setSidebarTableSearchQuery(parentNodeId, "");
     }
     latestTableSearchInteractionParentId = null;
+    latestTableSearchInteractionId = 0;
     void Promise.all(parentNodeIds.map((parentNodeId) => store.refreshSidebarTableSearch(parentNodeId))).catch(() => {});
   },
 );
@@ -223,7 +239,6 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>
   }
 }
 
-const isSearching = computed(() => !!deferredSearchQuery.value);
 const sidebarFilterGuards = computed(() => resolveSidebarFilterGuards(showConnectedConnectionsOnly.value, searchQuery.value, hasSearchScopeFilter.value));
 // Connected-only filtering changes only root visibility, so descendant-local
 // features stay available while operations requiring the full root list pause.
@@ -326,10 +341,10 @@ function clearSearchScopeFilter() {
   selectedSearchScopes.value = [];
 }
 
-function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { restoreFocus?: boolean }) {
+function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { focusRestore?: TableSearchFocusRestore }) {
   window.clearTimeout(tableSearchTimers.get(parentNodeId));
   if (isTreeSearchFiltering.value) return;
-  const restoreToken = options?.restoreFocus ? ++tableSearchFocusRestoreTokenSeq : 0;
+  const restoreToken = options?.focusRestore?.shouldRestoreFocus ? ++tableSearchFocusRestoreTokenSeq : 0;
   if (restoreToken) {
     tableSearchFocusRestoreTokens.clear();
     tableSearchFocusRestoreTokens.set(parentNodeId, restoreToken);
@@ -340,30 +355,63 @@ function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { res
       if (!restoreToken) return;
       if (tableSearchFocusRestoreTokens.get(parentNodeId) !== restoreToken) return;
       tableSearchFocusRestoreTokens.delete(parentNodeId);
-      if (latestTableSearchInteractionParentId !== parentNodeId) return;
-      if (document.activeElement === document.body || activeTableSearchParentId() === parentNodeId) {
-        focusTableSearchInput(parentNodeId);
-      }
+      const focusRestore = options?.focusRestore;
+      if (!focusRestore || !isCurrentTableSearchInteraction(focusRestore)) return;
+      restoreTableSearchInput(focusRestore);
     });
   }, 250);
   tableSearchTimers.set(parentNodeId, timer);
 }
 
-function activeTableSearchParentId(): string | null {
+function captureTableSearchFocus(parentNodeId: string): TableSearchFocusRestore {
+  const interactionId = ++tableSearchInteractionIdSeq;
   const active = document.activeElement;
-  if (!(active instanceof HTMLElement)) return null;
-  return active.dataset.sidebarTableSearchParentId || null;
+  const isActiveSearchInput = active instanceof HTMLInputElement && active.dataset.sidebarTableSearchParentId === parentNodeId;
+
+  return {
+    interactionId,
+    parentNodeId,
+    shouldRestoreFocus: isActiveSearchInput,
+    selection: isActiveSearchInput
+      ? {
+          start: active.selectionStart ?? active.value.length,
+          end: active.selectionEnd ?? active.value.length,
+          direction: active.selectionDirection ?? "none",
+        }
+      : null,
+  };
 }
 
-function focusTableSearchInput(parentNodeId: string) {
+function isCurrentTableSearchInteraction(focusRestore: TableSearchFocusRestore): boolean {
+  return latestTableSearchInteractionParentId === focusRestore.parentNodeId && latestTableSearchInteractionId === focusRestore.interactionId;
+}
+
+function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
   void nextTick(() => {
+    if (!isCurrentTableSearchInteraction(focusRestore) || !focusRestore.shouldRestoreFocus) return;
     const root = rootRef.value;
     if (!root) return;
-    const input = Array.from(root.querySelectorAll<HTMLInputElement>("[data-sidebar-table-search-parent-id]")).find((item) => item.dataset.sidebarTableSearchParentId === parentNodeId);
+    const input = Array.from(root.querySelectorAll<HTMLInputElement>("[data-sidebar-table-search-parent-id]")).find((item) => item.dataset.sidebarTableSearchParentId === focusRestore.parentNodeId);
     if (!input) return;
+
+    // Keep the browser's current selection when the tree update preserved the
+    // input element. Only restore focus and selection if the async update
+    // actually displaced focus or recreated the input.
+    if (document.activeElement === input) return;
+    if (document.activeElement !== document.body) return;
+
     input.focus({ preventScroll: true });
-    const end = input.value.length;
-    input.setSelectionRange(end, end);
+    const selection = focusRestore.selection;
+    if (!selection) {
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+      return;
+    }
+
+    const valueLength = input.value.length;
+    const start = Math.min(selection.start, valueLength);
+    const end = Math.min(selection.end, valueLength);
+    input.setSelectionRange(start, end, selection.direction);
   });
 }
 
@@ -380,25 +428,24 @@ function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
     if (!query || !children) return children === node.children ? node : { ...node, children };
 
     const indexed = localTableSearchResults.value[node.id];
+    // matchSidebarLabel compares case-insensitively internally and needs the
+    // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
     const matchingChildren =
       indexed === null
-        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()))
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query))
         : indexed
-          ? reuseLiveSidebarTreeNodes(
-              buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) }),
-              children,
-            )
-          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
+          ? reuseLiveSidebarTreeNodes(buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name, query)) }), children)
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query));
     return { ...node, children: matchingChildren };
   });
 }
 
-async function loadLocalTableSearchResults(parentNodeId: string, refresh = false) {
+async function loadLocalTableSearchResults(parentNodeId: string, refresh = false, focusRestore?: TableSearchFocusRestore) {
   try {
     const entries = refresh ? await store.refreshSidebarTableSearchIndex(parentNodeId) : await store.loadSidebarTableSearchIndex(parentNodeId);
     localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: entries };
   } finally {
-    if (latestTableSearchInteractionParentId === parentNodeId) focusTableSearchInput(parentNodeId);
+    if (focusRestore) restoreTableSearchInput(focusRestore);
   }
 }
 
@@ -844,16 +891,18 @@ provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
   setTableSearchQuery: (parentNodeId, query, local) => {
+    const focusRestore = captureTableSearchFocus(parentNodeId);
     latestTableSearchInteractionParentId = parentNodeId;
+    latestTableSearchInteractionId = focusRestore.interactionId;
     store.setSidebarTableSearchQuery(parentNodeId, query);
     if (local) {
       localTableSearchFocusPending = true;
       void nextTick(() => {
-        focusTableSearchInput(parentNodeId);
+        restoreTableSearchInput(focusRestore);
         localTableSearchFocusPending = false;
       });
-      void loadLocalTableSearchResults(parentNodeId);
-    } else scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
+      void loadLocalTableSearchResults(parentNodeId, false, focusRestore);
+    } else scheduleSidebarTableSearchRefresh(parentNodeId, { focusRestore });
   },
   refreshTableSearchIndex: (parentNodeId) => void loadLocalTableSearchResults(parentNodeId, true),
   registerPasteHandler: pasteHandlerRegistry.register,
@@ -1178,16 +1227,16 @@ function findSchemaNode(nodes: TreeNode[], connId: string, database: string, sch
 }
 
 function onSearchToggle(node: TreeNode) {
-  if (!isSearching.value || !node.children) return;
+  if (!isTreeSearchFiltering.value || !node.children) return;
   const next = new Set(searchCollapsedIds.value);
   if (node.isExpanded) next.add(node.id);
   else next.delete(node.id);
   searchCollapsedIds.value = next;
 }
 
-function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
+function onNodeToggled(node: TreeNode, expanded: boolean) {
   if (isTreeSearchFiltering.value) return;
-  syncSidebarTreeNodeExpansion(store.treeNodes, node, !wasExpanded);
+  syncSidebarTreeNodeExpansion(store.treeNodes, node, expanded);
 }
 
 function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void) {
@@ -1441,7 +1490,9 @@ watch(sidebarTableNameFilterOpen, (open) => {
 
 function collapseAllTreeNodes() {
   store.collapseAllTreeNodes();
-  if (isSearching.value) {
+  // 与 onSearchToggle 一致：scope-only 过滤也要填充 searchCollapsedIds，
+  // 否则 filteredNodes 会用空集合把所有分组重建成展开态，“全部折叠”空操作。
+  if (isTreeSearchFiltering.value) {
     searchCollapsedIds.value = new Set(flatTreeIndex.value.expandableNodeIds);
   }
 }
@@ -1667,6 +1718,7 @@ onUnmounted(() => {
   tableSearchTimers.clear();
   tableSearchFocusRestoreTokens.clear();
   latestTableSearchInteractionParentId = null;
+  latestTableSearchInteractionId = 0;
   stopSidebarScrollbarDrag();
   stopSidebarHorizontalScrollbarDrag();
   sidebarScrollbarResizeObserver?.disconnect();

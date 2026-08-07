@@ -19,4 +19,15 @@ describe("DatabaseIcon", () => {
     expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/oceanbase.svg");
     app.unmount();
   });
+
+  it("uses the Apache Phoenix asset for the Phoenix JDBC profile", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(DatabaseIcon, { dbType: "phoenix" });
+    app.mount(container);
+    await nextTick();
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/phoenix.svg");
+    app.unmount();
+  });
 });

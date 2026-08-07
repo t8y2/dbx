@@ -5,7 +5,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
 
@@ -23,12 +23,12 @@ export function useFileDrop() {
   const queryStore = useQueryStore();
   const { toast } = useToast();
 
-  async function openDroppedSqlFile(name: string, content: string, path?: string) {
+  async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
     const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = connection?.database || "";
     if (path) {
-      queryStore.openExternalSqlFile(connectionId, database, path, content);
+      queryStore.openExternalSqlFile(connectionId, database, path, content, version);
     } else {
       const tabId = queryStore.createTab(connectionId, database, name, "query");
       queryStore.updateSql(tabId, content);
@@ -70,8 +70,8 @@ export function useFileDrop() {
 
           if (isSqlFilePath(path)) {
             try {
-              const content = await api.readExternalSqlFile(path);
-              await openDroppedSqlFile(name, content, path);
+              const snapshot = await api.readExternalSqlFileSnapshot(path);
+              await openDroppedSqlFile(name, snapshot.content, path, snapshot.version);
             } catch (e: any) {
               toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
             }

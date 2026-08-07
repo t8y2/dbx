@@ -97,6 +97,17 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     });
   });
 
+  it.each([1, 1.125, 1.1875, 1.2345])("keeps the exact observed density when the nominal ratio is %s", (pixelRatio) => {
+    expect(
+      resolveCanvasBackingStoreMetrics({
+        width: 800,
+        height: 400,
+        pixelRatio,
+        devicePixelSize: { cssWidth: 800, cssHeight: 400, pixelWidth: 1000, pixelHeight: 500 },
+      }),
+    ).toEqual({ pixelWidth: 1000, pixelHeight: 500, scaleX: 1.25, scaleY: 1.25, measured: true });
+  });
+
   it("ignores a stale observed size after the CSS viewport changes", () => {
     expect(
       resolveCanvasBackingStoreMetrics({
@@ -108,15 +119,19 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     ).toEqual({ pixelWidth: 1125, pixelHeight: 500, scaleX: 1.25, scaleY: 1.25, measured: false });
   });
 
-  it("caps the observed backing store at the configured pixel ratio", () => {
+  it("caps the observed backing store only at the absolute safety limit", () => {
     expect(
       resolveCanvasBackingStoreMetrics({
         width: 801,
         height: 399,
-        pixelRatio: 4,
+        pixelRatio: 1.125,
         devicePixelSize: { cssWidth: 801, cssHeight: 399, pixelWidth: 4005, pixelHeight: 1995 },
       }),
     ).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: true });
+  });
+
+  it("caps a fallback ratio at the absolute safety limit", () => {
+    expect(resolveCanvasBackingStoreMetrics({ width: 801, height: 399, pixelRatio: 5 })).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: false });
   });
 
   it("draws without errors when frozenColumnCount is 0", () => {

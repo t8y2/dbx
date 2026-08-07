@@ -464,10 +464,8 @@ pub(crate) enum PgColType {
     Other,
 }
 
-const POSTGRES_FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
-
 fn pg_scalar_type_requires_text_protocol(oid: u32, col_type: PgColType) -> bool {
-    oid >= POSTGRES_FIRST_NORMAL_OBJECT_ID && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
+    Type::from_oid(oid).is_none() && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
 }
 
 fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
@@ -477,9 +475,9 @@ fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
 
     match pg_type.kind() {
         Kind::Enum(_) => false,
-        Kind::Array(element_type) => element_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        Kind::Array(element_type) => Type::from_oid(element_type.oid()).is_none(),
         Kind::Simple => pg_scalar_type_requires_text_protocol(pg_type.oid(), col_type),
-        _ => pg_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        _ => Type::from_oid(pg_type.oid()).is_none(),
     }
 }
 
@@ -972,9 +970,13 @@ async fn execute_select_prepared(
     sql: &str,
     start: Instant,
     row_limit: usize,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<PreparedSelectOutcome, tokio_postgres::Error> {
     let prepared_start = Instant::now();
     let (stmt, metadata) = prepare_select_with_metadata(client, sql).await?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     log::info!(
         "[postgres][select:prepare_cached:done] elapsed_ms={} total_ms={}",
         prepared_start.elapsed().as_millis(),
@@ -988,6 +990,9 @@ async fn execute_select_prepared(
     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     let query_start = Instant::now();
     let stream = client.query_raw(&stmt, params).await?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     log::info!(
         "[postgres][select:query_raw:done] elapsed_ms={} total_ms={} column_count={}",
         query_start.elapsed().as_millis(),
@@ -1007,6 +1012,9 @@ async fn execute_select_prepared(
 
     let rows_start = Instant::now();
     while let Some(row_result) = stream.next().await {
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         if result_rows.len() >= row_limit {
             truncated = true;
             break;
@@ -1061,8 +1069,12 @@ async fn execute_select_text(
     start: Instant,
     row_limit: usize,
     prepared_column_types: Option<Vec<String>>,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
@@ -1078,6 +1090,9 @@ async fn execute_select_text(
     let mut truncated = false;
 
     while let Some(message) = stream.next().await {
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         match message {
             Ok(SimpleQueryMessage::RowDescription(cols)) => {
                 columns = cols.iter().map(|c| c.name().to_string()).collect();
@@ -1144,6 +1159,7 @@ async fn finish_prepared_select(
     start: Instant,
     row_limit: usize,
     outcome: PreparedSelectOutcome,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     match outcome {
         PreparedSelectOutcome::Complete(result) => Ok(result),
@@ -1152,7 +1168,7 @@ async fn finish_prepared_select(
                 "[postgres][select:text_fallback] unsupported_type={} switching_to=simple_query",
                 unsupported_type
             );
-            execute_select_text(client, sql, start, row_limit, Some(column_types)).await
+            execute_select_text(client, sql, start, row_limit, Some(column_types), progress_clock).await
         }
     }
 }
@@ -1163,24 +1179,34 @@ pub(crate) async fn execute_select_query(
     start: Instant,
     row_limit: usize,
 ) -> Result<QueryResult, String> {
-    match execute_select_prepared(client, sql, start, row_limit).await {
-        Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome).await,
+    execute_select_query_with_progress(client, sql, start, row_limit, None).await
+}
+
+async fn execute_select_query_with_progress(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    start: Instant,
+    row_limit: usize,
+    progress_clock: Option<&StreamProgressClock>,
+) -> Result<QueryResult, String> {
+    match execute_select_prepared(client, sql, start, row_limit, progress_clock).await {
+        Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
         Err(err) if should_retry_postgres_stale_cache(&err) => {
             // The cached prepared statement is stale (e.g. the view or table
             // schema changed since the statement was prepared). Evict the
             // stale entry and retry with a fresh server-side prepare.
             log::warn!("[postgres][select:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
             client.statement_cache.remove(sql, &[]);
-            match execute_select_prepared(client, sql, start, row_limit).await {
-                Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome).await,
+            match execute_select_prepared(client, sql, start, row_limit, progress_clock).await {
+                Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
                 Err(err) if should_retry_postgres_text_query(&err) => {
-                    execute_select_text(client, sql, start, row_limit, None).await
+                    execute_select_text(client, sql, start, row_limit, None, progress_clock).await
                 }
                 Err(err) => Err(pg_error_to_string(err)),
             }
         }
         Err(err) if should_retry_postgres_text_query(&err) => {
-            execute_select_text(client, sql, start, row_limit, None).await
+            execute_select_text(client, sql, start, row_limit, None, progress_clock).await
         }
         Err(err) => Err(pg_error_to_string(err)),
     }
@@ -1469,7 +1495,7 @@ async fn connect_with_optional_local_timezone(
 
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
 
-    super::with_connection_timeout("PostgreSQL", timeout, async {
+    let (pool, client) = super::with_connection_timeout("PostgreSQL", timeout, async {
         let pg_config = tokio_postgres::Config::from_str(&postgres_url.url)
             .map_err(|e| format!("Invalid PostgreSQL connection URL: {e}"))?;
 
@@ -1500,19 +1526,33 @@ async fn connect_with_optional_local_timezone(
             .build()
             .map_err(|e| format!("Failed to create PostgreSQL pool: {e}"))?;
 
-        // Verify connectivity and set timezone. Explicit connection options are
-        // handled by PostgreSQL during startup and must remain strict.
+        // Verify connectivity. Explicit connection options are handled by
+        // PostgreSQL during startup and must remain strict.
         let client =
             pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {}", pg_pool_error_to_string(e)))?;
-        if !pg_url_has_timezone_setting(url) {
-            if let Some(timezone) = timezone {
-                set_automatic_postgres_timezone(&client, timezone).await?;
-            }
-        }
-
-        Ok(pool)
+        Ok((pool, client))
     })
-    .await
+    .await?;
+
+    // Creating the physical connection and applying session defaults are two
+    // sequential network phases. Give each phase the configured connection
+    // timeout instead of sharing one deadline that can expire during the
+    // optional SET timezone round-trip on higher-latency tunnels.
+    if !pg_url_has_timezone_setting(url) {
+        if let Some(timezone) = timezone {
+            postgres_session_setup_with_timeout(timeout, set_automatic_postgres_timezone(&client, timezone)).await?;
+        }
+    }
+
+    drop(client);
+    Ok(pool)
+}
+
+async fn postgres_session_setup_with_timeout<T, F>(timeout: Duration, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    super::with_connection_timeout("PostgreSQL session setup", timeout, future).await
 }
 
 async fn set_automatic_postgres_timezone(client: &deadpool_postgres::Client, timezone: &str) -> Result<(), String> {
@@ -3137,6 +3177,7 @@ pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Res
         Instant::now(),
         crate::query::MAX_ROWS,
         None,
+        None,
     )
     .await?;
     Ok(redshift_columns_from_query_result(result))
@@ -3314,14 +3355,15 @@ pub async fn execute_query_with_max_rows_and_cancel(
     prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
-    let pg_cancel_token = client.cancel_token();
-    wait_postgres_query(
-        pg_cancel_token,
-        cancel_context,
+    execute_postgres_user_query(
+        &client,
+        sql,
+        max_rows,
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+        cancel_context,
+        prefer_text_protocol,
     )
     .await
 }
@@ -3388,14 +3430,15 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
                 execute_postgres_infra_statement(&client, &statement, budget.recycle_timeout, stage).await?;
             }
 
-            let pg_cancel_token = client.cancel_token();
-            wait_postgres_query(
-                pg_cancel_token,
-                cancel_context,
+            execute_postgres_user_query(
+                &client,
+                sql,
+                max_rows,
                 cancel_token,
                 budget.query_timeout,
                 budget.cancel_timeout,
-                execute_query_with_max_rows_inner(&client, sql, max_rows, false),
+                cancel_context,
+                false,
             )
             .await
         },
@@ -3536,7 +3579,7 @@ pub async fn execute_query_with_schema_and_max_rows(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        return execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
+        return execute_query_with_max_rows_inner(&client, sql, max_rows, false, None).await;
     }
 
     let set_schema_start = Instant::now();
@@ -3548,7 +3591,7 @@ pub async fn execute_query_with_schema_and_max_rows(
     );
 
     let query_start = Instant::now();
-    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
+    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false, None).await;
     if result.is_ok() {
         clear_postgres_caches_after_ddl(pool, Some(&client), sql);
     }
@@ -3587,14 +3630,15 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        let pg_cancel_token = client.cancel_token();
-        return wait_postgres_query(
-            pg_cancel_token,
-            cancel_context,
+        return execute_postgres_user_query(
+            &client,
+            sql,
+            max_rows,
             cancel_token,
             budget.query_timeout,
             budget.cancel_timeout,
-            execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+            cancel_context,
+            prefer_text_protocol,
         )
         .await;
     }
@@ -3608,14 +3652,15 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     );
 
     let query_start = Instant::now();
-    let pg_cancel_token = client.cancel_token();
-    let result = wait_postgres_query(
-        pg_cancel_token,
-        cancel_context,
+    let result = execute_postgres_user_query(
+        &client,
+        sql,
+        max_rows,
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+        cancel_context,
+        prefer_text_protocol,
     )
     .await;
     if result.is_ok() {
@@ -3749,6 +3794,52 @@ where
     }
 }
 
+async fn execute_postgres_user_query(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    max_rows: Option<usize>,
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+    cancel_timeout: Duration,
+    cancel_context: Option<PostgresCancelContext>,
+    prefer_text_protocol: bool,
+) -> Result<QueryResult, String> {
+    let pg_cancel_token = client.cancel_token();
+    // Commands do not expose incremental results, so keep their timeout as a
+    // wall-clock deadline. Row-returning queries may spend longer transferring
+    // a bounded result through a slow tunnel; for those, the same setting is an
+    // inactivity budget that resets only after real PostgreSQL progress.
+    if !postgres_statement_returns_rows(sql) {
+        return wait_postgres_query(
+            pg_cancel_token,
+            cancel_context,
+            cancel_token,
+            timeout_duration,
+            cancel_timeout,
+            execute_query_with_max_rows_inner(client, sql, max_rows, prefer_text_protocol, None),
+        )
+        .await;
+    }
+
+    let timeout_error =
+        format!("Query timed out after {} seconds", timeout_duration.map_or(0, |timeout| timeout.as_secs()));
+    let progress_clock = Arc::new(StreamProgressClock::new());
+    let result = await_stream_with_progress_timeout(
+        execute_query_with_max_rows_inner(client, sql, max_rows, prefer_text_protocol, Some(progress_clock.clone())),
+        timeout_duration,
+        progress_clock,
+        cancel_token.as_ref(),
+        timeout_error.clone(),
+    )
+    .await;
+
+    if result.as_ref().is_err_and(|error| error == &timeout_error || error == crate::query::QUERY_CANCELED) {
+        cancel_postgres_query(pg_cancel_token, cancel_context.as_ref(), cancel_timeout).await;
+    }
+
+    result
+}
+
 /// PostgreSQL pool checkout with timeout and cancel token support.
 /// When the checkout phase is stuck, the cancel token can terminate the wait early.
 /// The timeout error message includes "checkout timed out" to ensure is_connection_error can classify it correctly.
@@ -3757,6 +3848,7 @@ pub async fn checkout_postgres_client(
     cancel_token: Option<&CancellationToken>,
     checkout_timeout: Duration,
 ) -> Result<deadpool_postgres::Object, String> {
+    let checkout_timeout = effective_postgres_checkout_timeout(pool, checkout_timeout);
     let start = Instant::now();
     let get_future = async {
         tokio::time::timeout(checkout_timeout, pool.get())
@@ -3808,6 +3900,14 @@ pub async fn checkout_postgres_client(
     result
 }
 
+fn effective_postgres_checkout_timeout(pool: &Pool, requested_timeout: Duration) -> Duration {
+    let configured = pool.timeouts();
+    [configured.wait, configured.create, configured.recycle]
+        .into_iter()
+        .flatten()
+        .fold(requested_timeout, std::cmp::max)
+}
+
 async fn cancel_postgres_query(
     pg_cancel_token: tokio_postgres::CancelToken,
     cancel_context: Option<&PostgresCancelContext>,
@@ -3855,15 +3955,16 @@ async fn execute_query_with_max_rows_inner(
     sql: &str,
     max_rows: Option<usize>,
     prefer_text_protocol: bool,
+    progress_clock: Option<Arc<StreamProgressClock>>,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
     if postgres_statement_returns_rows(sql) {
         if prefer_text_protocol {
-            execute_select_text(client, sql, start, row_limit, None).await
+            execute_select_text(client, sql, start, row_limit, None, progress_clock.as_deref()).await
         } else {
-            execute_select_query(client, sql, start, row_limit).await
+            execute_select_query_with_progress(client, sql, start, row_limit, progress_clock.as_deref()).await
         }
     } else {
         let affected = client.execute(sql, &[]).await.map_err(pg_error_to_string)?;
@@ -4787,7 +4888,7 @@ mod tests {
 
     #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
-        assert!(pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID, PgColType::Other));
+        assert!(pg_scalar_type_requires_text_protocol(8_880, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::GenericArray));
     }
@@ -4822,12 +4923,25 @@ mod tests {
 
     #[test]
     fn postgres_builtin_or_supported_type_keeps_binary_protocol() {
-        assert!(!pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID - 1, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::VARCHAR, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4_ARRAY, PgColType::GenericArray));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Vector));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Geometry));
+    }
+
+    #[test]
+    fn postgres_compatible_builtin_names_with_unknown_low_oids_require_text_protocol() {
+        let compatible_date = Type::new("date".to_string(), 8_881, Kind::Simple, "pg_catalog".to_string());
+        let compatible_tinyint = Type::new("tinyint".to_string(), 8_882, Kind::Simple, "pg_catalog".to_string());
+
+        assert!(Type::from_oid(compatible_date.oid()).is_none());
+        assert!(Type::from_oid(compatible_tinyint.oid()).is_none());
+        assert!(pg_type_requires_text_protocol(
+            &compatible_date,
+            PgColType::Temporal { fallback: PgTemporalFallback::Probe }
+        ));
+        assert!(pg_type_requires_text_protocol(&compatible_tinyint, PgColType::Other));
     }
 
     #[test]
@@ -5881,6 +5995,71 @@ mod tests {
             ),
             Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn postgres_checkout_timeout_respects_pool_configuration() {
+        let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), NoTls);
+        let pool = Pool::builder(manager)
+            .runtime(Runtime::Tokio1)
+            .wait_timeout(Some(Duration::from_secs(10)))
+            .create_timeout(Some(Duration::from_secs(10)))
+            .recycle_timeout(Some(Duration::from_secs(10)))
+            .build()
+            .expect("build postgres pool");
+
+        assert_eq!(effective_postgres_checkout_timeout(&pool, Duration::from_secs(5)), Duration::from_secs(10));
+        assert_eq!(effective_postgres_checkout_timeout(&pool, Duration::from_secs(15)), Duration::from_secs(15));
+    }
+
+    #[tokio::test]
+    async fn postgres_session_setup_reports_its_own_timeout_stage() {
+        let error =
+            postgres_session_setup_with_timeout(Duration::from_millis(1), std::future::pending::<Result<(), String>>())
+                .await
+                .expect_err("pending session setup should time out");
+
+        assert!(error.starts_with("PostgreSQL session setup connection timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_timeout_tracks_inactivity_instead_of_total_duration() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let progress_clock_for_query = progress_clock.clone();
+        let future = async {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                progress_clock_for_query.mark();
+            }
+            Ok::<_, String>(())
+        };
+
+        let result = await_stream_with_progress_timeout(
+            future,
+            Some(Duration::from_millis(100)),
+            progress_clock,
+            None,
+            "query inactivity timeout".to_string(),
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_timeout_still_fires_after_no_progress() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let error = await_stream_with_progress_timeout(
+            std::future::pending::<Result<(), String>>(),
+            Some(Duration::from_millis(10)),
+            progress_clock,
+            None,
+            "query inactivity timeout".to_string(),
+        )
+        .await
+        .expect_err("a stalled query should time out");
+
+        assert_eq!(error, "query inactivity timeout");
     }
 
     #[test]

@@ -42,6 +42,14 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("executeSqlInNewResultTab", DEFAULT_SHORTCUT_SETTINGS.executeSqlInNewResultTab, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
+  it("registers a conflict-free shortcut for expanding SELECT stars", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "expandSelectStar");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Mod+Shift+X" });
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.expandSelectStar)).toBe("Mod-Shift-x");
+    expect(findShortcutConflict("expandSelectStar", DEFAULT_SHORTCUT_SETTINGS.expandSelectStar, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("resolves the close-other-tabs default per platform and heals cross-platform synced defaults", () => {
     // 本测试环境（darwin）：默认应为 macOS 组合
     expect(DEFAULT_SHORTCUT_SETTINGS.closeOtherTabs).toBe(closeOtherTabsDefaultShortcut());

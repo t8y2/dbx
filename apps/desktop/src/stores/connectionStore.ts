@@ -109,6 +109,7 @@ import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel }
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
+import { filterNacosNamespacesForSidebar } from "@/lib/nacos/nacosNamespaceVisibility";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -122,7 +123,8 @@ import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
 import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/mqConsoleDefaults";
 import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
-import { sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
+import { connectionHasConfiguredSidebarVisibleFilter, sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
+import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -387,6 +389,12 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
   } | null>(null);
+  const docsSource = ref<{
+    connectionId: string;
+    database: string;
+    schema?: string;
+    tableName?: string;
+  } | null>(null);
   const tableImportSource = ref<{
     connectionId: string;
     database: string;
@@ -445,6 +453,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const connectionStateRevisions = new Map<string, number>();
   const connectionErrorRevisions = new Map<string, number>();
   const treeNodeLoads = new TreeNodeLoadRegistry();
+  const primaryVisibleObjectRefreshInFlight = new Set<string>();
   let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
@@ -903,6 +912,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function markConnectionLost(connectionId: string, error: unknown) {
     connectedIds.value.delete(connectionId);
+    clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionNodeLoading(connectionId);
     clearConnectionHealthCheck(connectionId);
@@ -1006,6 +1016,7 @@ export const useConnectionStore = defineStore("connection", () => {
       spark: "Apache Spark",
       db2: "DB2",
       informix: "Informix",
+      phoenix: "Apache Phoenix",
       neo4j: "Neo4j",
       cassandra: "Cassandra",
       bigquery: "BigQuery",
@@ -1047,6 +1058,10 @@ export const useConnectionStore = defineStore("connection", () => {
       agent_java_options: Array.isArray(config.agent_java_options) ? config.agent_java_options : [],
       attached_databases: Array.isArray(config.attached_databases) ? config.attached_databases.filter((database) => database.name?.trim() && database.path?.trim()) : [],
       init_script: config.init_script?.trim() ? config.init_script : undefined,
+      // A cleared field must become absent, not "". `resolve_notes_path` treats
+      // blank as unset anyway, but an empty string would still be written to
+      // the config file as though a path had been chosen.
+      docs_notes_path: config.docs_notes_path?.trim() ? config.docs_notes_path.trim() : undefined,
       transport_layers: Array.isArray(config.transport_layers) ? config.transport_layers : [],
       show_system_schemas: config.show_system_schemas === true,
       connect_timeout_secs: config.connect_timeout_secs || 10,
@@ -2578,6 +2593,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return config ? sidebarVisibleFilterSummary(config, primaryVisibleObjectNames.value[connectionId]) : null;
   }
 
+  function scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId: string, config: ConnectionConfig | undefined, options?: LoadTreeOptions) {
+    if (options?.force || !config || primaryVisibleObjectNames.value[connectionId] || primaryVisibleObjectRefreshInFlight.has(connectionId)) return;
+    if (!connectionCanConfigureSidebarVisibleDatabases(config.db_type) || !connectionHasConfiguredSidebarVisibleFilter(config)) return;
+    primaryVisibleObjectRefreshInFlight.add(connectionId);
+    void loadDatabases(connectionId, { force: true, connectedOnly: true })
+      .catch(() => undefined)
+      .finally(() => primaryVisibleObjectRefreshInFlight.delete(connectionId));
+  }
+
   async function clearVisibleDatabases(connectionId: string) {
     const config = getConfig(connectionId);
     if (!config || !Array.isArray(config.visible_databases)) return;
@@ -2721,6 +2745,7 @@ export const useConnectionStore = defineStore("connection", () => {
         existing.label = config.name;
         existing.type = "connection";
         existing.connectionId = id;
+        existing.comment = config.note || null;
         existing.children = existing.children || [];
       } else {
         treeNodes.value.push({
@@ -2730,6 +2755,7 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId: id,
           isExpanded: false,
           children: [],
+          comment: config.note || null,
         });
       }
       return id;
@@ -2757,6 +2783,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!cancelled) return false;
     clearConnectionError(connectionId);
     connectedIds.value.delete(connectionId);
+    clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionHealthCheck(connectionId);
     if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
@@ -2772,6 +2799,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
 
     connectedIds.value.delete(connectionId);
+    clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     forgetSuccessfulLocalConnectionAttempt(connectionId);
     clearConnectionHealthCheck(connectionId);
@@ -2848,6 +2876,7 @@ export const useConnectionStore = defineStore("connection", () => {
       } catch {
         // Backend pool is dead — remove from connectedIds and reconnect
         connectedIds.value.delete(connectionId);
+        clearPrimaryVisibleObjectNames(connectionId);
         clearConnectionHealthCheck(connectionId);
         if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
       }
@@ -3047,15 +3076,19 @@ export const useConnectionStore = defineStore("connection", () => {
             await ensureConnected(connectionId);
             load = reclaimTreeNodeLoad(load, node);
           }
-          if (useCachedChildren(node, options, load)) return;
-
           const config = getConfig(connectionId);
+          if (useCachedChildren(node, options, load)) {
+            scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
+            return;
+          }
+
           if (config?.db_type === "duckdb") {
             const cacheKey = schemaCacheKey(connectionId, "duckdb-root");
             if (!options?.force) {
               const cached = await loadPersistedTreeChildren(node, cacheKey, load);
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
+                else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
                 return;
               }
             }
@@ -3081,6 +3114,7 @@ export const useConnectionStore = defineStore("connection", () => {
               const cached = await loadPersistedTreeChildren(node, cacheKey, load);
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
+                else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
                 return;
               }
             }
@@ -3146,6 +3180,7 @@ export const useConnectionStore = defineStore("connection", () => {
                 const cached = await loadPersistedTreeChildren(node, cacheKey, load);
                 if (cached.hit) {
                   if (cached.isStale) refreshStaleTreeNode(node);
+                  else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
                   return;
                 }
               }
@@ -3474,7 +3509,8 @@ export const useConnectionStore = defineStore("connection", () => {
       if (useCachedChildren(node, options, load)) return;
 
       const namespaces = await api.nacosListNamespaces(connectionId);
-      const sorted = [...namespaces].sort((left, right) => {
+      const visibleNamespaces = filterNacosNamespacesForSidebar(namespaces, getConfig(connectionId)?.visible_databases);
+      const sorted = [...visibleNamespaces].sort((left, right) => {
         const leftLabel = left.namespaceShowName || left.namespace || "public";
         const rightLabel = right.namespaceShowName || right.namespace || "public";
         return leftLabel.localeCompare(rightLabel);
@@ -7033,6 +7069,7 @@ export const useConnectionStore = defineStore("connection", () => {
     dataCompareSource,
     sqlFileSource,
     diagramSource,
+    docsSource,
     tableImportSource,
     tableDataGenerateSource,
     fieldLineageSource,

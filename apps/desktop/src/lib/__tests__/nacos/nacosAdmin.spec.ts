@@ -195,8 +195,10 @@ describe("nacosAdmin helpers", () => {
 
   it("includes identifying fields in confirmations", () => {
     expect(buildNacosConfigDeleteConfirm({ namespace: "", dataId: "app.yaml", group: "DEFAULT_GROUP" })).toContain("dataId=app.yaml");
-    const details = buildNacosInstanceConfirm({ serviceName: "DEFAULT_GROUP@@svc", groupName: "DEFAULT_GROUP" }, { ip: "127.0.0.1", port: 8080, enabled: true, metadata: null }, { enabled: false }, "", "public");
+    const details = buildNacosInstanceConfirm({ serviceName: "DEFAULT_GROUP@@svc", groupName: "DEFAULT_GROUP" }, { ip: "127.0.0.1", port: 8080, clusterName: "blue", ephemeral: false, enabled: true, metadata: null }, { enabled: false }, "", "public");
     expect(details).toContain("serviceName=DEFAULT_GROUP@@svc");
+    expect(details).toContain("cluster=blue");
+    expect(details).toContain("ephemeral=false");
     expect(details).toContain("targetEnabled=false");
   });
 

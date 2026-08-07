@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -269,6 +270,15 @@ func (r queryResult) MarshalJSON() ([]byte, error) {
 	if value.Rows == nil {
 		value.Rows = [][]any{}
 	}
+	data, err := json.Marshal(value)
+	if err == nil {
+		return data, nil
+	}
+	rows, changed := normalizeNonFiniteQueryRows(value.Rows)
+	if !changed {
+		return nil, err
+	}
+	value.Rows = rows
 	return json.Marshal(value)
 }
 
@@ -295,7 +305,42 @@ func (r queryPageResult) MarshalJSON() ([]byte, error) {
 	if value.Rows == nil {
 		value.Rows = [][]any{}
 	}
+	data, err := json.Marshal(value)
+	if err == nil {
+		return data, nil
+	}
+	rows, changed := normalizeNonFiniteQueryRows(value.Rows)
+	if !changed {
+		return nil, err
+	}
+	value.Rows = rows
 	return json.Marshal(value)
+}
+
+func normalizeNonFiniteQueryRows(rows [][]any) ([][]any, bool) {
+	result := rows
+	changed := false
+	for rowIndex, row := range rows {
+		var normalizedRow []any
+		for columnIndex, value := range row {
+			floatValue, ok := value.(float64)
+			if !ok || (!math.IsNaN(floatValue) && !math.IsInf(floatValue, 0)) {
+				continue
+			}
+			if normalizedRow == nil {
+				normalizedRow = append([]any(nil), row...)
+			}
+			normalizedRow[columnIndex] = fmt.Sprint(floatValue)
+		}
+		if normalizedRow != nil {
+			if !changed {
+				result = append([][]any(nil), rows...)
+				changed = true
+			}
+			result[rowIndex] = normalizedRow
+		}
+	}
+	return result, changed
 }
 
 type querySession struct {

@@ -19,6 +19,10 @@ vi.mock("@/lib/backend/api", () => ({
   mqSendMessage: backend.mqSendMessage,
 }));
 
+vi.mock("@/composables/useMqMutationGuard", () => ({
+  useMqMutationGuard: () => ({ confirmMqWrite: vi.fn().mockResolvedValue(true) }),
+}));
+
 vi.mock("@/components/ui/select", async () => (await import("./selectStub")).createSelectStub());
 
 import SendMessagePanel from "@/components/mq/SendMessagePanel.vue";

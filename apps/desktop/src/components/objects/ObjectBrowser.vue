@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowRightLeft,
   ArrowUp,
+  BookOpen,
   Braces,
   CheckSquare,
   Clipboard,
@@ -44,6 +45,7 @@ import {
   Trash2,
   WrapText,
   X,
+  Wrench,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
@@ -94,6 +96,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
@@ -1176,6 +1179,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
     tabId,
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
+      driverProfile: props.connection.driver_profile,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       catalog: props.catalog,
       database: props.database,
@@ -1456,6 +1460,16 @@ function openDiagram(row: ObjectBrowserRow) {
     database: props.database,
     schema: row.schema || selectedSchema.value,
     tableName: row.type === "TABLE" ? row.name : undefined,
+  };
+}
+
+function openDocs(row: ObjectBrowserRow) {
+  // The docs viewer documents the whole schema rather than one object, so the
+  // row only supplies which schema to collect.
+  connectionStore.docsSource = {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: row.schema || selectedSchema.value,
   };
 }
 
@@ -2199,6 +2213,21 @@ async function executeObjectBrowserSqlWithProductionGuard<T>(sql: string, execut
   });
 }
 
+async function compileXuguObject(row: ObjectBrowserRow) {
+  if (effectiveDatabaseType.value !== "xugu") return;
+  const sql = buildXuguCompileSql({ objectType: row.type, schema: row.schema || selectedSchema.value, name: row.name });
+  if (!sql) return;
+  try {
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, row.schema || selectedSchema.value));
+    if (!executed) return;
+    toast(t("contextMenu.compileObjectSuccess", { name: row.name }));
+    await reload();
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
   truncatePreviewSql.value = "";
   truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })).catch(() => "");
@@ -2634,7 +2663,12 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
-    ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
+    ...(canOpenDiagram.value
+      ? [
+          { label: t("diagram.open"), action: () => openDiagram(item), icon: Network },
+          { label: t("docs.title"), action: () => openDocs(item), icon: BookOpen },
+        ]
+      : []),
     ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
     { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
     { label: "", separator: true },
@@ -2684,7 +2718,12 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
-    ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
+    ...(canOpenDiagram.value
+      ? [
+          { label: t("diagram.open"), action: () => openDiagram(item), icon: Network },
+          { label: t("docs.title"), action: () => openDocs(item), icon: BookOpen },
+        ]
+      : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
@@ -2704,6 +2743,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(item.type === "PROCEDURE" ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }] : []),
+    ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: "", separator: true },
@@ -2720,6 +2760,7 @@ function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
+    ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     { label: "", separator: true },
     { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },

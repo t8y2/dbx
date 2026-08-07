@@ -85,6 +85,7 @@ fn psql(container: &DockerPostgres, sql: &str) {
 
 fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
     ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),

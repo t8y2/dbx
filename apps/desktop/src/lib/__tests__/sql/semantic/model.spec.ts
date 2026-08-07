@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sqlSemanticCompletionScope, sqlSemanticLocalColumnsByTable, sqlSemanticProjectionAliasColumns } from "@/lib/sql/semantic/completion";
+import { sqlSemanticCompletionScope, sqlSemanticLocalColumnsByTable, sqlSemanticProjectionAliasColumns, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSource } from "@/lib/sql/semantic/completion";
 import { SQL_SEMANTIC_BASELINE_FIXTURES, sqlFixtureCursor } from "@/lib/sql/semantic/fixtures";
 import { buildSqlSemanticModel, sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
 
@@ -28,6 +28,46 @@ describe("sqlSemanticModel baseline fixtures", () => {
       }
     });
   }
+
+  it("does not treat SELECT as the qualifier of an unqualified star", () => {
+    const { sql, cursor } = sqlFixtureCursor("select *| from apis as ap");
+    const model = buildSqlSemanticModel(sql, cursor);
+
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "star", qualifierParts: [] }));
+  });
+
+  it("retains the qualifier of a qualified star", () => {
+    const { sql, cursor } = sqlFixtureCursor("select ap.*| from apis as ap");
+    const model = buildSqlSemanticModel(sql, cursor);
+
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "star", qualifierParts: ["ap"], targetSourceId: model.rowSources[0]?.id }));
+  });
+
+  it("does not resolve an unqualified star to the only physical table among multiple row sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("select *| from users u join (select 1 as x) s on 1 = 1");
+    const model = buildSqlSemanticModel(sql, cursor);
+
+    expect(model.rowSources.map((source) => source.kind)).toEqual(["table", "subquery"]);
+    expect(sqlSemanticSelectStarTableSource(model)).toBeUndefined();
+  });
+
+  it.each([
+    ["select *| from apis", true],
+    ["select distinct *| from apis", true],
+    ["select ap.*| from apis ap", true],
+    ["select *, 1 as extra| from apis", false],
+    ["select ap.*, 1 as extra| from apis ap", false],
+  ] as const)("detects whether the star is the only projection in %s", (markedSql, expected) => {
+    const { sql, cursor } = sqlFixtureCursor(markedSql);
+
+    expect(sqlSemanticSelectStarIsOnlyProjection(buildSqlSemanticModel(sql, cursor))).toBe(expected);
+  });
+
+  it("retains the original quoting of a star qualifier", () => {
+    const { sql, cursor } = sqlFixtureCursor('select "Order Alias".*| from orders as "Order Alias"');
+
+    expect(sqlSemanticSelectStarQualifierSql(buildSqlSemanticModel(sql, cursor, { databaseType: "postgres", dialect: "postgres" }))).toBe('"Order Alias"');
+  });
 
   it("does not mix row sources from inactive statements", () => {
     const { sql, cursor } = sqlFixtureCursor("select * from users u; select * from orders o where o.|");

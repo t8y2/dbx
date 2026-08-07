@@ -5,7 +5,7 @@ import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
 import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
 
 export type DocumentStoreKind = "mongodb" | "elasticsearch";
-export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "greater-than" | "less-than" | "is-null" | "is-not-null";
+export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "is-null" | "is-not-null";
 export type ElasticsearchBoolClause = "filter" | "must" | "should" | "must_not";
 export type ElasticsearchQueryType = "term" | "terms" | "match" | "match_phrase" | "wildcard" | "range_gt" | "range_gte" | "range_lt" | "range_lte" | "exists";
 
@@ -55,7 +55,9 @@ export const documentFilterModeOptions: Array<{ value: DocumentFilterMode; label
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
   { value: "greater-than", labelKey: "grid.filterBuilderGreaterThan" },
+  { value: "greater-than-or-equal", labelKey: "grid.filterBuilderGreaterThanOrEqual" },
   { value: "less-than", labelKey: "grid.filterBuilderLessThan" },
+  { value: "less-than-or-equal", labelKey: "grid.filterBuilderLessThanOrEqual" },
   { value: "is-null", labelKey: "grid.filterBuilderIsNull" },
   { value: "is-not-null", labelKey: "grid.filterBuilderIsNotNull" },
 ];
@@ -435,8 +437,12 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
       return { [rule.fieldName]: { $not: { $regex: escapeRegexLiteral(textValue), $options: "i" } } };
     case "greater-than":
       return { [rule.fieldName]: { $gt: value } };
+    case "greater-than-or-equal":
+      return { [rule.fieldName]: { $gte: value } };
     case "less-than":
       return { [rule.fieldName]: { $lt: value } };
+    case "less-than-or-equal":
+      return { [rule.fieldName]: { $lte: value } };
     case "is-null":
       return { [rule.fieldName]: null };
     case "is-not-null":

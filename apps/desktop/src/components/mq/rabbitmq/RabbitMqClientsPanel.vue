@@ -5,6 +5,7 @@ import type { MqChannelInfo, MqClientConnectionInfo, NamespaceRef } from "@/type
 import { mqCloseClientConnection, mqListClientChannels, mqListClientConnections } from "@/lib/backend/api";
 import { isAllVhostsNamespace, RABBITMQ_MQ_TENANT, resolveMqRowNamespace } from "@/lib/mq/mqConsoleDefaults";
 import { formatError } from "@/lib/backend/errorUtils";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 interface Props {
@@ -16,6 +17,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const connections = ref<MqClientConnectionInfo[]>([]);
 const loading = ref(false);
@@ -48,12 +50,12 @@ function nsRef(namespace?: string): NamespaceRef {
   return { tenant: RABBITMQ_MQ_TENANT, namespace: namespace ?? "" };
 }
 
-function guardWritable() {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqClientConnections.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadConnections() {
@@ -112,12 +114,16 @@ function toggleExpanded(connection: MqClientConnectionInfo) {
 }
 
 function openCloseDialog(connection: MqClientConnectionInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqClientConnections.readOnly");
+    return;
+  }
   closeTarget.value = connection;
   showCloseDialog.value = true;
 }
 
 async function confirmClose() {
+  if (!(await guardWritable(t("mqClientConnections.closeConnection")))) return;
   const target = closeTarget.value;
   if (!target) return;
   const namespace = resolveMqRowNamespace(target, props.namespace);
@@ -274,6 +280,8 @@ watch(
 </template>
 
 <style scoped>
+@import "../shared/mqPanel.css";
+
 .clients-panel {
   display: flex;
   flex-direction: column;
@@ -440,37 +448,6 @@ td {
   gap: 6px;
   flex-wrap: wrap;
   align-items: center;
-}
-
-.btn-secondary,
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: var(--color-hover);
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
 }
 
 button:disabled {

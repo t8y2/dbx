@@ -102,6 +102,10 @@ pub struct ConnectionConfig {
     pub init_script: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    /// Path to this connection's documentation notes file. Set by the
+    /// desktop app; the CLI takes an explicit `--notes` path instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_notes_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transport_layers: Vec<TransportLayerConfig>,
     #[serde(default = "default_connect_timeout_secs")]
@@ -586,6 +590,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
+    pub docs_notes_path: Option<String>,
+    #[serde(default)]
     pub transport_layers: Vec<TransportLayerConfig>,
     #[serde(default = "default_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
@@ -675,6 +681,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
+            docs_notes_path: data.docs_notes_path,
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
@@ -2277,6 +2284,7 @@ mod tests {
 
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "id".to_string(),
             name: "name".to_string(),
             note: String::new(),
@@ -2348,6 +2356,40 @@ mod tests {
         .unwrap();
         assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
         assert!(!legacy.read_only);
+    }
+
+    #[test]
+    fn docs_notes_path_defaults_to_none_and_round_trips() {
+        // A connection stored before this field existed must still load.
+        let legacy: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "name": "local",
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "postgres",
+            "password": "",
+            "database": null
+        }))
+        .expect("legacy config must still parse");
+        assert_eq!(legacy.docs_notes_path, None);
+
+        // And a stored path must actually survive a load — this is the half
+        // that fails if the field is added to ConnectionConfig only, without
+        // ConnectionConfigData and the From impl.
+        let with_path: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "name": "local",
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "postgres",
+            "password": "",
+            "database": null,
+            "docs_notes_path": "docs/dbx-docs.json"
+        }))
+        .expect("config with a notes path must parse");
+        assert_eq!(with_path.docs_notes_path.as_deref(), Some("docs/dbx-docs.json"));
     }
 
     #[test]

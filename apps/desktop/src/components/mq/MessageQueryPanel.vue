@@ -7,6 +7,7 @@ import { formatRocketMqMessagePayload, formatRocketMqTimestamp, parseRocketMqMes
 import { formatError } from "@/lib/backend/errorUtils";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildRocketMqTraceTopicOptions, DEFAULT_ROCKETMQ_TRACE_TOPIC, resolveRocketMqMessageType } from "@/lib/mq/rocketmqTopicTypes";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import RocketMqTraceDetailDialog from "./RocketMqTraceDetailDialog.vue";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 import RocketMqMessageDetailDialog from "./shared/RocketMqMessageDetailDialog.vue";
@@ -25,6 +26,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const topicSelectRef = ref<InstanceType<typeof RocketMqTopicSelect>>();
 const availableTopics = ref<TopicInfo[]>([]);
@@ -258,6 +260,7 @@ async function resendMessage() {
     resendError.value = t("mqMessages.readOnlyCannotSend");
     return;
   }
+  if (!(await confirmMqWrite(t("mqMessages.resendMessage")))) return;
   const topic = resendTopic.value;
   const payloadText = detailPayload.value.trim();
   if (!topic) {
@@ -493,6 +496,8 @@ watch(topicName, () => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .message-query-panel {
   height: 100%;
   display: flex;
@@ -585,32 +590,6 @@ watch(topicName, () => {
 .topic-select-row select {
   flex: 1;
   min-width: 0;
-}
-
-.btn-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: 16px;
-  transition: all 0.15s;
-  flex-shrink: 0;
-}
-
-.btn-icon:hover:not(:disabled) {
-  background: var(--color-background-secondary);
-  color: var(--color-text);
-}
-
-.btn-icon:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
 }
 
 .spin {
@@ -711,37 +690,10 @@ watch(topicName, () => {
   word-break: break-all;
 }
 
-.btn-primary,
-.btn-sm {
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 12px;
-}
-
 .operation-cell {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.btn-sm:hover:not(:disabled) {
-  background: var(--color-background-secondary);
-}
-
-.btn-primary {
-  padding: 7px 16px;
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: #fff;
-  font-weight: 500;
 }
 
 .dialog-overlay {
@@ -791,15 +743,6 @@ watch(topicName, () => {
   border-top: 1px solid var(--color-border);
 }
 
-.btn-close {
-  border: none;
-  background: none;
-  color: var(--color-text-secondary);
-  font-size: 22px;
-  line-height: 1;
-  cursor: pointer;
-}
-
 .dialog-body {
   padding: 16px 20px;
   display: flex;
@@ -841,16 +784,6 @@ watch(topicName, () => {
   background: color-mix(in srgb, var(--color-primary) 12%, transparent);
   color: var(--color-primary);
   font-size: 13px;
-}
-
-.btn-secondary {
-  padding: 7px 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text);
-  font-size: 13px;
-  cursor: pointer;
 }
 
 .detail-payload {

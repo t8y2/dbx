@@ -6,6 +6,7 @@ import type { PeekedMessage } from "@/types/mq";
 
 const backend = vi.hoisted(() => ({
   mqListSubscriptions: vi.fn(),
+  mqEnrichSubscriptions: vi.fn(),
   mqCreateSubscription: vi.fn(),
   mqDeleteSubscription: vi.fn(),
   mqResetCursor: vi.fn(),
@@ -20,6 +21,10 @@ vi.mock("vue-i18n", () => ({
 }));
 
 vi.mock("@/lib/backend/api", () => backend);
+
+vi.mock("@/composables/useMqMutationGuard", () => ({
+  useMqMutationGuard: () => ({ confirmMqWrite: vi.fn().mockResolvedValue(true) }),
+}));
 
 vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({
   default: { template: "<div />" },
@@ -61,7 +66,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function mountPanel() {
+async function mountPanel(overrides: Record<string, unknown> = {}) {
   root = document.createElement("div");
   document.body.appendChild(root);
   app = createApp(SubscriptionsPanel, {
@@ -71,15 +76,29 @@ async function mountPanel() {
     namespace: "default",
     mqSystemKind: "kafka",
     supportsPeekMessages: true,
+    ...overrides,
   });
   app.mount(root);
   await flushUi();
   return root;
 }
 
+function subscription(name: string, consumerGroupType: string) {
+  return {
+    name,
+    subType: consumerGroupType,
+    consumerGroupType,
+    messageModel: "CLUSTERING",
+    msgBacklog: 0,
+    msgRateOut: 0,
+    msgThroughputOut: 0,
+    consumers: [],
+  };
+}
+
 beforeEach(() => {
   Object.values(backend).forEach((mock) => mock.mockReset());
-  backend.mqListSubscriptions.mockResolvedValue([
+  const rows = [
     {
       name: "orders-consumer",
       subType: "shared",
@@ -88,7 +107,9 @@ beforeEach(() => {
       msgThroughputOut: 0,
       consumers: [],
     },
-  ]);
+  ];
+  backend.mqListSubscriptions.mockResolvedValue(rows);
+  backend.mqEnrichSubscriptions.mockResolvedValue(rows);
 });
 
 afterEach(() => {
@@ -174,5 +195,65 @@ describe("SubscriptionsPanel message peek", () => {
 
     expect(panel.textContent).toContain("payments message");
     expect(panel.textContent).not.toContain("orders message");
+  });
+});
+
+describe("SubscriptionsPanel RocketMQ online members", () => {
+  it("shows '-' when onlineMembers is unknown before enrich completes", async () => {
+    const enrich = deferred<ReturnType<typeof subscription>[]>();
+    const rows = [subscription("orders-group", "NORMAL")];
+    backend.mqListSubscriptions.mockResolvedValue(rows);
+    backend.mqEnrichSubscriptions.mockReturnValueOnce(enrich.promise);
+
+    const panel = await mountPanel({
+      topic: undefined,
+      tenant: "_rocketmq",
+      namespace: "default",
+      mqSystemKind: "rocketmq",
+      supportsPeekMessages: false,
+    });
+
+    // Fast list paints before enrich; unknown member count must not look like healthy zero.
+    const membersCell = () => panel.querySelector('[data-testid="online-members"]')?.textContent?.trim();
+    expect(membersCell()).toBe("-");
+
+    enrich.resolve([{ ...rows[0], onlineMembers: 2, topics: ["orders"] }]);
+    await flushUi();
+    expect(membersCell()).toBe("2");
+  });
+});
+
+describe("SubscriptionsPanel RocketMQ filter count", () => {
+  it("updates the visible/total count when type filters or search change", async () => {
+    const rows = [subscription("orders-group", "NORMAL"), subscription("payments-fifo", "FIFO"), subscription("CID_SYS_GROUP", "SYSTEM"), subscription("orders-retry", "NORMAL")];
+    backend.mqListSubscriptions.mockResolvedValue(rows);
+    backend.mqEnrichSubscriptions.mockResolvedValue(rows);
+
+    const panel = await mountPanel({
+      topic: undefined,
+      tenant: "_rocketmq",
+      namespace: "default",
+      mqSystemKind: "rocketmq",
+      supportsPeekMessages: false,
+    });
+
+    const count = () => panel.querySelector('[data-testid="subscription-count"]')?.textContent?.replace(/\s+/g, " ").trim();
+    // Default: SYSTEM off → 3 type-filtered groups.
+    expect(count()).toBe("3 / 3");
+
+    const systemCheckbox = [...panel.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) => input.closest("label")?.textContent?.toLowerCase().includes("system"));
+    expect(systemCheckbox).toBeTruthy();
+    expect(systemCheckbox!.checked).toBe(false);
+    systemCheckbox!.click();
+    await flushUi();
+    expect(count()).toBe("4 / 4");
+
+    const search = panel.querySelector<HTMLInputElement>("input.topic-search");
+    expect(search).toBeTruthy();
+    search!.focus();
+    search!.value = "orders";
+    search!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(count()).toBe("2 / 4");
   });
 });

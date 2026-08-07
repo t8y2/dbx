@@ -1,3 +1,4 @@
+use serde_json::json;
 use std::sync::Arc;
 use tauri::State;
 
@@ -19,6 +20,27 @@ async fn get_mqtt_client(
     }
 }
 
+async fn persist_mqtt_topics(
+    state: &AppState,
+    connection_id: &str,
+    client: &dbx_core::mqtt::client::MqttClient,
+) -> Result<(), String> {
+    let saved_topics = client.desired_topic_configs().await;
+    if !state.configs.read().await.contains_key(connection_id) {
+        return Ok(());
+    }
+    let saved_topics = serde_json::to_value(saved_topics).map_err(|e| e.to_string())?;
+    state.storage.save_connection_mqtt_saved_topics(connection_id, saved_topics.clone()).await?;
+    if let Some(config) = state.configs.write().await.get_mut(connection_id) {
+        let mut external_config = config.external_config.take().unwrap_or_else(|| json!({}));
+        let Some(external_object) = external_config.as_object_mut() else {
+            return Err("MQTT external_config 必须是 JSON 对象".to_string());
+        };
+        external_object.insert("savedTopics".to_string(), saved_topics);
+        config.external_config = Some(external_config);
+    }
+    Ok(())
+}
 /// 获取 broker 基本信息
 #[tauri::command]
 pub async fn mqtt_get_broker_info(
@@ -36,9 +58,11 @@ pub async fn mqtt_subscribe(
     connection_id: String,
     topic: String,
     qos: Option<MqttQoS>,
+    no_local: Option<bool>,
 ) -> Result<(), String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
-    service::subscribe(&client, &topic, qos.unwrap_or_default()).await
+    service::subscribe(&client, &topic, qos.unwrap_or_default(), no_local.unwrap_or(false)).await?;
+    persist_mqtt_topics(state.inner(), &connection_id, &client).await
 }
 
 /// 取消订阅 topic
@@ -49,7 +73,8 @@ pub async fn mqtt_unsubscribe(
     topic: String,
 ) -> Result<(), String> {
     let client = get_mqtt_client(&state, &connection_id).await?;
-    service::unsubscribe(&client, &topic).await
+    service::unsubscribe(&client, &topic).await?;
+    persist_mqtt_topics(state.inner(), &connection_id, &client).await
 }
 
 /// 发布消息

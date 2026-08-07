@@ -1,5 +1,6 @@
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import type { DatabaseType } from "@/types/database";
 
 export type BinaryCellDownloadMode = "binary" | "utf8" | "gbk";
 
@@ -22,6 +23,38 @@ export interface BinaryCellDownloadResult {
 
 export const BINARY_CELL_DOWNLOAD_MODES: BinaryCellDownloadMode[] = ["binary", "utf8", "gbk"];
 
+export function binaryCellBytesToHexValue(bytes: Uint8Array): string {
+  let hex = "0x";
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  return hex;
+}
+
+function openBinaryCellFileInBrowser(): Promise<Uint8Array | undefined> {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.onchange = async () => {
+      try {
+        const file = input.files?.[0];
+        resolve(file ? new Uint8Array(await file.arrayBuffer()) : undefined);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    input.click();
+  });
+}
+
+export async function openBinaryCellFile(): Promise<Uint8Array | undefined> {
+  if (!isTauriRuntime()) return openBinaryCellFileInBrowser();
+
+  const [{ open }, { readFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+  const selected = await open({ multiple: false });
+  const path = Array.isArray(selected) ? selected[0] : selected;
+  if (!path) return undefined;
+  return readFile(path);
+}
+
 export function retainBinaryCellDownloadMenuForHover(openCell: BinaryCellPosition | null, hoveredCell: BinaryCellPosition): BinaryCellPosition | null {
   return openCell?.rowIndex === hoveredCell.rowIndex && openCell.col === hoveredCell.col ? openCell : null;
 }
@@ -30,6 +63,7 @@ const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]+)$/;
 const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;
 const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
+const MYSQL_FILE_IMPORT_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|binary|varbinary)(?:\b|\()/i;
 
 function copyBytesForBlob(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return new Uint8Array(bytes);
@@ -94,6 +128,13 @@ export function parseBinaryCellBytes(value: unknown, columnType?: string): Uint8
 export function isBinaryCellColumnType(columnType?: string): boolean {
   const type = (columnType ?? "").trim();
   return !!type && BINARY_TYPE_RE.test(type);
+}
+
+export function canImportBinaryCellFile(databaseType?: DatabaseType, columnType?: string): boolean {
+  const type = (columnType ?? "").trim();
+  if (databaseType === "postgres") return /^bytea(?:\b|\()/i.test(type);
+  if (databaseType === "mysql") return MYSQL_FILE_IMPORT_TYPE_RE.test(type);
+  return false;
 }
 
 export function canDownloadBinaryCellValue(value: unknown, columnType?: string): boolean {

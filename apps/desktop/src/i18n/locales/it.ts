@@ -2419,7 +2419,7 @@ export default withEnglishFallback({
     changeOpenMode: "Modifica modalità apertura",
     closeRightTabs: "Chiudi le schede a destra",
     compileObject: "Compila",
-    compileObjectSuccess: "\"{name}\" compilato con successo",
+    compileObjectSuccess: '"{name}" compilato con successo',
   },
   visibleDatabases: {
     title: "Database Visibili",

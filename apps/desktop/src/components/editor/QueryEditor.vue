@@ -15,8 +15,8 @@ import { completionMatchRanges } from "@/lib/common/completionMatch";
 import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
-import { currentStatementFrameRangeTo, shouldRebuildCurrentStatementFrame, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
-import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
+import { currentStatementFrameRangeTo, shouldRebuildCurrentStatementFrame } from "@/lib/sql/currentStatementFrame";
+import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlForEditing, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
@@ -4168,7 +4168,7 @@ onMounted(async () => {
         this.decorations = this.getDeco(update.view);
       }
       currentConfiguration() {
-        return `${settingsStore.editorSettings.showCurrentStatementFrame}:${settingsStore.editorSettings.showInsertValueHints}:${props.databaseType ?? ""}`;
+        return `${settingsStore.editorSettings.showCurrentStatementFrame}:${props.databaseType ?? ""}`;
       }
       getDeco(view: import("@codemirror/view").EditorView) {
         if (!settingsStore.editorSettings.showCurrentStatementFrame) return Decoration.none;
@@ -4176,47 +4176,11 @@ onMounted(async () => {
         const range = currentExecutableStatementRange(view);
         if (!range) return Decoration.none;
 
-        const startLine = view.state.doc.lineAt(range.from);
         const frameTo = currentStatementFrameTo(view, range);
-        const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
-        let insertValueHints: Array<{ from: number; column: string }> = [];
-        try {
-          if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "victoriametrics") {
-            const statementSql = view.state.doc.sliceString(range.from, range.to);
-            if (/\binsert\b/i.test(statementSql)) {
-              insertValueHints = parseInsertValueHints(statementSql, { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
-                ...hint,
-                from: hint.from + range.from,
-              }));
-            }
-          }
-        } catch {
-          insertValueHints = [];
-        }
-        let maxWidth = 1;
-        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
-          const line = view.state.doc.line(lineNumber);
-          const lineRangeTo = Math.min(line.to, frameTo);
-          maxWidth = Math.max(maxWidth, visualSqlColumnsWithInlineHints(view.state.doc.sliceString(line.from, lineRangeTo), line.from, lineRangeTo, insertValueHints));
-        }
-
-        const deco: any[] = [];
-        const frameWidth = `calc(${maxWidth}ch + 2ch)`;
-        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
-          const line = view.state.doc.line(lineNumber);
-          const classes = ["cm-db-current-statement-line"];
-          if (lineNumber === startLine.number) classes.push("cm-db-current-statement-line--first");
-          if (lineNumber === endLine.number) classes.push("cm-db-current-statement-line--last");
-          deco.push(
-            Decoration.line({
-              class: classes.join(" "),
-              attributes: {
-                style: `--dbx-current-statement-frame-width: ${frameWidth};`,
-              },
-            }).range(line.from),
-          );
-        }
-        return Decoration.set(deco);
+        // Mark the exact statement text so the browser renders the green frame
+        // at true character boundaries (unlike a per-line `ch` estimate, which
+        // drifts on tabs, wide glyphs and non-monospaced fonts).
+        return Decoration.set([Decoration.mark({ class: "cm-db-current-statement-frame" }).range(range.from, frameTo)]);
       }
     },
     { decorations: (v) => v.decorations },
@@ -5169,29 +5133,10 @@ defineExpose({
   color: rgb(216 180 254) !important;
 }
 
-:deep(.cm-db-current-statement-line) {
-  position: relative;
-}
-
-:deep(.cm-db-current-statement-line::after) {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  box-sizing: border-box;
-  width: var(--dbx-current-statement-frame-width, 100%);
-  border-right: 1px solid rgb(34 197 94 / 0.75);
-  border-left: 1px solid rgb(34 197 94 / 0.75);
-  pointer-events: none;
-}
-
-:deep(.cm-db-current-statement-line--first::after) {
-  border-top: 1px solid rgb(34 197 94 / 0.75);
-}
-
-:deep(.cm-db-current-statement-line--last::after) {
-  border-bottom: 1px solid rgb(34 197 94 / 0.75);
+:deep(.cm-db-current-statement-frame) {
+  box-shadow: inset 0 0 0 1px rgb(34 197 94 / 0.75);
+  border-radius: 2px;
+  box-decoration-break: clone;
 }
 
 :deep(.cm-run-statement-gutter) {

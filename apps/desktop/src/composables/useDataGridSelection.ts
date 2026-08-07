@@ -142,12 +142,6 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   });
 
   // 选区计数/是否有选区不走 selectedCells 物化：框选拖拽时每帧都会读这些值
-  const hasCellSelection = computed(() => {
-    if (selectedColumnIndexes.value.size > 0) return true;
-    if (selectedCellKeys.value.size > 0) return true;
-    return selectionAnchor.value !== null && selectionFocus.value !== null;
-  });
-
   const selectedCellCount = computed(() => {
     if (hasColumnSelection.value) {
       const colCount = selectedColumnIndexes.value.size;
@@ -175,6 +169,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     }
     return rows * colCount;
   });
+
+  // hasCellSelection 跟随计数语义：仅选中草稿行/草稿单元格时视为无选区
+  const hasCellSelection = computed(() => selectedCellCount.value > 0);
 
   function clearCellSelection() {
     selectionAnchor.value = null;

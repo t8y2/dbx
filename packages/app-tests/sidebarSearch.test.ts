@@ -17,6 +17,10 @@ test("matches word prefixes in underscored and dotted identifiers", () => {
 test("matches DataGrip-style abbreviations by identifier word boundaries", () => {
   assert.equal(matchSidebarLabel("additional_country", "ac")?.kind, "abbreviation");
   assert.equal(matchSidebarLabel("sales.customer_profile", "scp")?.kind, "abbreviation");
+  // Existing behavior: s/system + e/exception + l/log.
+  const sel = matchSidebarLabel("system_exception_log", "sel");
+  assert.equal(sel?.kind, "abbreviation");
+  assert.equal(sel?.score, 60);
 });
 
 test("keeps one-character fuzzy matches disabled", () => {

@@ -12,6 +12,7 @@ const driverStoreDialogSource = readFileSync(new URL("../../components/config/Dr
 const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
 const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
 const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
+const switchSource = readFileSync(new URL("../../components/ui/switch/Switch.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
 const legacyWebViewSource = readFileSync(new URL("../../lib/ui/legacyWebView.ts", import.meta.url), "utf8");
@@ -200,6 +201,19 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain(".connection-transport-layer-option--selected");
     expect(fallback).toContain("background-color: rgba(23, 23, 23, 0.08) !important;");
     expect(fallback).toContain(".dark .connection-transport-layer-option--selected");
+  });
+
+  it("keeps dark switches visible in legacy WebViews", () => {
+    const fallbackStart = switchSource.indexOf('html.dbx-legacy-webview.dark .dbx-switch[data-state="unchecked"] .dbx-switch-thumb');
+    const fallback = switchSource.slice(fallbackStart);
+
+    expect(fallbackStart).toBeGreaterThan(-1);
+    expect(fallback).toContain('html.dbx-legacy-webview.dark .dbx-switch[data-state="unchecked"] .dbx-switch-thumb');
+    expect(fallback).toContain("background-color: rgb(215, 215, 219) !important;");
+    expect(fallback).toContain("html.dbx-legacy-webview.dark .dbx-switch {");
+    expect(fallback).toContain("background-color: rgba(110, 110, 114, 0.44) !important;");
+    expect(fallback).toContain("border-color: rgb(208, 208, 214) !important;");
+    expect(fallback).toContain("background-color: rgb(19, 20, 22) !important;");
   });
 
   it("keeps native number input steppers scoped to legacy WebViews", () => {

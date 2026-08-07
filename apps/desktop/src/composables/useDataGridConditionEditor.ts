@@ -1,6 +1,7 @@
 import { computed, getCurrentScope, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from "vue";
 import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory, type DataGridConditionHistoryKind, type DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import { pinyinAwareMatchScore } from "@/lib/common/pinyin";
+import { matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 
 export type DataGridConditionSuggestionKind = "column" | "keyword" | "history";
 
@@ -205,7 +206,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
   let suggestionTimer: ReturnType<typeof setTimeout> | undefined;
   let suggestionRequestId = 0;
   let suggestionAbortController: AbortController | undefined;
-  let suppressNextValueSuggestion = false;
+  let suppressedSuggestionValue: string | undefined;
 
   const dropdownOpen = computed(() => suggestions.value.length > 0 || historyOpen.value);
 
@@ -226,6 +227,11 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     replacementRange.value = undefined;
   }
 
+  function dismissUntilValueChanges() {
+    suppressedSuggestionValue = options.value.value;
+    dismiss();
+  }
+
   function defaultSuggestions(target: DataGridConditionCompletionTarget): DataGridConditionSuggestion[] {
     const role = options.kind === "where" ? whereSuggestionRole(target) : "field";
     if (role === "none") return [];
@@ -233,17 +239,19 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     const seen = new Set<string>();
     const suggestions: DataGridConditionSuggestion[] = [];
     if (role === "field") {
+      const columns = toValue(options.columns) ?? [];
+      if (normalizedToken && columns.some((column) => (typeof column === "string" ? column : column.name).toLowerCase() === normalizedToken)) return [];
       const scored: Array<{ suggestion: DataGridConditionSuggestion; score: number; index: number }> = [];
       let index = 0;
-      for (const column of toValue(options.columns) ?? []) {
+      for (const column of columns) {
         const columnValue = typeof column === "string" ? column : column.name;
-        const normalizedValue = columnValue.toLowerCase();
-        if ((normalizedToken && normalizedValue === normalizedToken) || seen.has(columnValue)) continue;
+        if (seen.has(columnValue)) continue;
         seen.add(columnValue);
-        // Substring + pinyin-initials matching (金 / zzj / zj → 总租金), scored so
-        // prefix matches rank above looser ones and ties keep the column order.
-        const score = normalizedToken ? pinyinAwareMatchScore(columnValue, normalizedToken) : 0;
-        if (score < 0) continue;
+        // Keep the existing prefix/pinyin/substring ranking stable, then append
+        // new camel-initial and ordered-fuzzy matches behind those tiers.
+        const existingScore = normalizedToken ? pinyinAwareMatchScore(columnValue, normalizedToken) : 0;
+        if (existingScore < 0 && !matchesIdentifierSearch(columnValue, normalizedToken)) continue;
+        const score = existingScore < 0 ? 50 : existingScore;
         const comment = normalizedColumnComment(column);
         const insertText = target.quotedIdentifier ? columnValue : typeof column === "string" ? columnValue : column.insertText;
         scored.push({ suggestion: { value: columnValue, kind: "column", ...(insertText !== undefined && insertText !== columnValue ? { insertText } : {}), ...(comment ? { comment } : {}) }, score, index: index++ });
@@ -271,7 +279,8 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       // A slower request must never replace suggestions for a newer editor value.
       if (controller.signal.aborted || requestId !== suggestionRequestId || options.value.value !== target.value || historyOpen.value) return;
       const limit = options.suggestionLimit ?? 8;
-      suggestions.value = values ? [...new Set(values)].slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" })) : defaultSuggestions(target).slice(0, limit);
+      const providerValues = values ? [...new Set(values)] : undefined;
+      suggestions.value = providerValues ? (providerValues.some((value) => value.toLowerCase() === target.token.toLowerCase()) ? [] : providerValues.slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" }))) : defaultSuggestions(target).slice(0, limit);
       replacementRange.value = { from: target.from, to: target.to };
       highlightedIndex.value = -1;
     } catch (error) {
@@ -342,7 +351,6 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     if (!suggestion) return false;
     let caret: number;
     if (suggestion.kind === "history") {
-      suppressNextValueSuggestion = true;
       options.value.value = suggestion.value;
       caret = suggestion.value.length;
     } else {
@@ -350,10 +358,10 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       const currentTarget = conditionCompletionTarget(options.kind, options.value.value, options.selectionStart?.value, options.selectionEnd?.value, toValue(options.identifierQuote));
       if (!range || currentTarget.from !== range.from || currentTarget.to !== range.to) return false;
       const replacement = suggestion.insertText ?? suggestion.value;
-      suppressNextValueSuggestion = true;
       options.value.value = `${options.value.value.slice(0, range.from)}${replacement}${options.value.value.slice(range.to)}`;
       caret = range.from + replacement.length;
     }
+    suppressedSuggestionValue = options.value.value;
     if (options.selectionStart) options.selectionStart.value = caret;
     if (options.selectionEnd) options.selectionEnd.value = caret;
     dismiss();
@@ -382,6 +390,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       if (suggestions.value.length > 0 && highlightedIndex.value >= 0) {
         if (accept()) return "accept";
       }
+      dismissUntilValueChanges();
       return "apply";
     }
     return undefined;
@@ -390,9 +399,9 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
   watch(
     () => [options.value.value, options.selectionStart?.value, options.selectionEnd?.value] as const,
     ([value, selectionStart, selectionEnd]) => {
-      if (suppressNextValueSuggestion) {
-        suppressNextValueSuggestion = false;
-        return;
+      if (suppressedSuggestionValue !== undefined) {
+        if (value === suppressedSuggestionValue) return;
+        suppressedSuggestionValue = undefined;
       }
       scheduleSuggestions(value, selectionStart, selectionEnd);
     },

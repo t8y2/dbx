@@ -47,6 +47,16 @@ const emit = defineEmits<{
 }>();
 
 const translatedErrorMessage = computed(() => (props.errorMessage ? translateBackendError(t, props.errorMessage) : ""));
+// Prefer the real saved file name from the save dialog path; the synthetic
+// "Query Result" style label is only a fallback when no path is available.
+const displayName = computed(() => {
+  const filePath = props.filePath?.trim() ?? "";
+  if (filePath) {
+    const segments = filePath.split(/[\\/]+/).filter((segment) => segment.length > 0);
+    if (segments.length > 0) return segments[segments.length - 1];
+  }
+  return `${props.tableName} (.${props.format})`;
+});
 const isActive = computed(() => props.status === "Running" || props.status === "Writing");
 const isFinished = computed(() => props.status === "Done" || props.status === "Error" || props.status === "Cancelled");
 const canRevealFile = computed(() => props.status === "Done" && !!props.filePath && isTauriRuntime());
@@ -96,8 +106,8 @@ async function revealExportFile() {
       </DialogHeader>
 
       <div class="py-4 space-y-4">
-        <!-- Table name and format info -->
-        <div class="text-sm text-muted-foreground">{{ tableName }} (.{{ format }})</div>
+        <!-- Real saved file name (falls back to table name and format) -->
+        <div class="text-sm text-muted-foreground" :title="filePath || undefined">{{ displayName }}</div>
 
         <!-- Progress bar -->
         <div class="w-full bg-muted rounded-full h-2 overflow-hidden">

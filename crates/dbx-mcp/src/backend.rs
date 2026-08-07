@@ -1216,17 +1216,25 @@ fn url_encode(value: &str) -> String {
 }
 
 pub(crate) fn format_query_result(result: &dbx_core::db::QueryResult, max_rows: usize) -> String {
-    if result.columns.is_empty() {
-        return format!("Query executed. {} row(s) affected.", result.affected_rows);
+    let mut output = if result.columns.is_empty() {
+        format!("Query executed. {} row(s) affected.", result.affected_rows)
+    } else {
+        let rows = result
+            .rows
+            .iter()
+            .take(max_rows)
+            .map(|row| row.iter().map(format_query_cell).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let mut output = markdown_table(&result.columns, &rows);
+        output.push_str(&format!("\n\n{} row(s)", rows.len()));
+        output
+    };
+    if !result.messages.is_empty() {
+        output.push_str("\n\nServer messages:");
+        for message in &result.messages {
+            output.push_str(&format!("\n- {}", message.format_line()));
+        }
     }
-    let rows = result
-        .rows
-        .iter()
-        .take(max_rows)
-        .map(|row| row.iter().map(format_query_cell).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let mut output = markdown_table(&result.columns, &rows);
-    output.push_str(&format!("\n\n{} row(s)", rows.len()));
     output
 }
 
@@ -1244,6 +1252,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 
@@ -1448,6 +1457,33 @@ mod tests {
         assert_eq!(parse_database_type("Postgres").unwrap(), DatabaseType::Postgres);
         assert_eq!(parse_database_type("mongodb").unwrap(), DatabaseType::MongoDb);
         assert!(parse_database_type("unknown").is_err());
+    }
+
+    #[test]
+    fn format_query_result_appends_server_messages() {
+        let mut result = query_result(Vec::new(), Vec::new(), 3);
+        assert_eq!(format_query_result(&result, 100), "Query executed. 3 row(s) affected.");
+
+        result.messages = vec![
+            dbx_core::db::QueryMessage {
+                severity: "notice".to_string(),
+                message: "hello world".to_string(),
+                code: Some("00000".to_string()),
+                detail: None,
+                hint: Some("use a table".to_string()),
+            },
+            dbx_core::db::QueryMessage {
+                severity: "WARNING".to_string(),
+                message: "careful".to_string(),
+                code: None,
+                detail: None,
+                hint: None,
+            },
+        ];
+        assert_eq!(
+            format_query_result(&result, 100),
+            "Query executed. 3 row(s) affected.\n\nServer messages:\n- NOTICE: hello world (code: 00000, hint: use a table)\n- WARNING: careful"
+        );
     }
 
     #[test]

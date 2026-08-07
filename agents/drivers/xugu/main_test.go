@@ -1020,6 +1020,20 @@ func TestXuguListObjectsQueryIncludesProgrammableObjects(t *testing.T) {
 	assertArgs(t, query.Args, wantArgs)
 }
 
+func TestXuguListObjectsQueryPreservesViewValidity(t *testing.T) {
+	query := xuguListObjectsQuery("APP", metadataListConstraints{ObjectTypes: []string{"VIEW"}})
+	upper := strings.ToUpper(query.SQL)
+	if !strings.Contains(upper, "FROM ALL_VIEWS V") {
+		t.Fatalf("view lookup should query ALL_VIEWS: %s", query.SQL)
+	}
+	if !strings.Contains(upper, "V.VALID") {
+		t.Fatalf("view lookup must preserve the catalog validity flag: %s", query.SQL)
+	}
+	if strings.Contains(upper, "NULL AS VALID") {
+		t.Fatalf("view lookup must not discard the catalog validity flag: %s", query.SQL)
+	}
+}
+
 func TestXuguListObjectsQueryKeepsPublicSynonymsOutOfSchemaGroups(t *testing.T) {
 	query := xuguListObjectsQuery("SYSDBA", metadataListConstraints{ObjectTypes: []string{"SYNONYM"}})
 	for _, want := range []string{"FROM ALL_SYNONYMS y", "y.IS_PUBLIC = FALSE", "OBJECT_TYPE IN (?)"} {

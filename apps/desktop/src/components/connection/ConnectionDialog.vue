@@ -2270,6 +2270,7 @@ watch(
         redis_key_separator: config.redis_key_separator ?? ":",
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
         etcd_endpoints: config.etcd_endpoints || "",
+        gbase_server: config.gbase_server || "",
         informix_server: config.informix_server || "",
         external_config: config.external_config,
         attached_databases: config.attached_databases || [],

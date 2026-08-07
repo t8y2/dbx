@@ -2140,20 +2140,20 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
   display: none;
 }
 
-/* Frosted glass menus */
+/* Shared menu surfaces */
 .cn-menu-translucent {
-  backdrop-filter: blur(8px) saturate(1.6) !important;
-  -webkit-backdrop-filter: blur(8px) saturate(1.6) !important;
-  background-color: rgb(255 255 255 / 0.95) !important;
-  background-color: oklch(1 0 0 / 0.95) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background-color: rgb(255 255 255) !important;
+  background-color: oklch(1 0 0) !important;
   box-shadow: none !important;
   border: 0.5px solid rgb(0 0 0 / 0.12) !important;
   border: 0.5px solid oklch(0 0 0 / 0.12) !important;
   --tw-ring-shadow: none !important;
 }
 .dark .cn-menu-translucent {
-  background-color: rgb(23 23 23 / 0.82) !important;
-  background-color: oklch(0.205 0 0 / 0.82) !important;
+  background-color: rgb(23 23 23) !important;
+  background-color: oklch(0.205 0 0) !important;
   border-color: rgb(255 255 255 / 0.1) !important;
   border-color: oklch(1 0 0 / 0.1) !important;
 }
@@ -2164,7 +2164,7 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
 [data-slot="dropdown-menu-sub-content"],
 [data-slot="select-content"],
 .cn-menu-translucent {
-  background-color: rgba(255, 255, 255, 0.96) !important;
+  background-color: rgb(255, 255, 255) !important;
   border: 1px solid rgba(0, 0, 0, 0.1) !important;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12) !important;
   --tw-ring-color: transparent !important;
@@ -2178,7 +2178,7 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
 .dark [data-slot="dropdown-menu-sub-content"],
 .dark [data-slot="select-content"],
 .dark .cn-menu-translucent {
-  background-color: rgba(23, 23, 23, 0.94) !important;
+  background-color: rgb(23, 23, 23) !important;
   border-color: rgba(255, 255, 255, 0.12) !important;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45) !important;
 }

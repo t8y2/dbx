@@ -99,7 +99,7 @@ import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/
 import { validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
-import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
+import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
@@ -247,35 +247,6 @@ function tableColumnTemplateRowsFromSettings(lines: readonly string[]): TableCol
       dataType: dataType === EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE ? "" : dataType,
     })),
   }));
-}
-
-function tableColumnTemplateRowsToSettings(rows: readonly TableColumnTemplateGridRow[]): string[] {
-  const seenNames = new Set<string>();
-  const settings: string[] = [];
-  for (const row of rows) {
-    const name = row.name.trim();
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seenNames.has(key)) continue;
-    seenNames.add(key);
-
-    const parts = [name];
-
-    const seenDatabaseTypes = new Set<DatabaseType>();
-    for (const override of row.overrides) {
-      const dataType = override.dataType.trim();
-      if (seenDatabaseTypes.has(override.databaseType)) continue;
-      seenDatabaseTypes.add(override.databaseType);
-      parts.push(`${override.databaseType}:${dataType || EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE}`);
-    }
-    if (!row.required) parts.push("required:false");
-    const defaultValue = row.defaultValue.trim();
-    if (defaultValue) parts.push(`default:${defaultValue}`);
-    const comment = row.comment.trim();
-    if (comment) parts.push(`comment:${comment}`);
-    settings.push(parts.join(" | "));
-  }
-  return settings;
 }
 
 function createEmptyTableColumnTemplateRow(): TableColumnTemplateGridRow {

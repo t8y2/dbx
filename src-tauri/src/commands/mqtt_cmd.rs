@@ -26,17 +26,19 @@ async fn persist_mqtt_topics(
     client: &dbx_core::mqtt::client::MqttClient,
 ) -> Result<(), String> {
     let saved_topics = client.desired_topic_configs().await;
-    let Some(mut config) = state.configs.read().await.get(connection_id).cloned() else {
+    if !state.configs.read().await.contains_key(connection_id) {
         return Ok(());
-    };
-    let mut external_config = config.external_config.take().unwrap_or_else(|| json!({}));
-    let Some(external_object) = external_config.as_object_mut() else {
-        return Err("MQTT external_config 必须是 JSON 对象".to_string());
-    };
-    external_object.insert("savedTopics".to_string(), serde_json::to_value(saved_topics).map_err(|e| e.to_string())?);
-    config.external_config = Some(external_config);
-    state.storage.save_connections(std::slice::from_ref(&config)).await?;
-    state.configs.write().await.insert(connection_id.to_string(), config);
+    }
+    let saved_topics = serde_json::to_value(saved_topics).map_err(|e| e.to_string())?;
+    state.storage.save_connection_mqtt_saved_topics(connection_id, saved_topics.clone()).await?;
+    if let Some(config) = state.configs.write().await.get_mut(connection_id) {
+        let mut external_config = config.external_config.take().unwrap_or_else(|| json!({}));
+        let Some(external_object) = external_config.as_object_mut() else {
+            return Err("MQTT external_config 必须是 JSON 对象".to_string());
+        };
+        external_object.insert("savedTopics".to_string(), saved_topics);
+        config.external_config = Some(external_config);
+    }
     Ok(())
 }
 /// 获取 broker 基本信息

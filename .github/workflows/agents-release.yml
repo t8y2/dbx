@@ -179,7 +179,6 @@ jobs:
             ["linux-aarch64"]="linux/arm64"
             ["linux-x64"]="linux/amd64"
             ["windows-aarch64"]="windows/arm64"
-            ["windows-x64"]="windows/amd64"
           )
           for platform in "${!TARGETS[@]}"; do
             IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
@@ -191,6 +190,20 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
           done
           ls -lh ../../../release-native
+      # Go 1.20 is the last release that supports Windows 7; keep other targets on Go 1.22.
+      - name: Set up Go for Windows 7-compatible Oracle agent
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/oracle-go/go.sum
+      - name: Build Windows 7-compatible Oracle agent
+        shell: bash
+        working-directory: agents/drivers/oracle-go
+        run: |
+          output="../../../release-native/dbx-agent-oracle-windows-x64.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output" .
+          go version -m "$output" | tee /tmp/oracle-windows-x64-build-info.txt
+          grep -q ': go1\.20\.14$' /tmp/oracle-windows-x64-build-info.txt
       - uses: actions/upload-artifact@v4
         with:
           name: oracle-native

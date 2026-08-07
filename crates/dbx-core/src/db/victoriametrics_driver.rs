@@ -339,6 +339,7 @@ fn series_result_to_query_result(series: Vec<SeriesResult>, start: Instant) -> Q
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 
@@ -375,6 +376,7 @@ fn simple_result(rows: Vec<Vec<Value>>, value_type: &str, start: Instant) -> Que
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 

@@ -10,7 +10,7 @@ use crate::query::QueryExecutionOptions;
 use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
 use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
 use crate::sql_risk::SqlRisk;
-use crate::types::QueryResult;
+use crate::types::{QueryMessage, QueryResult};
 
 /// Maximum number of tables returned by list_tables tool.
 const LIST_TABLES_LIMIT: usize = 200;
@@ -734,7 +734,10 @@ fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<Str
     // A result without columns is a command result, not an empty result set.
     // This is how drivers represent DML that does not use RETURNING.
     if result.columns.is_empty() {
-        return Ok(format!("Query executed. {} row(s) affected.", result.affected_rows));
+        return Ok(append_server_messages(
+            format!("Query executed. {} row(s) affected.", result.affected_rows),
+            &result.messages,
+        ));
     }
 
     let mut lines = Vec::new();
@@ -774,7 +777,20 @@ fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<Str
     // Stats line
     lines.push(format!("({} rows, {}ms)", result.rows.len(), result.execution_time_ms));
 
-    Ok(lines.join("\n"))
+    Ok(append_server_messages(lines.join("\n"), &result.messages))
+}
+
+/// Append server messages in the same style as the MCP `format_query_result`
+/// renderer: a `Server messages:` section with `- SEVERITY: message` lines.
+fn append_server_messages(mut output: String, messages: &[QueryMessage]) -> String {
+    if messages.is_empty() {
+        return output;
+    }
+    output.push_str("\n\nServer messages:");
+    for message in messages {
+        output.push_str(&format!("\n- {}", message.format_line()));
+    }
+    output
 }
 
 /// Get sample data from a table via the get_sample_data tool.
@@ -1363,6 +1379,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }
     }
 
@@ -1390,6 +1407,44 @@ for line in sys.stdin:
         assert_eq!(
             format_query_result_as_text(&result, 50).unwrap(),
             "| id | name |\n|---|---|\n| 5 | returning |\n(1 rows, 1ms)"
+        );
+    }
+
+    #[test]
+    fn query_result_formatter_appends_server_messages() {
+        let mut dml = query_result(vec![], vec![], 2);
+        dml.messages = vec![
+            QueryMessage {
+                severity: "notice".to_string(),
+                message: "hello world".to_string(),
+                code: Some("00000".to_string()),
+                detail: None,
+                hint: Some("use a table".to_string()),
+            },
+            QueryMessage {
+                severity: "WARNING".to_string(),
+                message: "careful".to_string(),
+                code: None,
+                detail: None,
+                hint: None,
+            },
+        ];
+        assert_eq!(
+            format_query_result_as_text(&dml, 50).unwrap(),
+            "Query executed. 2 row(s) affected.\n\nServer messages:\n- NOTICE: hello world (code: 00000, hint: use a table)\n- WARNING: careful"
+        );
+
+        let mut result = query_result(vec!["id"], vec![vec![serde_json::json!(1)]], 0);
+        result.messages = vec![QueryMessage {
+            severity: "INFO".to_string(),
+            message: "print output".to_string(),
+            code: None,
+            detail: None,
+            hint: None,
+        }];
+        assert_eq!(
+            format_query_result_as_text(&result, 50).unwrap(),
+            "| id |\n|---|\n| 1 |\n(1 rows, 1ms)\n\nServer messages:\n- INFO: print output"
         );
     }
 

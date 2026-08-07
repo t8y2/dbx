@@ -387,6 +387,21 @@ describe("DataGridColumnHeader", () => {
 });
 
 describe("DataGridFilterBuilder", () => {
+  it("opens the first empty rule column search on request", async () => {
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["id"],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+    });
+
+    await mounted.exposed.value.openFirstEmptyRuleColumnSearch();
+
+    const columnSelect = findAll(mounted.root, (node) => node.props["data-stub"] === "Select")[0];
+    expect(columnSelect.props.open).toBe(true);
+  });
+
   it("keeps selected columns and values readable without stretching the controls", () => {
     const mounted = mountComponent(DataGridFilterBuilder, {
       rules: [{ id: "r1", columnName: "appointmentStatusWithAnExceptionallyLongName", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
@@ -400,7 +415,7 @@ describe("DataGridFilterBuilder", () => {
     const triggers = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectTrigger");
     const selectValues = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectValue");
     const items = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem");
-    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]"));
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[minmax(0,210px)_92px_minmax(0,210px)_auto]"));
     const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
 
@@ -414,7 +429,7 @@ describe("DataGridFilterBuilder", () => {
     expect(items.every((item) => String(item.props.class).includes("rounded-none"))).toBe(true);
     expect(searchInput.props.placeholder).toBe("grid.filterBuilderSearchColumns");
     expect(valueEditor.props.placeholder).toBe("grid.filterBuilderValue");
-    expect(String(ruleGrid.props.class)).toContain("grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]");
+    expect(String(ruleGrid.props.class)).toContain("grid-cols-[minmax(0,210px)_92px_minmax(0,210px)_auto]");
     expect(String(ruleGrid.props.class)).toContain("justify-start");
     for (const trigger of triggers) {
       expect(String(trigger.props.class)).toContain("w-full");
@@ -616,6 +631,88 @@ describe("DataGridFilterBuilder", () => {
 });
 
 describe("DataGridQueryControls", () => {
+  it("opens column search when the filter button creates the first rule", async () => {
+    let mounted: ReturnType<typeof mountComponent>;
+    const firstRule = { id: "r1", columnName: "", mode: "equals" as const, rawValue: "", rawEndValue: "", conjunction: "AND" as const };
+    const ensureRule = vi.fn(() => {
+      void mounted.setProps({ rules: [firstRule], filterBuilderOpen: true });
+    });
+    mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onEnsureRule: ensureRule,
+    });
+
+    const filterButton = findOne(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    dispatch(filterButton, "click");
+    await nextTick();
+    await nextTick();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await nextTick();
+
+    const columnSelect = findAll(mounted.root, (node) => node.props["data-stub"] === "Select")[0];
+    expect(ensureRule).toHaveBeenCalledOnce();
+    expect(columnSelect.props.open).toBe(true);
+  });
+
+  it("does not open column search when filter rules already exist", async () => {
+    let mounted: ReturnType<typeof mountComponent>;
+    const ensureRule = vi.fn(() => {
+      void mounted.setProps({ filterBuilderOpen: true });
+    });
+    mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "id = 1",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterButtonActive: true,
+      filterButtonCount: 1,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onEnsureRule: ensureRule,
+    });
+
+    const filterButton = findOne(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    dispatch(filterButton, "click");
+    await nextTick();
+
+    const columnSelect = findAll(mounted.root, (node) => node.props["data-stub"] === "Select")[0];
+    expect(ensureRule).toHaveBeenCalledOnce();
+    expect(columnSelect.props.open).toBe(false);
+  });
+
   it("gives filter rules enough horizontal space for longer column names", () => {
     const mounted = mountComponent(DataGridQueryControls, {
       whereInput: "",

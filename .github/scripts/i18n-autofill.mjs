@@ -201,9 +201,7 @@ function assertSamePlaceholders(key, source, translated, locale) {
   const sourcePlaceholders = placeholders(source);
   const translatedPlaceholders = placeholders(translated);
   if (sourcePlaceholders.join("\0") !== translatedPlaceholders.join("\0")) {
-    throw new Error(
-      `${locale}:${key} placeholder mismatch: expected [${sourcePlaceholders.join(", ")}], got [${translatedPlaceholders.join(", ")}]`,
-    );
+    throw new Error(`${locale}:${key} placeholder mismatch: expected [${sourcePlaceholders.join(", ")}], got [${translatedPlaceholders.join(", ")}]`);
   }
 }
 
@@ -362,7 +360,7 @@ function flattenNode(node, path, result) {
     const nextPath = [...path, property.key];
     if (property.value.type === "object") {
       flattenNode(property.value, nextPath, result);
-    } else {
+    } else if (property.value.type === "string") {
       result.set(nextPath.join("."), property.value.value);
     }
   }
@@ -416,6 +414,12 @@ class Parser {
       const start = this.index;
       const key = this.parseKey();
       this.skipSpace();
+      if (this.peek() === "," || this.peek() === "}") {
+        const hasComma = this.peek() === ",";
+        if (hasComma) this.index += 1;
+        properties.push({ key, start, end: this.index, hasComma, value: { type: "external" } });
+        continue;
+      }
       this.expect(":");
       this.skipSpace();
       const value = this.parseValue();

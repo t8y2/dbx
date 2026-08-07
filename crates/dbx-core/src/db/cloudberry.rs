@@ -10,8 +10,7 @@ const CLOUD_BERRY_TABLE_DDL_SQL: &str = "SELECT pg_get_tabledef($1, $2, true)";
 const CLOUD_BERRY_EXTERNAL_TABLES_SQL: &str = "SELECT c.relname \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     JOIN pg_catalog.pg_exttable x ON x.reloid = c.oid \
-     WHERE n.nspname = $1 AND c.relname = ANY($2::text[])";
+     WHERE n.nspname = $1 AND c.relkind = 'f' AND c.relname = ANY($2::text[])";
 
 const CLOUD_BERRY_TABLE_MODIFIERS_SQL: &str = "SELECT COALESCE(am.amname, '')::text AS access_method, \
             COALESCE(array_to_string(c.reloptions, E'\\n'), '')::text AS reloptions, \
@@ -19,7 +18,7 @@ const CLOUD_BERRY_TABLE_MODIFIERS_SQL: &str = "SELECT COALESCE(am.amname, '')::t
             COALESCE(string_agg(a.attname, E'\\n' \
               ORDER BY array_position(dp.distkey::smallint[], a.attnum::smallint)), '')::text \
               AS distribution_columns, \
-            bool_or(x.reloid IS NOT NULL) AS is_external, \
+            bool_or(c.relkind = 'f') AS is_external, \
             COALESCE(fs.srvname, '')::text AS external_server, \
             ft.ftoptions AS external_options \
      FROM pg_catalog.pg_class c \
@@ -27,7 +26,6 @@ const CLOUD_BERRY_TABLE_MODIFIERS_SQL: &str = "SELECT COALESCE(am.amname, '')::t
      LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam \
      LEFT JOIN pg_catalog.gp_distribution_policy dp ON dp.localoid = c.oid \
      LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(dp.distkey) \
-     LEFT JOIN pg_catalog.pg_exttable x ON x.reloid = c.oid \
      LEFT JOIN pg_catalog.pg_foreign_table ft ON ft.ftrelid = c.oid \
      LEFT JOIN pg_catalog.pg_foreign_server fs ON fs.oid = ft.ftserver \
      WHERE n.nspname = $1 AND c.relname = $2 \
@@ -327,9 +325,12 @@ mod tests {
     }
 
     #[test]
-    fn ddl_query_uses_cloudberry_native_definition_function() {
+    fn ddl_queries_avoid_privileged_external_catalog_view() {
         assert_eq!(CLOUD_BERRY_TABLE_DDL_SQL, "SELECT pg_get_tabledef($1, $2, true)");
         assert!(CLOUD_BERRY_TABLE_MODIFIERS_SQL.contains("gp_distribution_policy"));
-        assert!(CLOUD_BERRY_TABLE_MODIFIERS_SQL.contains("pg_exttable"));
+        assert!(CLOUD_BERRY_TABLE_MODIFIERS_SQL.contains("c.relkind = 'f'"));
+        assert!(CLOUD_BERRY_EXTERNAL_TABLES_SQL.contains("c.relkind = 'f'"));
+        assert!(!CLOUD_BERRY_TABLE_MODIFIERS_SQL.contains("pg_exttable"));
+        assert!(!CLOUD_BERRY_EXTERNAL_TABLES_SQL.contains("pg_exttable"));
     }
 }

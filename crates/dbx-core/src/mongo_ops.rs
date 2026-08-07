@@ -889,6 +889,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affecte
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 

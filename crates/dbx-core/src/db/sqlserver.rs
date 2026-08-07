@@ -1,11 +1,11 @@
 use crate::query::MAX_ROWS;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, LinkedServerInfo, ObjectStatistics, QueryResult,
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, LinkedServerInfo, ObjectStatistics, QueryMessage, QueryResult,
     SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 use futures::{FutureExt, TryStreamExt};
-use sqlparser::ast::{Expr, Ident, OrderByKind, SelectItem, SetExpr, Statement, Value};
+use sqlparser::ast::{Expr, Ident, ObjectNamePart, OrderByKind, SelectItem, SetExpr, Statement, TableFactor, Value};
 use sqlparser::dialect::MsSqlDialect;
 use sqlparser::parser::Parser;
 use std::borrow::Cow;
@@ -486,15 +486,41 @@ where
     (output, messages)
 }
 
+/// Map captured tiberius INFO-token texts to generic query messages. Tiberius
+/// exposes only the message text in its tracing event, so severity is always
+/// `INFO` and no code/detail/hint is available.
+fn sqlserver_query_messages(messages: &[String]) -> Vec<QueryMessage> {
+    messages
+        .iter()
+        .map(|message| QueryMessage {
+            severity: "INFO".to_string(),
+            message: message.clone(),
+            code: None,
+            detail: None,
+            hint: None,
+        })
+        .collect()
+}
+
 fn query_result_with_server_messages(result: QueryResult, messages: Vec<String>) -> QueryResult {
     query_result_with_server_messages_metadata(result, messages).result
 }
 
 fn query_result_with_server_messages_metadata(mut result: QueryResult, messages: Vec<String>) -> SqlServerBatchResult {
-    if messages.is_empty() || !result.columns.is_empty() || !result.rows.is_empty() {
+    if messages.is_empty() {
+        return SqlServerBatchResult { result, server_message: false };
+    }
+    if !result.columns.is_empty() || !result.rows.is_empty() {
+        // Tabular results keep their shape and additionally carry the
+        // messages; only the empty-result synthesis below leaves
+        // `messages` empty so consumers do not render the same text twice.
+        result.messages = sqlserver_query_messages(&messages);
         return SqlServerBatchResult { result, server_message: false };
     }
 
+    // Empty results synthesize the legacy single-"Message"-column grid; the
+    // text lives only there, so `messages` stays empty to avoid consumers
+    // rendering the same text twice.
     result.columns = vec![SQLSERVER_MESSAGE_COLUMN.to_string()];
     result.column_types = vec!["nvarchar".to_string()];
     result.rows = messages.into_iter().map(|message| vec![serde_json::Value::String(message)]).collect();
@@ -520,6 +546,7 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         },
         messages,
     ))
@@ -585,6 +612,7 @@ async fn collect_first_result_limited(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -699,7 +727,15 @@ async fn describe_sqlserver_result_set_with_mode(
         let item = match sqlserver_driver_result(stream.try_next()).await {
             Ok(item) => item,
             Err(error) if uses_describe_dmv == Some(false) => {
-                return Err(format!("{SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX} {error}"));
+                let error = format!("{SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX} {error}");
+                if is_sqlserver_legacy_duplicate_probe_error(&error) {
+                    let Some(metadata_sql) = sqlserver_legacy_wildcard_metadata_query(sql) else {
+                        return Err(error);
+                    };
+                    drop(stream);
+                    return describe_sqlserver_legacy_wildcard_result_set(client, &metadata_sql).await;
+                }
+                return Err(error);
             }
             Err(error) => return Err(error),
         };
@@ -725,6 +761,114 @@ async fn describe_sqlserver_result_set_with_mode(
         restore_sqlserver_legacy_probe_output_names(&mut columns, legacy_probe);
     }
     Ok(columns)
+}
+
+fn is_sqlserver_legacy_duplicate_probe_error(error: &str) -> bool {
+    error.starts_with(SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX)
+        && error.to_ascii_lowercase().contains("dbx_probe_source")
+}
+
+async fn describe_sqlserver_legacy_wildcard_result_set(
+    client: &mut SqlServerClient,
+    metadata_sql: &str,
+) -> Result<Vec<SqlServerDescribedColumn>, String> {
+    let rows = sqlserver_driver_result(client.query(metadata_sql, &[]))
+        .await
+        .map_err(|error| format!("{SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX} {error}"))?
+        .into_first_result()
+        .await
+        .map_err(|error| format!("{SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX} {error}"))?;
+    if rows.is_empty() {
+        return Err(format!(
+            "{SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX} legacy wildcard metadata capture returned no columns"
+        ));
+    }
+    Ok(rows.iter().map(sqlserver_described_column_from_row).collect())
+}
+
+fn sqlserver_legacy_wildcard_metadata_query(sql: &str) -> Option<String> {
+    let statement = normalized_sqlserver_select_statement(sql)?;
+    let statements = Parser::parse_sql(&MsSqlDialect {}, &statement.inner).ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    if !matches!(select.projection.as_slice(), [SelectItem::Wildcard(_)]) {
+        return None;
+    }
+
+    let mut relations = Vec::new();
+    for source in &select.from {
+        relations.push(sqlserver_legacy_wildcard_relation(&source.relation)?);
+        for join in &source.joins {
+            relations.push(sqlserver_legacy_wildcard_relation(&join.relation)?);
+        }
+    }
+    if relations.is_empty() {
+        return None;
+    }
+
+    let checks = relations
+        .iter()
+        .map(|relation| {
+            format!(
+                "IF OBJECT_ID({}) IS NULL RAISERROR(N'Unable to inspect wildcard source metadata', 16, 1);",
+                sqlserver_nstring_literal(&relation.object_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let selects = relations
+        .iter()
+        .enumerate()
+        .map(|(index, relation)| {
+            let catalog = relation.catalog_prefix;
+            format!(
+                "SELECT {} AS dbx_source_ordinal, c.column_id AS dbx_column_ordinal, c.name, \
+                 TYPE_NAME(c.system_type_id) AS system_type_name, s.name AS user_type_schema, t.name AS user_type_name \
+                 FROM {catalog}sys.columns c \
+                 JOIN {catalog}sys.types t ON c.user_type_id = t.user_type_id \
+                 JOIN {catalog}sys.schemas s ON t.schema_id = s.schema_id \
+                 WHERE c.object_id = OBJECT_ID({})",
+                index + 1,
+                sqlserver_nstring_literal(&relation.object_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    Some(format!(
+        "{checks} SELECT name, system_type_name, user_type_schema, user_type_name \
+         FROM ({selects}) AS dbx_wildcard_metadata \
+         ORDER BY dbx_source_ordinal, dbx_column_ordinal"
+    ))
+}
+
+struct SqlServerLegacyWildcardRelation {
+    catalog_prefix: &'static str,
+    object_name: String,
+}
+
+fn sqlserver_legacy_wildcard_relation(relation: &TableFactor) -> Option<SqlServerLegacyWildcardRelation> {
+    let TableFactor::Table { name, args, .. } = relation else {
+        return None;
+    };
+    if args.is_some() {
+        return None;
+    }
+    let identifiers = name.0.iter().map(ObjectNamePart::as_ident).collect::<Option<Vec<_>>>()?;
+    match identifiers.as_slice() {
+        [table] if table.value.starts_with('#') => Some(SqlServerLegacyWildcardRelation {
+            catalog_prefix: "tempdb.",
+            object_name: format!("tempdb..{}", table.value),
+        }),
+        [_table] => Some(SqlServerLegacyWildcardRelation { catalog_prefix: "", object_name: name.to_string() }),
+        [_schema, _table] => {
+            Some(SqlServerLegacyWildcardRelation { catalog_prefix: "", object_name: name.to_string() })
+        }
+        _ => None,
+    }
 }
 
 fn restore_sqlserver_legacy_probe_output_names(
@@ -1283,6 +1427,7 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         });
     }
 }
@@ -1340,6 +1485,7 @@ fn push_sqlserver_ordered_events(
                         session_id: None,
                         has_more: false,
                         elasticsearch_raw_body: None,
+                        messages: Vec::new(),
                     },
                     server_message: false,
                 });
@@ -2669,6 +2815,7 @@ pub async fn execute_query_with_max_rows(
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             },
             messages,
         ))
@@ -2713,6 +2860,7 @@ pub(crate) async fn execute_batch_with_max_rows_metadata(
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             },
             messages,
         )]);
@@ -2797,6 +2945,7 @@ pub(crate) async fn execute_simple_batch_with_max_rows_metadata(
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             },
             server_message: false,
         });
@@ -3063,19 +3212,20 @@ mod tests {
     use super::{
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, completion_context_from_query_result,
         decode_sqlserver_spatial_values, format_sqlserver_numeric, is_blocking_sqlserver_unsafe_probe_error,
-        is_sqlserver_spatial_column, is_sqlserver_variant_column, push_sqlserver_ordered_events,
-        query_result_with_server_messages, query_result_with_server_messages_metadata, requires_simple_query_batch,
-        restore_sqlserver_legacy_probe_output_names, restore_sqlserver_spatial_column_types,
-        sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
-        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_done_trace_event,
-        sqlserver_filter_definition_error, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
-        sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
-        sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
-        sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
-        sqlserver_supports_session_database_switch, sqlserver_table_comment_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent,
-        SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        is_sqlserver_legacy_duplicate_probe_error, is_sqlserver_spatial_column, is_sqlserver_variant_column,
+        push_sqlserver_ordered_events, query_result_with_server_messages, query_result_with_server_messages_metadata,
+        requires_simple_query_batch, restore_sqlserver_legacy_probe_output_names,
+        restore_sqlserver_spatial_column_types, server_messages_query_result, sqlserver_batch_can_use_execute,
+        sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
+        sqlserver_dml_output_returns_rows, sqlserver_done_trace_event, sqlserver_filter_definition_error,
+        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
+        sqlserver_legacy_probe_with_nonce, sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql,
+        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
+        sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_supports_session_database_switch,
+        sqlserver_table_comment_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -3120,10 +3270,15 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
         let result = query_result_with_server_messages(empty, vec!["DBCC execution completed".to_string()]);
         assert_eq!(result.columns, vec!["Message"]);
+        assert_eq!(result.column_types, vec!["nvarchar"]);
         assert_eq!(result.rows, vec![vec![serde_json::json!("DBCC execution completed")]]);
+        // The synthesized grid already carries the text; `messages` stays
+        // empty so consumers do not render the same text twice.
+        assert!(result.messages.is_empty());
 
         let message = query_result_with_server_messages_metadata(
             QueryResult {
@@ -3139,6 +3294,7 @@ mod tests {
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             },
             vec!["PRINT output".to_string()],
         );
@@ -3157,11 +3313,16 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
         let result = query_result_with_server_messages_metadata(select, vec!["informational".to_string()]);
         assert!(!result.server_message);
         assert_eq!(result.result.columns, vec!["id"]);
         assert_eq!(result.result.rows, vec![vec![serde_json::json!(1)]]);
+        // Non-empty results keep their shape but still carry the server messages.
+        assert_eq!(result.result.messages.len(), 1);
+        assert_eq!(result.result.messages[0].severity, "INFO");
+        assert_eq!(result.result.messages[0].message, "informational");
     }
 
     #[test]
@@ -3302,6 +3463,36 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].result.columns, vec!["selected"]);
         assert_eq!(results[1].result.affected_rows, 2);
+    }
+
+    #[test]
+    fn sqlserver_query_messages_map_info_severity() {
+        let messages = sqlserver_query_messages(&["first".to_string(), "second".to_string()]);
+        assert_eq!(messages.len(), 2);
+        for (message, expected) in messages.iter().zip(["first", "second"]) {
+            assert_eq!(message.severity, "INFO");
+            assert_eq!(message.message, expected);
+            assert!(message.code.is_none());
+            assert!(message.detail.is_none());
+            assert!(message.hint.is_none());
+        }
+
+        assert!(sqlserver_query_messages(&[]).is_empty());
+    }
+
+    #[test]
+    fn sqlserver_server_messages_query_result_synthesizes_grid() {
+        assert!(server_messages_query_result(vec![], Instant::now()).is_none());
+
+        let result = server_messages_query_result(vec!["print output".to_string()], Instant::now())
+            .expect("non-empty messages yield a result");
+        assert!(result.server_message);
+        assert_eq!(result.result.columns, vec!["Message"]);
+        assert_eq!(result.result.column_types, vec!["nvarchar"]);
+        assert_eq!(result.result.rows, vec![vec![serde_json::json!("print output")]]);
+        // The synthesized grid already carries the text; `messages` stays
+        // empty so consumers do not render the same text twice.
+        assert!(result.result.messages.is_empty());
     }
 
     #[test]
@@ -3822,6 +4013,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
         .unwrap();
 
@@ -4164,6 +4356,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
@@ -4597,6 +4790,33 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_legacy_duplicate_probe_uses_bounded_metadata_recovery() {
+        assert!(is_sqlserver_legacy_duplicate_probe_error(
+            "SQL Server unsafe result type: The column 'usergrp' was specified multiple times for 'dbx_probe_source'."
+        ));
+        assert!(!is_sqlserver_legacy_duplicate_probe_error(
+            "SQL Server unsafe result type: Invalid object name 'missing'."
+        ));
+        let query = sqlserver_legacy_wildcard_metadata_query(
+            "SELECT * FROM dbo.purctl a JOIN dbo.deptctl b ON a.id = b.id JOIN whctl c ON b.id = c.id",
+        )
+        .unwrap();
+        assert_eq!(query.matches("OBJECT_ID").count(), 6);
+        assert_eq!(query.matches("UNION ALL").count(), 2);
+        assert!(query.contains("ORDER BY dbx_source_ordinal, dbx_column_ordinal"));
+        assert!(sqlserver_legacy_wildcard_metadata_query("SELECT a.* FROM dbo.purctl a").is_none());
+    }
+
+    #[test]
+    fn sqlserver_legacy_wildcard_metadata_limits_supported_sources() {
+        assert!(sqlserver_legacy_wildcard_metadata_query("SELECT * FROM #left l JOIN #right r ON l.id = r.id")
+            .unwrap()
+            .contains("tempdb.sys.columns"));
+        assert!(sqlserver_legacy_wildcard_metadata_query("SELECT * FROM (SELECT 1 AS id) x").is_none());
+        assert!(sqlserver_legacy_wildcard_metadata_query("SELECT * FROM db.dbo.t").is_none());
+    }
+
+    #[test]
     fn sqlserver_legacy_probe_uses_unique_internal_names_for_duplicate_outputs() {
         let probe = sqlserver_legacy_probe(
             "SELECT a.HJRQ, b.HJRQ, a.id + b.id AS total, GETDATE() FROM dbo.a a JOIN dbo.b b ON b.id = a.id",
@@ -4832,11 +5052,14 @@ mod tests {
 
         let setup = "\
             IF OBJECT_ID('tempdb..#dbx_issue_4002') IS NOT NULL DROP TABLE #dbx_issue_4002; \
+            IF OBJECT_ID('tempdb..#dbx_issue_5606_extra') IS NOT NULL DROP TABLE #dbx_issue_5606_extra; \
             CREATE TABLE #dbx_issue_4002 (\
                 id int NOT NULL, ybbz int NULL, cytzrq date NULL, jzrq datetime NULL, payload sql_variant NULL\
             ); \
+            CREATE TABLE #dbx_issue_5606_extra (id int NOT NULL); \
             INSERT INTO #dbx_issue_4002 (id, ybbz, cytzrq, jzrq, payload) \
-            VALUES (1, 2, '2026-07-28', '2026-07-28T12:34:56', CAST(N'legacy' AS nvarchar(20)))";
+            VALUES (1, 2, '2026-07-28', '2026-07-28T12:34:56', CAST(N'legacy' AS nvarchar(20))); \
+            INSERT INTO #dbx_issue_5606_extra VALUES (2)";
         client.simple_query(setup).await.unwrap().into_results().await.unwrap();
 
         let sql = "SELECT id, payload FROM #dbx_issue_4002";
@@ -4916,10 +5139,66 @@ mod tests {
         assert_eq!(wildcard_rows[0].columns()[4].name(), "ybbz");
         assert_eq!(wildcard_rows[0].get::<&str, _>(7), Some("legacy"));
 
+        let issue_setup = "\
+            CREATE TABLE #purctl (Ref_id nvarchar(32) NOT NULL, Vnd_id nvarchar(32) NULL, usergrp nvarchar(32) NULL); \
+            CREATE TABLE #deptctl (tvnd_id nvarchar(32) NULL, usergrp nvarchar(32) NULL); \
+            CREATE TABLE #whctl (stru_id nvarchar(32) NULL, usergrp nvarchar(32) NULL); \
+            INSERT INTO #purctl VALUES (N'RPM012608060005', N'V1', N'P'); \
+            INSERT INTO #deptctl VALUES (N'V1', N'W1'); \
+            INSERT INTO #whctl VALUES (N'W1', N'W')";
+        client.simple_query(issue_setup).await.unwrap().into_results().await.unwrap();
+        let issue_sql = "\
+            SELECT * FROM #purctl a \
+            JOIN #deptctl b ON COALESCE(a.Vnd_id, N'') = COALESCE(b.tvnd_id, N'') \
+            JOIN #whctl c ON b.usergrp = c.stru_id \
+            WHERE a.Ref_id = N'RPM012608060005'";
+        let issue_probe = super::sqlserver_legacy_probe(issue_sql).unwrap();
+        let issue_columns =
+            super::describe_sqlserver_result_set_with_mode(&mut client, issue_sql, &issue_probe, true).await.unwrap();
+        assert_eq!(issue_columns.len(), 7);
+        assert_eq!(issue_columns.iter().filter(|column| column.name.as_deref() == Some("usergrp")).count(), 3);
+        assert!(build_sqlserver_unsafe_type_query(issue_sql, &issue_columns).is_none());
+        let issue_rows = client.query(issue_sql, &[]).await.unwrap().into_first_result().await.unwrap();
+        assert_eq!(issue_rows.len(), 1);
+
+        let pure_wildcard_variant_sql = "SELECT * FROM #dbx_issue_4002 AS a CROSS JOIN #dbx_issue_5606_extra AS b";
+        let pure_wildcard_variant_probe = super::sqlserver_legacy_probe(pure_wildcard_variant_sql).unwrap();
+        let pure_wildcard_variant_columns = super::describe_sqlserver_result_set_with_mode(
+            &mut client,
+            pure_wildcard_variant_sql,
+            &pure_wildcard_variant_probe,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pure_wildcard_variant_columns.len(), 6);
+        assert!(is_sqlserver_variant_column(&pure_wildcard_variant_columns[4]));
+        let pure_wildcard_variant_rewritten =
+            build_sqlserver_unsafe_type_query(pure_wildcard_variant_sql, &pure_wildcard_variant_columns).unwrap();
+        let pure_wildcard_variant_rows = client
+            .query(pure_wildcard_variant_rewritten.sql.as_str(), &[])
+            .await
+            .unwrap()
+            .into_first_result()
+            .await
+            .unwrap();
+        assert_eq!(pure_wildcard_variant_rows[0].columns()[0].name(), "id");
+        assert_eq!(pure_wildcard_variant_rows[0].columns()[5].name(), "id");
+        assert_eq!(pure_wildcard_variant_rows[0].get::<&str, _>(4), Some("legacy"));
+
         let continued = super::execute_query(&mut client, "SELECT CAST(7 AS int) AS still_connected").await.unwrap();
         assert_eq!(continued.rows, vec![vec![serde_json::json!(7)]]);
 
-        client.simple_query("DROP TABLE #dbx_issue_4002").await.unwrap().into_results().await.unwrap();
+        client
+            .simple_query(
+                "DROP TABLE #purctl; DROP TABLE #deptctl; DROP TABLE #whctl; \
+                 DROP TABLE #dbx_issue_5606_extra; DROP TABLE #dbx_issue_4002",
+            )
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

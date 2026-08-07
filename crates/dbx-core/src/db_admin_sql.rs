@@ -771,7 +771,8 @@ fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
 }
 
 fn is_oracle_like_rename(database_type: DatabaseType) -> bool {
-    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng)
+    // 神通 Oscar 实测支持 `ALTER TABLE old RENAME TO new`（PG 风格，与 Dameng/Oracle 一致）。
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::Oscar)
 }
 
 fn is_postgres_like_structure_copy(database_type: DatabaseType) -> bool {
@@ -1930,6 +1931,22 @@ mod tests {
             })
             .unwrap(),
             "ALTER VIEW \"SYSDBA\".\"ACTIVE_USERS\" RENAME TO \"ENABLED_USERS\";"
+        );
+    }
+
+    #[test]
+    fn builds_oscar_table_rename_sql() {
+        // 神通实测支持 `ALTER TABLE old RENAME TO new`（issue #5505 探测）。
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::Oscar),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("SYSDBA".to_string()),
+                old_name: "OLD_USERS".to_string(),
+                new_name: "NEW_USERS".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE \"SYSDBA\".\"OLD_USERS\" RENAME TO \"NEW_USERS\";"
         );
     }
 

@@ -139,7 +139,9 @@ pub enum DataGridContextFilterMode {
     Like,
     NotLike,
     LessThan,
+    LessThanOrEqual,
     GreaterThan,
+    GreaterThanOrEqual,
     In,
     NotIn,
     Between,
@@ -520,8 +522,16 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
             "{column} < {}",
             format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
         )),
+        DataGridContextFilterMode::LessThanOrEqual => Some(format!(
+            "{column} <= {}",
+            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+        )),
         DataGridContextFilterMode::GreaterThan => Some(format!(
             "{column} > {}",
+            format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
+        )),
+        DataGridContextFilterMode::GreaterThanOrEqual => Some(format!(
+            "{column} >= {}",
             format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
         )),
         DataGridContextFilterMode::In => build_data_grid_context_membership_filter_condition(
@@ -3508,6 +3518,25 @@ mod tests {
             .as_deref(),
             Some("`file_name` = '34-B-0048'")
         );
+        for (mode, expected) in [
+            (DataGridContextFilterMode::GreaterThanOrEqual, "`score` >= 80"),
+            (DataGridContextFilterMode::LessThanOrEqual, "`score` <= 80"),
+        ] {
+            assert_eq!(
+                build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                    database_type: Some(DatabaseType::Mysql),
+                    identifier_quote: None,
+                    column_name: "score".to_string(),
+                    mode,
+                    value: json!(80),
+                    values: Vec::new(),
+                    end_value: None,
+                    column_info: Some(column("score", "int", false, None)),
+                })
+                .as_deref(),
+                Some(expected)
+            );
+        }
         assert_eq!(
             build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
                 database_type: Some(DatabaseType::Kingbase),

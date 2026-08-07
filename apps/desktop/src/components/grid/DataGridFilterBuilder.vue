@@ -134,6 +134,13 @@ async function handleColumnSelectOpen(rule: DataGridStructuredFilterRule, open: 
   window.requestAnimationFrame(() => columnSearchInputs.get(rule.id)?.focus());
 }
 
+async function openFirstEmptyRuleColumnSearch() {
+  const rule = props.rules.find((item) => !item.columnName && !item.disabled);
+  if (rule) await handleColumnSelectOpen(rule, true);
+}
+
+defineExpose({ openFirstEmptyRuleColumnSearch });
+
 function handleColumnCloseAutoFocus(id: string, event: Event) {
   if (pendingKeyboardAddFocus.delete(id)) {
     event.preventDefault();
@@ -263,7 +270,7 @@ function blurValueRule(id: string) {
         <div v-if="index > 0" class="flex justify-center">
           <Button variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="emit('updateRule', rule.id, { conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND' })">{{ rule.conjunction }}</Button>
         </div>
-        <div :ref="(element) => setFilterRuleElement(rule.id, element)" class="grid items-center justify-start gap-2" :class="usesExpandedLayout(rule.mode) ? 'grid-cols-[minmax(0,260px)_88px_auto]' : 'grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]'">
+        <div :ref="(element) => setFilterRuleElement(rule.id, element)" class="grid items-center justify-start gap-2" :class="usesExpandedLayout(rule.mode) ? 'grid-cols-[minmax(0,260px)_92px_auto]' : 'grid-cols-[minmax(0,210px)_92px_minmax(0,210px)_auto]'">
           <Select :model-value="rule.columnName" :open="openColumnSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => updateRuleColumn(rule, value)" @update:open="(open: boolean) => handleColumnSelectOpen(rule, open)">
             <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
               <SelectValue v-if="rule.columnName">{{ rule.columnName }}</SelectValue>

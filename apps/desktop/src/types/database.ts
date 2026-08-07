@@ -573,6 +573,15 @@ export interface OwnerInfo {
   owner: string;
 }
 
+/** A database server message carried on a query result (e.g. PostgreSQL RAISE NOTICE, MySQL warnings). */
+export interface QueryMessage {
+  severity: string;
+  message: string;
+  code?: string;
+  detail?: string;
+  hint?: string;
+}
+
 export interface QueryResult {
   columns: string[];
   /** One SRID per geometry/geography column (first non-null observed). */
@@ -634,6 +643,8 @@ export interface QueryResult {
   /** Absolute offsets in the editor document at execution time. */
   sourceFrom?: number;
   sourceTo?: number;
+  /** Database server messages (notices, warnings) emitted while producing this result. Omitted when empty. */
+  messages?: QueryMessage[];
 }
 
 export type BatchStatementExecutionStatus = "pending" | "running" | "success" | "error" | "skipped" | "cancelled";

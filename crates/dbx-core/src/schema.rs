@@ -2848,6 +2848,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         assert_eq!(mysql_external_driver_ddl_from_query_result(result).unwrap(), "CREATE TABLE `users` (`id` bigint);");
@@ -2868,6 +2869,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         assert_eq!(
@@ -3572,6 +3574,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let tables = presto_like_tables_from_query_result(&result);
@@ -3619,6 +3622,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let columns = presto_like_columns_from_query_result(&result);
@@ -3790,6 +3794,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         assert_eq!(oracle_table_comment_from_query_result(result).unwrap().as_deref(), Some("Customer table"));
@@ -3807,6 +3812,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         assert_eq!(oracle_table_comment_from_query_result(empty).unwrap(), None);
@@ -3842,6 +3848,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let comments = table_comments_from_query_result(result);
@@ -3964,6 +3971,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let columns = oracle_columns_from_query_result(result);
@@ -4068,6 +4076,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let stats = oracle_object_statistics_from_query_result(result);

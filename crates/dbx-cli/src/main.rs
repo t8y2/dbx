@@ -4,7 +4,7 @@ use dbx_core::{
     models::connection::{ConnectionConfig, DatabaseType},
     production_safety::{is_production_database, targets_production_database},
     sql_risk::{classify_sql_risk_for_database, SqlRisk},
-    types::{ColumnInfo, QueryResult, TableInfo},
+    types::{ColumnInfo, QueryMessage, QueryResult, TableInfo},
 };
 use dbx_mcp::{
     backend::DocsSnapshotOptions,
@@ -742,22 +742,37 @@ fn format_query(connection: &str, result: &QueryResult, format: OutputFormat) ->
         .collect();
     let row_count = if result.columns.is_empty() { result.affected_rows } else { result.rows.len() as u64 };
     match format {
-        OutputFormat::Json => json_string(
-            &json!({ "connection": connection, "columns": result.columns, "rows": rows, "row_count": row_count }),
-        ),
+        OutputFormat::Json => {
+            let mut output =
+                json!({ "connection": connection, "columns": result.columns, "rows": rows, "row_count": row_count });
+            if !result.messages.is_empty() {
+                output["messages"] = json!(result.messages);
+            }
+            json_string(&output)
+        }
         OutputFormat::Csv => Ok(csv_table(&result.columns.iter().map(String::as_str).collect::<Vec<_>>(), &rows)),
         OutputFormat::Table if result.columns.is_empty() => {
-            Ok(format!("Query executed. {row_count} row(s) affected.\n"))
+            Ok(format!("Query executed. {row_count} row(s) affected.\n{}", format_query_messages(&result.messages)))
         }
         OutputFormat::Table => Ok(format!(
-            "{}\n\n{row_count} row(s)\n",
+            "{}\n\n{row_count} row(s)\n{}",
             markdown_table(
                 &result.columns.iter().map(String::as_str).collect::<Vec<_>>(),
                 &rows,
                 &result.columns.iter().map(String::as_str).collect::<Vec<_>>()
-            )
+            ),
+            format_query_messages(&result.messages)
         )),
     }
+}
+
+fn format_query_messages(messages: &[QueryMessage]) -> String {
+    let mut output = String::new();
+    for message in messages {
+        output.push_str(&message.format_line());
+        output.push('\n');
+    }
+    output
 }
 
 fn format_capabilities(format: OutputFormat) -> Result<String, CliError> {
@@ -997,6 +1012,7 @@ mod tests {
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             })
         }
 
@@ -1045,6 +1061,63 @@ mod tests {
     fn dangerous_sql_requires_explicit_permission() {
         let risk = classify_sql_risk_for_database("drop table users", DatabaseType::Postgres).unwrap();
         assert_eq!(risk, SqlRisk::Ddl);
+    }
+
+    #[test]
+    fn format_query_renders_server_messages_in_table_output() {
+        let mut result = QueryResult {
+            columns: Vec::new(),
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: Vec::new(),
+            affected_rows: 1,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: vec![
+                QueryMessage {
+                    severity: "notice".to_string(),
+                    message: "hello world".to_string(),
+                    code: Some("00000".to_string()),
+                    detail: None,
+                    hint: Some("use a table".to_string()),
+                },
+                QueryMessage {
+                    severity: "WARNING".to_string(),
+                    message: "careful".to_string(),
+                    code: None,
+                    detail: None,
+                    hint: None,
+                },
+            ],
+        };
+        let output = format_query("local", &result, OutputFormat::Table).unwrap();
+        assert_eq!(
+            output,
+            "Query executed. 1 row(s) affected.\nNOTICE: hello world (code: 00000, hint: use a table)\nWARNING: careful\n"
+        );
+
+        let output = format_query("local", &result, OutputFormat::Json).unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            value["messages"],
+            json!([
+                { "severity": "notice", "message": "hello world", "code": "00000", "hint": "use a table" },
+                { "severity": "WARNING", "message": "careful" },
+            ])
+        );
+
+        result.messages = Vec::new();
+        let output = format_query("local", &result, OutputFormat::Table).unwrap();
+        assert_eq!(output, "Query executed. 1 row(s) affected.\n");
+
+        let output = format_query("local", &result, OutputFormat::Json).unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert!(value.get("messages").is_none());
     }
 
     #[tokio::test]

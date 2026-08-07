@@ -3,10 +3,11 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
+import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
+import { Check, CheckSquare2, Columns3Cog, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
+import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
@@ -138,7 +140,7 @@ const props = defineProps<{
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
   executableSql: string;
-  activeOutputView: "result" | "summary" | "explain" | "chart";
+  activeOutputView: "result" | "summary" | "explain" | "chart" | "messages";
   formatSqlRequest: { id: number; tabId: string } | null;
   compressSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
@@ -147,7 +149,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "update:activeOutputView": [value: "result" | "summary" | "explain" | "chart"];
+  "update:activeOutputView": [value: "result" | "summary" | "explain" | "chart" | "messages"];
   fixWithAi: [errorMessage: string];
   sendSelectionToAi: [sql: string];
   execute: [sqlOverride?: SqlExecutionOverride];
@@ -183,6 +185,8 @@ const { t, locale } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
+const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
+const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 
@@ -427,6 +431,8 @@ const hasTabularResult = computed(() => {
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
+const resultMessageCount = computed(() => props.activeTab.result?.messages?.length ?? 0);
+const canShowMessagesOutput = computed(() => resultMessageCount.value > 0);
 const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
@@ -599,7 +605,8 @@ watch(
   () => {
     if (props.activeTab.isExecuting) return;
     if (hasExecutionSummary.value && !hasTabularResult.value && props.activeOutputView === "result") {
-      emit("update:activeOutputView", "summary");
+      const result = props.activeTab.result;
+      emit("update:activeOutputView", result ? defaultViewForResult(result) : "summary");
     }
   },
   { immediate: true },
@@ -1287,6 +1294,30 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                         </button>
                       </div>
                     </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <CheckSquare2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.booleanDisplayMode") }}</span>
+                      </div>
+                      <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          :class="booleanDisplayMode === 'dropdown' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanDisplayMode('dropdown')"
+                        >
+                          {{ t("grid.booleanDisplayDropdown") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          :class="booleanDisplayMode === 'checkbox' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanDisplayMode('checkbox')"
+                        >
+                          {{ t("grid.booleanDisplayCheckbox") }}
+                        </button>
+                      </div>
+                    </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
                       <span class="min-w-0 flex items-center gap-2 font-medium">
                         <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1319,6 +1350,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :can-show-result="canShowResultOutput"
                 :can-show-summary="hasExecutionSummary"
                 :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                :can-show-messages="canShowMessagesOutput"
+                :message-count="resultMessageCount"
                 :compact="standaloneResultToolbarCompact"
                 @select-view="emit('update:activeOutputView', $event)"
               />
@@ -1414,6 +1447,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               </div>
             </div>
 
+            <QueryMessagesView v-else-if="activeOutputView === 'messages'" class="flex-1 min-h-0" :messages="activeTab.result?.messages ?? []" />
+
             <template v-else>
               <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
               <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
@@ -1467,7 +1502,16 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template #result-toolbar-leading="{ compact }">
-                  <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse" :compact="compact" @select-view="emit('update:activeOutputView', $event)" />
+                  <QueryResultViewSwitcher
+                    :active-view="activeOutputView"
+                    :can-show-result="canShowResultOutput"
+                    :can-show-summary="hasExecutionSummary"
+                    :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                    :can-show-messages="canShowMessagesOutput"
+                    :message-count="resultMessageCount"
+                    :compact="compact"
+                    @select-view="emit('update:activeOutputView', $event)"
+                  />
                   <template v-if="activeElasticsearchRawBody">
                     <div class="mx-1 h-4 w-px bg-border" />
                     <button
@@ -1730,6 +1774,30 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                     @click="setNumericColumnRightAlign(true)"
                   >
                     {{ t("grid.numericColumnAlignRight") }}
+                  </button>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <CheckSquare2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.booleanDisplayMode") }}</span>
+                </div>
+                <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    :class="booleanDisplayMode === 'dropdown' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanDisplayMode('dropdown')"
+                  >
+                    {{ t("grid.booleanDisplayDropdown") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    :class="booleanDisplayMode === 'checkbox' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanDisplayMode('checkbox')"
+                  >
+                    {{ t("grid.booleanDisplayCheckbox") }}
                   </button>
                 </div>
               </div>

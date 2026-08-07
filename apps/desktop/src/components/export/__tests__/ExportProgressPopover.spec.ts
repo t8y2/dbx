@@ -25,8 +25,17 @@ vi.mock("@/components/ui/button", async () => {
   };
 });
 
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+
+vi.mock("@/lib/backend/api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/backend/api")>();
+  return { ...original, revealPathInFileManager: vi.fn() };
+});
+
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
 import { useExportTracker } from "@/composables/useExportTracker";
+import { useToast } from "@/composables/useToast";
+import * as api from "@/lib/backend/api";
 
 const mountedApps: App[] = [];
 let now = 0;
@@ -248,5 +257,113 @@ describe("ExportProgressPopover task duration", () => {
 
     expect(document.body.textContent).toContain("1 additional failure detail(s) not shown");
     expect(document.body.textContent).not.toContain("failure 100");
+  });
+});
+
+describe("ExportProgressPopover file name and reveal action", () => {
+  it("shows the saved file name instead of the synthetic query-result label", async () => {
+    const tracker = useExportTracker();
+    tracker.addTask("Query Result", "sql", "C:\\exports\\自定义.sql");
+    tracker.addTask("Query Result", "xlsx", "/home/dbx/downloads/report-final.xlsx");
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("自定义.sql");
+    expect(document.body.textContent).toContain("report-final.xlsx");
+    expect(document.body.textContent).not.toContain("Query Result.sql");
+    expect(document.body.textContent).not.toContain("Query Result.xlsx");
+  });
+
+  it("falls back to the table label when the task has no file path", async () => {
+    const tracker = useExportTracker();
+    tracker.addTask("audit_log", "csv", "");
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("audit_log.csv");
+  });
+
+  it("reveals the containing folder for a finished export from the task row", async () => {
+    const revealMock = vi.mocked(api.revealPathInFileManager);
+    revealMock.mockReset();
+    revealMock.mockResolvedValue(undefined);
+    const tracker = useExportTracker();
+    const task = tracker.addTask("Query Result", "sql", "C:\\exports\\自定义.sql");
+    tracker.updateTableExportTask(task.exportId, {
+      exportId: task.exportId,
+      tableName: "Query Result",
+      rowsExported: 10,
+      totalRows: 10,
+      status: "Done",
+      errorMessage: undefined,
+    });
+
+    await mountPopover();
+
+    const revealButton = document.body.querySelector<HTMLButtonElement>('button[title="Open containing folder"]');
+    expect(revealButton).not.toBeNull();
+    revealButton?.click();
+    await nextTick();
+    await vi.waitFor(() => expect(revealMock).toHaveBeenCalledWith("C:\\exports\\自定义.sql"));
+  });
+
+  it("hides the reveal button for active tasks and tasks without a file path", async () => {
+    const tracker = useExportTracker();
+    tracker.addTask("running_export", "csv", "C:\\exports\\running.csv");
+    const doneTask = tracker.addTask("finished_export", "csv", "");
+    tracker.updateTableExportTask(doneTask.exportId, {
+      exportId: doneTask.exportId,
+      tableName: "finished_export",
+      rowsExported: 1,
+      totalRows: 1,
+      status: "Done",
+      errorMessage: undefined,
+    });
+
+    await mountPopover();
+
+    expect(document.body.querySelector('button[title="Open containing folder"]')).toBeNull();
+  });
+
+  it("hides the reveal button for sql-file tasks whose path is a joined list of input scripts", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-batch", "a.sql (+1)", "C:\\scripts\\a.sql; C:\\scripts\\b.sql");
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "done",
+      statementIndex: 2,
+      successCount: 2,
+      failureCount: 0,
+      affectedRows: 0,
+      elapsedMs: 10,
+      statementSummary: "",
+    });
+
+    await mountPopover();
+
+    expect(document.body.querySelector('button[title="Open containing folder"]')).toBeNull();
+  });
+
+  it("shows a toast when revealing the folder fails", async () => {
+    const revealMock = vi.mocked(api.revealPathInFileManager);
+    revealMock.mockReset();
+    revealMock.mockRejectedValue(new Error("file does not exist: C:\\exports\\gone.sql"));
+    const tracker = useExportTracker();
+    const task = tracker.addTask("Query Result", "sql", "C:\\exports\\gone.sql");
+    tracker.updateTableExportTask(task.exportId, {
+      exportId: task.exportId,
+      tableName: "Query Result",
+      rowsExported: 10,
+      totalRows: 10,
+      status: "Done",
+      errorMessage: undefined,
+    });
+
+    await mountPopover();
+
+    document.body.querySelector<HTMLButtonElement>('button[title="Open containing folder"]')?.click();
+    await vi.waitFor(() => {
+      expect(useToast().message.value).toContain("Failed to open folder");
+    });
   });
 });

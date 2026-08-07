@@ -1027,6 +1027,7 @@ mod tests {
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             },
             execution_error: true,
             statement_index: Some(1),

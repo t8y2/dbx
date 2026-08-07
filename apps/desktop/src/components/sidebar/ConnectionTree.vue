@@ -428,15 +428,14 @@ function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
     if (!query || !children) return children === node.children ? node : { ...node, children };
 
     const indexed = localTableSearchResults.value[node.id];
+    // matchSidebarLabel compares case-insensitively internally and needs the
+    // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
     const matchingChildren =
       indexed === null
-        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()))
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query))
         : indexed
-          ? reuseLiveSidebarTreeNodes(
-              buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) }),
-              children,
-            )
-          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
+          ? reuseLiveSidebarTreeNodes(buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name, query)) }), children)
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query));
     return { ...node, children: matchingChildren };
   });
 }

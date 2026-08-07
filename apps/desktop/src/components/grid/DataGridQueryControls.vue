@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
-import { Filter, Trash2 } from "@lucide/vue";
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
+import { Filter, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -61,6 +61,9 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement>();
+const filterBuilderRef = ref<InstanceType<typeof DataGridFilterBuilder>>();
+const pendingFirstEmptyRuleColumnSearch = ref(false);
+let openingFirstEmptyRuleColumnSearch = false;
 const whereWidth = ref<number | null>(null);
 const resizing = ref(false);
 let resizeStartX = 0;
@@ -112,6 +115,32 @@ function clearWhere() {
   emit("clearFilters");
 }
 
+async function openPendingFirstEmptyRuleColumnSearch() {
+  if (openingFirstEmptyRuleColumnSearch || !pendingFirstEmptyRuleColumnSearch.value || !props.filterBuilderOpen || !filterBuilderRef.value) return;
+  if (!props.rules.some((rule) => !rule.columnName && !rule.disabled)) return;
+  openingFirstEmptyRuleColumnSearch = true;
+  await nextTick();
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  try {
+    if (!pendingFirstEmptyRuleColumnSearch.value || !props.filterBuilderOpen || !filterBuilderRef.value) return;
+    pendingFirstEmptyRuleColumnSearch.value = false;
+    await filterBuilderRef.value.openFirstEmptyRuleColumnSearch();
+  } finally {
+    openingFirstEmptyRuleColumnSearch = false;
+  }
+}
+
+async function handleFilterButtonClick() {
+  const shouldFocusColumnSearch = !props.filterBuilderOpen && props.rules.every((rule) => !rule.columnName);
+  pendingFirstEmptyRuleColumnSearch.value = shouldFocusColumnSearch;
+  emit("ensureRule");
+  if (!shouldFocusColumnSearch) return;
+  await nextTick();
+  await openPendingFirstEmptyRuleColumnSearch();
+}
+
+watch([() => props.filterBuilderOpen, () => props.rules.map((rule) => `${rule.id}:${rule.columnName}:${rule.disabled ? "1" : "0"}`).join("\u0000"), filterBuilderRef], () => void openPendingFirstEmptyRuleColumnSearch(), { flush: "post" });
+
 onUnmounted(onResizeEnd);
 </script>
 
@@ -125,7 +154,7 @@ onUnmounted(onResizeEnd);
             class="relative flex h-5 w-5 -translate-x-1 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
             :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
             :disabled="!canUseWhereSearch"
-            @click="emit('ensureRule')"
+            @click="handleFilterButtonClick"
           >
             <Filter class="h-3 w-3" />
             <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
@@ -159,6 +188,7 @@ onUnmounted(onResizeEnd);
           </div>
 
           <DataGridFilterBuilder
+            ref="filterBuilderRef"
             :rules="rules"
             :columns="[...columns]"
             :filtered-columns="filteredColumns"

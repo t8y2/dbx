@@ -135,7 +135,7 @@ import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, default
 import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, type DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOptions, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
-import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, parseBooleanCellEditorValue } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, isPointInBooleanCheckbox, nextBooleanCellValue, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
@@ -274,6 +274,8 @@ const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize)
 const rowNumberWidth = ref(DATA_GRID_ROW_NUM_WIDTH);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
+const booleanCellsUseCheckbox = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode === "checkbox");
+const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const { isDark, themePalette } = useTheme();
 const { toast } = useToast();
 // 外键单元格跳转复用导航入口；对话框引用传 stub（同 AiAssistant 模式）
@@ -721,7 +723,9 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
   { value: "greater-than", labelKey: "grid.filterBuilderGreaterThan" },
+  { value: "greater-than-or-equal", labelKey: "grid.filterBuilderGreaterThanOrEqual" },
   { value: "less-than", labelKey: "grid.filterBuilderLessThan" },
+  { value: "less-than-or-equal", labelKey: "grid.filterBuilderLessThanOrEqual" },
   { value: "in", labelKey: "grid.filterBuilderIn" },
   { value: "not-in", labelKey: "grid.filterBuilderNotIn" },
   { value: "between", labelKey: "grid.filterBuilderBetween" },
@@ -1566,8 +1570,8 @@ watch(
   [structuredFilterRules, appliedStructuredWhereInput, serverColumnFilters],
   () => {
     const columns = filterBuilderColumnOptions.value;
-    if (columns.length > 0 && structuredFilterRules.value.some((rule) => !columns.includes(rule.columnName))) {
-      structuredFilterRules.value = structuredFilterRules.value.map((rule) => (columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" }));
+    if (columns.length > 0 && structuredFilterRules.value.some((rule) => rule.columnName && !columns.includes(rule.columnName))) {
+      structuredFilterRules.value = structuredFilterRules.value.map((rule) => (!rule.columnName || columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" }));
       return;
     }
     persistStructuredFilterState();
@@ -3179,6 +3183,7 @@ function showReadonlyCellDetailsOnDblClick(item: RowItem, rowIndex: number, visi
 }
 
 function onDomCellDblClick(item: RowItem, rowIndex: number, visibleColIdx: number, actualColIdx: number, event: MouseEvent) {
+  if (booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && canEditCellItem(item, actualColIdx)) return;
   if (showReadonlyCellDetailsOnDblClick(item, rowIndex, visibleColIdx, actualColIdx)) return;
   startDomCellEdit(item.id, actualColIdx, formatCellCached(item.data[actualColIdx], actualColIdx), event);
 }
@@ -3215,6 +3220,19 @@ function measureCellTextWidth(text: string, font: string): number {
   context.font = font;
   const width = context.measureText(text).width;
   context.restore();
+  return width;
+}
+
+const cellTextWidthCache = new Map<string, number>();
+
+function measureCellTextWidthCached(text: string, font: string): number {
+  const key = `${font}|${text}`;
+  let width = cellTextWidthCache.get(key);
+  if (width === undefined) {
+    width = measureCellTextWidth(text, font);
+    if (cellTextWidthCache.size >= 200) cellTextWidthCache.clear();
+    cellTextWidthCache.set(key, width);
+  }
   return width;
 }
 
@@ -3281,6 +3299,17 @@ const booleanEditorModelValue = computed({
     editValue.value = value;
   },
 });
+
+function booleanCellChecked(value: unknown): boolean {
+  return normalizeBooleanCellValue(value) === true;
+}
+
+function cycleBooleanGridCell(item: RowItem | undefined, actualColIdx: number, event?: MouseEvent) {
+  if (!item || !isBooleanGridCell(item, actualColIdx) || !canEditCellItem(item, actualColIdx)) return;
+  event?.stopPropagation();
+  const next = nextBooleanCellValue(item.data[actualColIdx], isBooleanGridColumnNullable(actualColIdx));
+  applyCellValue(item.id, actualColIdx, next === null ? null : next ? "true" : "false");
+}
 
 function cellEditInputModeForColumn(columnIndex: number): "decimal" | "numeric" | undefined {
   const dataType = normalizedColumnDataType(tableColumnForGridColumn(columnIndex));
@@ -4674,6 +4703,7 @@ async function applyOrderBySearch() {
     if (!tableMeta) return;
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
+      driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
       database: tableMeta.database,
@@ -4708,6 +4738,7 @@ async function applyWhereFilter() {
     if (!tableMeta) return;
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
+      driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
       database: tableMeta.database,
@@ -5227,7 +5258,9 @@ function onCanvasMouseMove(event: MouseEvent) {
   const next = hit && hitItem ? { rowIndex: hitItem.displayIndex, visibleColIdx: hit.rowNumber ? -1 : hit.visibleColIdx } : null;
   const actualColIdx = next ? visibleColumnIndexes.value[next.visibleColIdx] : undefined;
   if (canvasRef.value) {
-    canvasRef.value.style.cursor = hit?.rowNumber ? "default" : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx) ? "text" : "cell";
+    const overBooleanInteractive =
+      booleanCellsUseCheckbox.value && hit != null && !hit.rowNumber && hitItem != null && actualColIdx !== undefined && isBooleanGridCell(hitItem, actualColIdx) && canEditCellItem(hitItem, actualColIdx) && booleanInteractiveHitFromCanvasEvent(hitItem, hit, actualColIdx, event);
+    canvasRef.value.style.cursor = hit?.rowNumber ? "default" : overBooleanInteractive ? "pointer" : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx) ? "text" : "cell";
   }
   if (next?.rowIndex === canvasHoverCell.value?.rowIndex && next?.visibleColIdx === canvasHoverCell.value?.visibleColIdx) {
     return;
@@ -5270,6 +5303,43 @@ function clearCanvasDetailHover(event?: MouseEvent) {
   onCanvasMouseLeave();
 }
 
+function booleanCheckboxHitFromCanvasEvent(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
+  if (item.data[actualColIdx] === null) return false;
+  const canvas = canvasRef.value;
+  const canvasRect = canvas?.getBoundingClientRect();
+  const cellRect = canvasCellViewportRect(hit.rowIndex, hit.visibleColIdx);
+  if (!canvasRect || !cellRect) return false;
+  return isPointInBooleanCheckbox({ x: event.clientX - canvasRect.left, y: event.clientY - canvasRect.top }, { left: cellRect.left, top: cellRect.top, width: cellRect.width, height: cellRect.height });
+}
+
+function booleanNullTextHitFromCanvasEvent(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
+  if (item.data[actualColIdx] !== null) return false;
+  const canvas = canvasRef.value;
+  const canvasRect = canvas?.getBoundingClientRect();
+  const cellRect = canvasCellViewportRect(hit.rowIndex, hit.visibleColIdx);
+  if (!canvasRect || !cellRect) return false;
+  const text = firstLineCellDisplayValue(formatCellCached(item.data[actualColIdx], actualColIdx));
+  if (!text) return false;
+  const textWidth = measureCellTextWidthCached(text, `italic 400 ${tableFontSize.value}px ${tableFontFamily.value}`);
+  if (textWidth <= 0) return false;
+  const left = cellRect.left + (cellRect.width - textWidth) / 2 - 2;
+  const right = left + textWidth + 4;
+  const x = event.clientX - canvasRect.left;
+  const y = event.clientY - canvasRect.top;
+  return x >= left && x <= right && y >= cellRect.top && y <= cellRect.top + cellRect.height;
+}
+
+function booleanInteractiveHitFromCanvasEvent(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
+  return item.data[actualColIdx] === null ? booleanNullTextHitFromCanvasEvent(item, hit, actualColIdx, event) : booleanCheckboxHitFromCanvasEvent(item, hit, actualColIdx, event);
+}
+
+function tryCycleBooleanCheckboxOnCanvasMouseDown(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
+  if (!booleanCellsUseCheckbox.value || !isBooleanGridCell(item, actualColIdx) || !canEditCellItem(item, actualColIdx)) return false;
+  if (!booleanInteractiveHitFromCanvasEvent(item, hit, actualColIdx, event)) return false;
+  cycleBooleanGridCell(item, actualColIdx);
+  return true;
+}
+
 function onCanvasMouseDown(event: MouseEvent) {
   if (event.button !== 0) return;
   const hit = canvasHitTest(event);
@@ -5286,6 +5356,7 @@ function onCanvasMouseDown(event: MouseEvent) {
     onRowNumberMouseDown(item, event);
   } else {
     handleDataCellMousedown(item.displayIndex, hit.visibleColIdx, item.id, event);
+    if (actualColIdx !== undefined) tryCycleBooleanCheckboxOnCanvasMouseDown(item, hit, actualColIdx, event);
   }
   gridRef.value?.focus({ preventScroll: true });
   scheduleCanvasDraw();
@@ -5318,6 +5389,7 @@ function onCanvasDblClick(event: MouseEvent) {
   const actualColIdx = visibleColumnIndexes.value[hit.visibleColIdx];
   if (!item || actualColIdx === undefined) return;
   if (showReadonlyCellDetailsOnDblClick(item, item.displayIndex, hit.visibleColIdx, actualColIdx)) return;
+  if (booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && canEditCellItem(item, actualColIdx)) return;
   startCellEdit(item.id, actualColIdx, canvasCellContentOverflows(item, actualColIdx, hit.visibleColIdx));
 }
 
@@ -5494,6 +5566,8 @@ function drawCanvasGrid() {
     frozenColumnCount: frozenColumnCount.value,
     columnAligns: columnAligns.value,
     rightAlignedActionCell: canvasRightAlignedActionCell.value,
+    columnIsBoolean: isBooleanGridColumn,
+    booleanDisplayMode: booleanDisplayMode.value,
   });
 }
 
@@ -5508,6 +5582,7 @@ watch(
 );
 watch(showDataGridTopbar, () => nextTick(observeDataGridTopbarWidth), { immediate: true });
 watch(columnAligns, () => scheduleCanvasDraw());
+watch(booleanDisplayMode, () => scheduleCanvasDraw());
 watch(
   [
     displayRowRefs,
@@ -8017,6 +8092,10 @@ watch(
     triggers.value = [];
     triggersLoaded.value = false;
     triggersError.value = "";
+    // 表身份变更后，主动触发索引加载，确保索引指示器在切换表后立即可见
+    if (showIndexIndicatorsInHeader.value && canShowTableIndexes.value && currentIndexTableIdentity.value) {
+      void fetchIndexes();
+    }
     if (showTableInfo.value) selectTableInfoTab(activeTableInfoTab.value);
   },
 );
@@ -9759,7 +9838,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
                             'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
                             'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
-                            'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx),
+                            'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx) && !(booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null),
+                            'cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null && canEditCellItem(item, col.actualColIdx),
                             'line-through': item.isDeleted,
                             'overflow-visible z-20 border-r-transparent': editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx,
                             'overflow-hidden': !(editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx),
@@ -9833,6 +9913,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             @keydown.stop="onCellEditKeydown"
                             @paste.stop="onCellEditTextareaPaste"
                           />
+                        </template>
+                        <template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null && canEditCellItem(item, col.actualColIdx)">
+                          <div class="flex h-full items-center justify-center">
+                            <input
+                              type="checkbox"
+                              class="h-3.5 w-3.5 rounded border-border/70 bg-background text-primary focus:ring-0"
+                              :checked="booleanCellChecked(item.data[col.actualColIdx])"
+                              :disabled="!canEditCellItem(item, col.actualColIdx)"
+                              @mousedown.stop
+                              @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)"
+                            />
+                          </div>
+                        </template>
+                        <template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] === null && canEditCellItem(item, col.actualColIdx)">
+                          <span class="italic text-muted-foreground cursor-pointer select-none" @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)">{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</span>
                         </template>
                         <template v-else>
                           <template v-if="draftCellPlaceholder(item, col.actualColIdx)">

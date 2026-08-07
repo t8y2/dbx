@@ -1179,6 +1179,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
     tabId,
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
+      driverProfile: props.connection.driver_profile,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       catalog: props.catalog,
       database: props.database,

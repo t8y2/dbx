@@ -15,13 +15,16 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
 use tokio_postgres::config::SslMode;
+use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::types::{FromSql, Kind, Type};
-use tokio_postgres::{NoTls, Row, SimpleQueryMessage};
+use tokio_postgres::{AsyncMessage, NoTls, Row, SimpleQueryMessage, Socket};
 use tokio_util::sync::CancellationToken;
 
 use super::file_validator::validate_file_path;
@@ -31,7 +34,8 @@ use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
     DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics,
-    OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
+    OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo,
+    TriggerInfo,
 };
 
 pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -970,9 +974,13 @@ async fn execute_select_prepared(
     sql: &str,
     start: Instant,
     row_limit: usize,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<PreparedSelectOutcome, tokio_postgres::Error> {
     let prepared_start = Instant::now();
     let (stmt, metadata) = prepare_select_with_metadata(client, sql).await?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     log::info!(
         "[postgres][select:prepare_cached:done] elapsed_ms={} total_ms={}",
         prepared_start.elapsed().as_millis(),
@@ -986,6 +994,9 @@ async fn execute_select_prepared(
     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     let query_start = Instant::now();
     let stream = client.query_raw(&stmt, params).await?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     log::info!(
         "[postgres][select:query_raw:done] elapsed_ms={} total_ms={} column_count={}",
         query_start.elapsed().as_millis(),
@@ -1005,6 +1016,9 @@ async fn execute_select_prepared(
 
     let rows_start = Instant::now();
     while let Some(row_result) = stream.next().await {
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         if result_rows.len() >= row_limit {
             truncated = true;
             break;
@@ -1046,6 +1060,7 @@ async fn execute_select_prepared(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }))
 }
 
@@ -1059,8 +1074,12 @@ async fn execute_select_text(
     start: Instant,
     row_limit: usize,
     prepared_column_types: Option<Vec<String>>,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
+    if let Some(progress_clock) = progress_clock {
+        progress_clock.mark();
+    }
     tokio::pin!(stream);
     let mut columns: Vec<String> = Vec::new();
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
@@ -1076,6 +1095,9 @@ async fn execute_select_text(
     let mut truncated = false;
 
     while let Some(message) = stream.next().await {
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         match message {
             Ok(SimpleQueryMessage::RowDescription(cols)) => {
                 columns = cols.iter().map(|c| c.name().to_string()).collect();
@@ -1133,6 +1155,7 @@ async fn execute_select_text(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -1142,6 +1165,7 @@ async fn finish_prepared_select(
     start: Instant,
     row_limit: usize,
     outcome: PreparedSelectOutcome,
+    progress_clock: Option<&StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     match outcome {
         PreparedSelectOutcome::Complete(result) => Ok(result),
@@ -1150,7 +1174,7 @@ async fn finish_prepared_select(
                 "[postgres][select:text_fallback] unsupported_type={} switching_to=simple_query",
                 unsupported_type
             );
-            execute_select_text(client, sql, start, row_limit, Some(column_types)).await
+            execute_select_text(client, sql, start, row_limit, Some(column_types), progress_clock).await
         }
     }
 }
@@ -1161,24 +1185,34 @@ pub(crate) async fn execute_select_query(
     start: Instant,
     row_limit: usize,
 ) -> Result<QueryResult, String> {
-    match execute_select_prepared(client, sql, start, row_limit).await {
-        Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome).await,
+    execute_select_query_with_progress(client, sql, start, row_limit, None).await
+}
+
+async fn execute_select_query_with_progress(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    start: Instant,
+    row_limit: usize,
+    progress_clock: Option<&StreamProgressClock>,
+) -> Result<QueryResult, String> {
+    match execute_select_prepared(client, sql, start, row_limit, progress_clock).await {
+        Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
         Err(err) if should_retry_postgres_stale_cache(&err) => {
             // The cached prepared statement is stale (e.g. the view or table
             // schema changed since the statement was prepared). Evict the
             // stale entry and retry with a fresh server-side prepare.
             log::warn!("[postgres][select:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
             client.statement_cache.remove(sql, &[]);
-            match execute_select_prepared(client, sql, start, row_limit).await {
-                Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome).await,
+            match execute_select_prepared(client, sql, start, row_limit, progress_clock).await {
+                Ok(outcome) => finish_prepared_select(client, sql, start, row_limit, outcome, progress_clock).await,
                 Err(err) if should_retry_postgres_text_query(&err) => {
-                    execute_select_text(client, sql, start, row_limit, None).await
+                    execute_select_text(client, sql, start, row_limit, None, progress_clock).await
                 }
                 Err(err) => Err(pg_error_to_string(err)),
             }
         }
         Err(err) if should_retry_postgres_text_query(&err) => {
-            execute_select_text(client, sql, start, row_limit, None).await
+            execute_select_text(client, sql, start, row_limit, None, progress_clock).await
         }
         Err(err) => Err(pg_error_to_string(err)),
     }
@@ -1456,6 +1490,188 @@ async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, time
     connect_with_optional_local_timezone(url, fallback_timeout, Some(timezone)).await
 }
 
+/// Identity of one physical backend connection for notice attribution:
+/// (server address, server port, backend PID). The PID alone is not unique
+/// across different servers, so the server's own address/port disambiguate
+/// (`inet_server_addr()` is NULL for Unix sockets, hence the fallback).
+type PostgresConnectionKey = (String, i32, i32);
+
+const POSTGRES_CONNECTION_IDENTITY_SQL: &str = "SELECT pg_backend_pid(), \
+     COALESCE(host(inet_server_addr()), 'unix'), \
+     COALESCE(inet_server_port(), current_setting('port')::integer)";
+
+/// Notice buffers for live connections, keyed by connection identity. Entries
+/// are weak so they disappear once the pooled connection (and its driver
+/// task) is dropped.
+fn postgres_notice_buffers() -> &'static Mutex<HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>> {
+    static BUFFERS: OnceLock<Mutex<HashMap<PostgresConnectionKey, Weak<Mutex<Vec<QueryMessage>>>>>> = OnceLock::new();
+    BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Connection identity cache, keyed by the per-physical-connection statement
+/// cache pointer (same identity pattern as `postgres_single_schema_clients`).
+/// The `Weak` guards against pointer reuse: a new connection whose
+/// `StatementCache` lands on a freed entry's address fails the `ptr_eq` check
+/// and is treated as a miss. The value is `None` when the identity query
+/// failed, so it is issued at most once per physical connection — it must
+/// never be retried from `drain_postgres_notices`, which can run inside the
+/// read-only transaction used for EXPLAIN, where a failing query would abort
+/// the user's statement.
+fn postgres_client_keys(
+) -> &'static Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>> {
+    static KEYS: OnceLock<
+        Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, Option<PostgresConnectionKey>)>>,
+    > = OnceLock::new();
+    KEYS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Establishes connections like deadpool's `ConfigConnectImpl`, but drives
+/// each connection with a task that captures `NoticeResponse` messages
+/// (`RAISE NOTICE`/`WARNING`, etc.) into a per-backend buffer instead of
+/// discarding them. Query execution drains the buffer so notices are
+/// attached to the `QueryResult` of the statement that raised them.
+struct NoticeCapturingConnect<T>
+where
+    T: MakeTlsConnect<Socket> + Clone + Sync + Send + 'static,
+    T::Stream: Sync + Send,
+    T::TlsConnect: Sync + Send,
+    <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    tls: T,
+}
+
+impl<T> deadpool_postgres::Connect for NoticeCapturingConnect<T>
+where
+    T: MakeTlsConnect<Socket> + Clone + Sync + Send + 'static,
+    T::Stream: Sync + Send,
+    T::TlsConnect: Sync + Send,
+    <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    fn connect(
+        &self,
+        pg_config: &tokio_postgres::Config,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<(tokio_postgres::Client, JoinHandle<()>), tokio_postgres::Error>> + Send + '_>,
+    > {
+        let tls = self.tls.clone();
+        let pg_config = pg_config.clone();
+        Box::pin(async move {
+            let (client, mut connection) = pg_config.connect(tls).await?;
+            // No query can complete before the connection is being driven, so
+            // the notice buffer is handed to the driver task through a slot
+            // that is filled once the backend PID is known.
+            let notice_buffer = Arc::new(Mutex::new(None::<Arc<Mutex<Vec<QueryMessage>>>>));
+            let task_buffer = Arc::clone(&notice_buffer);
+            let conn_task = tokio::spawn(async move {
+                loop {
+                    match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                        Some(Ok(AsyncMessage::Notice(error))) => {
+                            let message = QueryMessage {
+                                severity: error.severity().to_string(),
+                                message: error.message().to_string(),
+                                code: Some(error.code().code().to_string()),
+                                detail: error.detail().map(str::to_string),
+                                hint: error.hint().map(str::to_string),
+                            };
+                            let buffer = task_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+                            match buffer {
+                                Some(buffer) => {
+                                    buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(message);
+                                }
+                                None => {
+                                    log::info!("[postgres][notice] {}: {}", message.severity, message.message);
+                                }
+                            }
+                        }
+                        // LISTEN/NOTIFY messages are not surfaced anywhere.
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => {
+                            log::warn!("[postgres] connection driver error: {err}");
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+            });
+
+            // Best-effort: without the connection identity, notices cannot be
+            // attributed to query results on this connection and are logged
+            // by the driver task instead. Never fail the connection over this.
+            if let Ok(row) = client.query_one(POSTGRES_CONNECTION_IDENTITY_SQL, &[]).await {
+                let key: PostgresConnectionKey = (row.get(1), row.get(2), row.get(0));
+                let buffer = Arc::new(Mutex::new(Vec::new()));
+                let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                buffers.retain(|_, weak| weak.strong_count() > 0);
+                buffers.insert(key, Arc::downgrade(&buffer));
+                drop(buffers);
+                *notice_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(buffer);
+            }
+
+            Ok((client, conn_task))
+        })
+    }
+}
+
+/// Cached identity lookup. `Some(Some(key))` = resolved, `Some(None)` =
+/// identity query failed before (do not retry), `None` = never seen (or the
+/// entry belonged to a dropped connection whose address was reused).
+fn cached_postgres_client_key(client: &deadpool_postgres::Client) -> Option<Option<PostgresConnectionKey>> {
+    let cache_key = Arc::as_ptr(&client.statement_cache) as usize;
+    let mut keys = postgres_client_keys().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match keys.get(&cache_key) {
+        Some((cached, key)) if cached.upgrade().is_some_and(|cached| Arc::ptr_eq(&cached, &client.statement_cache)) => {
+            Some(key.clone())
+        }
+        Some(_) => {
+            keys.remove(&cache_key);
+            None
+        }
+        None => None,
+    }
+}
+
+/// Best-effort identity resolution. Failures are cached as `None` so the
+/// identity query runs at most once per physical connection.
+async fn resolve_postgres_client_key(client: &deadpool_postgres::Client) -> Option<PostgresConnectionKey> {
+    if let Some(key) = cached_postgres_client_key(client) {
+        return key;
+    }
+    let key: Option<PostgresConnectionKey> = client
+        .query_one(POSTGRES_CONNECTION_IDENTITY_SQL, &[])
+        .await
+        .ok()
+        .map(|row| (row.get(1), row.get(2), row.get(0)));
+    let mut keys = postgres_client_keys().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    keys.retain(|_, (cached, _)| cached.strong_count() > 0);
+    let cache_key = Arc::as_ptr(&client.statement_cache) as usize;
+    keys.insert(cache_key, (Arc::downgrade(&client.statement_cache), key.clone()));
+    key
+}
+
+async fn postgres_client_key(client: &deadpool_postgres::Client) -> Option<PostgresConnectionKey> {
+    resolve_postgres_client_key(client).await
+}
+
+fn take_notices_for_key(key: &PostgresConnectionKey) -> Vec<QueryMessage> {
+    let buffer = {
+        let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        buffers.retain(|_, weak| weak.strong_count() > 0);
+        buffers.get(key).and_then(Weak::upgrade)
+    };
+    let Some(buffer) = buffer else {
+        return Vec::new();
+    };
+    let notices = std::mem::take(&mut *buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    notices
+}
+
+async fn drain_postgres_notices(client: &deadpool_postgres::Client) -> Vec<QueryMessage> {
+    match postgres_client_key(client).await {
+        Some(key) => take_notices_for_key(&key),
+        None => Vec::new(),
+    }
+}
+
 async fn connect_with_optional_local_timezone(
     url: &str,
     fallback_timeout: Duration,
@@ -1467,7 +1683,7 @@ async fn connect_with_optional_local_timezone(
 
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
 
-    super::with_connection_timeout("PostgreSQL", timeout, async {
+    let (pool, client) = super::with_connection_timeout("PostgreSQL", timeout, async {
         let pg_config = tokio_postgres::Config::from_str(&postgres_url.url)
             .map_err(|e| format!("Invalid PostgreSQL connection URL: {e}"))?;
 
@@ -1484,9 +1700,9 @@ async fn connect_with_optional_local_timezone(
             postgres_url.accepts_invalid_certs,
             postgres_url.verifies_hostname,
         )?;
-        let mgr = deadpool_postgres::Manager::from_config(
+        let mgr = deadpool_postgres::Manager::from_connect(
             pg_config.clone(),
-            tokio_postgres_rustls::MakeRustlsConnect::new(tls_config),
+            NoticeCapturingConnect { tls: tokio_postgres_rustls::MakeRustlsConnect::new(tls_config) },
             mgr_config,
         );
         let pool = Pool::builder(mgr)
@@ -1498,19 +1714,33 @@ async fn connect_with_optional_local_timezone(
             .build()
             .map_err(|e| format!("Failed to create PostgreSQL pool: {e}"))?;
 
-        // Verify connectivity and set timezone. Explicit connection options are
-        // handled by PostgreSQL during startup and must remain strict.
+        // Verify connectivity. Explicit connection options are handled by
+        // PostgreSQL during startup and must remain strict.
         let client =
             pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {}", pg_pool_error_to_string(e)))?;
-        if !pg_url_has_timezone_setting(url) {
-            if let Some(timezone) = timezone {
-                set_automatic_postgres_timezone(&client, timezone).await?;
-            }
-        }
-
-        Ok(pool)
+        Ok((pool, client))
     })
-    .await
+    .await?;
+
+    // Creating the physical connection and applying session defaults are two
+    // sequential network phases. Give each phase the configured connection
+    // timeout instead of sharing one deadline that can expire during the
+    // optional SET timezone round-trip on higher-latency tunnels.
+    if !pg_url_has_timezone_setting(url) {
+        if let Some(timezone) = timezone {
+            postgres_session_setup_with_timeout(timeout, set_automatic_postgres_timezone(&client, timezone)).await?;
+        }
+    }
+
+    drop(client);
+    Ok(pool)
+}
+
+async fn postgres_session_setup_with_timeout<T, F>(timeout: Duration, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    super::with_connection_timeout("PostgreSQL session setup", timeout, future).await
 }
 
 async fn set_automatic_postgres_timezone(client: &deadpool_postgres::Client, timezone: &str) -> Result<(), String> {
@@ -3135,6 +3365,7 @@ pub async fn get_redshift_columns(pool: &Pool, schema: &str, table: &str) -> Res
         Instant::now(),
         crate::query::MAX_ROWS,
         None,
+        None,
     )
     .await?;
     Ok(redshift_columns_from_query_result(result))
@@ -3298,6 +3529,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     }
 }
@@ -3312,14 +3544,15 @@ pub async fn execute_query_with_max_rows_and_cancel(
     prefer_text_protocol: bool,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
-    let pg_cancel_token = client.cancel_token();
-    wait_postgres_query(
-        pg_cancel_token,
-        cancel_context,
+    execute_postgres_user_query(
+        &client,
+        sql,
+        max_rows,
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+        cancel_context,
+        prefer_text_protocol,
     )
     .await
 }
@@ -3386,14 +3619,15 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
                 execute_postgres_infra_statement(&client, &statement, budget.recycle_timeout, stage).await?;
             }
 
-            let pg_cancel_token = client.cancel_token();
-            wait_postgres_query(
-                pg_cancel_token,
-                cancel_context,
+            execute_postgres_user_query(
+                &client,
+                sql,
+                max_rows,
                 cancel_token,
                 budget.query_timeout,
                 budget.cancel_timeout,
-                execute_query_with_max_rows_inner(&client, sql, max_rows, false),
+                cancel_context,
+                false,
             )
             .await
         },
@@ -3534,7 +3768,7 @@ pub async fn execute_query_with_schema_and_max_rows(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        return execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
+        return execute_query_with_max_rows_inner(&client, sql, max_rows, false, None).await;
     }
 
     let set_schema_start = Instant::now();
@@ -3546,7 +3780,7 @@ pub async fn execute_query_with_schema_and_max_rows(
     );
 
     let query_start = Instant::now();
-    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false).await;
+    let result = execute_query_with_max_rows_inner(&client, sql, max_rows, false, None).await;
     if result.is_ok() {
         clear_postgres_caches_after_ddl(pool, Some(&client), sql);
     }
@@ -3585,14 +3819,15 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
             "[postgres][execute_with_schema:skip-search-path] total_ms={} reason=transaction-recovery",
             start.elapsed().as_millis()
         );
-        let pg_cancel_token = client.cancel_token();
-        return wait_postgres_query(
-            pg_cancel_token,
-            cancel_context,
+        return execute_postgres_user_query(
+            &client,
+            sql,
+            max_rows,
             cancel_token,
             budget.query_timeout,
             budget.cancel_timeout,
-            execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+            cancel_context,
+            prefer_text_protocol,
         )
         .await;
     }
@@ -3606,14 +3841,15 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     );
 
     let query_start = Instant::now();
-    let pg_cancel_token = client.cancel_token();
-    let result = wait_postgres_query(
-        pg_cancel_token,
-        cancel_context,
+    let result = execute_postgres_user_query(
+        &client,
+        sql,
+        max_rows,
         cancel_token,
         budget.query_timeout,
         budget.cancel_timeout,
-        execute_query_with_max_rows_inner(&client, sql, max_rows, prefer_text_protocol),
+        cancel_context,
+        prefer_text_protocol,
     )
     .await;
     if result.is_ok() {
@@ -3747,6 +3983,52 @@ where
     }
 }
 
+async fn execute_postgres_user_query(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    max_rows: Option<usize>,
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+    cancel_timeout: Duration,
+    cancel_context: Option<PostgresCancelContext>,
+    prefer_text_protocol: bool,
+) -> Result<QueryResult, String> {
+    let pg_cancel_token = client.cancel_token();
+    // Commands do not expose incremental results, so keep their timeout as a
+    // wall-clock deadline. Row-returning queries may spend longer transferring
+    // a bounded result through a slow tunnel; for those, the same setting is an
+    // inactivity budget that resets only after real PostgreSQL progress.
+    if !postgres_statement_returns_rows(sql) {
+        return wait_postgres_query(
+            pg_cancel_token,
+            cancel_context,
+            cancel_token,
+            timeout_duration,
+            cancel_timeout,
+            execute_query_with_max_rows_inner(client, sql, max_rows, prefer_text_protocol, None),
+        )
+        .await;
+    }
+
+    let timeout_error =
+        format!("Query timed out after {} seconds", timeout_duration.map_or(0, |timeout| timeout.as_secs()));
+    let progress_clock = Arc::new(StreamProgressClock::new());
+    let result = await_stream_with_progress_timeout(
+        execute_query_with_max_rows_inner(client, sql, max_rows, prefer_text_protocol, Some(progress_clock.clone())),
+        timeout_duration,
+        progress_clock,
+        cancel_token.as_ref(),
+        timeout_error.clone(),
+    )
+    .await;
+
+    if result.as_ref().is_err_and(|error| error == &timeout_error || error == crate::query::QUERY_CANCELED) {
+        cancel_postgres_query(pg_cancel_token, cancel_context.as_ref(), cancel_timeout).await;
+    }
+
+    result
+}
+
 /// PostgreSQL pool checkout with timeout and cancel token support.
 /// When the checkout phase is stuck, the cancel token can terminate the wait early.
 /// The timeout error message includes "checkout timed out" to ensure is_connection_error can classify it correctly.
@@ -3755,6 +4037,7 @@ pub async fn checkout_postgres_client(
     cancel_token: Option<&CancellationToken>,
     checkout_timeout: Duration,
 ) -> Result<deadpool_postgres::Object, String> {
+    let checkout_timeout = effective_postgres_checkout_timeout(pool, checkout_timeout);
     let start = Instant::now();
     let get_future = async {
         tokio::time::timeout(checkout_timeout, pool.get())
@@ -3796,14 +4079,28 @@ pub async fn checkout_postgres_client(
         },
         None => get_future.await,
     };
-    if result.is_ok() {
+    if let Ok(client) = &result {
         log::debug!(
             "[db:pool.checkout:done] elapsed_ms={} timeout_ms={}",
             start.elapsed().as_millis(),
             checkout_timeout.as_millis()
         );
+        // Resolve the notice-attribution identity here, outside of any
+        // transaction: a lazy first lookup from `drain_postgres_notices`
+        // could run inside the read-only EXPLAIN transaction, where a
+        // failing identity query would abort the user's statement. Cached
+        // after the first checkout of each physical connection.
+        let _ = resolve_postgres_client_key(client).await;
     }
     result
+}
+
+fn effective_postgres_checkout_timeout(pool: &Pool, requested_timeout: Duration) -> Duration {
+    let configured = pool.timeouts();
+    [configured.wait, configured.create, configured.recycle]
+        .into_iter()
+        .flatten()
+        .fold(requested_timeout, std::cmp::max)
 }
 
 async fn cancel_postgres_query(
@@ -3853,20 +4150,24 @@ async fn execute_query_with_max_rows_inner(
     sql: &str,
     max_rows: Option<usize>,
     prefer_text_protocol: bool,
+    progress_clock: Option<Arc<StreamProgressClock>>,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if postgres_statement_returns_rows(sql) {
+    // Discard stale notices from infrastructure statements (e.g. the timezone
+    // SET issued at connect time) so only messages raised by this statement
+    // are attached to its result.
+    let _ = drain_postgres_notices(client).await;
+
+    let result = if postgres_statement_returns_rows(sql) {
         if prefer_text_protocol {
-            execute_select_text(client, sql, start, row_limit, None).await
+            execute_select_text(client, sql, start, row_limit, None, progress_clock.as_deref()).await
         } else {
-            execute_select_query(client, sql, start, row_limit).await
+            execute_select_query_with_progress(client, sql, start, row_limit, progress_clock.as_deref()).await
         }
     } else {
-        let affected = client.execute(sql, &[]).await.map_err(pg_error_to_string)?;
-
-        Ok(QueryResult {
+        client.execute(sql, &[]).await.map_err(pg_error_to_string).map(|affected| QueryResult {
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: Vec::new(),
@@ -3879,7 +4180,21 @@ async fn execute_query_with_max_rows_inner(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
+    };
+
+    match result {
+        Ok(mut result) => {
+            result.messages = drain_postgres_notices(client).await;
+            Ok(result)
+        }
+        Err(error) => {
+            // Drop notices so an errored statement's messages cannot leak
+            // into the next query on this pooled connection.
+            let _ = drain_postgres_notices(client).await;
+            Err(error)
+        }
     }
 }
 
@@ -4629,6 +4944,87 @@ mod tests {
         }
         assert_eq!(gaussdb_identifier_quote_for_compatibility_mode("C"), None);
         assert_eq!(gaussdb_identifier_quote_for_compatibility_mode(""), None);
+    }
+
+    fn test_query_message(message: &str) -> QueryMessage {
+        QueryMessage {
+            severity: "NOTICE".to_string(),
+            message: message.to_string(),
+            code: Some("00000".to_string()),
+            detail: None,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn take_notices_for_key_returns_buffered_notices_and_empties_buffer() {
+        let key = ("test-host".to_string(), 9_000_001, 9_000_001);
+        let buffer = Arc::new(Mutex::new(vec![test_query_message("first"), test_query_message("second")]));
+        postgres_notice_buffers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), Arc::downgrade(&buffer));
+
+        let notices = take_notices_for_key(&key);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].message, "first");
+        assert_eq!(notices[1].message, "second");
+        assert_eq!(notices[0].severity, "NOTICE");
+        assert_eq!(notices[0].code.as_deref(), Some("00000"));
+
+        // The buffer was drained but stays registered while the connection lives.
+        assert!(take_notices_for_key(&key).is_empty());
+        buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(test_query_message("third"));
+        let notices = take_notices_for_key(&key);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].message, "third");
+    }
+
+    #[test]
+    fn take_notices_for_key_prunes_dead_buffers_and_misses_return_empty() {
+        let live_key = ("test-host".to_string(), 9_000_002, 9_000_002);
+        let dead_key = ("test-host".to_string(), 9_000_003, 9_000_003);
+        let live = Arc::new(Mutex::new(vec![test_query_message("live")]));
+        let dead = Arc::new(Mutex::new(vec![test_query_message("dead")]));
+        {
+            let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            buffers.insert(live_key.clone(), Arc::downgrade(&live));
+            buffers.insert(dead_key.clone(), Arc::downgrade(&dead));
+        }
+        drop(dead);
+
+        assert!(take_notices_for_key(&("test-host".to_string(), 9_000_004, 9_000_004)).is_empty());
+        assert!(take_notices_for_key(&dead_key).is_empty());
+        let buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!buffers.contains_key(&dead_key));
+        assert!(buffers.contains_key(&live_key));
+        drop(buffers);
+
+        let notices = take_notices_for_key(&live_key);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].message, "live");
+    }
+
+    #[test]
+    fn take_notices_for_key_distinguishes_same_pid_on_different_servers() {
+        // Backend PIDs collide across servers; the (address, port, pid) key
+        // keeps notice attribution separate.
+        let key_a = ("server-a".to_string(), 5432, 42);
+        let key_b = ("server-b".to_string(), 5432, 42);
+        let buffer_a = Arc::new(Mutex::new(vec![test_query_message("from-a")]));
+        let buffer_b = Arc::new(Mutex::new(vec![test_query_message("from-b")]));
+        {
+            let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            buffers.insert(key_a.clone(), Arc::downgrade(&buffer_a));
+            buffers.insert(key_b.clone(), Arc::downgrade(&buffer_b));
+        }
+
+        let notices_a = take_notices_for_key(&key_a);
+        let notices_b = take_notices_for_key(&key_b);
+        assert_eq!(notices_a.len(), 1);
+        assert_eq!(notices_a[0].message, "from-a");
+        assert_eq!(notices_b.len(), 1);
+        assert_eq!(notices_b[0].message, "from-b");
     }
 
     #[test]
@@ -5895,6 +6291,71 @@ mod tests {
     }
 
     #[test]
+    fn postgres_checkout_timeout_respects_pool_configuration() {
+        let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), NoTls);
+        let pool = Pool::builder(manager)
+            .runtime(Runtime::Tokio1)
+            .wait_timeout(Some(Duration::from_secs(10)))
+            .create_timeout(Some(Duration::from_secs(10)))
+            .recycle_timeout(Some(Duration::from_secs(10)))
+            .build()
+            .expect("build postgres pool");
+
+        assert_eq!(effective_postgres_checkout_timeout(&pool, Duration::from_secs(5)), Duration::from_secs(10));
+        assert_eq!(effective_postgres_checkout_timeout(&pool, Duration::from_secs(15)), Duration::from_secs(15));
+    }
+
+    #[tokio::test]
+    async fn postgres_session_setup_reports_its_own_timeout_stage() {
+        let error =
+            postgres_session_setup_with_timeout(Duration::from_millis(1), std::future::pending::<Result<(), String>>())
+                .await
+                .expect_err("pending session setup should time out");
+
+        assert!(error.starts_with("PostgreSQL session setup connection timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_timeout_tracks_inactivity_instead_of_total_duration() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let progress_clock_for_query = progress_clock.clone();
+        let future = async {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                progress_clock_for_query.mark();
+            }
+            Ok::<_, String>(())
+        };
+
+        let result = await_stream_with_progress_timeout(
+            future,
+            Some(Duration::from_millis(100)),
+            progress_clock,
+            None,
+            "query inactivity timeout".to_string(),
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn postgres_row_query_timeout_still_fires_after_no_progress() {
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let error = await_stream_with_progress_timeout(
+            std::future::pending::<Result<(), String>>(),
+            Some(Duration::from_millis(10)),
+            progress_clock,
+            None,
+            "query inactivity timeout".to_string(),
+        )
+        .await
+        .expect_err("a stalled query should time out");
+
+        assert_eq!(error, "query inactivity timeout");
+    }
+
+    #[test]
     fn postgres_cancel_context_omits_disabled_ssl_mode() {
         assert!(build_postgres_cancel_context("postgres://localhost/app?sslmode=disable").is_none());
     }
@@ -6418,6 +6879,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let columns = redshift_columns_from_query_result(result);

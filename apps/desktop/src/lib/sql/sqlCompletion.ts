@@ -10,6 +10,7 @@ import { findActiveSqlStatementSpan, tokenizeSqlSemantic } from "@/lib/sql/seman
 import type { SqlSemanticBuildOptions, SqlSemanticSpan } from "@/lib/sql/semantic/types";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 import { requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 
@@ -3635,16 +3636,17 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   const relevanceBoost = context.referencedTables.length > 0 || !!context.qualifier || !!context.insertTable ? 2000 : 0;
 
   return uniqueColumns
-    .filter((column) => matchesPrefix(column.displayLabel, context.prefix))
+    .filter((column) => matchesIdentifierSearch(column.name, context.prefix) || matchesIdentifierSearch(column.displayLabel, context.prefix))
     .map((column) => {
       const keyBoost = isKeyColumn(column.name) ? 500 : 0;
+      const matchScore = Math.max(identifierMatchScore(column.name, context.prefix), identifierMatchScore(column.displayLabel, context.prefix));
       return {
         label: column.displayLabel,
         type: "column" as const,
         detail: buildColumnDetail(column),
         info: buildColumnInfo(column),
         apply: buildColumnApply(column, context, dialect),
-        boost: computeBoost(column.displayLabel, context.prefix) + keyBoost + relevanceBoost,
+        boost: matchScore + keyBoost + relevanceBoost,
       };
     })
     .sort(compareCompletionItems);
@@ -3667,7 +3669,7 @@ function applyReferencedColumnAliases<T extends SqlCompletionColumn>(table: SqlC
 
 function hasMatchingReferencedColumnPrefix(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>): boolean {
   if (!context.suggestColumns || !context.prefix || context.referencedTables.length === 0) return false;
-  return context.referencedTables.some((table) => columnsForReferencedTable(table, columnsByTable).some((column) => matchesPrefix(column.name, context.prefix)));
+  return context.referencedTables.some((table) => columnsForReferencedTable(table, columnsByTable).some((column) => matchesIdentifierSearch(column.name, context.prefix)));
 }
 
 function qualifiedTableTargetFromContext(context: SqlCompletionContext): { database?: string; schema: string; table: string } | null {
@@ -4230,7 +4232,7 @@ function buildNonAggregatedColumnItems(context: SqlCompletionContext, columnsByT
     for (const col of cols) {
       const key = col.name.toLowerCase();
       if (!nonAggSet.has(key) || seen.has(key)) continue;
-      if (context.prefix && !matchesPrefix(col.name, context.prefix)) continue;
+      if (context.prefix && !matchesIdentifierSearch(col.name, context.prefix)) continue;
       seen.add(key);
       items.push({
         label: col.name,

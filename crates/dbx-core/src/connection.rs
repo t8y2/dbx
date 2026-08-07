@@ -5215,6 +5215,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         assert_eq!(gaussdb_identifier_quote_from_query_result(&result).as_deref(), Some("`"));

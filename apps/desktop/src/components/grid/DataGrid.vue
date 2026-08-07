@@ -136,7 +136,7 @@ import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDet
 import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOptions, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, isPointInBooleanCheckbox, nextBooleanCellValue, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "@/lib/dataGrid/dataGridBooleanColumn";
-import { resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
+import { resolveDataGridColumnNullability, resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
@@ -534,6 +534,10 @@ function headerColumnType(column: string, actualColIdx: number): string {
     actualColIdx,
   });
   return resolved ? shortTypeName(compactHeaderColumnType(resolved)) : "";
+}
+
+function headerColumnNullability(actualColIdx: number): "nullable" | "required" | undefined {
+  return resolveDataGridColumnNullability(props.context, tableColumnForGridColumn(actualColIdx));
 }
 
 const reserveColumnTypeLine = computed(() => reserveDataGridHeaderLine(showColumnTypesInHeader.value, props.result.columns, (column, index) => headerColumnType(column, index)));
@@ -9292,6 +9296,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :show-comment-line="reserveColumnCommentLine"
                     :tooltip-column-type="columnTypeMap.get(col.name)"
                     :tooltip-column-comment="columnCommentMap.get(col.name)"
+                    :column-nullability="headerColumnNullability(col.actualColIdx)"
                     :type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
                     :drag-class="columnHeaderDragClass(col.visibleColIdx)"
                     :column-style="columnHeaderStyle(col.visibleColIdx)"
@@ -9299,6 +9304,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :column-name-label="t('grid.columnName')"
                     :column-type-label="t('grid.columnType')"
                     :column-comment-label="t('grid.columnComment')"
+                    :nullable-label="t('structureEditor.nullable')"
+                    :yes-label="t('structureEditor.yes')"
+                    :no-label="t('structureEditor.no')"
                     :column-index-label="t('grid.tableInfoIndexes')"
                     :column-primary-index-label="t('grid.columnPrimaryIndex')"
                     :column-unique-index-label="t('grid.columnUniqueIndex')"

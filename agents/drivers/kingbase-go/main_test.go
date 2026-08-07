@@ -1100,6 +1100,250 @@ func TestListTablesPreservesKingbaseObjectTypesAndComments(t *testing.T) {
 	}
 }
 
+func TestListCustomTypesUsesPostgresCatalog(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM pg_catalog.pg_type t") || !strings.Contains(query, "t.typtype IN ('b','c','d','e','r','m')") || !strings.Contains(query, "t.typelem = 0") || !strings.Contains(query, "(t.typrelid = 0 OR c.relkind = 'c')") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"typname", "description"},
+			rows: [][]driver.Value{
+				{"status", "order status"},
+				{"email", nil},
+				{"address", nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.postgresCatalog = true
+
+	types, err := server.listCustomTypes("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 3 {
+		t.Fatalf("unexpected types: %#v", types)
+	}
+	for _, item := range types {
+		if item.ObjectType != "TYPE" || item.Schema != "public" {
+			t.Fatalf("type metadata was lost: %#v", item)
+		}
+	}
+	if types[0].Comment == nil || *types[0].Comment != "order status" {
+		t.Fatalf("type comment was lost: %#v", types[0])
+	}
+	if types[1].Comment != nil {
+		t.Fatalf("nil comment became non-nil: %#v", types[1])
+	}
+}
+
+func TestListCustomTypesUsesSystemCatalog(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM sys_catalog.sys_type t") || strings.Contains(query, "FROM pg_catalog") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"typname", "description"},
+			rows:    [][]driver.Value{{"status", "order status"}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.postgresCatalog = false
+
+	types, err := server.listCustomTypes("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 1 || types[0].Name != "status" {
+		t.Fatalf("unexpected types: %#v", types)
+	}
+}
+
+func TestListCustomTypesSkipsMySQLCompatMode(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		return nil, errors.New("custom types query must not run in mysql compat mode: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.mysqlCompat = true
+
+	types, err := server.listCustomTypes("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 0 {
+		t.Fatalf("expected no types in mysql compat mode: %#v", types)
+	}
+}
+
+func TestListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "sys_type t"):
+			return &valueRows{
+				columns: []string{"typname", "description"},
+				rows: [][]driver.Value{
+					{"status", "order status"},
+					{"email", nil},
+				},
+			}, nil
+		case strings.Contains(query, "sys_proc p"):
+			return &valueRows{
+				columns: []string{"proname", "kind", "comment"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+			}, nil
+		case strings.Contains(query, "sys_class c"):
+			return &valueRows{
+				columns: []string{"relname", "relkind", "comment"},
+				rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+			}, nil
+		}
+		return nil, errors.New("unexpected query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	objects, err := server.listObjects("public", metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var typeNames []string
+	for _, item := range objects {
+		if item.ObjectType == "TYPE" {
+			typeNames = append(typeNames, item.Name)
+		}
+	}
+	if len(typeNames) != 2 || typeNames[0] != "email" || typeNames[1] != "status" {
+		t.Fatalf("unexpected types in object list: %v (objects=%#v)", typeNames, objects)
+	}
+	if len(objects) != 4 {
+		t.Fatalf("expected table + function + 2 types, got %#v", objects)
+	}
+}
+
+func TestListObjectsOnlyCustomTypesWhenTypeRequested(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "FROM sys_catalog.sys_class c") || strings.Contains(query, "sys_proc p") {
+			return nil, errors.New("type-only request must not scan relations or routines: " + query)
+		}
+		if !strings.Contains(query, "sys_type t") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"typname", "description"},
+			rows:    [][]driver.Value{{"status", "order status"}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	// The sidebar type group sends TYPE together with the TYPE_BODY companion;
+	// both must resolve to a type-only request that never scans tables.
+	for _, objectTypes := range [][]string{{"TYPE"}, {"TYPE", "TYPE_BODY"}} {
+		objects, err := server.listObjects("public", metadataListConstraints{ObjectTypes: objectTypes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(objects) != 1 || objects[0].Name != "status" || objects[0].ObjectType != "TYPE" || objects[0].Schema != "public" {
+			t.Fatalf("expected only the TYPE object for %v: %#v", objectTypes, objects)
+		}
+	}
+}
+
+func TestTypeBodyConstraintIsNotTableLike(t *testing.T) {
+	constraints := metadataListConstraints{ObjectTypes: []string{"TYPE", "TYPE_BODY"}}
+	if !constraintsAllowTypes(constraints) {
+		t.Fatal("TYPE/TYPE_BODY request must allow types")
+	}
+	if constraintsAllowsTableLike(constraints) {
+		t.Fatal("TYPE/TYPE_BODY request must not be table-like; normalizeTableType must not map TYPE_BODY to TABLE")
+	}
+	if constraintsAllowRoutines(constraints) {
+		t.Fatal("TYPE/TYPE_BODY request must not be routine-like")
+	}
+}
+
+func TestListObjectsSkipsCustomTypesWhenTableRequested(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "sys_type t") || strings.Contains(query, "sys_proc p") {
+			return nil, errors.New("table-only request must not scan types or routines: " + query)
+		}
+		if !strings.Contains(query, "sys_class c") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"relname", "relkind", "comment"},
+			rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	objects, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{"TABLE"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range objects {
+		if item.ObjectType == "TYPE" {
+			t.Fatalf("table-only request must not return types: %#v", objects)
+		}
+	}
+	if len(objects) == 0 {
+		t.Fatalf("expected the table to remain listed: %#v", objects)
+	}
+}
+
+func TestListObjectsTypeOnlyPropagatesCustomTypesError(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		return nil, errors.New("catalog unavailable: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	_, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{"TYPE"}})
+	if err == nil {
+		t.Fatal("dedicated type request must propagate the catalog error")
+	}
+	if !strings.Contains(err.Error(), "list custom types") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestListObjectsUnfilteredPropagatesCustomTypesError(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "sys_type t") {
+			return nil, errors.New("pg_type unavailable")
+		}
+		switch {
+		case strings.Contains(query, "sys_proc p"):
+			return &valueRows{
+				columns: []string{"proname", "kind", "comment"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+			}, nil
+		case strings.Contains(query, "sys_class c"):
+			return &valueRows{
+				columns: []string{"relname", "relkind", "comment"},
+				rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+			}, nil
+		}
+		return nil, errors.New("unexpected query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	// A failing type catalog must surface as an error even for the unfiltered
+	// “all objects” listing, so users never see a silently incomplete list.
+	_, err := server.listObjects("public", metadataListConstraints{})
+	if err == nil {
+		t.Fatal("unfiltered request must propagate the type catalog error")
+	}
+	if !strings.Contains(err.Error(), "list custom types") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestListTriggersUsesCompatibilityCatalogAndDecodesTiming(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		if !strings.Contains(query, "FROM pg_catalog.pg_trigger") || !strings.Contains(query, "NOT tg.tgisinternal") {

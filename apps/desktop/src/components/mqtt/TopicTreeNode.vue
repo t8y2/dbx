@@ -2,6 +2,7 @@
 import type { MqttSavedTopic, MqttTopicNode } from "@/types/mqtt";
 import { ChevronRight, ChevronDown, Pencil, Power, Trash2 } from "@lucide/vue";
 import { computed, ref } from "vue";
+import { useI18n } from "vue-i18n";
 
 interface Props {
   node: MqttTopicNode;
@@ -13,6 +14,7 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 const emit = defineEmits<{
   select: [topic: string];
   toggleEnabled: [config: MqttSavedTopic];
@@ -52,15 +54,20 @@ function toggle() {
 
       <template v-if="savedConfig">
         <span class="shrink-0 rounded border px-1 py-0.5 text-[10px] text-muted-foreground">QoS {{ savedConfig.qos === "atmostonce" ? 0 : savedConfig.qos === "atleastonce" ? 1 : 2 }}</span>
-        <span v-if="savedConfig.noLocal" class="shrink-0 rounded border border-blue-400/40 px-1 py-0.5 text-[10px] text-blue-600 dark:text-blue-400" title="仅 MQTT 5.0 支持">NL</span>
-        <span class="hidden shrink-0 text-[10px] text-muted-foreground sm:inline">{{ active ? "已订阅" : savedConfig.enabled ? "订阅中" : "未启用" }}</span>
-        <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :title="active ? '停用订阅' : '启用订阅'" @click.stop="emit('toggleEnabled', savedConfig)">
+        <span v-if="savedConfig.noLocal" class="shrink-0 rounded border border-blue-400/40 px-1 py-0.5 text-[10px] text-blue-600 dark:text-blue-400" :title="t('connection.mqttNoLocalMqtt5Only')">NL</span>
+        <span class="hidden shrink-0 text-[10px] text-muted-foreground sm:inline">{{ active ? t("connection.mqttSubscriptionStatusActive") : savedConfig.enabled ? t("connection.mqttSubscriptionStatusPending") : t("connection.mqttSubscriptionStatusDisabled") }}</span>
+        <button
+          type="button"
+          class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+          :title="active ? t('connection.mqttSubscriptionDisable') : t('connection.mqttSubscriptionEnable')"
+          @click.stop="emit('toggleEnabled', savedConfig)"
+        >
           <Power class="h-3.5 w-3.5" :class="active ? 'text-emerald-600 dark:text-emerald-400' : ''" />
         </button>
-        <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" title="编辑配置" @click.stop="emit('edit', savedConfig)">
+        <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('connection.mqttSubscriptionEdit')" @click.stop="emit('edit', savedConfig)">
           <Pencil class="h-3.5 w-3.5" />
         </button>
-        <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive" title="删除配置" @click.stop="emit('delete', savedConfig)">
+        <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive" :title="t('connection.mqttSubscriptionDelete')" @click.stop="emit('delete', savedConfig)">
           <Trash2 class="h-3.5 w-3.5" />
         </button>
       </template>

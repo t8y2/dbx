@@ -566,6 +566,9 @@ const isNodeDefaultDatabase = computed(
     typeof activeNode.value.database === "string" &&
     connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
 );
+function isNodeDefaultSchema(): boolean {
+  return activeNode.value.type === "schema" && !!activeNode.value.connectionId && !!activeNode.value.schema && connectionStore.isDefaultSchema(activeNode.value.connectionId, activeNode.value.schema);
+}
 
 const trailingComment = computed(() => {
   if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
@@ -1211,6 +1214,9 @@ function onKeydown(event: KeyboardEvent) {
             >
             <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
               {{ t("editor.defaultDatabase") }}
+            </Badge>
+            <Badge v-if="isNodeDefaultSchema()" variant="secondary" class="h-4 px-1.5 text-[10px]">
+              {{ t("editor.defaultSchema") }}
             </Badge>
           </div>
           <span v-if="trailingComment && !isRightAlignedComment()" class="sidebar-object-comment ml-4 min-w-0 flex-1 truncate text-left" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ trailingComment }}</span>

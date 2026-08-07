@@ -346,6 +346,8 @@ const emit = defineEmits<{
 const {
   setNodeAsDefaultDatabase,
   clearNodeDefaultDatabase,
+  setNodeAsDefaultSchema,
+  clearNodeDefaultSchema,
   connectionDeleteMenuLabel,
   connectionDuplicateMenuLabel,
   connectionDeleteConfirmMessage,
@@ -363,6 +365,7 @@ const {
   closeDatabaseConnection,
   isPinned,
   isNodeDefaultDatabase,
+  isNodeDefaultSchema,
   isConnected,
   isConnecting,
   canCloseDatabaseConnection,
@@ -1243,7 +1246,7 @@ async function newQuery() {
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
     const options = await getDatabaseOptions(node.connectionId);
-    queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, options), undefined, "query");
+    queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, options), undefined, "query", connection.default_schema);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
@@ -4181,6 +4184,13 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         items.push({ label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
       } else {
         items.push({ label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
+      }
+    }
+    if (node.type === "schema") {
+      if (!isNodeDefaultSchema.value) {
+        items.push({ label: t("contextMenu.setDefaultSchema"), action: setNodeAsDefaultSchema, icon: Database });
+      } else {
+        items.push({ label: t("contextMenu.clearDefaultSchema"), action: clearNodeDefaultSchema, icon: Database });
       }
     }
     if (canEditDatabaseProperties.value) {

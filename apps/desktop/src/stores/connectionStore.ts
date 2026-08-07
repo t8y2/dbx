@@ -2536,6 +2536,29 @@ export const useConnectionStore = defineStore("connection", () => {
     return config?.database === database && database !== "";
   }
 
+  async function setDefaultSchema(connectionId: string, schema: string) {
+    const config = getConfig(connectionId);
+    const defaultSchema = schema.trim();
+    if (!config || !defaultSchema || config.default_schema === defaultSchema) return;
+    await updateConnection({
+      ...config,
+      default_schema: defaultSchema,
+    });
+  }
+
+  async function clearDefaultSchema(connectionId: string) {
+    const config = getConfig(connectionId);
+    if (!config?.default_schema) return;
+    await updateConnection({
+      ...config,
+      default_schema: undefined,
+    });
+  }
+
+  function isDefaultSchema(connectionId: string, schema: string): boolean {
+    return getConfig(connectionId)?.default_schema === schema && schema !== "";
+  }
+
   function getRedisDatabaseAlias(connectionId: string, database: string | number): string | undefined {
     return redisDatabaseAlias(getConfig(connectionId)?.redis_database_aliases, database);
   }
@@ -6966,6 +6989,9 @@ export const useConnectionStore = defineStore("connection", () => {
     setDefaultDatabase,
     clearDefaultDatabase,
     isDefaultDatabase,
+    setDefaultSchema,
+    clearDefaultSchema,
+    isDefaultSchema,
     getRedisDatabaseAlias,
     setRedisDatabaseAlias,
     setVisibleDatabases,

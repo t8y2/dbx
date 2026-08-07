@@ -138,6 +138,7 @@ export interface ConnectionConfig {
   username: string;
   password: string;
   database?: string;
+  default_schema?: string;
   visible_databases?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;

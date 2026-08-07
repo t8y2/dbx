@@ -202,15 +202,16 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain(".dark .connection-transport-layer-option--selected");
   });
 
-  it("keeps number input steppers visible and usable globally", () => {
+  it("keeps native number input steppers scoped to legacy WebViews", () => {
     expect(globalsCss).toContain('input[type="number"]');
-    expect(globalsCss).toContain('input[type="number"]::-webkit-inner-spin-button');
+    expect(globalsCss).toContain('html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"])::-webkit-inner-spin-button');
+    expect(globalsCss).not.toContain('input[type="number"]::-webkit-inner-spin-button');
     expect(globalsCss).toContain("-webkit-appearance: inner-spin-button !important;");
     expect(globalsCss).not.toContain("width: 1.25rem !important;");
     expect(globalsCss).not.toContain("min-height: 1.4rem !important;");
     expect(globalsCss).not.toContain("-webkit-transform: scale(1.45);");
     expect(globalsCss).not.toContain("transform: scale(1.45);");
-    expect(globalsCss).toContain('input[type="number"]:disabled::-webkit-inner-spin-button');
+    expect(globalsCss).toContain('html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):disabled::-webkit-inner-spin-button');
   });
 
   it("keeps settings field stacks spaced in legacy WebViews", () => {

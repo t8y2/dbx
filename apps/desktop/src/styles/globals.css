@@ -292,16 +292,16 @@ input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
 
-input[type="number"]::-webkit-inner-spin-button,
-input[type="number"]::-webkit-outer-spin-button {
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"])::-webkit-inner-spin-button,
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"])::-webkit-outer-spin-button {
   -webkit-appearance: inner-spin-button !important;
   appearance: auto !important;
   opacity: 1 !important;
   cursor: pointer;
 }
 
-input[type="number"]:disabled::-webkit-inner-spin-button,
-input[type="number"]:disabled::-webkit-outer-spin-button {
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):disabled::-webkit-inner-spin-button,
+html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):disabled::-webkit-outer-spin-button {
   cursor: not-allowed;
   opacity: 0.5 !important;
 }

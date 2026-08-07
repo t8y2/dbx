@@ -2440,6 +2440,8 @@ export default withEnglishFallback({
   extension: {
     manageTitle: "확장 관리",
     installTitle: "확장 설치",
+    detailsTitle: "확장 세부 정보",
+    viewDetails: "세부 정보 보기",
     name: "확장 이름",
     namePlaceholder: "예: pg_stat_statements",
     install: "설치",

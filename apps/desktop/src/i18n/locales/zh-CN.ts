@@ -2566,6 +2566,8 @@ export default withEnglishFallback({
   extension: {
     installTitle: "安装扩展",
     manageTitle: "管理扩展",
+    detailsTitle: "扩展详情",
+    viewDetails: "查看详情",
     name: "扩展名称",
     namePlaceholder: "例如: pg_stat_statements",
     install: "安装",

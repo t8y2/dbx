@@ -2566,6 +2566,8 @@ export default {
   extension: {
     manageTitle: "Manage Extensions",
     installTitle: "Install Extension",
+    detailsTitle: "Extension Details",
+    viewDetails: "View details",
     name: "Extension name",
     namePlaceholder: "e.g. pg_stat_statements",
     install: "Install",

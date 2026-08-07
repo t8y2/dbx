@@ -5928,6 +5928,8 @@ export default withEnglishFallback({
   extension: {
     installTitle: "安裝擴展",
     manageTitle: "管理擴展",
+    detailsTitle: "擴展詳情",
+    viewDetails: "查看詳情",
     name: "擴展名稱",
     namePlaceholder: "例如：pg_stat_statements",
     install: "安裝",

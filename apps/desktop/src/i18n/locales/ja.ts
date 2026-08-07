@@ -5988,6 +5988,8 @@ export default withEnglishFallback({
   extension: {
     installTitle: "拡張機能のインストール",
     manageTitle: "拡張機能の管理",
+    detailsTitle: "拡張機能の詳細",
+    viewDetails: "詳細を表示",
     name: "拡張機能名",
     namePlaceholder: "例: pg_stat_statements",
     install: "インストール",

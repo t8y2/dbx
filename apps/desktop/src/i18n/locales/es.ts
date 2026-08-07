@@ -5933,6 +5933,8 @@ export default withEnglishFallback({
   extension: {
     installTitle: "Instalar extensión",
     manageTitle: "Administrar extensión",
+    detailsTitle: "Detalles de la extensión",
+    viewDetails: "Ver detalles",
     name: "Nombre de la extensión",
     namePlaceholder: "Por ejemplo: pg_stat_statements",
     install: "Instalar",

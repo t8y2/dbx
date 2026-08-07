@@ -14,6 +14,7 @@ function createResizeState(options: {
   cacheKey?: string;
   density?: "compact" | "standard" | "comfortable";
   compactColumnHeaderActions?: boolean;
+  indexIndicatorColumnIndexes?: number[] | ReturnType<typeof ref<number[]>>;
   headerTextWidth?: number;
 }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
@@ -21,12 +22,14 @@ function createResizeState(options: {
   const headerMeasurementKey = ref(0);
   const density = ref(options.density ?? "standard");
   const rows = isRef(options.rows) ? options.rows : ref(options.rows);
+  const indexIndicatorColumnIndexes = isRef(options.indexIndicatorColumnIndexes) ? options.indexIndicatorColumnIndexes : ref(options.indexIndicatorColumnIndexes ?? []);
   const state = useDataGridColumnResize({
     columns: computed(() => options.columns),
     sourceRows: computed(() => rows.value),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
     density,
     compactColumnHeaderActions: computed(() => compact.value),
+    columnIndexIndicators: computed(() => options.columns.map((_, index) => indexIndicatorColumnIndexes.value.includes(index))),
     cacheKey: computed(() => options.cacheKey),
     columnStructureSignature: computed(() => createDataGridColumnStructureSignature(options.columns, options.columnTypes)),
     measureHeaderText: () => headerTextWidth.value,
@@ -44,6 +47,9 @@ function createResizeState(options: {
     setHeaderTextWidth(width: number) {
       headerTextWidth.value = width;
       headerMeasurementKey.value += 1;
+    },
+    setIndexIndicatorColumnIndexes(indexes: number[]) {
+      indexIndicatorColumnIndexes.value = indexes;
     },
   };
 }
@@ -279,6 +285,22 @@ describe("useDataGridColumnResize", () => {
     longName.initColumnWidths();
     // 100×7+45=745，表头自动宽度限制为 500
     expect(longName.columnWidths.value[0]).toBe(500);
+  });
+
+  it("grows a short column when its index indicator metadata arrives", async () => {
+    const state = createResizeState({
+      columns: ["id"],
+      rows: [[1]],
+      density: "compact",
+      compactColumnHeaderActions: true,
+    });
+    state.initColumnWidths();
+    expect(state.columnWidths.value[0]).toBe(60);
+
+    state.setIndexIndicatorColumnIndexes([0]);
+    await nextTick();
+
+    expect(state.columnWidths.value[0]).toBe(75);
   });
 
   it("comfortable mode uses percentile to ignore outlier values", () => {

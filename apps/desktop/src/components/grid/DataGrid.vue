@@ -501,6 +501,10 @@ const dataGridViewportWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const showIndexIndicatorsInHeader = computed(() => settingsStore.editorSettings.showIndexIndicatorsInHeader !== false);
+const indexes = ref<IndexInfo[]>([]);
+const indexesLoaded = ref(false);
+const indexesLoading = ref(false);
+const indexesError = ref("");
 const primaryKeyColumnNames = computed(() => {
   const names = new Set(props.tableMeta?.primaryKeys ?? []);
   for (const column of props.tableMeta?.columns ?? []) {
@@ -1830,6 +1834,13 @@ const filteredGoToColumns = computed(() => {
   return filterDataGridColumnLookupItems(goToColumnItems.value, goToColumnSearch.value);
 });
 const visibleColumns = computed(() => visibleColumnIndexes.value.map((index) => props.result.columns[index]));
+const visibleColumnIndexIndicators = computed(() =>
+  visibleColumns.value.map((column) => {
+    if (!showIndexIndicatorsInHeader.value) return false;
+    const kind = columnIndexMap.value.get(columnIndexNameKey(column));
+    return !!kind && kind !== "none";
+  }),
+);
 const visibleSourceColumns = computed(() => {
   if (!props.sourceColumns || props.sourceColumns.length !== props.result.columns.length) return undefined;
   return visibleColumnIndexes.value.map((index) => props.sourceColumns?.[index]);
@@ -1951,6 +1962,7 @@ const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, to
   columnIndexes: visibleColumnIndexes,
   density: columnWidthDensity,
   compactColumnHeaderActions,
+  columnIndexIndicators: visibleColumnIndexIndicators,
   cacheKey: columnWidthCacheKey,
   columnStructureSignature,
   measureHeaderText: measureColumnHeaderText,
@@ -7789,10 +7801,6 @@ let detailResizeStartY = 0;
 let detailResizeStartHeight = 0;
 let mongoJsonPreviewResizeStartX = 0;
 let mongoJsonPreviewResizeStartWidth = 0;
-const indexes = ref<IndexInfo[]>([]);
-const indexesLoaded = ref(false);
-const indexesLoading = ref(false);
-const indexesError = ref("");
 const currentIndexTableIdentity = computed(() =>
   columnIndexTableIdentity({
     connectionId: props.connectionId,

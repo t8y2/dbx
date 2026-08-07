@@ -962,7 +962,7 @@ func TestKingbaseCatalogFunctionsFollowMetadataMode(t *testing.T) {
 func TestMySQLCompatSchemaQueryKeepsUserSchemasWithSystemLikeNames(t *testing.T) {
 	query := kingbaseMySQLCompatListSchemasSQL
 	for _, prefix := range []string{"SYS", "XLOG"} {
-		expected := "NOT LIKE '" + prefix + `\_%' ESCAPE '\'`
+		expected := "NOT LIKE '" + prefix + `#_%' ESCAPE '#'`
 		if !strings.Contains(query, expected) {
 			t.Fatalf("schema query must only hide the internal %s_ prefix: %s", prefix, query)
 		}

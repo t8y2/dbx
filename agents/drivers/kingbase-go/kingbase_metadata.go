@@ -21,9 +21,9 @@ const (
 	kingbaseListDatabasesPostgresSQL = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
 )
 
-// Escape '_' so only Kingbase internal SYS_/XLOG_ prefixes are hidden; names
-// such as SYSTEMS and SYSLOG may be user-created schemas in MySQL mode.
-const kingbaseMySQLCompatListSchemasSQL = `SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS\_%' ESCAPE '\' AND UPPER(schema_name) NOT LIKE 'XLOG\_%' ESCAPE '\' ORDER BY schema_name`
+// Escape '_' so only Kingbase internal SYS_/XLOG_ prefixes are hidden; use a
+// non-backslash escape because MySQL mode treats backslash as a string escape.
+const kingbaseMySQLCompatListSchemasSQL = `SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS#_%' ESCAPE '#' AND UPPER(schema_name) NOT LIKE 'XLOG#_%' ESCAPE '#' ORDER BY schema_name`
 
 var kingbaseDataTypes = []string{
 	"bigint", "bigserial", "bit", "bit varying", "boolean", "bytea", "char", "character",

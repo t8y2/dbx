@@ -351,6 +351,26 @@ describe("normalizeEditorSettings - clickTableNavigationTarget", () => {
   });
 });
 
+describe("normalizeEditorSettings - completionTriggerMode", () => {
+  it("defaults completionTriggerMode to positional", () => {
+    expect(normalizeEditorSettings({}).completionTriggerMode).toBe("positional");
+  });
+
+  it("preserves the three valid modes", () => {
+    expect(normalizeEditorSettings({ completionTriggerMode: "manual" }).completionTriggerMode).toBe("manual");
+    expect(normalizeEditorSettings({ completionTriggerMode: "require-prefix" }).completionTriggerMode).toBe("require-prefix");
+    expect(normalizeEditorSettings({ completionTriggerMode: "positional" }).completionTriggerMode).toBe("positional");
+  });
+
+  it("normalizes invalid values to positional", () => {
+    expect(normalizeEditorSettings({ completionTriggerMode: "always" } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: "" } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: undefined } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: null } as any).completionTriggerMode).toBe("positional");
+    expect(normalizeEditorSettings({ completionTriggerMode: 123 } as any).completionTriggerMode).toBe("positional");
+  });
+});
+
 describe("normalizeEditorSettings - tabLayout", () => {
   it("defaults tabLayout to scroll", () => {
     expect(normalizeEditorSettings({}).tabLayout).toBe("scroll");

@@ -114,6 +114,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-vim", category: "editor", titleKey: "settings.vimMode", descriptionKey: "settings.vimModeDescription", targetId: "editor" },
   { id: "editor-brackets", category: "editor", titleKey: "settings.autoCloseBrackets", descriptionKey: "settings.autoCloseBracketsDescription", targetId: "editor" },
   { id: "editor-completion-spacing", category: "editor", titleKey: "settings.insertSpaceAfterCompletion", descriptionKey: "settings.insertSpaceAfterCompletionDescription", targetId: "editor" },
+  { id: "editor-completion-trigger-mode", category: "editor", titleKey: "settings.completionTriggerMode", descriptionKey: "settings.completionTriggerModeDescription", targetId: "editor" },
   { id: "editor-auto-alias", category: "editor", titleKey: "settings.autoAliasTables", descriptionKey: "settings.autoAliasTablesDescription", targetId: "editor" },
   { id: "editor-unsaved-close", category: "editor", titleKey: "settings.confirmUnsavedSqlClose", descriptionKey: "settings.confirmUnsavedSqlCloseDescription", targetId: "editor" },
   { id: "editor-prefill-query", category: "editor", titleKey: "settings.prefillNewQueryWithSelect", descriptionKey: "settings.prefillNewQueryWithSelectDescription", targetId: "editor" },

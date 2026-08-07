@@ -1,5 +1,6 @@
 import type { EditorSettings } from "@/stores/settingsStore";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "fontFamily",
@@ -66,6 +67,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sqlVariableSyntaxOverrides",
   "continueOnErrorOnBatch",
   "clickTableNavigationTarget",
+  "completionTriggerMode",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];
@@ -83,6 +85,7 @@ export function normalizeTableOpenPageSizeDraft(value: unknown): number {
 
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
   if (key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
+  if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
   return value;
 }
 

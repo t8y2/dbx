@@ -46,6 +46,7 @@ import {
   type CustomThemeColors,
   type CustomTheme,
   type ClickTableNavigationTarget,
+  type SqlCompletionTriggerMode,
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -277,6 +278,7 @@ const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurre
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
+const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
@@ -445,6 +447,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showInsertValueHints: editShowInsertValueHints.value,
     autoAliasTables: editAutoAliasTables.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
+    completionTriggerMode: editCompletionTriggerMode.value,
     wordWrap: editWordWrap.value,
     vimModeEnabled: editVimModeEnabled.value,
     autoCloseBrackets: editAutoCloseBrackets.value,
@@ -712,6 +715,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
+  editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
   editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
@@ -915,6 +919,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
+    editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
     editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
@@ -1191,6 +1196,12 @@ function isTableColumnTemplateLengthDisabled(row: TableColumnTemplateGridRow): b
 
 function onExecuteModeChange(v: any) {
   if (v === "all" || v === "current") editExecuteMode.value = v;
+}
+
+function onCompletionTriggerModeChange(v: any) {
+  if (v === "manual" || v === "require-prefix" || v === "positional") {
+    editCompletionTriggerMode.value = v;
+  }
 }
 
 function onSqlSemanticDiagnosticsEnabledChange(value: boolean) {
@@ -3721,6 +3732,23 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
+
+                <div class="space-y-2">
+                  <Label>{{ t("settings.completionTriggerMode") }}</Label>
+                  <Select :model-value="editCompletionTriggerMode" @update:model-value="onCompletionTriggerModeChange">
+                    <SelectTrigger>
+                      <SelectValue :placeholder="t('settings.completionTriggerMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="manual">{{ t("settings.completionTriggerModeManual") }}</SelectItem>
+                      <SelectItem value="require-prefix">{{ t("settings.completionTriggerModeRequirePrefix") }}</SelectItem>
+                      <SelectItem value="positional">{{ t("settings.completionTriggerModePositional") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.completionTriggerModeDescription") }}
+                  </p>
                 </div>
               </div>
 

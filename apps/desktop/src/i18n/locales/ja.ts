@@ -5420,6 +5420,11 @@ export default withEnglishFallback({
     syncSnippetGuide: "設定ガイド",
     insertSpaceAfterCompletion: "補全後に自動でスペースを挿入",
     insertSpaceAfterCompletionDescription: "キーワード、テーブル名、列名の補全確定時、次の文字が許容する場合に自動でスペースを補填します",
+    completionTriggerMode: "自動補完トリガーモード",
+    completionTriggerModeDescription: "SQL補完ポップアップが自動的に開くタイミングを制御します。手動はショートカットキーが必要; 識別子入力後は1文字以上の入力が必要; スマート位置は現在の動作を維持します。",
+    completionTriggerModeManual: "手動のみ",
+    completionTriggerModeRequirePrefix: "識別子入力後",
+    completionTriggerModePositional: "スマート位置",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

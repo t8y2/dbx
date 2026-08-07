@@ -49,6 +49,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes the data-tab reuse mode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
+
+  it("includes completionTriggerMode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {
@@ -70,6 +74,16 @@ describe("editorSettingsDraftFromSettings", () => {
 
   it("maps the saved SQL open target mode", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ savedSqlOpenTargetMode: "current" })).savedSqlOpenTargetMode).toBe("current");
+  });
+
+  it("maps completionTriggerMode from settings", () => {
+    const draft = editorSettingsDraftFromSettings(makeSettings({ completionTriggerMode: "require-prefix" } as Partial<EditorSettings>));
+    expect(draft.completionTriggerMode).toBe("require-prefix");
+  });
+
+  it("normalizes invalid completionTriggerMode to positional", () => {
+    const draft = editorSettingsDraftFromSettings(makeSettings({ completionTriggerMode: "always" as unknown } as Partial<EditorSettings>));
+    expect(draft.completionTriggerMode).toBe("positional");
   });
 });
 
@@ -127,6 +141,21 @@ describe("editorSettingsDraftChanged", () => {
     draft.dataTabReuseMode = "active-tab";
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
   });
+
+  it("detects completionTriggerMode change", () => {
+    const settings = makeSettings({ completionTriggerMode: "positional" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.completionTriggerMode = "manual";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
+
+  it("detects no change when completionTriggerMode matches", () => {
+    const settings = makeSettings({ completionTriggerMode: "require-prefix" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(false);
+  });
 });
 
 describe("editorSettingsPatchFromDraft", () => {
@@ -169,6 +198,23 @@ describe("editorSettingsPatchFromDraft", () => {
     const base = editorSettingsDraftFromSettings(settings);
     draft.dataTabReuseMode = "always-new";
     expect(editorSettingsPatchFromDraft(draft, base).dataTabReuseMode).toBe("always-new");
+  });
+
+  it("includes completionTriggerMode in patch when changed", () => {
+    const settings = makeSettings({ completionTriggerMode: "positional" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.completionTriggerMode = "manual";
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.completionTriggerMode).toBe("manual");
+  });
+
+  it("omits completionTriggerMode when unchanged", () => {
+    const settings = makeSettings({ completionTriggerMode: "require-prefix" } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.completionTriggerMode).toBeUndefined();
   });
 });
 

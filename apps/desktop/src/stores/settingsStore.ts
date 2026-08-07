@@ -18,10 +18,11 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type Sql
 import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } from "@/lib/sql/sqlVariableSyntax";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
+import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
 import type { SqlSnippet, TableInfoTab } from "@/types/database";
 
-export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, DataTabReuseMode, SavedSqlOpenTargetMode };
+export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, DataTabReuseMode, SavedSqlOpenTargetMode, SqlCompletionTriggerMode };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -550,6 +551,7 @@ export interface EditorSettings {
   sqlVariableSyntaxOverrides: SqlVariableSyntaxOverrides;
   continueOnErrorOnBatch: boolean;
   clickTableNavigationTarget: ClickTableNavigationTarget;
+  completionTriggerMode: SqlCompletionTriggerMode;
 }
 
 export interface ToolbarItems {
@@ -730,6 +732,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sqlVariableSyntaxOverrides: {},
   continueOnErrorOnBatch: false,
   clickTableNavigationTarget: "data",
+  completionTriggerMode: "positional",
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -1079,6 +1082,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sqlVariableSyntaxOverrides: normalizeSqlVariableSyntaxOverrides(settings.sqlVariableSyntaxOverrides),
     continueOnErrorOnBatch: settings.continueOnErrorOnBatch === true,
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
+    completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
   };
 }
 
@@ -1536,6 +1540,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sqlVariableSyntaxOverrides !== undefined) editorSettings.value.sqlVariableSyntaxOverrides = normalizeSqlVariableSyntaxOverrides(partial.sqlVariableSyntaxOverrides);
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
+    if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
     saveEditorSettings(editorSettings.value);
   }
 

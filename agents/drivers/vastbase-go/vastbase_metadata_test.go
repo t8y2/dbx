@@ -112,6 +112,329 @@ func assertVastbaseIndex(t *testing.T, index indexInfo, name string, columns []s
 	}
 }
 
+var vastbaseCustomTypesDriverSequence atomic.Uint64
+
+type vastbaseCustomTypesTestState struct {
+	query func(string) (driver.Rows, error)
+}
+
+type valueRows struct {
+	columns []string
+	rows    [][]driver.Value
+	index   int
+}
+
+func (rows *valueRows) Columns() []string {
+	if len(rows.columns) > 0 {
+		return rows.columns
+	}
+	return []string{"value"}
+}
+
+func (rows *valueRows) Close() error { return nil }
+
+func (rows *valueRows) Next(destination []driver.Value) error {
+	if rows.index >= len(rows.rows) {
+		return io.EOF
+	}
+	copy(destination, rows.rows[rows.index])
+	rows.index++
+	return nil
+}
+
+type vastbaseCustomTypesTestDriver struct {
+	state *vastbaseCustomTypesTestState
+}
+
+func (testDriver *vastbaseCustomTypesTestDriver) Open(string) (driver.Conn, error) {
+	return &vastbaseCustomTypesTestConn{state: testDriver.state}, nil
+}
+
+type vastbaseCustomTypesTestConn struct {
+	state *vastbaseCustomTypesTestState
+}
+
+func (conn *vastbaseCustomTypesTestConn) Prepare(query string) (driver.Stmt, error) {
+	return &vastbaseCustomTypesTestStmt{state: conn.state, query: query}, nil
+}
+func (*vastbaseCustomTypesTestConn) Close() error              { return nil }
+func (*vastbaseCustomTypesTestConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (conn *vastbaseCustomTypesTestConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	return conn.state.query(query)
+}
+
+type vastbaseCustomTypesTestStmt struct {
+	state *vastbaseCustomTypesTestState
+	query string
+}
+
+func (*vastbaseCustomTypesTestStmt) Close() error  { return nil }
+func (*vastbaseCustomTypesTestStmt) NumInput() int { return 1 }
+func (*vastbaseCustomTypesTestStmt) Exec([]driver.Value) (driver.Result, error) {
+	return nil, driver.ErrSkip
+}
+func (stmt *vastbaseCustomTypesTestStmt) Query([]driver.Value) (driver.Rows, error) {
+	return stmt.state.query(stmt.query)
+}
+
+func openVastbaseCustomTypesDB(t *testing.T, state *vastbaseCustomTypesTestState) *sql.DB {
+	t.Helper()
+	driverName := fmt.Sprintf("vastbase-custom-types-%d", vastbaseCustomTypesDriverSequence.Add(1))
+	sql.Register(driverName, &vastbaseCustomTypesTestDriver{state: state})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func TestVastbaseListCustomTypesUsesPostgresCatalog(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM pg_catalog.pg_type t") || !strings.Contains(query, "t.typtype IN ('b','c','d','e','r','m')") || !strings.Contains(query, "t.typelem = 0") || !strings.Contains(query, "(t.typrelid = 0 OR c.relkind = 'c')") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") {
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+		return &valueRows{
+			columns: []string{"typname", "description"},
+			rows: [][]driver.Value{
+				{"status", "order status"},
+				{"email", nil},
+				{"address", nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+	server.mode.postgresCatalog = true
+
+	types, err := server.listCustomTypes("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 3 {
+		t.Fatalf("unexpected types: %#v", types)
+	}
+	for _, item := range types {
+		if item.ObjectType != "TYPE" || item.Schema != "public" {
+			t.Fatalf("type metadata was lost: %#v", item)
+		}
+	}
+	if types[0].Comment == nil || *types[0].Comment != "order status" {
+		t.Fatalf("type comment was lost: %#v", types[0])
+	}
+	if types[1].Comment != nil {
+		t.Fatalf("nil comment became non-nil: %#v", types[1])
+	}
+}
+
+func TestVastbaseListCustomTypesUsesSystemCatalog(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM sys_catalog.sys_type t") || strings.Contains(query, "FROM pg_catalog") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") {
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+		return &valueRows{
+			columns: []string{"typname", "description"},
+			rows:    [][]driver.Value{{"status", "order status"}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+	server.mode.postgresCatalog = false
+
+	types, err := server.listCustomTypes("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 1 || types[0].Name != "status" {
+		t.Fatalf("unexpected types: %#v", types)
+	}
+}
+
+func TestVastbaseListCustomTypesSkipsMySQLCompatMode(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		return nil, fmt.Errorf("custom types query must not run in mysql compat mode: %s", query)
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+	server.mode.mysqlCompat = true
+
+	types, err := server.listCustomTypes("public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 0 {
+		t.Fatalf("expected no types in mysql compat mode: %#v", types)
+	}
+}
+
+func TestVastbaseListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "sys_type t"):
+			return &valueRows{
+				columns: []string{"typname", "description"},
+				rows: [][]driver.Value{
+					{"status", "order status"},
+					{"email", nil},
+				},
+			}, nil
+		case strings.Contains(query, "sys_proc p"):
+			return &valueRows{
+				columns: []string{"proname", "kind", "comment"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+			}, nil
+		case strings.Contains(query, "sys_class c"):
+			return &valueRows{
+				columns: []string{"relname", "relkind", "comment"},
+				rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected query: %s", query)
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+
+	objects, err := server.listObjects("public", metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var typeNames []string
+	for _, item := range objects {
+		if item.ObjectType == "TYPE" {
+			typeNames = append(typeNames, item.Name)
+		}
+	}
+	if len(typeNames) != 2 || typeNames[0] != "email" || typeNames[1] != "status" {
+		t.Fatalf("unexpected types in object list: %v (objects=%#v)", typeNames, objects)
+	}
+	if len(objects) != 4 {
+		t.Fatalf("expected table + function + 2 types, got %#v", objects)
+	}
+}
+
+func TestVastbaseListObjectsOnlyCustomTypesWhenTypeRequested(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "FROM sys_catalog.sys_class c") || strings.Contains(query, "sys_proc p") {
+			return nil, fmt.Errorf("type-only request must not scan relations or routines: %s", query)
+		}
+		if !strings.Contains(query, "sys_type t") {
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+		return &valueRows{
+			columns: []string{"typname", "description"},
+			rows:    [][]driver.Value{{"status", "order status"}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+
+	// The sidebar type group sends TYPE together with the TYPE_BODY companion;
+	// both must resolve to a type-only request that never scans tables.
+	for _, objectTypes := range [][]string{{"TYPE"}, {"TYPE", "TYPE_BODY"}} {
+		objects, err := server.listObjects("public", metadataListConstraints{ObjectTypes: objectTypes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(objects) != 1 || objects[0].Name != "status" || objects[0].ObjectType != "TYPE" || objects[0].Schema != "public" {
+			t.Fatalf("expected only the TYPE object for %v: %#v", objectTypes, objects)
+		}
+	}
+}
+
+func TestVastbaseTypeBodyConstraintIsNotTableLike(t *testing.T) {
+	constraints := metadataListConstraints{ObjectTypes: []string{"TYPE", "TYPE_BODY"}}
+	if !constraintsAllowTypes(constraints) {
+		t.Fatal("TYPE/TYPE_BODY request must allow types")
+	}
+	if constraintsAllowsTableLike(constraints) {
+		t.Fatal("TYPE/TYPE_BODY request must not be table-like; normalizeTableType must not map TYPE_BODY to TABLE")
+	}
+	if constraintsAllowRoutines(constraints) {
+		t.Fatal("TYPE/TYPE_BODY request must not be routine-like")
+	}
+}
+
+func TestVastbaseListObjectsSkipsCustomTypesWhenTableRequested(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "sys_type t") || strings.Contains(query, "sys_proc p") {
+			return nil, fmt.Errorf("table-only request must not scan types or routines: %s", query)
+		}
+		if !strings.Contains(query, "FROM sys_catalog.sys_class c") {
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+		return &valueRows{
+			columns: []string{"relname", "relkind", "comment"},
+			rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+
+	objects, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{"TABLE"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range objects {
+		if item.ObjectType == "TYPE" {
+			t.Fatalf("table-only request must not return types: %#v", objects)
+		}
+	}
+	if len(objects) == 0 {
+		t.Fatalf("expected the table to remain listed: %#v", objects)
+	}
+}
+
+func TestVastbaseListObjectsTypeOnlyPropagatesCustomTypesError(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		return nil, fmt.Errorf("catalog unavailable: %s", query)
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+
+	_, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{"TYPE"}})
+	if err == nil {
+		t.Fatal("dedicated type request must propagate the catalog error")
+	}
+	if !strings.Contains(err.Error(), "list custom types") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestVastbaseListObjectsUnfilteredPropagatesCustomTypesError(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "sys_type t") {
+			return nil, fmt.Errorf("pg_type unavailable")
+		}
+		switch {
+		case strings.Contains(query, "sys_proc p"):
+			return &valueRows{
+				columns: []string{"proname", "kind", "comment"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+			}, nil
+		case strings.Contains(query, "FROM sys_catalog.sys_class c"):
+			return &valueRows{
+				columns: []string{"relname", "relkind", "comment"},
+				rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected query: %s", query)
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+
+	// A failing type catalog must surface as an error even for the unfiltered
+	// “all objects” listing, so users never see a silently incomplete list.
+	_, err := server.listObjects("public", metadataListConstraints{})
+	if err == nil {
+		t.Fatal("unfiltered request must propagate the type catalog error")
+	}
+	if !strings.Contains(err.Error(), "list custom types") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 var vastbaseIndexMetadataDriverSequence atomic.Uint64
 
 type vastbaseIndexMetadataTestState struct {

@@ -353,20 +353,73 @@ LIMIT 1`, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLitera
 	return nullStringPtr(comment), nil
 }
 
+// listCustomTypes lists user-defined types visible in the given schema.
+//
+// Only explicitly created types are returned: base types (b), standalone
+// composite types (c), domains (d), enums (e), ranges (r) and multiranges (m).
+// Relation auto-generated row types (table/view/materialized view/foreign
+// table/partitioned table) are excluded via `typrelid = 0 OR relkind = 'c'`,
+// and array companion types are excluded via `typelem = 0`. MySQL
+// compatibility mode has no pg_type catalog contract and returns nothing.
+//
+// The comment join scopes description entries to the type catalog itself via
+// a regclass cast. `t.tableoid` cannot be used because Kingbase's native
+// sys_type catalog has no tableoid system column. Kingbase and Vastbase both
+// key COMMENT ON TYPE entries with the pg_type identity (oid 1247) even when
+// the server is in sys_catalog compatibility mode, so the filter always
+// references pg_catalog.pg_type.
+func (s *server) listCustomTypes(schema string) ([]objectInfo, error) {
+	if s.mode.mysqlCompat {
+		return []objectInfo{}, nil
+	}
+	catalog := "sys_catalog"
+	if s.mode.postgresCatalog {
+		catalog = "pg_catalog"
+	}
+	prefix := catalogPrefix(catalog)
+	query := fmt.Sprintf(`SELECT t.typname, d.description
+FROM %s.%s_type t
+JOIN %s.%s_namespace n ON n.oid = t.typnamespace
+LEFT JOIN %s.%s_class c ON c.oid = t.typrelid
+LEFT JOIN %s.%s_description d ON d.objoid = t.oid AND d.classoid = 'pg_catalog.pg_type'::regclass AND d.objsubid = 0
+WHERE n.nspname = %s
+  AND t.typtype IN ('b','c','d','e','r','m')
+  AND t.typelem = 0
+  AND (t.typrelid = 0 OR c.relkind = 'c')
+ORDER BY t.typname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []objectInfo{}
+	for rows.Next() {
+		var name string
+		var comment sql.NullString
+		if err := rows.Scan(&name, &comment); err != nil {
+			return nil, err
+		}
+		result = append(result, objectInfo{Name: name, ObjectType: "TYPE", Schema: schema, Comment: nullStringPtr(comment)})
+	}
+	return result, rows.Err()
+}
+
 func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
 	effective, err := s.effectiveSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	tables, err := s.listTables(effective, metadataListConstraints{})
-	if err != nil {
-		return nil, err
+	result := []objectInfo{}
+	if constraintsAllowsTableLike(constraints) {
+		tables, err := s.listTables(effective, metadataListConstraints{})
+		if err != nil {
+			return nil, err
+		}
+		for _, table := range tables {
+			result = append(result, objectInfo{Name: table.Name, ObjectType: table.TableType, Schema: effective, Comment: table.Comment})
+		}
 	}
-	result := make([]objectInfo, 0, len(tables))
-	for _, table := range tables {
-		result = append(result, objectInfo{Name: table.Name, ObjectType: table.TableType, Schema: effective, Comment: table.Comment})
-	}
-	if !s.mode.mysqlCompat {
+	if !s.mode.mysqlCompat && constraintsAllowRoutines(constraints) {
 		catalog := "sys_catalog"
 		function := "sys"
 		if s.mode.postgresCatalog {
@@ -387,6 +440,16 @@ WHERE n.nspname = %s ORDER BY p.proname`, catalog, function, catalog, function, 
 			}
 			_ = rows.Close()
 		}
+	}
+	if constraintsAllowTypes(constraints) {
+		types, typesErr := s.listCustomTypes(effective)
+		if typesErr != nil {
+			// A type catalog failure is a real fault: surfacing it lets the user
+			// distinguish an incomplete “all objects” view from an actually
+			// empty schema, instead of silently dropping the type group.
+			return nil, fmt.Errorf("list custom types in schema %q: %w", effective, typesErr)
+		}
+		result = append(result, types...)
 	}
 	filtered := result[:0]
 	for _, item := range result {
@@ -1172,7 +1235,7 @@ func normalizeTableType(value string) string {
 	switch normalized {
 	case "BASE_TABLE", "PARTITIONED_TABLE":
 		return "TABLE"
-	case "MATERIALIZED_VIEW", "FOREIGN_TABLE", "VIEW", "TABLE":
+	case "MATERIALIZED_VIEW", "FOREIGN_TABLE", "VIEW", "TABLE", "TYPE", "TYPE_BODY":
 		return normalized
 	default:
 		return "TABLE"
@@ -1210,6 +1273,38 @@ func constraintsAllowsTableLike(constraints metadataListConstraints) bool {
 	for _, kind := range constraints.ObjectTypes {
 		switch normalizeTableType(kind) {
 		case "TABLE", "VIEW", "MATERIALIZED_VIEW", "FOREIGN_TABLE":
+			return true
+		}
+	}
+	return false
+}
+
+// constraintsAllowTypes reports whether the object-type filter asks for
+// user-defined types (or leaves the filter open). normalizeTableType treats
+// "TYPE" and "TYPE_BODY" as first-class kinds, so table-like constraints never
+// match them and a dedicated type request does not scan relations.
+func constraintsAllowTypes(constraints metadataListConstraints) bool {
+	if len(constraints.ObjectTypes) == 0 {
+		return true
+	}
+	for _, kind := range constraints.ObjectTypes {
+		switch normalizeTableType(kind) {
+		case "TYPE", "TYPE_BODY":
+			return true
+		}
+	}
+	return false
+}
+
+// constraintsAllowRoutines reports whether the object-type filter asks for
+// procedures or functions (or leaves the filter open).
+func constraintsAllowRoutines(constraints metadataListConstraints) bool {
+	if len(constraints.ObjectTypes) == 0 {
+		return true
+	}
+	for _, kind := range constraints.ObjectTypes {
+		upper := strings.ToUpper(strings.TrimSpace(kind))
+		if strings.Contains(upper, "PROCEDURE") || strings.Contains(upper, "FUNCTION") {
 			return true
 		}
 	}
@@ -1269,6 +1364,8 @@ func objectOrder(kind string) int {
 		return 4
 	case "FUNCTION":
 		return 5
+	case "TYPE":
+		return 6
 	default:
 		return 9
 	}

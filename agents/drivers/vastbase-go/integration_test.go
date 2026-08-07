@@ -140,6 +140,164 @@ func TestVastbaseIntegration(t *testing.T) {
 	}
 }
 
+func TestVastbaseCustomTypesIntegration(t *testing.T) {
+	host := os.Getenv("VASTBASE_TEST_HOST")
+	portText := os.Getenv("VASTBASE_TEST_PORT")
+	username := os.Getenv("VASTBASE_TEST_USERNAME")
+	password := os.Getenv("VASTBASE_TEST_PASSWORD")
+	if host == "" || portText == "" || username == "" || password == "" {
+		t.Skip("Vastbase integration environment is not configured")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := os.Getenv("VASTBASE_TEST_DATABASE")
+	if database == "" {
+		database = "test"
+	}
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	schema := "dbx_types_" + suffix
+	schemaIdent := quoteIdentifier(schema)
+	statusType := schemaIdent + "." + quoteIdentifier("status")
+	emailDomain := schemaIdent + "." + quoteIdentifier("email")
+	addressType := schemaIdent + "." + quoteIdentifier("address")
+	ordersTable := schemaIdent + "." + quoteIdentifier("orders")
+
+	server := newServer()
+	cp := connectParams{
+		Host: host, Port: port, Database: database, Username: username, Password: password,
+		ConnectionString: fmt.Sprintf("jdbc:vastbase://%s:%d/%s", host, port, database),
+	}
+	if err := server.connect(cp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.disconnect() })
+	t.Cleanup(func() {
+		_, _ = server.executeQuery(queryOptions{SQL: "DROP SCHEMA IF EXISTS " + schemaIdent + " CASCADE"})
+	})
+
+	mustExecute(t, server, "CREATE SCHEMA "+schemaIdent)
+
+	// Detect the compatibility mode before creating any type object: MySQL
+	// compatibility mode has no pg_type catalog contract and may reject type
+	// syntax, so the type feature degrades to an empty group (never an error)
+	// while the plain table listing keeps working.
+	if server.mode.mysqlCompat {
+		mustExecute(t, server, "CREATE TABLE "+ordersTable+" (id bigint, state text, ship_to text)")
+		empty, err := server.listCustomTypes(schema)
+		if err != nil {
+			t.Fatalf("listCustomTypes failed in mysql compat mode: %v", err)
+		}
+		if len(empty) != 0 {
+			t.Fatalf("mysql compat mode must not list types, got %#v", empty)
+		}
+		typeOnly, err := server.listObjects(schema, metadataListConstraints{ObjectTypes: []string{"TYPE"}})
+		if err != nil {
+			t.Fatalf("listObjects([TYPE]) failed in mysql compat mode: %v", err)
+		}
+		if len(typeOnly) != 0 {
+			t.Fatalf("mysql compat mode TYPE request must be empty, got %#v", typeOnly)
+		}
+		all, err := server.listObjects(schema, metadataListConstraints{})
+		if err != nil {
+			t.Fatalf("listObjects(all) failed in mysql compat mode: %v", err)
+		}
+		var sawOrders bool
+		for _, item := range all {
+			if item.Name == "orders" && item.ObjectType == "TABLE" {
+				sawOrders = true
+			}
+			if item.ObjectType == "TYPE" || strings.Contains(item.ObjectType, "FUNCTION") || strings.Contains(item.ObjectType, "PROCEDURE") {
+				t.Fatalf("mysql compat mode must not list types or routines: %#v", all)
+			}
+		}
+		if !sawOrders {
+			t.Fatalf("orders table missing from mysql compat listing: %#v", all)
+		}
+		return
+	}
+
+	mustExecute(t, server, "CREATE TYPE "+statusType+" AS ENUM ('draft', 'published')")
+	mustExecute(t, server, "CREATE DOMAIN "+emailDomain+" AS text CHECK (VALUE ~ '.+@.+')")
+	mustExecute(t, server, "CREATE TYPE "+addressType+" AS (city text, zip text)")
+	mustExecute(t, server, "COMMENT ON TYPE "+statusType+" IS '订单状态'")
+	mustExecute(t, server, "CREATE TABLE "+ordersTable+" (id bigint, state "+statusType+", ship_to "+addressType+")")
+
+	customTypes, err := server.listCustomTypes(schema)
+	if err != nil {
+		t.Fatalf("listCustomTypes failed: %v", err)
+	}
+	typeNames := make(map[string]string, len(customTypes))
+	for _, item := range customTypes {
+		comment := ""
+		if item.Comment != nil {
+			comment = *item.Comment
+		}
+		typeNames[item.Name] = comment
+	}
+	if len(customTypes) != 3 {
+		t.Fatalf("expected exactly the 3 user-created types, got %#v", customTypes)
+	}
+	for _, name := range []string{"status", "email", "address"} {
+		if _, ok := typeNames[name]; !ok {
+			t.Fatalf("user-created type %q missing from listing: %#v", name, customTypes)
+		}
+	}
+	if _, ok := typeNames["orders"]; ok {
+		t.Fatalf("relation auto-generated row type leaked into type listing: %#v", customTypes)
+	}
+	for _, name := range []string{"_status", "_email", "_address"} {
+		if _, ok := typeNames[name]; ok {
+			t.Fatalf("auto-generated array type %q leaked into type listing: %#v", name, customTypes)
+		}
+	}
+	if comment := typeNames["status"]; comment != "订单状态" {
+		t.Fatalf("type comment was lost: got %q, want %q", comment, "订单状态")
+	}
+	for _, item := range customTypes {
+		if item.ObjectType != "TYPE" {
+			t.Fatalf("type object_type was lost: %#v", item)
+		}
+	}
+
+	// A dedicated TYPE request must return only types.
+	// The sidebar type group sends TYPE together with the TYPE_BODY companion kind.
+	for _, objectTypes := range [][]string{{"TYPE"}, {"TYPE", "TYPE_BODY"}} {
+		onlyTypes, err := server.listObjects(schema, metadataListConstraints{ObjectTypes: objectTypes})
+		if err != nil {
+			t.Fatalf("listObjects(%v) failed: %v", objectTypes, err)
+		}
+		if len(onlyTypes) != 3 {
+			t.Fatalf("listObjects(%v) must return only the 3 types: %#v", objectTypes, onlyTypes)
+		}
+		for _, item := range onlyTypes {
+			if item.ObjectType != "TYPE" {
+				t.Fatalf("listObjects(%v) returned a non-type: %#v", objectTypes, onlyTypes)
+			}
+		}
+	}
+
+	// The unfiltered object list keeps the table and the types, and never
+	// exposes the array companions or the relation row type.
+	all, err := server.listObjects(schema, metadataListConstraints{})
+	if err != nil {
+		t.Fatalf("listObjects(all) failed: %v", err)
+	}
+	var sawOrders bool
+	for _, item := range all {
+		if item.Name == "orders" && item.ObjectType == "TABLE" {
+			sawOrders = true
+		}
+		if strings.HasPrefix(item.Name, "_") {
+			t.Fatalf("auto-generated array type leaked into object list: %#v", all)
+		}
+	}
+	if !sawOrders {
+		t.Fatalf("orders table missing from object list: %#v", all)
+	}
+}
+
 func rawJSON(value any) json.RawMessage {
 	data, err := json.Marshal(value)
 	if err != nil {

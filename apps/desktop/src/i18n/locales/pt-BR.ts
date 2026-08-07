@@ -1570,6 +1570,9 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Cabeçalho usa nome do campo",
     xlsxHeaderComment: "Cabeçalho usa comentário",
     jumpToPage: "Ir para a página",
+    importBinaryValue: "Importar do arquivo",
+    binaryImportApplied: "{count} bytes importados, gravados no banco de dados após salvar as alterações.",
+    binaryImportFailed: "Falha ao importar o arquivo: {message}",
   },
   exportProgress: {
     streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",

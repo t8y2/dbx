@@ -1568,6 +1568,9 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Intestazione con nome campo",
     xlsxHeaderComment: "Intestazione con commento",
     jumpToPage: "Vai alla pagina",
+    importBinaryValue: "Importa da file",
+    binaryImportApplied: "Importati {count} byte, scritti nel database dopo il salvataggio delle modifiche.",
+    binaryImportFailed: "Importazione del file non riuscita: {message}",
   },
   exportProgress: {
     streamingUnsupported: "L'esportazione in streaming non è supportata per questa query. Semplificala o usa un driver supportato.",

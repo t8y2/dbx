@@ -2420,7 +2420,7 @@ export default withEnglishFallback({
     changeOpenMode: "修改開啟方式",
     closeRightTabs: "關閉右側標籤頁",
     compileObject: "編譯",
-    compileObjectSuccess: '"{name}" 編譯成功',
+    compileObjectSuccess: "\"{name}\" 編譯成功",
   },
   visibleDatabases: {
     title: "顯示資料庫",

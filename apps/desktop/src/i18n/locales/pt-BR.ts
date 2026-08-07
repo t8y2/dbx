@@ -2421,7 +2421,7 @@ export default withEnglishFallback({
     changeOpenMode: "Alterar modo de abertura",
     closeRightTabs: "Fechar abas à direita",
     compileObject: "Compilar",
-    compileObjectSuccess: '"{name}" compilado com sucesso',
+    compileObjectSuccess: "\"{name}\" compilado com sucesso",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

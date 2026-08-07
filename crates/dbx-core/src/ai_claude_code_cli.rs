@@ -525,6 +525,7 @@ pub async fn run_claude_code_agent(
         CliAgentProcessSpec {
             command,
             env,
+            env_remove: Vec::new(),
             current_dir: Some(isolated_cwd.path.clone()),
             stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::ClaudeCodePrint,
@@ -580,6 +581,8 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
         }
     }
 

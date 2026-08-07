@@ -82,7 +82,11 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         AiProvider::AnthropicCompatible | AiProvider::OpenaiCompatible | AiProvider::Custom => {
             Some(AiEffortCapability::FreeText { placeholder: None, source: AiCapabilitySource::Custom })
         }
-        AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => None,
+        AiProvider::Claude
+        | AiProvider::CodexCli
+        | AiProvider::ClaudeCodeCli
+        | AiProvider::PiAgentCli
+        | AiProvider::OpenCodeCli => None,
     }
 }
 
@@ -187,6 +191,7 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli
+        | AiProvider::OpenCodeCli
         | AiProvider::Custom => None,
     }
 }
@@ -201,7 +206,11 @@ pub fn validate_runtime_effort(config: &AiConfig) -> Result<(), String> {
 
     if matches!(
         config.provider,
-        AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli
+        AiProvider::Claude
+            | AiProvider::CodexCli
+            | AiProvider::ClaudeCodeCli
+            | AiProvider::PiAgentCli
+            | AiProvider::OpenCodeCli
     ) {
         return match selection {
             AiEffortSelection::Enum(value) if !value.trim().is_empty() => Ok(()),
@@ -254,7 +263,7 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
                 apply_openai_effort(object, &config.api_style, selection);
             }
         }
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => {}
+        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli | AiProvider::OpenCodeCli => {}
     }
 }
 
@@ -408,6 +417,8 @@ mod tests {
             claude_code_cli_env: HashMap::new(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
         }
     }
 

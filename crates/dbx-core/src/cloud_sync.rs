@@ -1416,6 +1416,8 @@ mod tests {
                 claude_code_cli_env: Default::default(),
                 pi_agent_cli_path: None,
                 pi_agent_cli_env: Default::default(),
+                opencode_cli_path: None,
+                opencode_cli_env: Default::default(),
             },
         }
     }
@@ -2238,7 +2240,11 @@ mod tests {
     async fn sensitive_payload_ai_configs_some_saves_configs() {
         let storage = Storage::open(&temp_db_path("ai-cfg-some")).await.unwrap();
 
-        let cfg = make_test_config("synced", true);
+        let mut cfg = make_test_config("synced", true);
+        cfg.config.provider = crate::ai::AiProvider::OpenCodeCli;
+        cfg.config.model = "openai/gpt-5.4-mini".to_string();
+        cfg.config.opencode_cli_path = Some("/opt/homebrew/bin/opencode".to_string());
+        cfg.config.opencode_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
         let payload = SensitiveSyncPayload {
             connection_secrets: vec![],
             ai_configs: Some(vec![cfg]),
@@ -2249,6 +2255,13 @@ mod tests {
         let loaded = storage.load_ai_configs().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "synced");
+        assert!(matches!(loaded[0].config.provider, crate::ai::AiProvider::OpenCodeCli));
+        assert_eq!(loaded[0].config.model, "openai/gpt-5.4-mini");
+        assert_eq!(loaded[0].config.opencode_cli_path.as_deref(), Some("/opt/homebrew/bin/opencode"));
+        assert_eq!(
+            loaded[0].config.opencode_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
     }
 
     #[tokio::test]

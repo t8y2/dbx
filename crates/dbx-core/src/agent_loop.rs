@@ -139,7 +139,7 @@ pub async fn run_agent_loop(
     let contract_system_prompt = augment_system_prompt_with_task_contract(system_prompt, task_contract, is_agent_mode);
     let system_prompt = contract_system_prompt.as_str();
 
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if crate::ai::is_cli_provider(&config.provider) {
         let connection_name = {
             let configs = agent_ctx.state.configs.read().await;
             configs
@@ -174,6 +174,14 @@ pub async fn run_agent_loop(
                 agent_ctx.sql_permissions.allow_writes,
             );
             return crate::ai_pi_agent_cli::run_pi_agent(config, &prompt, options, cancelled, on_event).await;
+        }
+        if matches!(config.provider, AiProvider::OpenCodeCli) {
+            let prompt = crate::ai_opencode_cli::build_opencode_prompt(
+                system_prompt,
+                messages,
+                agent_ctx.sql_permissions.allow_writes,
+            );
+            return crate::ai_opencode_cli::run_opencode_agent(config, &prompt, options, cancelled, on_event).await;
         }
         let prompt =
             crate::ai_codex_cli::build_codex_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);

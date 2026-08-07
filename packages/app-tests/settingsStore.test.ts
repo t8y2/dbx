@@ -538,6 +538,9 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].iconSlug, "claudecode");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["opencode-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["opencode-cli"].iconSlug, "opencode");
+  assert.equal(AI_PROVIDER_PRESETS["opencode-cli"].requiresApiKey, false);
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].iconSlug, "pi");
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].requiresApiKey, false);
@@ -546,6 +549,8 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("minimax") < Object.keys(AI_PROVIDER_PRESETS).indexOf("ollama"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("opencode-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("opencode-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
 
@@ -614,6 +619,15 @@ test("normalizes legacy AI config and fills provider defaults", () => {
   assert.equal(piAgent.piAgentCliPath, "/opt/homebrew/bin/pi");
   assert.deepEqual(piAgent.piAgentCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
   assert.equal(piAgent.model, "default");
+
+  const openCode = normalizeAiConfig({
+    provider: "opencode-cli",
+    opencodeCliPath: " /opt/homebrew/bin/opencode ",
+    opencodeCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  } as any);
+  assert.equal(openCode.opencodeCliPath, "/opt/homebrew/bin/opencode");
+  assert.deepEqual(openCode.opencodeCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(openCode.model, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

@@ -8,6 +8,7 @@ use chrono::Utc;
 use reqwest::{header, Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
@@ -108,6 +109,11 @@ pub struct SyncSnapshot {
     pub exported_at: String,
     pub app_version: String,
     pub connections: Vec<ConnectionConfig>,
+    /// Explicit MQTT subscription metadata. `None` means this is a legacy
+    /// snapshot that predates MQTT subscription sync and must not clear local
+    /// subscriptions when applied.
+    #[serde(default)]
+    pub mqtt_subscriptions: Option<Vec<MqttSubscriptionSyncEntry>>,
     /// Shared tunnel profiles (secrets scrubbed). `None` means the snapshot
     /// predates tunnel profiles — applying it leaves local profiles alone.
     #[serde(default)]
@@ -118,6 +124,33 @@ pub struct SyncSnapshot {
     pub desktop_settings: DesktopSettings,
     pub editor_settings: Option<serde_json::Value>,
     pub encrypted_secrets: Option<EncryptedSecretsBlob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MqttSubscriptionSyncEntry {
+    pub connection_id: String,
+    pub subscriptions: Vec<MqttSubscriptionSyncTopic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MqttSubscriptionSyncTopic {
+    pub topic: String,
+    #[serde(default = "default_sync_qos")]
+    pub qos: String,
+    #[serde(default)]
+    pub no_local: bool,
+    #[serde(default = "default_sync_enabled")]
+    pub enabled: bool,
+}
+
+fn default_sync_qos() -> String {
+    "atmostonce".to_string()
+}
+
+fn default_sync_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +254,7 @@ pub async fn build_sync_snapshot(
         )?),
         None => None,
     };
+    let mqtt_subscriptions = Some(extract_mqtt_subscriptions(&connections)?);
     for config in &mut connections {
         scrub_connection_secrets(config);
     }
@@ -233,6 +267,7 @@ pub async fn build_sync_snapshot(
         exported_at: Utc::now().to_rfc3339(),
         app_version: app_version.into(),
         connections,
+        mqtt_subscriptions,
         tunnel_profiles: Some(tunnel_profiles),
         sidebar_layout: storage.load_sidebar_layout().await?,
         pinned_tree_node_ids: storage.load_pinned_tree_node_ids().await?,
@@ -279,6 +314,15 @@ pub async fn apply_sync_snapshot(
         };
 
     let mut connections = snapshot.connections.clone();
+    if let Some(mqtt_subscriptions) = &snapshot.mqtt_subscriptions {
+        apply_mqtt_subscriptions(&mut connections, mqtt_subscriptions)?;
+    } else {
+        // Snapshots created before MQTT subscription sync may still contain a
+        // stale `savedTopics` value inside `externalConfig`. Preserve the
+        // current device value instead of allowing that legacy metadata to
+        // overwrite local subscriptions during restore.
+        preserve_local_mqtt_subscriptions_for_legacy_snapshot(storage, &mut connections).await?;
+    }
     for config in &mut connections {
         scrub_connection_secrets(config);
     }
@@ -784,6 +828,119 @@ impl SnippetSyncClient {
     }
 }
 
+fn extract_mqtt_subscriptions(connections: &[ConnectionConfig]) -> Result<Vec<MqttSubscriptionSyncEntry>, String> {
+    connections
+        .iter()
+        .filter(|config| config.db_type == DatabaseType::Mqtt)
+        .map(|config| {
+            let subscriptions = config
+                .external_config
+                .as_ref()
+                .and_then(|external| external.get("savedTopics"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+            let subscriptions: Vec<MqttSubscriptionSyncTopic> = serde_json::from_value(subscriptions)
+                .map_err(|error| format!("Invalid MQTT subscriptions for connection {}: {error}", config.id))?;
+            validate_mqtt_subscriptions(config, &subscriptions)?;
+            Ok(MqttSubscriptionSyncEntry { connection_id: config.id.clone(), subscriptions })
+        })
+        .collect()
+}
+
+fn apply_mqtt_subscriptions(
+    connections: &mut [ConnectionConfig],
+    entries: &[MqttSubscriptionSyncEntry],
+) -> Result<(), String> {
+    let mut seen_connections = HashSet::new();
+    for entry in entries {
+        if !seen_connections.insert(entry.connection_id.clone()) {
+            return Err(format!("重复的 MQTT 同步连接 ID: {}", entry.connection_id));
+        }
+        let config = connections
+            .iter_mut()
+            .find(|config| config.id == entry.connection_id)
+            .ok_or_else(|| format!("MQTT 同步配置引用了不存在的连接: {}", entry.connection_id))?;
+        if config.db_type != DatabaseType::Mqtt {
+            return Err(format!("同步连接 {} 不是 MQTT 连接", entry.connection_id));
+        }
+        validate_mqtt_subscriptions(config, &entry.subscriptions)?;
+        let mut external = config.external_config.take().unwrap_or_else(|| serde_json::json!({}));
+        let object = external
+            .as_object_mut()
+            .ok_or_else(|| format!("MQTT 连接 {} 的 externalConfig 必须是 JSON 对象", entry.connection_id))?;
+        object
+            .insert("savedTopics".to_string(), serde_json::to_value(&entry.subscriptions).map_err(|e| e.to_string())?);
+        config.external_config = Some(external);
+    }
+    Ok(())
+}
+
+async fn preserve_local_mqtt_subscriptions_for_legacy_snapshot(
+    storage: &Storage,
+    connections: &mut [ConnectionConfig],
+) -> Result<(), String> {
+    let local_connections = storage.load_connections().await?;
+    for config in connections.iter_mut().filter(|config| config.db_type == DatabaseType::Mqtt) {
+        let Some(local_config) = local_connections.iter().find(|local| local.id == config.id) else {
+            continue;
+        };
+        let Some(local_saved_topics) =
+            local_config.external_config.as_ref().and_then(|external| external.get("savedTopics")).cloned()
+        else {
+            continue;
+        };
+        let mut external = config.external_config.take().unwrap_or_else(|| serde_json::json!({}));
+        if let Some(object) = external.as_object_mut() {
+            object.insert("savedTopics".to_string(), local_saved_topics);
+            config.external_config = Some(external);
+        } else {
+            config.external_config = Some(serde_json::json!({ "savedTopics": local_saved_topics }));
+        }
+    }
+    Ok(())
+}
+
+fn validate_mqtt_subscriptions(
+    config: &ConnectionConfig,
+    subscriptions: &[MqttSubscriptionSyncTopic],
+) -> Result<(), String> {
+    let protocol = config
+        .external_config
+        .as_ref()
+        .and_then(|external| external.get("protocolVersion"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("v5");
+    let mut topics = HashSet::new();
+    for subscription in subscriptions {
+        if !valid_mqtt_filter(&subscription.topic) {
+            return Err(format!("MQTT 连接 {} 包含无效 Topic Filter: {}", config.id, subscription.topic));
+        }
+        if !topics.insert(subscription.topic.clone()) {
+            return Err(format!("MQTT 连接 {} 包含重复 Topic Filter: {}", config.id, subscription.topic));
+        }
+        if !matches!(subscription.qos.as_str(), "atmostonce" | "atleastonce" | "exactlyonce") {
+            return Err(format!("MQTT 连接 {} 包含无效 QoS: {}", config.id, subscription.qos));
+        }
+        if subscription.no_local && protocol != "v5" {
+            return Err(format!("MQTT 连接 {} 使用了 MQTT 3.x 不支持的 No Local", config.id));
+        }
+    }
+    Ok(())
+}
+
+fn valid_mqtt_filter(topic: &str) -> bool {
+    if topic.is_empty() || topic.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let segments: Vec<&str> = topic.split('/').collect();
+    segments.iter().enumerate().all(|(index, segment)| {
+        if *segment == "#" {
+            return index == segments.len() - 1;
+        }
+        !segment.contains('#') && (!segment.contains('+') || *segment == "+")
+    })
+}
+
 fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     config.password.clear();
     for layer in &mut config.transport_layers {
@@ -803,8 +960,23 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     config.redis_sentinel_password.clear();
     config.connection_string = None;
     config.init_script = None;
+    scrub_mqtt_auth_secrets(config);
     scrub_mq_external_config_secrets(config);
     scrub_nacos_auth_secrets(config);
+}
+
+fn scrub_mqtt_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Mqtt {
+        return;
+    }
+    let Some(auth) = config.external_config.as_mut().and_then(|external| external.get_mut("auth")) else {
+        return;
+    };
+    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("password") {
+        if let Some(object) = auth.as_object_mut() {
+            object.insert("password".to_string(), serde_json::Value::String(String::new()));
+        }
+    }
 }
 
 fn webdav_password_account(config: &WebDavConfig) -> String {

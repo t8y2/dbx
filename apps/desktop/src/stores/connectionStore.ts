@@ -3410,18 +3410,15 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       await ensureConnected(connectionId);
-      const { mqttGetTopicTree } = await import("@/lib/backend/api");
-      const topicTree = (await mqttGetTopicTree(connectionId)) as { name: string; fullPath: string; children?: unknown[]; isLeaf: boolean };
-      const topicNodes = mqttTopicTreeToSidebarNodes(connectionId, topicTree);
-      // Always prepend a synthetic console entry so users can open the MQTT admin
-      // even when no topics are subscribed yet.
+      // MQTT subscription state belongs to the console. The global sidebar only
+      // exposes a single navigation entry and must not keep a second topic tree.
       const consoleNode: TreeNode = {
         id: `${connectionId}:mqtt-topic:__console__`,
         label: "MQTT 控制台",
         type: "mqtt-topic" as const,
         connectionId,
-        children: topicNodes.length > 0 ? topicNodes : [],
-        isExpanded: topicNodes.length > 0,
+        children: [],
+        isExpanded: false,
       };
       setChildren(node, [consoleNode]);
       node.isExpanded = true;
@@ -3431,18 +3428,6 @@ export const useConnectionStore = defineStore("connection", () => {
     } finally {
       node.isLoading = false;
     }
-  }
-
-  function mqttTopicTreeToSidebarNodes(connectionId: string, tree: { name: string; fullPath: string; children?: unknown[]; isLeaf: boolean }): TreeNode[] {
-    const children = tree.children ?? [];
-    return children.map((child: any) => ({
-      id: `${connectionId}:mqtt-topic:${child.fullPath}`,
-      label: child.isLeaf ? child.name : `${child.name}/`,
-      type: "mqtt-topic",
-      connectionId,
-      children: child.children?.length > 0 ? mqttTopicTreeToSidebarNodes(connectionId, child) : [],
-      isExpanded: false,
-    })) as TreeNode[];
   }
 
   async function loadMqTenants(connectionId: string, options?: LoadTreeOptions) {

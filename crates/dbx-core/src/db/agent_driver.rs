@@ -3100,7 +3100,7 @@ mod tests {
         agent_schema_params, agent_schema_table_params, agent_supports_capability, agent_transaction_params,
         append_legacy_error_context, decode_agent_response, format_agent_process_error, format_agent_startup_error,
         is_agent_rpc_response_error, is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params,
-        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_line, spawn_agent_process,
+        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_line,
         start_stderr_collector, validate_dameng_java_system_properties, AgentCallError, AgentCapability,
         AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod,
         AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition,
@@ -3127,7 +3127,7 @@ mod tests {
         fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o600)).unwrap();
 
-        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        let mut child = super::spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
         assert!(child.wait().unwrap().success());
         assert_ne!(fs::metadata(&program).unwrap().permissions().mode() & 0o100, 0);
 
@@ -3146,7 +3146,7 @@ mod tests {
         fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        let mut child = super::spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(fs::metadata(&program).unwrap().permissions().mode() & 0o777, 0o700);
 

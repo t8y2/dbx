@@ -2063,11 +2063,17 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_subscribe,
             #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_save_topic_config,
+            #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_unsubscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_delete_topic_config,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_publish,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_list_topics,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_list_saved_topic_configs,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_get_topic_tree,
             #[cfg(feature = "mq-admin")]

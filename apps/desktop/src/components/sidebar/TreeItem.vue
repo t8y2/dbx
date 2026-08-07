@@ -1203,9 +1203,11 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
                   node.type === 'group-functions' ||
+                  node.type === 'group-triggers' ||
                   node.type === 'group-sequences' ||
                   node.type === 'group-synonyms' ||
                   node.type === 'group-packages' ||
+                  node.type === 'group-types' ||
                   node.type === 'group-partitions') &&
                 node.objectCount != null
               "

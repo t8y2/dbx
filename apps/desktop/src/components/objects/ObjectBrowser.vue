@@ -118,6 +118,7 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
@@ -833,7 +834,7 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
 
 function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   const activation = settingsStore.editorSettings.sidebarActivation;
-  const { action, isDouble } = resolveRowClickAction(row, event.detail, activation);
+  const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
   // Double click: cancel any pending single-click and fire immediately
   if (isDouble) {
     if (singleClickTimer) {
@@ -2737,9 +2738,26 @@ function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   ];
 }
 
+function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
+  // Types are listed on PostgreSQL-family databases without a source getter;
+  // only Xugu keeps the “view source” entry for TYPE/TYPE_BODY rows.
+  if (supportsTypeObjectSource(effectiveDatabaseType.value)) {
+    items.push({ label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 });
+  }
+  // Only separate the source entry when one exists; otherwise the menu starts
+  // with copy-name and no leading separator.
+  if (items.length > 0) {
+    items.push({ label: "", separator: true });
+  }
+  items.push({ label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy });
+  return items;
+}
+
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
   if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
+  if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
   if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
 }

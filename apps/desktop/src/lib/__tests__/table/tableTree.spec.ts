@@ -119,6 +119,22 @@ describe("programmable database objects", () => {
     expect(synonymGroup).toEqual(expect.objectContaining({ objectCount: 1, label: "tree.synonyms" }));
     expect(synonymGroup?.children).toEqual([expect.objectContaining({ type: "synonym", objectName: "SYN_SHOP_USERS", valid: true })]);
   });
+
+  it("groups user-defined types with an object count", () => {
+    const objects: ObjectInfo[] = [
+      { name: "status", object_type: "TYPE", schema: "app", comment: "order status" },
+      { name: "email", object_type: "TYPE", schema: "app" },
+    ];
+
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "app", objects });
+    const typeGroup = groups.find((node) => node.type === "group-types");
+
+    expect(typeGroup).toEqual(expect.objectContaining({ objectCount: 2, label: "tree.types" }));
+    expect(typeGroup?.children?.map((node) => node.type)).toEqual(["type", "type"]);
+    expect(typeGroup?.children?.map((node) => node.objectName)).toEqual(["email", "status"]);
+    expect(typeGroup?.children?.[0]?.comment).toBeUndefined();
+    expect(typeGroup?.children?.[1]?.comment).toBe("order status");
+  });
 });
 
 describe("PostgreSQL table hierarchy", () => {

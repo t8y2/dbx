@@ -91,6 +91,10 @@ export function generateDatabaseExportId(): string {
   return uuid();
 }
 
+export function shouldUseDatabaseBackupSnapshot(databaseType: DatabaseType | undefined, includeData: boolean, desktopRuntime: boolean): boolean {
+  return desktopRuntime && includeData && (databaseType === "mysql" || databaseType === "postgres");
+}
+
 export async function runDatabaseExportUntilTerminal(request: api.DatabaseExportRequest, onProgress: (progress: api.ExportProgress) => void): Promise<api.ExportProgress> {
   return new Promise<api.ExportProgress>((resolve, reject) => {
     api

@@ -223,6 +223,7 @@ describe("useSidebarDataOpenRuntime", () => {
     ["pinned", { pinned: true }],
     ["executing", { isExecuting: true, executionId: "running" }],
     ["pending edits", { pendingDataChangeCount: 1 }],
+    ["pending editor draft", { hasPendingDataEditorDraft: true }],
   ])("opens a new tab instead of replacing an active %s data tab", async (_label, patch) => {
     mocks.dataTabReuseMode = "active-tab";
     const activeTab = {

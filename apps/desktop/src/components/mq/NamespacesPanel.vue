@@ -4,6 +4,7 @@ import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { NamespaceRef, NamespaceInfo, NamespaceConfig } from "@/types/mq";
 import { mqListNamespaces, mqCreateNamespace, mqDeleteNamespace } from "@/lib/backend/api";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 interface Props {
@@ -23,6 +24,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const namespaces = ref<NamespaceInfo[]>([]);
 const loading = ref(false);
@@ -37,12 +39,12 @@ const formData = ref({
   namespace: "",
 });
 
-function guardWritable() {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqNamespaces.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadNamespaces() {
@@ -62,7 +64,10 @@ async function loadNamespaces() {
 }
 
 function openCreateDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqNamespaces.readOnly");
+    return;
+  }
   formData.value = {
     namespace: "",
   };
@@ -70,7 +75,7 @@ function openCreateDialog() {
 }
 
 async function handleCreate() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqNamespaces.create")))) return;
   if (!formData.value.namespace.trim() || !props.tenant) {
     error.value = t("mqNamespaces.namespaceNameRequired");
     return;
@@ -94,12 +99,16 @@ async function handleCreate() {
 }
 
 function handleDelete(ns: NamespaceInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqNamespaces.readOnly");
+    return;
+  }
   deleteTarget.value = ns;
   showDeleteDialog.value = true;
 }
 
 async function confirmDelete() {
+  if (!(await guardWritable(t("mqNamespaces.delete")))) return;
   const ns = deleteTarget.value;
   if (!ns || !props.tenant) return;
   deleting.value = true;
@@ -217,6 +226,8 @@ watch(
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .namespaces-panel {
   height: 100%;
   display: flex;
@@ -307,45 +318,6 @@ td {
   gap: 8px;
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm,
-.btn-danger {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -412,16 +384,6 @@ button:disabled {
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
 }
 
 .dialog-body {

@@ -30,7 +30,6 @@ vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
 function emptySavedSqlStore() {
   return {
     allFiles: [] as any[],
-    orphanedFileIds: vi.fn().mockReturnValue(new Set<string>()),
     getFile: vi.fn().mockReturnValue(undefined),
   };
 }
@@ -661,7 +660,6 @@ describe("useQuickOpen", () => {
       const fileMap = new Map(files.map((f) => [f.id, f]));
       return {
         allFiles: files,
-        orphanedFileIds: vi.fn().mockReturnValue(new Set<string>()),
         getFile: vi.fn().mockImplementation((id: string) => fileMap.get(id)),
       };
     }
@@ -713,7 +711,7 @@ describe("useQuickOpen", () => {
       expect(sqlItems[0].sqlFileId).toBe("f1");
     });
 
-    it("excludes orphaned SQL library files", () => {
+    it("includes SQL library files whose connection was deleted", () => {
       const mockConnStore = {
         connections: [{ id: "conn1", name: "Active", type: "mssql" }],
         treeNodes: [],
@@ -724,16 +722,24 @@ describe("useQuickOpen", () => {
         { id: "f1", name: "active_query.sql", connectionId: "conn1", updatedAt: "2024-01-01T00:00:00.000Z" },
         { id: "f2", name: "orphaned_query.sql", connectionId: "deleted_conn", updatedAt: "2024-01-02T00:00:00.000Z" },
       ];
-      const store = savedSqlStoreWithFiles(files);
-      store.orphanedFileIds = vi.fn().mockReturnValue(new Set(["f2"]));
-      vi.mocked(useSavedSqlStore).mockReturnValue(store as any);
+      vi.mocked(useSavedSqlStore).mockReturnValue(savedSqlStoreWithFiles(files) as any);
 
       const { filteredItems, setQuery } = useQuickOpen();
       setQuery("query");
 
       const sqlItems = filteredItems.value.filter((item) => item.type === "sql_library_file");
-      expect(sqlItems).toHaveLength(1);
-      expect(sqlItems[0].label).toBe("active_query.sql");
+      expect(sqlItems).toHaveLength(2);
+      expect(sqlItems.find((item) => item.label === "orphaned_query.sql")?.description).toBe("Connection deleted");
+    });
+
+    it("labels SQL library files without a connection as unassociated", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      vi.mocked(useSavedSqlStore).mockReturnValue(savedSqlStoreWithFiles([{ id: "f1", name: "draft.sql", connectionId: "", updatedAt: "2024-01-01T00:00:00.000Z" }]) as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("draft");
+
+      expect(filteredItems.value.find((item) => item.type === "sql_library_file")?.description).toBe("Unassociated");
     });
   });
 

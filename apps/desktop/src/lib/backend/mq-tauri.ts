@@ -211,6 +211,10 @@ export async function mqListSubscriptions(connectionId: string, topic: TopicRef)
   return invoke("mq_list_subscriptions", { connectionId, topic });
 }
 
+export async function mqEnrichSubscriptions(connectionId: string, topic: TopicRef): Promise<SubscriptionInfo[]> {
+  return invoke("mq_enrich_subscriptions", { connectionId, topic });
+}
+
 export async function mqCreateSubscription(connectionId: string, topic: TopicRef, sub: string, pos: ResetPosition): Promise<void> {
   return invoke("mq_create_subscription", { connectionId, topic, sub, pos });
 }

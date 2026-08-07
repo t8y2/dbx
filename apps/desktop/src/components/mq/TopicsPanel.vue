@@ -14,6 +14,7 @@ import type { MqTab } from "@/lib/mq/mqConsoleDefaults";
 import { isAllVhostsNamespace, resolveMqRowNamespace } from "@/lib/mq/mqConsoleDefaults";
 import { formatError } from "@/lib/backend/errorUtils";
 import { DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS, isProtectedRocketMqTopic, isRocketMqBusinessMessageType, matchesRocketMqTypeFilters, resolveRocketMqMessageType, ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES, ROCKETMQ_TOPIC_MESSAGE_TYPES } from "@/lib/mq/rocketmqTopicTypes";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 const TOPIC_ROW_HEIGHT = 44;
@@ -193,12 +194,14 @@ const canSubmitPartitionUpdate = computed(() => {
   return !props.readOnly && current > 0 && Number.isFinite(newPartitions.value) && newPartitions.value > current;
 });
 
-function guardWritable() {
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
+
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqTopics.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadTopics() {
@@ -234,7 +237,10 @@ async function loadClusterInfo() {
 }
 
 function openCreateDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTopics.readOnly");
+    return;
+  }
   dialogError.value = undefined;
   const defaultBroker = rocketMqMasterBrokers.value[0]?.brokerName ?? rocketMqBrokerOptions.value[0]?.brokerName ?? "";
   formData.value = {
@@ -307,7 +313,10 @@ function isDlqTopic(topic: TopicInfo): boolean {
 }
 
 function openPartitionsDialog(topic: TopicInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTopics.readOnly");
+    return;
+  }
   dialogError.value = undefined;
   if (!topic.partitions || topic.partitions < 1) {
     error.value = t("mqTopics.currentPartitionsUnknown");
@@ -319,7 +328,7 @@ function openPartitionsDialog(topic: TopicInfo) {
 }
 
 async function handleCreate() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqTopics.create")))) return;
   if (!formData.value.topicName.trim() || !props.tenant || !props.namespace) {
     dialogError.value = t("mqTopics.topicNameRequired");
     return;
@@ -353,12 +362,16 @@ async function handleCreate() {
 }
 
 function handleDelete(topic: TopicInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTopics.readOnly");
+    return;
+  }
   deleteTarget.value = topic;
   showDeleteDialog.value = true;
 }
 
 async function confirmDelete() {
+  if (!(await guardWritable(t("mqTopics.delete")))) return;
   const topic = deleteTarget.value;
   if (!topic || !props.tenant || !props.namespace) return;
   const namespace = resolveMqRowNamespace(topic, props.namespace);
@@ -390,7 +403,7 @@ async function confirmDelete() {
 }
 
 async function handleUpdatePartitions() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqTopics.adjustPartitions")))) return;
   if (!editingTopic.value || !props.tenant || !props.namespace) return;
   const currentPartitions = editingTopic.value.partitions;
   if (!currentPartitions || currentPartitions < 1) {
@@ -719,6 +732,8 @@ watch(newPartitions, () => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .topics-panel {
   --topics-surface: var(--card, var(--color-background, #ffffff));
   --topics-header-bg: color-mix(in srgb, var(--secondary, #f5f5f5) 86%, var(--card, #ffffff));
@@ -1010,45 +1025,6 @@ watch(newPartitions, () => {
   color: var(--color-text);
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm,
-.btn-danger {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -1087,16 +1063,6 @@ button:disabled {
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
 }
 
 .dialog-body {

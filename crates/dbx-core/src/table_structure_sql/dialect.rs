@@ -11,6 +11,9 @@ pub(super) enum StructureDialect {
     SqlServer,
     Oracle,
     Dameng,
+    // 神通 Oscar：Oracle 兼容方言，且支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
+    // 不同于 Oracle）。DDL 生成行为与 Dameng 共享分支；单独成 dialect 以保证 label/反向映射准确。
+    Oscar,
     H2,
     ClickHouse,
     ManticoreSearch,
@@ -212,6 +215,22 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             alter_primary_key: true,
             ..base
         },
+        // 神通 Oscar v7：Oracle 兼容，实测支持 ALTER TABLE ADD/MODIFY/DROP/RENAME COLUMN、
+        // DROP/ADD PRIMARY KEY、COMMENT ON、CREATE/DROP INDEX（见 issue #5505 探测）。
+        Some(DatabaseType::Oscar) => TableStructureCapabilities {
+            dialect: StructureDialect::Oscar,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            index_type: true,
+            alter_primary_key: true,
+            ..base
+        },
         Some(DatabaseType::Iris) => TableStructureCapabilities {
             dialect: StructureDialect::Oracle,
             add_column: true,
@@ -285,7 +304,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
 }
 
 pub(super) fn is_oracle_like(dialect: StructureDialect) -> bool {
-    matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng)
+    matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar)
 }
 
 pub(super) fn database_label(database_type: Option<DatabaseType>) -> String {
@@ -310,6 +329,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::SqlServer => "sqlserver",
         StructureDialect::Oracle => "oracle",
         StructureDialect::Dameng => "dameng",
+        StructureDialect::Oscar => "oscar",
         StructureDialect::H2 => "h2",
         StructureDialect::ClickHouse => "clickhouse",
         StructureDialect::ManticoreSearch => "manticoresearch",
@@ -331,6 +351,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
         StructureDialect::Dameng => Some(DatabaseType::Dameng),
+        StructureDialect::Oscar => Some(DatabaseType::Oscar),
         StructureDialect::H2 => Some(DatabaseType::H2),
         StructureDialect::ClickHouse => Some(DatabaseType::ClickHouse),
         StructureDialect::ManticoreSearch => Some(DatabaseType::ManticoreSearch),

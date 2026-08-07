@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSqlForDisplay, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import { formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
 
 describe("sqlFormatter", () => {
   it("maps PostgreSQL-compatible database types to the postgres formatter dialect", () => {
@@ -48,6 +48,19 @@ describe("sqlFormatter", () => {
 
     expect(formatted).toContain("1::int");
     expect(formatted).toContain("AS id");
+  });
+
+  it("keeps incomplete editor SQL unchanged when the formatter cannot parse it", async () => {
+    const sql = "select *\nfrom dbname.\n;";
+
+    await expect(formatSqlText(sql, "mysql")).rejects.toThrow("Parse error at token:");
+    await expect(formatSqlForEditing(sql, "mysql")).resolves.toBe(sql);
+  });
+
+  it("keeps non-parse editor formatting failures visible", async () => {
+    const oversizedSql = "x".repeat(MAX_SQL_FORMAT_CHARS + 1);
+
+    await expect(formatSqlForEditing(oversizedSql, "mysql")).rejects.toThrow("SQL is too large to format safely.");
   });
 
   it("returns the original SQL for display when formatting fails", async () => {

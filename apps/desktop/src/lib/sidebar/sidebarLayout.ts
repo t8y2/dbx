@@ -130,6 +130,8 @@ function makeConnectionNode(config: ConnectionConfig, pinned: boolean): TreeNode
     isExpanded: false,
     children: [],
     pinned,
+    // 连接备注复用 TreeNode.comment 通道，侧边栏按 sidebarObjectInfoMode 渲染。
+    comment: config.note || null,
   };
 }
 

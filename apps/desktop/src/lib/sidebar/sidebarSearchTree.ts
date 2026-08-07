@@ -3,23 +3,20 @@ import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sideb
 
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
 
-const normalizedLabelCache = new WeakMap<TreeNode, { label: string; normalized: string }>();
-
 function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null) {
   const lm = matchLabel(label);
   if (!comment) return lm;
-  const cm = matchLabel(comment.toLowerCase());
+  const cm = matchLabel(comment);
   if (lm && cm) return lm.score >= cm.score ? lm : cm;
   return lm ?? cm;
 }
 
 function normalizedLabel(node: TreeNode): string {
-  const cached = normalizedLabelCache.get(node);
-  if (cached?.label === node.label) return cached.normalized;
-
-  const normalized = node.label.toLowerCase();
-  normalizedLabelCache.set(node, { label: node.label, normalized });
-  return normalized;
+  // Keep the original case. The matcher lowercases internally for comparison;
+  // preserving case here lets it tokenize camelCase labels ("camelCaseTable"
+  // -> "camel" | "Case" | "Table") instead of treating them as one lowercase
+  // blob.
+  return node.label;
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
@@ -31,6 +28,19 @@ export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds
 export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: readonly TreeNode[]): TreeNode[] {
   const liveNodesById = new Map(liveNodes.map((node) => [node.id, node]));
   return indexedNodes.map((node) => liveNodesById.get(node.id) ?? node);
+}
+
+function applySearchCollapsedState(node: TreeNode, collapsedIds: ReadonlySet<string>): TreeNode {
+  const children = node.children?.map((child) => applySearchCollapsedState(child, collapsedIds));
+  const childrenChanged = children?.some((child, index) => child !== node.children?.[index]) ?? false;
+  const collapsed = collapsedIds.has(node.id);
+  if (!collapsed && !childrenChanged) return node;
+
+  return {
+    ...node,
+    children: childrenChanged ? children : node.children,
+    isExpanded: collapsed ? false : node.isExpanded,
+  };
 }
 
 function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
@@ -57,7 +67,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     // A type-matched table keeps its loaded detail groups after the text query
     // is cleared instead of being rebuilt with an empty filtered child list.
     const preservesTypeMatchedTable = !matchLabel && !!selfMatch && node.type === "table";
-    const filteredChildren = preservesSubtree ? node.children : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
+    const filteredChildren = preservesSubtree ? node.children?.map((child) => applySearchCollapsedState(child, collapsedIds)) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {
       if (!node.children || preservesTypeMatchedTable) {

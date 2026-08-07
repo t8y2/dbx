@@ -2,14 +2,18 @@ package com.dbx.agent.rocketmq;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
+import org.apache.rocketmq.remoting.protocol.admin.ConsumeStats;
+import org.apache.rocketmq.remoting.protocol.admin.OffsetWrapper;
 import org.apache.rocketmq.remoting.protocol.admin.TopicStatsTable;
 import org.apache.rocketmq.remoting.protocol.admin.TopicOffset;
 import org.apache.rocketmq.remoting.protocol.body.ProducerInfo;
@@ -23,6 +27,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -129,6 +134,21 @@ class RocketMqAgentTest {
         assertEquals("127.0.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.18.0.3:10911", conn));
         assertEquals("127.0.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("10.0.0.5:10911", conn));
         assertEquals("broker.example.com:10911", RocketMqAgent.remapBrokerAddrForClient("broker.example.com:10911", conn));
+        // 172.15/172.32 are not RFC1918 — leave reachable public/non-private hosts alone.
+        assertEquals("172.15.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.15.0.1:10911", conn));
+        assertEquals("172.32.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.32.0.1:10911", conn));
+    }
+
+    @Test
+    void isRfc1918PrivateIpv4MatchesOnlyPrivateRanges() {
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("10.0.0.1"));
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("172.16.0.1"));
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("172.31.255.255"));
+        assertTrue(RocketMqAgent.isRfc1918PrivateIpv4("192.168.1.1"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("172.15.0.1"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("172.32.0.1"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("8.8.8.8"));
+        assertFalse(RocketMqAgent.isRfc1918PrivateIpv4("broker.example.com"));
     }
 
     @Test
@@ -255,6 +275,8 @@ class RocketMqAgentTest {
         SubscriptionGroupConfig normal = new SubscriptionGroupConfig();
         normal.setConsumeMessageOrderly(false);
         assertEquals("NORMAL", RocketMqAgent.classifyConsumerGroupType("MyGroup", normal));
+        // Missing dump must not look like NORMAL (FIFO groups would be mislabeled).
+        assertEquals("UNKNOWN", RocketMqAgent.classifyConsumerGroupType("MissingConfigGroup", null));
     }
 
     @Test
@@ -291,13 +313,94 @@ class RocketMqAgentTest {
 
         assertTrue(maxActive.get() > 1);
         for (Map<String, Object> row : rows) {
+            // Successful empty connection probe → genuine offline 0.
             assertEquals(0, row.get("memberCount"));
             assertEquals(List.of(), row.get("topics"));
         }
     }
 
     @Test
-    void enrichConsumerGroupRowsReturnsDefaultsWhenBudgetExpires() {
+    void requireConsumerConnectionProbeResultFailsClosedWhenNoMasterAnswers() throws Exception {
+        assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.requireConsumerConnectionProbeResult(
+                1, 0, 0, 0, null, new IllegalStateException("timeout"), "g1")
+        );
+        ConsumerConnection offline = new ConsumerConnection();
+        assertSame(
+            offline,
+            RocketMqAgent.requireConsumerConnectionProbeResult(1, 1, 0, 0, offline, null, "g1")
+        );
+    }
+
+    @Test
+    void requireConsumerConnectionProbeResultFailsClosedOnRemapped206WithUnreachableFallback() {
+        Exception cause = new IllegalStateException("fallback unreachable");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.requireConsumerConnectionProbeResult(
+                1, 1, 1, 0, new ConsumerConnection(), cause, "g1")
+        );
+        assertTrue(err.getMessage().contains("Docker remap address collision"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void requireConsumerConnectionProbeResultFailsClosedOnPartialRemappedOffline() {
+        Exception cause = new IllegalStateException("broker-b timeout");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.requireConsumerConnectionProbeResult(
+                2, 1, 0, 0, new ConsumerConnection(), cause, "g1")
+        );
+        assertTrue(err.getMessage().contains("partial remapped probe"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void requireConsumerConnectionProbeResultAllowsFullOfflineCoverage() throws Exception {
+        ConsumerConnection offline = new ConsumerConnection();
+        assertSame(
+            offline,
+            RocketMqAgent.requireConsumerConnectionProbeResult(2, 2, 0, 0, offline, null, "g1")
+        );
+        assertSame(
+            offline,
+            RocketMqAgent.requireConsumerConnectionProbeResult(1, 1, 1, 1, offline, null, "g1")
+        );
+    }
+
+    @Test
+    void isConsumerGroupNotOnlineDetectsBrokerCode206() {
+        assertTrue(RocketMqAgent.isConsumerGroupNotOnline(
+            new MQBrokerException(206, "the consumer group[g1] not online")));
+        assertTrue(RocketMqAgent.isConsumerGroupNotOnline(
+            new MQClientException(206, "the consumer group[g1] not online")));
+        assertTrue(RocketMqAgent.isConsumerGroupNotOnline(
+            new RuntimeException(new MQBrokerException(206, "not online"))));
+        assertFalse(RocketMqAgent.isConsumerGroupNotOnline(
+            new MQBrokerException(1, "system error")));
+        assertFalse(RocketMqAgent.isConsumerGroupNotOnline(new IllegalStateException("timeout")));
+    }
+
+    @Test
+    void enrichConsumerGroupRowsOmitsMemberCountWhenConnectionProbeFails() {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("groupId", "unreachable-group");
+        rows.add(row);
+
+        RocketMqAgent.enrichConsumerGroupRows(rows, groupId -> {
+            throw new MQClientException("Failed to examine consumer connection on all masters", null);
+        }, 1, 1_000);
+
+        // All-master connection probe failure must not look like offline 0.
+        assertFalse(row.containsKey("memberCount"));
+        assertEquals(List.of(), row.get("topics"));
+    }
+
+    @Test
+    void enrichConsumerGroupRowsOmitsMemberCountWhenBudgetExpires() {
         List<Map<String, Object>> rows = IntStream.range(0, 4)
             .mapToObj(index -> {
                 Map<String, Object> row = new LinkedHashMap<>();
@@ -316,7 +419,8 @@ class RocketMqAgentTest {
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
         assertTrue(elapsedMs < 1_000, "enrichment exceeded its response budget: " + elapsedMs + "ms");
         for (Map<String, Object> row : rows) {
-            assertEquals(0, row.get("memberCount"));
+            // Cancelled probes must not look offline (0); UI shows '-' when memberCount is absent.
+            assertFalse(row.containsKey("memberCount"));
             assertEquals(List.of(), row.get("topics"));
         }
     }
@@ -574,5 +678,432 @@ class RocketMqAgentTest {
 
         assertTrue(RocketMqAgent.connectionMatches(base, same));
         assertFalse(RocketMqAgent.connectionMatches(base, differentNamesrv));
+    }
+
+    @Test
+    void buildConsumerLagResultIncludesBrokerClientAndTimestamp() {
+        MessageQueue mq0 = new MessageQueue("TX_TOPIC", "broker-a", 0);
+        MessageQueue mq1 = new MessageQueue("TX_TOPIC", "broker-a", 1);
+        OffsetWrapper offset0 = new OffsetWrapper();
+        offset0.setBrokerOffset(100);
+        offset0.setConsumerOffset(90);
+        offset0.setLastTimestamp(1_725_000_000_000L);
+        OffsetWrapper offset1 = new OffsetWrapper();
+        offset1.setBrokerOffset(50);
+        offset1.setConsumerOffset(50);
+        offset1.setLastTimestamp(0L);
+
+        ConsumeStats stats = new ConsumeStats();
+        stats.getOffsetTable().put(mq0, offset0);
+        stats.getOffsetTable().put(mq1, offset1);
+
+        Map<MessageQueue, String> clients = new HashMap<>();
+        clients.put(mq0, "172.18.2.212@7#1");
+
+        Map<String, Object> result = RocketMqAgent.buildConsumerLagResult(stats, clients);
+        assertEquals(10L, result.get("totalLag"));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> partitions = (List<Map<String, Object>>) result.get("partitions");
+        assertEquals(2, partitions.size());
+        assertEquals("broker-a", partitions.get(0).get("brokerName"));
+        assertEquals(0, partitions.get(0).get("partition"));
+        assertEquals(90L, partitions.get(0).get("currentOffset"));
+        assertEquals(100L, partitions.get(0).get("endOffset"));
+        assertEquals(10L, partitions.get(0).get("lag"));
+        assertEquals(1_725_000_000_000L, partitions.get(0).get("lastTimestamp"));
+        assertEquals("172.18.2.212@7#1", partitions.get(0).get("consumerClient"));
+        // Missing client mapping still returns offsets with empty consumerClient.
+        assertEquals("", partitions.get(1).get("consumerClient"));
+        assertEquals(0L, partitions.get(1).get("lastTimestamp"));
+    }
+
+    @Test
+    void buildConsumerLagResultHandlesNullStatsAndEmptyClientMap() {
+        Map<String, Object> empty = RocketMqAgent.buildConsumerLagResult(null, null);
+        assertEquals(0L, empty.get("totalLag"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> partitions = (List<Map<String, Object>>) empty.get("partitions");
+        assertTrue(partitions.isEmpty());
+    }
+
+    @Test
+    void mergeSubscriptionGroupConfigsPrefersFifoAndKeepsLaterOnlyGroups() {
+        Map<String, SubscriptionGroupConfig> merged = new LinkedHashMap<>();
+
+        SubscriptionGroupConfig normalA = new SubscriptionGroupConfig();
+        normalA.setGroupName("group-a");
+        normalA.setConsumeMessageOrderly(false);
+
+        SubscriptionGroupConfig fifoA = new SubscriptionGroupConfig();
+        fifoA.setGroupName("group-a");
+        fifoA.setConsumeMessageOrderly(true);
+
+        SubscriptionGroupConfig onlyOnLater = new SubscriptionGroupConfig();
+        onlyOnLater.setGroupName("group-b");
+        onlyOnLater.setConsumeMessageOrderly(true);
+
+        // Intermediate broker repeats group-a as NORMAL (size would not grow), then later adds FIFO-only group-b.
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("group-a", normalA));
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("group-a", normalA));
+        RocketMqAgent.mergeSubscriptionGroupConfigs(
+            merged,
+            Map.of("group-a", fifoA, "group-b", onlyOnLater)
+        );
+
+        assertEquals(2, merged.size());
+        assertTrue(merged.get("group-a").isConsumeMessageOrderly());
+        assertTrue(merged.get("group-b").isConsumeMessageOrderly());
+        assertEquals("FIFO", RocketMqAgent.classifyConsumerGroupType("group-a", merged.get("group-a")));
+        assertEquals("FIFO", RocketMqAgent.classifyConsumerGroupType("group-b", merged.get("group-b")));
+    }
+
+    @Test
+    void mergeSubscriptionGroupConfigsDoesNotDowngradeFifoToNormal() {
+        Map<String, SubscriptionGroupConfig> merged = new LinkedHashMap<>();
+        SubscriptionGroupConfig fifo = new SubscriptionGroupConfig();
+        fifo.setGroupName("ordered");
+        fifo.setConsumeMessageOrderly(true);
+        SubscriptionGroupConfig normal = new SubscriptionGroupConfig();
+        normal.setGroupName("ordered");
+        normal.setConsumeMessageOrderly(false);
+
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("ordered", fifo));
+        RocketMqAgent.mergeSubscriptionGroupConfigs(merged, Map.of("ordered", normal));
+
+        assertTrue(merged.get("ordered").isConsumeMessageOrderly());
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededRejectsAllBrokerFailures() {
+        MQClientException noMasters = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(0, 0, true, null, "GID_A"));
+        assertTrue(noMasters.getMessage().contains("No reachable RocketMQ master"));
+
+        Exception cause = new RuntimeException("broker down");
+        MQClientException allFailed = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(2, 0, true, cause, "GID_A"));
+        assertTrue(allFailed.getMessage().contains("Failed to examine consume stats"));
+        assertSame(cause, allFailed.getCause());
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededRejectsPartialFailureWithEmptyMerge() {
+        Exception cause = new RuntimeException("one broker down");
+        MQClientException partialEmpty = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureConsumeStatsProbeSucceeded(3, 1, true, cause, "GID_A"));
+        assertTrue(partialEmpty.getMessage().contains("partial failure"));
+        assertSame(cause, partialEmpty.getCause());
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededAllowsEmptyOffsetsWhenAllBrokersSucceed() throws Exception {
+        // Genuine offline / unused group: every broker answered, offset table empty.
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(1, 1, true, null, "GID_A");
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(3, 3, true, null, "GID_A");
+    }
+
+    @Test
+    void ensureConsumeStatsProbeSucceededAllowsPartialFailureWhenMergeHasOffsets() throws Exception {
+        // One broker failed but another returned queue offsets — keep partial lag.
+        RocketMqAgent.ensureConsumeStatsProbeSucceeded(
+            3, 1, false, new RuntimeException("partial"), "GID_A");
+    }
+
+    @Test
+    void shouldFailClosedOnCollisionEmptyWhenSiblingFallbacksUnreachable() {
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 1, 0));
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 2, 1));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(false, 1, 0));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 0, 0));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionEmpty(true, 2, 2));
+    }
+
+    @Test
+    void shouldFailClosedOnCollisionPartialMutationWhenSiblingFallbacksUnreachable() {
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(1, 0));
+        assertTrue(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(2, 1));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(0, 0));
+        assertFalse(RocketMqAgent.shouldFailClosedOnCollisionPartialMutation(2, 2));
+    }
+
+    @Test
+    void ensureSubscriptionGroupMutationSucceededRejectsCollisionPartialUpdate() {
+        Exception cause = new RuntimeException("fallback unreachable");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(
+                1, 1, 1, 0, cause, "delete", "GID_A"));
+        assertTrue(err.getMessage().contains("Docker remap address collision"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void ensureSubscriptionGroupMutationSucceededRejectsPartialRemappedUpdate() {
+        Exception cause = new RuntimeException("broker-b down");
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(
+                2, 1, 0, 0, cause, "update", "GID_A"));
+        assertTrue(err.getMessage().contains("partial remapped update"));
+        assertSame(cause, err.getCause());
+    }
+
+    @Test
+    void ensureSubscriptionGroupMutationSucceededAllowsFullCoverage() throws Exception {
+        RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(2, 2, 0, 0, null, "delete", "GID_A");
+        RocketMqAgent.ensureSubscriptionGroupMutationSucceeded(1, 1, 1, 1, null, "update", "GID_A");
+    }
+
+    @Test
+    void masterBrokerAddrsFromClusterInfoKeepsCollisionFallbacksSeparate() {
+        org.apache.rocketmq.remoting.protocol.body.ClusterInfo clusterInfo =
+            new org.apache.rocketmq.remoting.protocol.body.ClusterInfo();
+        HashMap<String, org.apache.rocketmq.remoting.protocol.route.BrokerData> table = new HashMap<>();
+        table.put("broker-a", brokerData("broker-a", "172.18.0.2:10911"));
+        table.put("broker-b", brokerData("broker-b", "172.18.0.3:10911"));
+        clusterInfo.setBrokerAddrTable(table);
+
+        JsonObject conn = JsonParser.parseString("""
+            {"namesrvAddr":"127.0.0.1:9876"}
+            """).getAsJsonObject();
+        RocketMqAgent.MasterBrokerAddrPlan plan =
+            RocketMqAgent.masterBrokerAddrsFromClusterInfo(clusterInfo, conn, null);
+
+        // Both masters remap to the same published host:port; one remapped + one fallback.
+        assertEquals(1, plan.remappedCount());
+        assertEquals(1, plan.fallbackCount());
+        assertTrue(plan.allAddrs().contains("127.0.0.1:10911"));
+        assertTrue(plan.isCollisionFallback("172.18.0.3:10911") || plan.isCollisionFallback("172.18.0.2:10911"));
+        // Remapped answered with offsets: collision fallbacks may stay unreachable on host agents.
+        try {
+            RocketMqAgent.ensureConsumeStatsProbeSucceeded(
+                plan.remappedCount(), 1, false, new RuntimeException("fallback unreachable"), "GID_A");
+        } catch (MQClientException e) {
+            throw new AssertionError("non-empty remapped merge should be allowed", e);
+        }
+        // Empty merge is still allowed by the shared gate when remappedCount==success; the
+        // examineConsumeStatsOnMasters collision check rejects empty+unreachable siblings.
+        try {
+            RocketMqAgent.ensureConsumeStatsProbeSucceeded(
+                plan.remappedCount(), 1, true, null, "GID_A");
+        } catch (MQClientException e) {
+            throw new AssertionError("empty remapped-only success remains allowed at gate layer", e);
+        }
+    }
+
+    @Test
+    void operationBudgetMsFollowsRequestTimeoutMs() {
+        JsonObject conn120 = JsonParser.parseString("""
+            {"request_timeout_ms":120000}
+            """).getAsJsonObject();
+        assertEquals(120_000L, RocketMqAgent.operationBudgetMs(conn120));
+        assertEquals(120_000, RocketMqAgent.operationBudgetMsAsInt(conn120));
+
+        JsonObject connDefault = JsonParser.parseString("{}").getAsJsonObject();
+        assertEquals(30_000L, RocketMqAgent.operationBudgetMs(connDefault));
+        assertEquals(30_000, RocketMqAgent.operationBudgetMsAsInt(connDefault));
+
+        JsonObject connTiny = JsonParser.parseString("""
+            {"request_timeout_ms":100}
+            """).getAsJsonObject();
+        // Floor at 1s so budgets cannot collapse to zero.
+        assertEquals(1_000L, RocketMqAgent.operationBudgetMs(connTiny));
+        assertEquals(1_000, RocketMqAgent.operationBudgetMsAsInt(connTiny));
+    }
+
+    @Test
+    void scaledOperationBudgetMsKeepsDefaultPhasesUnderRpcWindow() {
+        JsonObject connDefault = JsonParser.parseString("{}").getAsJsonObject();
+        assertEquals(12_000L, RocketMqAgent.scaledOperationBudgetMs(connDefault, 12_000L));
+        assertEquals(8_000L, RocketMqAgent.scaledOperationBudgetMs(connDefault, 8_000L));
+        assertEquals(10_000L, RocketMqAgent.scaledOperationBudgetMs(connDefault, 10_000L));
+
+        JsonObject conn120 = JsonParser.parseString("""
+            {"request_timeout_ms":120000}
+            """).getAsJsonObject();
+        assertEquals(48_000L, RocketMqAgent.scaledOperationBudgetMs(conn120, 12_000L));
+        assertEquals(32_000L, RocketMqAgent.scaledOperationBudgetMs(conn120, 8_000L));
+        assertEquals(40_000L, RocketMqAgent.scaledOperationBudgetMs(conn120, 10_000L));
+        // Never exceed the RPC window even if baseline is larger.
+        assertEquals(120_000L, RocketMqAgent.scaledOperationBudgetMs(conn120, 200_000L));
+    }
+
+    @Test
+    void collectConsumerGroupConfigsSkipsFallbacksWhenRemappedNonEmpty() throws Exception {
+        RocketMqAgent.MasterBrokerAddrPlan plan = collisionPlan(
+            "127.0.0.1:10911", "172.18.0.3:10911");
+        List<String> probed = new ArrayList<>();
+        SubscriptionGroupConfig group = new SubscriptionGroupConfig();
+        group.setGroupName("GID_A");
+
+        Map<String, SubscriptionGroupConfig> configs = RocketMqAgent.collectConsumerGroupConfigs(
+            plan,
+            2,
+            30_000L,
+            30_000L,
+            2_000L,
+            (addr, timeout) -> {
+                probed.add(addr);
+                if (plan.isCollisionFallback(addr)) {
+                    throw new AssertionError("collision-fallback must not be probed after non-empty remapped collect");
+                }
+                return Map.of("GID_A", group);
+            }
+        );
+
+        assertEquals(List.of("127.0.0.1:10911"), probed);
+        assertEquals(1, configs.size());
+        assertTrue(configs.containsKey("GID_A"));
+    }
+
+    @Test
+    void collectConsumerGroupConfigsProbesFallbacksWhenRemappedEmpty() throws Exception {
+        RocketMqAgent.MasterBrokerAddrPlan plan = collisionPlan(
+            "127.0.0.1:10911", "172.18.0.3:10911");
+        List<String> probed = new ArrayList<>();
+        SubscriptionGroupConfig group = new SubscriptionGroupConfig();
+        group.setGroupName("GID_B");
+
+        Map<String, SubscriptionGroupConfig> configs = RocketMqAgent.collectConsumerGroupConfigs(
+            plan,
+            2,
+            30_000L,
+            30_000L,
+            2_000L,
+            (addr, timeout) -> {
+                probed.add(addr);
+                if (plan.isCollisionFallback(addr)) {
+                    assertEquals(2_000L, timeout);
+                    return Map.of("GID_B", group);
+                }
+                return Map.of();
+            }
+        );
+
+        assertEquals(2, probed.size());
+        assertTrue(probed.contains("127.0.0.1:10911"));
+        assertTrue(probed.contains("172.18.0.3:10911"));
+        assertEquals(1, configs.size());
+        assertTrue(configs.containsKey("GID_B"));
+    }
+
+    @Test
+    void examineConsumeStatsOnMastersSkipsFallbacksWhenRemappedHasOffsets() throws Exception {
+        RocketMqAgent.MasterBrokerAddrPlan plan = collisionPlan(
+            "127.0.0.1:10911", "172.18.0.3:10911");
+        List<String> probed = new ArrayList<>();
+        ConsumeStats remappedStats = nonEmptyConsumeStats("TOPIC_A", "broker-a", 0);
+
+        ConsumeStats merged = RocketMqAgent.examineConsumeStatsOnMasters(
+            "GID_A",
+            "TOPIC_A",
+            plan,
+            30_000L,
+            2_000L,
+            (addr, groupId, topic, timeout) -> {
+                probed.add(addr);
+                if (plan.isCollisionFallback(addr)) {
+                    throw new AssertionError("collision-fallback must not be probed after non-empty remapped");
+                }
+                assertEquals(30_000L, timeout);
+                return remappedStats;
+            }
+        );
+
+        assertEquals(List.of("127.0.0.1:10911"), probed);
+        assertEquals(1, merged.getOffsetTable().size());
+    }
+
+    @Test
+    void examineConsumeStatsOnMastersProbesFallbacksAndFailClosesOnEmptyUnreachable() {
+        RocketMqAgent.MasterBrokerAddrPlan plan = collisionPlan(
+            "127.0.0.1:10911", "172.18.0.3:10911");
+        List<String> probed = new ArrayList<>();
+
+        MQClientException err = assertThrows(
+            MQClientException.class,
+            () -> RocketMqAgent.examineConsumeStatsOnMasters(
+                "GID_A",
+                "TOPIC_A",
+                plan,
+                30_000L,
+                2_000L,
+                (addr, groupId, topic, timeout) -> {
+                    probed.add(addr);
+                    if (plan.isCollisionFallback(addr)) {
+                        assertEquals(2_000L, timeout);
+                        throw new RuntimeException("docker internal unreachable");
+                    }
+                    assertEquals(30_000L, timeout);
+                    return new ConsumeStats();
+                }
+            )
+        );
+
+        assertTrue(err.getMessage().contains("Docker remap address collision"));
+        assertEquals(2, probed.size());
+        assertTrue(probed.contains("127.0.0.1:10911"));
+        assertTrue(probed.contains("172.18.0.3:10911"));
+    }
+
+    @Test
+    void examineConsumeStatsOnMastersUsesFallbackWhenRemappedFails() throws Exception {
+        RocketMqAgent.MasterBrokerAddrPlan plan = collisionPlan(
+            "127.0.0.1:10911", "172.18.0.3:10911");
+        List<String> probed = new ArrayList<>();
+        ConsumeStats fallbackStats = nonEmptyConsumeStats("TOPIC_A", "broker-b", 1);
+
+        ConsumeStats merged = RocketMqAgent.examineConsumeStatsOnMasters(
+            "GID_A",
+            "TOPIC_A",
+            plan,
+            30_000L,
+            2_000L,
+            (addr, groupId, topic, timeout) -> {
+                probed.add(addr);
+                if (!plan.isCollisionFallback(addr)) {
+                    assertEquals(30_000L, timeout);
+                    throw new RuntimeException("published remap unreachable");
+                }
+                assertEquals(2_000L, timeout);
+                return fallbackStats;
+            }
+        );
+
+        assertEquals(2, probed.size());
+        assertEquals(1, merged.getOffsetTable().size());
+    }
+
+    private static RocketMqAgent.MasterBrokerAddrPlan collisionPlan(
+        String remapped, String fallback) {
+        RocketMqAgent.MasterBrokerAddrPlan plan = new RocketMqAgent.MasterBrokerAddrPlan();
+        plan.addRemapped(remapped);
+        plan.addCollisionFallback(fallback);
+        return plan;
+    }
+
+    private static ConsumeStats nonEmptyConsumeStats(String topic, String broker, int queueId) {
+        MessageQueue mq = new MessageQueue(topic, broker, queueId);
+        OffsetWrapper offset = new OffsetWrapper();
+        offset.setBrokerOffset(10);
+        offset.setConsumerOffset(0);
+        ConsumeStats stats = new ConsumeStats();
+        stats.getOffsetTable().put(mq, offset);
+        return stats;
+    }
+
+    private static org.apache.rocketmq.remoting.protocol.route.BrokerData brokerData(
+        String name, String masterAddr) {
+        org.apache.rocketmq.remoting.protocol.route.BrokerData data =
+            new org.apache.rocketmq.remoting.protocol.route.BrokerData();
+        data.setBrokerName(name);
+        HashMap<Long, String> addrs = new HashMap<>();
+        addrs.put(0L, masterAddr);
+        data.setBrokerAddrs(addrs);
+        return data;
     }
 }

@@ -64,9 +64,9 @@ test("query-tab object source opens clean isolated tabs and honors backend edita
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const openObjectSourceBody = functionBody(runtimeHost, "openObjectSourceDialog");
 
-  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, result\.source, node\.catalog, \{ forceNew: true \}\)/);
-  assert.match(openObjectSourceBody, /result\.editable !== false/);
-  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"\]\.includes\(objectType\)/);
+  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true \}\)/);
+  assert.match(openObjectSourceBody, /raw\.editable !== false/);
+  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"\]\.includes\(resolvedType\)/);
   assert.match(openObjectSourceBody, /signature: node\.signature/);
   assert.doesNotMatch(openObjectSourceBody, /queryStore\.updateSql/);
 });

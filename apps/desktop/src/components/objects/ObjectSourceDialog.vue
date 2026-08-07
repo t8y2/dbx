@@ -8,6 +8,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError } from "@/lib/table/objectSourceEditor";
+import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
@@ -54,6 +55,8 @@ const editing = ref(false);
 const sourceEditable = ref(true);
 const error = ref("");
 const saveError = ref("");
+/** May differ from props.objectType after PROCEDURE/FUNCTION/PACKAGE fallback resolution. */
+const resolvedObjectType = ref<ObjectSourceKind>(props.objectType);
 let loadSerial = 0;
 
 const canEdit = computed(() => sourceEditable.value && props.objectType !== "SEQUENCE");
@@ -80,16 +83,17 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   try {
     if (!props.databaseType) throw new Error("Connection type is unavailable.");
     const schema = props.schema || props.database;
-    const result = await api.getObjectSource(props.connectionId, props.database, schema, props.name, props.objectType, props.signature, props.relationName);
+    const { source: result, objectType: resolvedType } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, props.connectionId, props.database, schema, props.name, props.objectType, props.signature, props.relationName);
     const editableAllowed = result.editable !== false;
     const editable = await buildEditableObjectSource({
       databaseType: props.databaseType,
-      objectType: props.objectType,
+      objectType: resolvedType,
       schema,
       name: props.name,
       source: result.source,
     });
     if (serial !== loadSerial) return;
+    resolvedObjectType.value = resolvedType;
     sourceEditable.value = editableAllowed;
     const formatted = await formatSqlForDisplay(editable, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     editableText.value = editable;
@@ -145,7 +149,7 @@ async function saveSource() {
   try {
     const statements = await buildExecutableObjectSourceStatements({
       databaseType,
-      objectType: props.objectType,
+      objectType: resolvedObjectType.value,
       schema,
       name: props.name,
       source: draft.value,

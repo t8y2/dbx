@@ -65,8 +65,83 @@ async fn local_backend_reads_dbx_storage_without_desktop_process() {
     server_task.abort();
 }
 
-#[cfg(feature = "duckdb-sidecar")]
 #[tokio::test]
+async fn local_backend_picks_up_connections_added_after_startup_without_reload() {
+    // Regression for issue #5428: after an agent connects to MCP, a connection created in the DBX
+    // desktop UI is not reflected in the MCP server's AppState.configs in-memory cache, so the
+    // agent can list the new connection but executing an operation fails with
+    // "Connection config not found". After the fix the new connection is usable without reload.
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    let initial: ConnectionConfig = serde_json::from_value(json!({
+        "id": "startup-sqlite",
+        "name": "startup-sqlite",
+        "db_type": "sqlite",
+        "host": ":memory:",
+        "port": 0,
+        "username": "",
+        "password": "",
+        "database": "",
+        "ssl": false
+    }))
+    .expect("initial connection config");
+    storage.save_connections(std::slice::from_ref(&initial)).await.expect("save initial connection");
+
+    let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
+    let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize client");
+
+    // Simulate a connection created in the DBX desktop UI: write directly to the shared storage,
+    // bypassing the MCP server's in-process cache.
+    let added: ConnectionConfig = serde_json::from_value(json!({
+        "id": "added-sqlite",
+        "name": "added-sqlite",
+        "db_type": "sqlite",
+        "host": ":memory:",
+        "port": 0,
+        "username": "",
+        "password": "",
+        "database": "",
+        "ssl": false
+    }))
+    .expect("added connection config");
+    storage.save_connections(&[initial, added.clone()]).await.expect("save added connection");
+
+    // list_connections reads storage live, so the new connection is already visible.
+    let list_result =
+        client.peer().call_tool(CallToolRequestParams::new("dbx_list_connections")).await.expect("list connections");
+    let list_text = list_result.content[0].as_text().expect("text response").text.clone();
+    assert!(list_text.contains("added-sqlite"), "list should include added connection: {list_text}");
+
+    // execute_query resolves through the AppState.configs cache: before the fix this failed with
+    // "Connection config not found"; after the fix load_connections syncs the cache and the query
+    // succeeds.
+    let arguments = json!({
+        "connection_id": "added-sqlite",
+        "sql": "SELECT 1",
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_else(Map::<String, Value>::new);
+    let result = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments))
+        .await
+        .expect("execute query on added connection");
+    let text = result.content[0].as_text().expect("text result").text.clone();
+    assert_ne!(result.is_error, Some(true), "query on added connection failed: {text}");
+    assert!(text.contains('1'), "unexpected query result: {text}");
+
+    client.cancel().await.expect("close client");
+    server_task.abort();
+    drop(backend);
+}
+
+#[tokio::test]
+#[cfg(feature = "duckdb-sidecar")]
 async fn local_backend_uses_the_installed_duckdb_sidecar() {
     let directory = tempdir().expect("temporary data directory");
     let missing_driver = directory.path().join("missing-duckdb-driver");
@@ -182,6 +257,12 @@ async fn executes_mongo_shell_commands_without_desktop_process() {
 
     client.cancel().await.expect("close client");
     server_task.abort();
+}
+
+#[test]
+#[cfg(feature = "mq-admin")]
+fn mcp_default_features_include_message_queue_admin() {
+    assert_eq!(dbx_core::mq::MqSystemKind::Kafka.as_str(), "kafka");
 }
 
 async fn call_query(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>, sql: &str) -> String {

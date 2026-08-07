@@ -182,7 +182,7 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     activeScheduleIds.add(schedule.id);
     activeRunIds.add(runId);
     cancellationRequested.delete(runId);
-    addDatabaseExportTask(runId, schedule.name, schedule.destinationDirectory);
+    addDatabaseExportTask(runId, schedule.name, schedule.destinationDirectory, "scheduled");
     registerTaskCancelHandler(runId, () => cancelRun(runId));
 
     let finalStatus: Exclude<DatabaseBackupRunStatus, "running"> = "success";
@@ -219,27 +219,29 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
             finalStatus = "cancelled";
             break;
           }
+          const schemasByDatabase = connection.db_type === "postgres" ? { [database]: await api.listSchemas(schedule.connectionId, database) } : undefined;
+          const databasePlan = buildAllDatabaseExportPlan({
+            databases: [database],
+            schemaAware: connection.db_type === "postgres",
+            schemasByDatabase,
+          });
+          if (databasePlan.length === 0) throw new Error(`Database ${database} did not resolve to any schemas.`);
+          const scopedDatabasePlan: Array<(typeof databasePlan)[number] & { selectedTables?: string[]; excludedTables?: string[] }> = [];
+          for (const item of databasePlan) {
+            if (schedule.tableFilterMode === "all") {
+              scopedDatabasePlan.push(item);
+              continue;
+            }
+            const availableTables = (await api.listTables(schedule.connectionId, item.database, item.schema)).map((table) => table.name);
+            const scope = resolveScheduledDatabaseBackupTableScope(schedule.tableFilterMode, schedule.tablePatterns, availableTables, item.database, item.schema, tableNamesCaseSensitive);
+            includedTableCount += scope.includedTables.length;
+            if (scope.includedTables.length === 0) continue;
+            scopedDatabasePlan.push({ ...item, selectedTables: scope.selectedTables, excludedTables: scope.excludedTables });
+          }
+
           const snapshot = await api.beginDatabaseBackupSnapshot(schedule.connectionId, database);
           let snapshotCompleted = false;
           try {
-            const databasePlan = buildAllDatabaseExportPlan({
-              databases: [database],
-              schemaAware: connection.db_type === "postgres",
-              schemasByDatabase: { [database]: snapshot.schemas },
-            });
-            if (databasePlan.length === 0) throw new Error(`Database ${database} did not resolve to any schemas.`);
-            const scopedDatabasePlan: Array<(typeof databasePlan)[number] & { selectedTables?: string[]; excludedTables?: string[] }> = [];
-            for (const item of databasePlan) {
-              if (schedule.tableFilterMode === "all") {
-                scopedDatabasePlan.push(item);
-                continue;
-              }
-              const availableTables = (await api.listTables(schedule.connectionId, item.database, item.schema)).map((table) => table.name);
-              const scope = resolveScheduledDatabaseBackupTableScope(schedule.tableFilterMode, schedule.tablePatterns, availableTables, item.database, item.schema, tableNamesCaseSensitive);
-              includedTableCount += scope.includedTables.length;
-              if (scope.includedTables.length === 0) continue;
-              scopedDatabasePlan.push({ ...item, selectedTables: scope.selectedTables, excludedTables: scope.excludedTables });
-            }
             for (const [planIndex, item] of scopedDatabasePlan.entries()) {
               if (cancellationRequested.has(runId)) {
                 finalStatus = "cancelled";

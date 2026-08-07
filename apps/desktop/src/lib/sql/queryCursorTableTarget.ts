@@ -78,6 +78,20 @@ export function queryTableCandidateAtSqlPosition(input: QueryTableCandidateAtPos
   return { connectionId: input.connectionId, database, schema, tableName };
 }
 
+export function queryTableNavigationTargetAtSqlPosition(input: QueryTableCandidateAtPositionInput, target: SqlObjectNavigationTarget): SqlObjectNavigationTarget {
+  const parts = extractQualifiedIdentifierPartsAt(input.sql, input.position);
+  if (parts.length < 2) return sqlObjectNavigationTarget(target);
+
+  const candidate = queryTableCandidateAtSqlPosition(input);
+  if (!candidate) return sqlObjectNavigationTarget(target);
+
+  return sqlObjectNavigationTarget({
+    ...target,
+    database: candidate.database,
+    schema: candidate.schema,
+  });
+}
+
 export function resolveQueryContextCandidateDatabase(candidate: QueryCursorTableCandidate, databases: readonly string[]): QueryCursorTableCandidate {
   const database = databases.find((name) => sameIdentifier(name, candidate.database));
   return database && database !== candidate.database ? { ...candidate, database } : candidate;

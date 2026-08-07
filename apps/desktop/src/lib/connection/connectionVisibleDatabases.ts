@@ -3,9 +3,9 @@ import { filterDatabaseNamesForVisiblePicker, normalizeVisibleDatabaseSelection 
 
 const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
-// Turso and Cloudflare D1 connections target one fixed SQLite-compatible `main` namespace;
-// listing account-level databases requires separate platform credentials, not the database connection.
-const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["turso", "cloudflare-d1", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper"]);
+// Turso and Cloudflare D1 target one fixed SQLite-compatible `main` namespace;
+// non-database services expose their own root objects rather than database namespaces.
+const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["turso", "cloudflare-d1", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"]);
 
 type VisibleDatabaseConnectionFields = Pick<
   ConnectionConfig,

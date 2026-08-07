@@ -10,7 +10,7 @@ use crate::query::QueryExecutionOptions;
 use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
 use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
 use crate::sql_risk::SqlRisk;
-use crate::types::QueryResult;
+use crate::types::{QueryMessage, QueryResult};
 
 /// Maximum number of tables returned by list_tables tool.
 const LIST_TABLES_LIMIT: usize = 200;
@@ -191,7 +191,9 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
     let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
-    if supports_sql_query(db_type) {
+    if db_type == DatabaseType::MongoDb {
+        tools.push(mongo_execute_query_tool(sql_permissions));
+    } else if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
     }
@@ -199,6 +201,29 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         tools.push(explain_query_tool());
     }
     tools
+}
+
+fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_query",
+        description: "Execute a read-only MongoDB shell command and return results (max 50 rows). Use commands such as db.collection.find({}), db.collection.findOne({}), db.collection.aggregate([]), or db.collection.countDocuments({}). Write commands are not available to the MongoDB Agent.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The MongoDB shell-style command to execute"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Max rows to return (default 50, max 100)"
+                }
+            },
+            "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: false,
+    }
 }
 
 /// list_tables tool definition.
@@ -620,6 +645,10 @@ async fn execute_execute_query(
         .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
         .unwrap_or(EXECUTE_QUERY_LIMIT);
 
+    if *db_type == DatabaseType::MongoDb {
+        return execute_mongo_query(state, connection_id, database, sql, limit.max(1)).await;
+    }
+
     // Classify SQL risk using the concrete database dialect.
     let risk = crate::sql_risk::classify_sql_risk_for_database(sql, *db_type)?;
     let connection_config = state.configs.read().await.get(connection_id).cloned();
@@ -677,12 +706,38 @@ async fn execute_execute_query(
     format_query_result_as_text(&result, limit)
 }
 
+async fn execute_mongo_query(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    source: &str,
+    limit: usize,
+) -> Result<String, String> {
+    let command = crate::mongo_shell::parse(source).map_err(|error| {
+        format!(
+            "{error} Use MongoDB shell-style commands such as db.collection.find({{}}), db.collection.findOne({{}}), or db.collection.aggregate([])."
+        )
+    })?;
+    if command.is_mutating() {
+        return Err(
+            "Blocked: MongoDB Agent queries are read-only. Return the command for the user to review and execute manually in DBX."
+                .to_string(),
+        );
+    }
+
+    let result = crate::mongo_ops::execute_mongo_command_core(state, connection_id, database, &command, limit).await?;
+    format_query_result_as_text(&result, limit)
+}
+
 /// Format a QueryResult as a Markdown table for LLM consumption.
 fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<String, String> {
     // A result without columns is a command result, not an empty result set.
     // This is how drivers represent DML that does not use RETURNING.
     if result.columns.is_empty() {
-        return Ok(format!("Query executed. {} row(s) affected.", result.affected_rows));
+        return Ok(append_server_messages(
+            format!("Query executed. {} row(s) affected.", result.affected_rows),
+            &result.messages,
+        ));
     }
 
     let mut lines = Vec::new();
@@ -722,7 +777,20 @@ fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<Str
     // Stats line
     lines.push(format!("({} rows, {}ms)", result.rows.len(), result.execution_time_ms));
 
-    Ok(lines.join("\n"))
+    Ok(append_server_messages(lines.join("\n"), &result.messages))
+}
+
+/// Append server messages in the same style as the MCP `format_query_result`
+/// renderer: a `Server messages:` section with `- SEVERITY: message` lines.
+fn append_server_messages(mut output: String, messages: &[QueryMessage]) -> String {
+    if messages.is_empty() {
+        return output;
+    }
+    output.push_str("\n\nServer messages:");
+    for message in messages {
+        output.push_str(&format!("\n- {}", message.format_line()));
+    }
+    output
 }
 
 /// Get sample data from a table via the get_sample_data tool.
@@ -1099,6 +1167,7 @@ for line in sys.stdin:
     #[cfg(unix)]
     fn agent_test_connection(id: &str, name: &str, db_type: DatabaseType, database: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: name.to_string(),
             note: String::new(),
@@ -1174,6 +1243,94 @@ for line in sys.stdin:
         assert!(names.contains(&"get_current_time"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_registers_shell_query_tool_and_routes_find_one_as_read_only() {
+        let tools = all_tools(DatabaseType::MongoDb, AgentSqlPermissions::default());
+        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        assert!(names.contains(&"execute_query"));
+        assert!(!names.contains(&"get_sample_data"));
+        assert!(!names.contains(&"explain_query"));
+        let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(execute_query.description.contains("MongoDB shell command"));
+        assert!(!execute_query.description.contains("SQL query"));
+        assert!(execute_query.description.contains("read-only"));
+
+        let confirmed_tools = all_tools(
+            DatabaseType::MongoDb,
+            AgentSqlPermissions {
+                allow_writes: true,
+                allow_dangerous: true,
+                confirmed_write_sql: Some("db.items.insertOne({name: 'test'})".to_string()),
+            },
+        );
+        let confirmed_execute_query = confirmed_tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(confirmed_execute_query.description.contains("read-only"));
+        assert!(!confirmed_execute_query.description.contains("confirmed write"));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "mongo-find-one".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "db.BenchmarkIndex_approved.findOne({})" }),
+            provider_payload: None,
+        };
+
+        let result = execute_tool(
+            &call,
+            &state,
+            "mongo-1",
+            "benchmark",
+            None,
+            &DatabaseType::MongoDb,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(!result.content.contains("Blocked:"), "{}", result.content);
+        assert!(result.content.contains("Connection") || result.content.contains("connection"), "{}", result.content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_keeps_all_writes_blocked_after_sql_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let permissions = AgentSqlPermissions {
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("SQL confirmation does not grant MongoDB writes".to_string()),
+        };
+
+        for (index, source) in [
+            "db.items.insertOne({name: 'test'})",
+            "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
+            "db.items.deleteMany({tenant: 7})",
+            "db.items.createIndex({tenant: 1})",
+            r#"db.items.aggregate([{"$out":"items_backup"}])"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = ToolCall {
+                id: format!("mongo-write-{index}"),
+                name: "execute_query".to_string(),
+                arguments: json!({ "sql": source }),
+                provider_payload: None,
+            };
+            let result =
+                execute_tool(&call, &state, "mongo-1", "benchmark", None, &DatabaseType::MongoDb, permissions.clone())
+                    .await;
+
+            assert!(result.is_error, "{source}: {}", result.content);
+            assert!(result.content.contains("read-only"), "{source}: {}", result.content);
+        }
+    }
+
     #[test]
     fn confirmed_sql_permissions_update_execute_query_contract() {
         let tools = all_tools(
@@ -1222,6 +1379,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }
     }
 
@@ -1249,6 +1407,44 @@ for line in sys.stdin:
         assert_eq!(
             format_query_result_as_text(&result, 50).unwrap(),
             "| id | name |\n|---|---|\n| 5 | returning |\n(1 rows, 1ms)"
+        );
+    }
+
+    #[test]
+    fn query_result_formatter_appends_server_messages() {
+        let mut dml = query_result(vec![], vec![], 2);
+        dml.messages = vec![
+            QueryMessage {
+                severity: "notice".to_string(),
+                message: "hello world".to_string(),
+                code: Some("00000".to_string()),
+                detail: None,
+                hint: Some("use a table".to_string()),
+            },
+            QueryMessage {
+                severity: "WARNING".to_string(),
+                message: "careful".to_string(),
+                code: None,
+                detail: None,
+                hint: None,
+            },
+        ];
+        assert_eq!(
+            format_query_result_as_text(&dml, 50).unwrap(),
+            "Query executed. 2 row(s) affected.\n\nServer messages:\n- NOTICE: hello world (code: 00000, hint: use a table)\n- WARNING: careful"
+        );
+
+        let mut result = query_result(vec!["id"], vec![vec![serde_json::json!(1)]], 0);
+        result.messages = vec![QueryMessage {
+            severity: "INFO".to_string(),
+            message: "print output".to_string(),
+            code: None,
+            detail: None,
+            hint: None,
+        }];
+        assert_eq!(
+            format_query_result_as_text(&result, 50).unwrap(),
+            "| id |\n|---|\n| 1 |\n(1 rows, 1ms)\n\nServer messages:\n- INFO: print output"
         );
     }
 

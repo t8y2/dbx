@@ -141,7 +141,36 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     );
   });
 
-  const selectedCellCount = computed(() => selectedCells.value.rows.reduce((count, row) => count + row.length, 0));
+  // 选区计数/是否有选区不走 selectedCells 物化：框选拖拽时每帧都会读这些值
+  const selectedCellCount = computed(() => {
+    if (hasColumnSelection.value) {
+      const colCount = selectedColumnIndexes.value.size;
+      if (colCount === 0) return 0;
+      let rows = 0;
+      for (const item of displayItems.value) {
+        if (!item.isDraft) rows += 1;
+      }
+      return rows * colCount;
+    }
+    if (selectedCellKeys.value.size > 0) {
+      let count = 0;
+      for (const key of selectedCellKeys.value) {
+        const position = parseCellKey(key);
+        if (position && !displayItems.value[position.rowIndex]?.isDraft) count += 1;
+      }
+      return count;
+    }
+    const range = selectedRange.value;
+    if (!range) return 0;
+    const colCount = range.endCol - range.startCol + 1;
+    let rows = 0;
+    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+      if (!displayItems.value[rowIndex]?.isDraft) rows += 1;
+    }
+    return rows * colCount;
+  });
+
+  // hasCellSelection 跟随计数语义：仅选中草稿行/草稿单元格时视为无选区
   const hasCellSelection = computed(() => selectedCellCount.value > 0);
 
   function clearCellSelection() {
@@ -461,6 +490,8 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function extendCellSelection(rowIndex: number, colIndex: number) {
     if (!isSelectingCells.value || !selectionAnchor.value) return;
+    const current = selectionFocus.value;
+    if (current?.rowIndex === rowIndex && current?.colIndex === colIndex) return;
     selectionFocus.value = { rowIndex, colIndex };
   }
 

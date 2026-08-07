@@ -638,6 +638,7 @@ mod tests {
 
     fn config() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "conn".to_string(),
             name: "test".to_string(),
             note: String::new(),

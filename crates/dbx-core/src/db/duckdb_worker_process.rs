@@ -195,6 +195,17 @@ impl DuckDbWorkerClient {
         cancel_token: Option<CancellationToken>,
         query_timeout: Option<Duration>,
     ) -> Result<db::QueryResult, String> {
+        self.execute_typed(database, sql, max_rows, cancel_token, query_timeout).await.map_err(|error| error.message)
+    }
+
+    pub async fn execute_typed(
+        &self,
+        database: Option<String>,
+        sql: String,
+        max_rows: Option<usize>,
+        cancel_token: Option<CancellationToken>,
+        query_timeout: Option<Duration>,
+    ) -> Result<db::QueryResult, DuckDbWorkerError> {
         let _query_guard = self.inner.query_lock.lock().await;
         let client = self.clone();
         // Cancellation and timeout restart the worker via cancel_or_kill below. An ordinary
@@ -206,7 +217,10 @@ impl DuckDbWorkerClient {
         // than letting the worker self-exit) avoids racing our own next request against a dying
         // worker, and OS-level kill never runs the destructor that would abort the process.
         let future = async move {
-            client.ensure_connected().await?;
+            client
+                .ensure_connected()
+                .await
+                .map_err(|message| DuckDbWorkerError::new("duckdb_worker_connect_failed", message))?;
             match client
                 .send_request_structured::<db::QueryResult>(
                     DuckDbWorkerMethod::Execute,
@@ -220,7 +234,7 @@ impl DuckDbWorkerClient {
                     if error.code == DUCKDB_WORKER_POISONED_CODE {
                         client.kill().await;
                     }
-                    Err(error.message)
+                    Err(error)
                 }
             }
         };
@@ -252,9 +266,9 @@ impl DuckDbWorkerClient {
         }
     }
 
-    async fn cancel_or_kill(&self, final_error: String) -> Result<db::QueryResult, String> {
+    async fn cancel_or_kill(&self, final_error: String) -> Result<db::QueryResult, DuckDbWorkerError> {
         let _ = self.cancel().await;
-        Err(final_error)
+        Err(DuckDbWorkerError::from(final_error))
     }
 
     pub async fn list_databases(&self) -> Result<Vec<db::DatabaseInfo>, String> {

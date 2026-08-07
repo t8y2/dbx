@@ -183,8 +183,10 @@ import type {
   NacosConnectionInfo,
   NacosRNacosConsoleCaptcha,
   NacosInstanceInfo,
+  NacosInstanceRef,
+  NacosInstanceRegistration,
   NacosInstanceQuery,
-  NacosInstanceUpdate,
+  NacosInstanceUpdateRequest,
   NacosDashboardQuery,
   NacosDashboardSnapshot,
   NacosNamespaceCreate,
@@ -193,11 +195,14 @@ import type {
   NacosRawRequest,
   NacosRawResponse,
   NacosServiceList,
+  NacosServiceDetail,
   NacosServiceQuery,
+  NacosServiceUpsert,
   NacosSearchProgress,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
+import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -251,7 +256,7 @@ async function put<T>(url: string, body: unknown): Promise<T> {
   return res.json();
 }
 
-async function backendResponseError(response: Response): Promise<BackendErrorException> {
+export async function backendResponseError(response: Response): Promise<BackendErrorException> {
   const text = await response.text();
   let payload: unknown = text;
   try {
@@ -287,7 +292,7 @@ export async function testConnectionWithInfo(config: ConnectionConfig): Promise<
   if (response.status === 404) {
     return normalizeConnectionTestResult(await testConnection(config), config);
   }
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   return normalizeConnectionTestResult(await response.json(), config);
 }
 
@@ -406,7 +411,7 @@ export async function importJdbcDrivers(pathsOrFiles: (string | File)[]): Promis
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
@@ -455,7 +460,7 @@ export async function installJdbcPluginLocal(pathOrFile: string | File): Promise
     method: "POST",
     body: formData,
   });
-  if (!uploadRes.ok) throw new Error(await uploadRes.text());
+  if (!uploadRes.ok) throw await backendResponseError(uploadRes);
   return uploadRes.json();
 }
 
@@ -534,7 +539,7 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   const result: { count: number } = await res.json();
   return result.count;
 }
@@ -556,7 +561,7 @@ export async function importAgentDriver(dbType: string, pathOrFile: string | Fil
     method: "POST",
     body: formData,
   });
-  if (!uploadRes.ok) throw new Error(await uploadRes.text());
+  if (!uploadRes.ok) throw await backendResponseError(uploadRes);
 }
 
 export const importAgentJar = importAgentDriver;
@@ -833,6 +838,26 @@ export async function listAvailableExtensions(connectionId: string, database: st
 
 export async function listDialectDataTypes(dialectName: string): Promise<string[]> {
   return get(`/api/dialect/data-types?${qs({ dialect_name: dialectName })}`);
+}
+
+// ---------------------------------------------------------------------------
+// Docs
+// ---------------------------------------------------------------------------
+
+export async function collectDocsSnapshot(connectionId: string, database: string, schemas: string[], tables: string[], projectName?: string): Promise<SchemaSnapshot> {
+  return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
+  return post("/api/docs/annotations/load", { connectionId });
+}
+
+export async function applyDocsAnnotations(connectionId: string, snapshot: SchemaSnapshot, annotations: AnnotationFile): Promise<SchemaSnapshot> {
+  return post("/api/docs/annotations/apply", { connectionId, snapshot, annotations });
+}
+
+export async function saveDocsAnnotations(connectionId: string, annotations: AnnotationFile): Promise<void> {
+  return post("/api/docs/annotations/save", { connectionId, annotations });
 }
 
 // ---------------------------------------------------------------------------
@@ -1293,7 +1318,7 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
@@ -1389,7 +1414,7 @@ export async function aiAgentStream(
     }),
     signal,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
@@ -1492,7 +1517,7 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(policy),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 }
 
 export async function loadMaxAgentTurns(): Promise<number> {
@@ -1505,7 +1530,7 @@ export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ maxAgentTurns }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 }
 
 export async function loadMaxRetries(): Promise<number> {
@@ -1518,7 +1543,7 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ maxRetries }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 }
 
 export interface OpenTabsStatePayload {
@@ -1820,7 +1845,7 @@ export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFile
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
@@ -1860,11 +1885,19 @@ export async function readExternalSqlFile(_path: string): Promise<string> {
   throw new Error("Opening external SQL file paths is only available in the desktop app");
 }
 
-export async function writeExternalSqlFile(_path: string, _content: string): Promise<void> {
+export async function readExternalSqlFileSnapshot(_path: string): Promise<import("@/lib/backend/tauri").ExternalSqlFileSnapshot> {
+  throw new Error("Opening external SQL file paths is only available in the desktop app");
+}
+
+export async function inspectExternalSqlFile(_path: string): Promise<import("@/lib/backend/tauri").ExternalSqlFileStatus> {
+  throw new Error("Inspecting external SQL file paths is only available in the desktop app");
+}
+
+export async function writeExternalSqlFile(_path: string, _content: string, _options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<import("@/lib/backend/tauri").ExternalSqlFileWriteResult> {
   throw new Error("Saving external SQL file paths is only available in the desktop app");
 }
 
-export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<string | null> {
+export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<{ path: string; version: import("@/types/database").ExternalSqlFileVersion } | null> {
   throw new Error("Saving SQL files locally is only available in the desktop app");
 }
 
@@ -1890,7 +1923,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -1952,7 +1985,7 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
         previewLimit: options.previewLimit,
       }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw await backendResponseError(res);
     return res.json();
   }
   const formData = new FormData();
@@ -1964,7 +1997,7 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 
@@ -1975,7 +2008,7 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -2029,7 +2062,7 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -2375,6 +2408,14 @@ export async function redisHashDel(connectionId: string, db: number, keyRaw: str
   return post("/api/redis/hash-del", { connectionId, db, keyRaw, field });
 }
 
+export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {
+  return post("/api/redis/hash-field-set-ttl", { connectionId, db, keyRaw, field, ttl });
+}
+
+export async function redisHashFieldSetExpireAt(connectionId: string, db: number, keyRaw: string, field: string, expireAt: number): Promise<void> {
+  return post("/api/redis/hash-field-set-expire-at", { connectionId, db, keyRaw, field, expireAt });
+}
+
 export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
   return post("/api/redis/list-push", { connectionId, db, keyRaw, value, ttl });
 }
@@ -2691,7 +2732,7 @@ export async function nacosSearchConfigContent(connectionId: string, req: NacosC
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ connectionId, req }),
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   if (!response.body) throw new Error("Nacos content search did not return a response stream");
 
   const reader = response.body.getReader();
@@ -2738,7 +2779,7 @@ export async function nacosExportConfigs(connectionId: string, selector: NacosCo
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ connectionId, selector, fileName }),
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -2758,7 +2799,7 @@ export async function nacosPreviewConfigImport(connectionId: string, targetNames
     method: "POST",
     body: formData,
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await backendResponseError(response);
   return response.json();
 }
 
@@ -2806,12 +2847,36 @@ export async function nacosListServices(connectionId: string, query: NacosServic
   return post("/api/nacos/services/list", { connectionId, query });
 }
 
+export async function nacosGetService(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceDetail> {
+  return post("/api/nacos/services/get", { connectionId, query });
+}
+
+export async function nacosCreateService(connectionId: string, req: NacosServiceUpsert): Promise<void> {
+  return post("/api/nacos/services/create", { connectionId, req });
+}
+
+export async function nacosUpdateService(connectionId: string, req: NacosServiceUpsert): Promise<void> {
+  return post("/api/nacos/services/update", { connectionId, req });
+}
+
+export async function nacosDeleteService(connectionId: string, query: NacosServiceQuery): Promise<void> {
+  return post("/api/nacos/services/delete", { connectionId, query });
+}
+
 export async function nacosListInstances(connectionId: string, query: NacosInstanceQuery): Promise<NacosInstanceInfo[]> {
   return post("/api/nacos/instances/list", { connectionId, query });
 }
 
-export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdate): Promise<void> {
+export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdateRequest): Promise<void> {
   return post("/api/nacos/instances/update", { connectionId, req });
+}
+
+export async function nacosRegisterInstance(connectionId: string, req: NacosInstanceRegistration): Promise<void> {
+  return post("/api/nacos/instances/register", { connectionId, req });
+}
+
+export async function nacosDeregisterInstance(connectionId: string, req: NacosInstanceRef): Promise<void> {
+  return post("/api/nacos/instances/deregister", { connectionId, req });
 }
 
 export async function nacosGetDashboard(connectionId: string, query: NacosDashboardQuery): Promise<NacosDashboardSnapshot> {
@@ -3039,7 +3104,7 @@ export async function documentDownloadGridFsFile(connectionId: string, database:
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ connectionId, database, bucket, fileId }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   const data = (await res.json()) as number[];
   return new Uint8Array(data);
 }
@@ -3058,7 +3123,7 @@ export async function documentUploadGridFsFile(connectionId: string, database: s
     method: "POST",
     body,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await backendResponseError(res);
   return res.json();
 }
 

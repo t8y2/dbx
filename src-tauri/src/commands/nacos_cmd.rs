@@ -130,6 +130,42 @@ pub async fn nacos_list_services(
 }
 
 #[tauri::command]
+pub async fn nacos_get_service(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    query: dbx_core::nacos::NacosServiceQuery,
+) -> Result<dbx_core::nacos::NacosServiceDetail, String> {
+    dbx_core::nacos::service::nacos_get_service_core(&state, &connection_id, query).await
+}
+
+#[tauri::command]
+pub async fn nacos_create_service(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosServiceUpsert,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_create_service_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_update_service(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosServiceUpsert,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_update_service_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_delete_service(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    query: dbx_core::nacos::NacosServiceQuery,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_delete_service_core(&state, &connection_id, query).await
+}
+
+#[tauri::command]
 pub async fn nacos_list_instances(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -142,9 +178,27 @@ pub async fn nacos_list_instances(
 pub async fn nacos_update_instance(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    req: dbx_core::nacos::NacosInstanceUpdate,
+    req: dbx_core::nacos::NacosInstanceUpdateRequest,
 ) -> Result<(), String> {
     dbx_core::nacos::service::nacos_update_instance_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_register_instance(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosInstanceRegistration,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_register_instance_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_deregister_instance(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosInstanceRef,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_deregister_instance_core(&state, &connection_id, req).await
 }
 
 #[tauri::command]

@@ -134,6 +134,31 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void fallsBackImmediatelyWhenAllObjectsContainsInvalidDatetimeMetadata() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> jdbcMetadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            sqls,
+            jdbcMetadataCalls,
+            List.of(
+                List.of("VIEW_B", "VIEW", "view comment"),
+                List.of("TABLE_A", "TABLE", "table comment"),
+                List.of("MTAB$_INTERNAL", "TABLE", "internal table")
+            ),
+            null,
+            new SQLException("非法的时间日期类型数据", "22015", -6118)
+        ));
+        MetadataListConstraints constraints = new MetadataListConstraints(null, 20, null, List.of("TABLE"));
+
+        List<TableInfo> tables = agent.listTables("APP", constraints);
+
+        Assertions.assertEquals(List.of("TABLE_A"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(1, sqls.size(), String.join("\n", sqls));
+        Assertions.assertEquals(List.of("catalog=null,schema=APP,table=%,types=null"), jdbcMetadataCalls);
+    }
+
+    @Test
     void returnsEmptyWhenRestrictedSchemaJdbcMetadataHasNoTables() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, restrictedTableConnection(
@@ -1055,6 +1080,22 @@ class DamengAgentMetadataTest {
         SQLException jdbcMetadataError,
         String catalogError
     ) {
+        return restrictedTableConnection(
+            sqls,
+            jdbcMetadataCalls,
+            rows,
+            jdbcMetadataError,
+            new SQLException(catalogError)
+        );
+    }
+
+    private static Connection restrictedTableConnection(
+        List<String> sqls,
+        List<String> jdbcMetadataCalls,
+        List<List<Object>> rows,
+        SQLException jdbcMetadataError,
+        SQLException catalogError
+    ) {
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
             if ("prepareStatement".equals(name)) {
@@ -1165,9 +1206,13 @@ class DamengAgentMetadataTest {
     }
 
     private static PreparedStatement failingMetadataStatement(String message) {
+        return failingMetadataStatement(new SQLException(message));
+    }
+
+    private static PreparedStatement failingMetadataStatement(SQLException error) {
         return proxy(PreparedStatement.class, (method, args) -> {
             if ("executeQuery".equals(method.getName())) {
-                throw new SQLException(message);
+                throw error;
             }
             if ("close".equals(method.getName())) {
                 return null;

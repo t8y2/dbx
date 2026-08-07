@@ -236,6 +236,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "influxdb":
       return "influxdb://user:password@host:port/database";
 
+    case "victoriametrics":
+      return "http://user:password@host:port/prometheus";
+
     case "jdbc":
       return "jdbc:mysql://host:3306/database";
 

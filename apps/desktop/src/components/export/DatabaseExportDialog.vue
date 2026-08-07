@@ -10,9 +10,9 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import * as api from "@/lib/backend/api";
 import type { ExportProgress } from "@/lib/backend/api";
-import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
+import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
@@ -125,6 +125,13 @@ function connectionIconType(connId: string) {
   return config?.driver_profile || config?.db_type || "mysql";
 }
 
+// 当前连接是否为单数据库架构（达梦、Oracle 等），这类数据库的"源数据库"与"Schema"没有层级关系
+const isSingleDb = computed(() => {
+  if (!connectionId.value) return false;
+  const config = store.getConfig(connectionId.value);
+  return isSingleDatabase(config?.db_type);
+});
+
 function sanitizeFileName(value: string): string {
   return (value || "database").replace(/[\\/:*?"<>|]+/g, "_").trim() || "database";
 }
@@ -139,18 +146,37 @@ async function loadDatabases(connId: string) {
   loadingMeta.value = true;
   try {
     await store.ensureConnected(connId);
-    const dbs = await api.listDatabases(connId);
-    const names = databaseOptionsForConnection(
-      dbs.map((d) => d.name),
-      store.getConfig(connId),
-    );
+    const config = store.getConfig(connId);
+    let names: string[];
+    if (config?.db_type === "dameng") {
+      // 达梦的"数据库"概念对应 schema，使用 fetchNamespaceOptionsForConnection
+      // 内部已正确处理达梦：通过 listSchemas 获取 schema 列表而非用户列表
+      names = await fetchNamespaceOptionsForConnection(connId, config);
+    } else {
+      const dbs = await api.listDatabases(connId);
+      names = databaseOptionsForConnection(
+        dbs.map((d) => d.name),
+        config,
+      );
+    }
     databases.value = names;
-    database.value = names.length === 1 ? names[0] : "";
     selectedDatabases.value = exportAllDatabases.value ? [...names] : [];
-    schemas.value = [];
-    schema.value = "";
     tables.value = [];
     selectedTables.value = [];
+
+    // 单数据库架构下（达梦、Oracle 等），databases 实际是 schema 列表，
+    // 直接作为 schemas 使用，并将 database 初始值设为第一个 schema
+    // 这样做的原因是：单数据库架构中"源数据库"与"Schema"没有层级关系，
+    // 所有 schema 都在同一个数据库实例中，因此 schema 同时作为 database 参数
+    if (config?.db_type && isSingleDatabase(config.db_type)) {
+      schemas.value = names;
+      schema.value = names.length === 1 ? names[0] : "";
+      database.value = schema.value;
+    } else {
+      database.value = names.length === 1 ? names[0] : "";
+      schemas.value = [];
+      schema.value = "";
+    }
   } catch {
     databases.value = [];
   } finally {
@@ -236,14 +262,15 @@ function clearSelectedDatabases() {
 
 async function buildExportPlanForDatabases(dbs: string[]): Promise<AllDatabaseExportPlanItem[]> {
   const config = store.getConfig(connectionId.value);
-  const schemaAware = isSchemaAware(config?.db_type);
+  const dbType = config?.db_type;
+  const schemaAware = isSchemaAware(dbType);
   const schemasByDatabase: Record<string, string[]> = {};
   if (schemaAware) {
     for (const db of dbs) {
       schemasByDatabase[db] = await api.listSchemas(connectionId.value, db);
     }
   }
-  return buildAllDatabaseExportPlan({ databases: dbs, schemaAware, schemasByDatabase });
+  return buildAllDatabaseExportPlan({ databases: dbs, schemaAware, schemasByDatabase, dbType });
 }
 
 async function startExport() {
@@ -304,7 +331,7 @@ async function startExport() {
       {
         connectionId: connectionId.value,
         database: database.value,
-        enabled: includeData.value && (connectionType === "mysql" || connectionType === "postgres"),
+        enabled: shouldUseDatabaseBackupSnapshot(connectionType, includeData.value, isTauriRuntime()),
       },
       async (snapshotSessionId) => {
         const request: api.DatabaseExportRequest = {
@@ -323,7 +350,7 @@ async function startExport() {
           snapshotSessionId,
           batchSize: 1000,
         };
-        await api.exportDatabaseSql(request, (progress) => {
+        return runDatabaseExportUntilTerminal(request, (progress) => {
           exportProgress.value = { ...progress };
           updateDatabaseExportTask(progress.exportId, progress);
           if (progress.status === "Done") {
@@ -342,7 +369,7 @@ async function startExport() {
           }
         });
       },
-      () => !exportError.value && !exportCancelled.value,
+      (terminal) => terminal.status === "Done",
     );
   } catch (e: any) {
     exportError.value = e?.message || String(e);
@@ -438,7 +465,7 @@ async function startAllDatabasesExport() {
         {
           connectionId: connectionId.value,
           database: item.database,
-          enabled: includeData.value && (connectionType === "mysql" || connectionType === "postgres"),
+          enabled: shouldUseDatabaseBackupSnapshot(connectionType, includeData.value, isTauriRuntime()),
         },
         (snapshotSessionId) =>
           runDatabaseExportUntilTerminal(
@@ -635,6 +662,8 @@ watch(connectionId, (id) => {
 
 watch(database, (db) => {
   if (exportAllDatabases.value) return;
+  // 单数据库架构下，"源数据库"由 schema 驱动，跳过此处的 schema 重新加载
+  if (isSingleDb.value) return;
   schema.value = "";
   schemas.value = [];
   tables.value = [];
@@ -645,6 +674,10 @@ watch(database, (db) => {
 
 watch(schema, (value) => {
   if (exportAllDatabases.value) return;
+  // 单数据库架构下，schema 即 database，同步 database 值
+  if (isSingleDb.value) {
+    database.value = value;
+  }
   tables.value = [];
   selectedTables.value = [];
   tableError.value = null;
@@ -742,7 +775,7 @@ watch(
             </div>
           </div>
 
-          <div v-else-if="databases.length" class="space-y-1.5">
+          <div v-else-if="databases.length && !isSingleDb" class="space-y-1.5">
             <Label class="text-xs">{{ t("transfer.sourceDatabase") }}</Label>
             <Select :model-value="database" @update:model-value="(v: any) => (database = String(v))">
               <SelectTrigger class="h-8 text-xs">

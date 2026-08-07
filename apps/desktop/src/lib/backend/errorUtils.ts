@@ -9,13 +9,21 @@ export interface BackendError {
   code: string;
   messageKey: string;
   messageParams: Record<string, BackendErrorParam>;
-  source: "jdbcAgent" | "jdbcAgentLegacy" | "legacyBackend";
+  /** Compatibility provenance. New callers should prefer origin metadata. */
+  source: string;
   operationOutcome: "not_started" | "unknown";
+  origin?: {
+    subsystem: string;
+    adapter: string;
+    driver?: string;
+  };
   detail?: string;
   diagnostics?: Record<string, unknown>;
   helpUrl?: string;
 }
 
+const MAX_FALLBACK_CHARS = 64 * 1024;
+const MAX_ERROR_PARSE_DEPTH = 16;
 const AGENT_RPC_ERROR_DATA_MARKER = "\nDBX_AGENT_ERROR_DATA:";
 
 export function sanitizeBackendErrorMessage(message: string): string {
@@ -45,25 +53,75 @@ function isBackendError(value: unknown): value is BackendError {
     !candidate.messageParams ||
     typeof candidate.messageParams !== "object" ||
     Array.isArray(candidate.messageParams) ||
-    !["jdbcAgent", "jdbcAgentLegacy", "legacyBackend"].includes(String(candidate.source)) ||
+    typeof candidate.source !== "string" ||
+    candidate.source.length === 0 ||
+    candidate.source.length > 64 ||
     !["not_started", "unknown"].includes(String(candidate.operationOutcome))
   ) {
     return false;
+  }
+  if (candidate.origin !== undefined) {
+    const origin = candidate.origin;
+    const originRecord = origin as Record<string, unknown>;
+    if (
+      !origin ||
+      typeof origin !== "object" ||
+      Array.isArray(origin) ||
+      typeof originRecord.subsystem !== "string" ||
+      typeof originRecord.adapter !== "string" ||
+      originRecord.subsystem.length > 64 ||
+      originRecord.adapter.length > 64 ||
+      (originRecord.driver !== undefined && (typeof originRecord.driver !== "string" || originRecord.driver.length > 64))
+    ) {
+      return false;
+    }
   }
   if (candidate.detail !== undefined && typeof candidate.detail !== "string") return false;
   return Object.values(candidate.messageParams).every((param) => typeof param === "string" || typeof param === "boolean" || (typeof param === "number" && Number.isFinite(param)));
 }
 
 export function normalizeBackendError(error: unknown): BackendError | null {
-  if (error instanceof BackendErrorException) return error.backendError;
+  return normalizeBackendErrorAtDepth(error, new WeakSet<object>(), 0);
+}
+
+function normalizeBackendErrorAtDepth(error: unknown, seen: WeakSet<object>, depth: number): BackendError | null {
+  if (depth > MAX_ERROR_PARSE_DEPTH) return null;
+
+  if (error && typeof error === "object") {
+    if (seen.has(error)) return null;
+    seen.add(error);
+
+    if ("name" in error && error.name === "BackendErrorException" && "backendError" in error) {
+      const normalized = normalizeBackendErrorAtDepth((error as { backendError: unknown }).backendError, seen, depth + 1);
+      if (normalized) return normalized;
+    }
+  }
+  if (typeof error === "string") {
+    try {
+      return normalizeBackendErrorAtDepth(JSON.parse(error), seen, depth + 1);
+    } catch {
+      return null;
+    }
+  }
   if (isBackendError(error)) return error;
   if (error && typeof error === "object" && "backendError" in error) {
     const backendError = (error as { backendError: unknown }).backendError;
-    if (isBackendError(backendError)) return backendError;
+    const normalized = normalizeBackendErrorAtDepth(backendError, seen, depth + 1);
+    if (normalized) return normalized;
   }
   if (error && typeof error === "object" && "error" in error) {
     const nested = (error as { error: unknown }).error;
-    if (isBackendError(nested)) return nested;
+    const normalized = normalizeBackendErrorAtDepth(nested, seen, depth + 1);
+    if (normalized) return normalized;
+  }
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+    try {
+      const parsed: unknown = JSON.parse(error.message);
+      const normalized = normalizeBackendErrorAtDepth(parsed, seen, depth + 1);
+      if (normalized) return normalized;
+    } catch {
+      // Keep checking compatibility wrappers before falling back to plain text.
+    }
   }
   return null;
 }
@@ -73,7 +131,8 @@ export class BackendErrorException extends Error {
 
   constructor(error: unknown) {
     const backendError = normalizeRawBackendError(error);
-    const fallbackMessage = sanitizeBackendErrorMessage(typeof error === "string" ? error : error instanceof Error ? error.message : "Backend request failed");
+    const fallbackDetail = boundedFallbackText(error);
+    const fallbackMessage = sanitizeBackendErrorMessage(fallbackDetail ?? "Backend request failed");
     super(backendError?.detail ? sanitizeBackendErrorMessage(backendError.detail) : fallbackMessage);
     this.name = "BackendErrorException";
     this.backendError = backendError ?? {
@@ -83,21 +142,44 @@ export class BackendErrorException extends Error {
       messageParams: {},
       source: "legacyBackend",
       operationOutcome: "unknown",
-      detail: fallbackMessage,
+      origin: { subsystem: "backend", adapter: "legacy" },
+      ...(fallbackDetail ? { detail: sanitizeBackendErrorMessage(fallbackDetail) } : {}),
     };
   }
 }
 
 function normalizeRawBackendError(error: unknown): BackendError | null {
-  if (typeof error === "string") {
-    try {
-      const parsed: unknown = JSON.parse(error);
-      return normalizeBackendError(parsed);
-    } catch {
-      return null;
-    }
-  }
   return normalizeBackendError(error);
+}
+
+function boundedFallbackText(error: unknown): string | undefined {
+  return boundedFallbackTextAtDepth(error, new WeakSet<object>(), 0);
+}
+
+function boundedFallbackTextAtDepth(error: unknown, seen: WeakSet<object>, depth: number): string | undefined {
+  if (depth > MAX_ERROR_PARSE_DEPTH) return undefined;
+
+  let text: string | undefined;
+  if (typeof error === "string") {
+    text = error;
+  } else if (error instanceof Error) {
+    text = error.message;
+  } else if (error && typeof error === "object") {
+    if (seen.has(error)) return undefined;
+    seen.add(error);
+    const candidate = error as Record<string, unknown>;
+    for (const key of ["message", "reason", "detail"]) {
+      if (typeof candidate[key] === "string") {
+        text = candidate[key];
+        break;
+      }
+    }
+    if (!text && "error" in candidate) text = boundedFallbackTextAtDepth(candidate.error, seen, depth + 1);
+    if (!text && "backendError" in candidate) text = boundedFallbackTextAtDepth(candidate.backendError, seen, depth + 1);
+  }
+  const normalized = text?.trim();
+  if (!normalized) return undefined;
+  return Array.from(normalized).slice(0, MAX_FALLBACK_CHARS).join("");
 }
 
 /**
@@ -117,6 +199,7 @@ function normalizeRawBackendError(error: unknown): BackendError | null {
 export function formatError(e: unknown): string {
   const backendError = normalizeBackendError(e);
   if (backendError?.detail) return sanitizeBackendErrorMessage(backendError.detail);
+  if (backendError) return backendError.code;
 
   if (e instanceof Error) {
     return sanitizeBackendErrorMessage(e.message);

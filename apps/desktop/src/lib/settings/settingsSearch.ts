@@ -168,6 +168,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-page-size", category: "data", titleKey: "settings.tableOpenPageSize", descriptionKey: "settings.tableOpenPageSizeDescription", targetId: "data" },
   { id: "appearance-header-comments", category: "appearance", titleKey: "settings.showColumnCommentsInHeader", descriptionKey: "settings.showColumnCommentsInHeaderDescription", targetId: "appearance" },
   { id: "appearance-header-types", category: "appearance", titleKey: "settings.showColumnTypesInHeader", descriptionKey: "settings.showColumnTypesInHeaderDescription", targetId: "appearance" },
+  { id: "appearance-index-indicators", category: "appearance", titleKey: "settings.showIndexIndicatorsInHeader", descriptionKey: "settings.showIndexIndicatorsInHeaderDescription", targetId: "appearance" },
   { id: "appearance-compact-header-actions", category: "appearance", titleKey: "settings.compactColumnHeaderActions", descriptionKey: "settings.compactColumnHeaderActionsDescription", targetId: "appearance" },
   { id: "appearance-auto-total", category: "appearance", titleKey: "settings.autoCalculateTotalRows", descriptionKey: "settings.autoCalculateTotalRowsDescription", targetId: "appearance" },
   { id: "appearance-infinite-scroll", category: "appearance", titleKey: "settings.infiniteScroll", descriptionKey: "settings.infiniteScrollDescription", targetId: "appearance" },

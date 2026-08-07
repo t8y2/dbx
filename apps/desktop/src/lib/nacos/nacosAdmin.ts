@@ -12,26 +12,26 @@ export interface NacosRawTemplate {
 }
 
 export const NACOS_RAW_TEMPLATES: NacosRawTemplate[] = [
-  { key: "serverState", method: "GET", path: "/v3/console/server/state", query: "", body: "" },
-  { key: "namespaceList", method: "GET", path: "/v3/console/core/namespace/list", query: "", body: "" },
+  { key: "serverState", method: "GET", path: "/v3/admin/core/state", query: "", body: "" },
+  { key: "namespaceList", method: "GET", path: "/v3/admin/core/namespace/list", query: "", body: "" },
   {
     key: "configDetail",
     method: "GET",
-    path: "/v3/console/cs/config",
+    path: "/v3/admin/cs/config",
     query: "dataId=application.yaml&groupName=DEFAULT_GROUP&namespaceId=",
     body: "",
   },
   {
     key: "serviceList",
     method: "GET",
-    path: "/v3/console/ns/service/list",
+    path: "/v3/admin/ns/service/list",
     query: "pageNo=1&pageSize=20&namespaceId=",
     body: "",
   },
   {
     key: "instanceList",
     method: "GET",
-    path: "/v3/console/ns/instance/list",
+    path: "/v3/admin/ns/instance/list",
     query: "serviceName=DEFAULT_GROUP@@example&namespaceId=",
     body: "",
   },
@@ -702,8 +702,12 @@ export function buildNacosInstanceConfirm(service: NacosServiceInfo, instance: N
     `serviceName=${service.serviceName}`,
     `group=${instance.groupName || service.groupName || fallbackGroup || "DEFAULT_GROUP"}`,
     `instance=${instance.ip}:${instance.port}`,
+    `cluster=${instance.clusterName || "DEFAULT"}`,
+    `ephemeral=${instance.ephemeral === true ? "true" : instance.ephemeral === false ? "false" : "unknown"}`,
     patch.enabled == null ? "" : `targetEnabled=${targetEnabled === false ? "false" : "true"}`,
     patch.healthy == null ? "" : `targetHealthy=${targetHealthy === false ? "false" : "true"}`,
+    patch.weight == null ? "" : `targetWeight=${patch.weight}`,
+    patch.metadata == null ? "" : `targetMetadata=${JSON.stringify(patch.metadata)}`,
   ]
     .filter(Boolean)
     .join("\n");

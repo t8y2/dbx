@@ -17,6 +17,7 @@ import com.dbx.agent.QueryResult;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -82,6 +83,26 @@ public final class HiveAgent extends AbstractJdbcAgent {
                 return getColumnsFromDescribe(schema, table);
             } catch (Exception ignored) {
                 return getColumnsFromMetadata(requireConnected(), schema, table);
+            }
+        });
+    }
+
+    @Override
+    public String getTableDdl(String schema, String table) {
+        return unchecked(() -> {
+            String qualifiedName = schema == null || schema.trim().isEmpty()
+                ? JdbcIdentifiers.INSTANCE.backtick(table)
+                : JdbcIdentifiers.INSTANCE.backtick(schema) + "." + JdbcIdentifiers.INSTANCE.backtick(table);
+            try (Statement stmt = requireConnected().createStatement();
+                 ResultSet rs = stmt.executeQuery("SHOW CREATE TABLE " + qualifiedName)) {
+                StringBuilder ddl = new StringBuilder();
+                while (rs.next()) {
+                    String line = rs.getString(1);
+                    if (line != null) {
+                        ddl.append(line).append('\n');
+                    }
+                }
+                return ddl.toString();
             }
         });
     }

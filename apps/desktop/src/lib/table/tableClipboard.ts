@@ -56,7 +56,7 @@ export function tableClipboardMenuState(entries: TableClipboardTableContext[], t
 }
 
 export function supportsWholeRowTableDataCopy(databaseType: DatabaseType | undefined): boolean {
-  return !!databaseType;
+  return !!databaseType && databaseType !== "victoriametrics";
 }
 
 export function defaultPasteTableMode(databaseType: DatabaseType | undefined): PasteTableMode {

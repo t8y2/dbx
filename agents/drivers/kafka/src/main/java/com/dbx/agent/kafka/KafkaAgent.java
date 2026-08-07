@@ -1821,13 +1821,14 @@ public final class KafkaAgent {
         int timeout = requestTimeout(params);
 
         DescribeClusterResult cluster = admin.describeCluster();
+        DescribeMetadataQuorumResult metadataQuorum = admin.describeMetadataQuorum();
         String clusterId = cluster.clusterId().get(timeout, TimeUnit.MILLISECONDS);
-        Node controller = cluster.controller().get(timeout, TimeUnit.MILLISECONDS);
         Collection<Node> nodes = cluster.nodes().get(timeout, TimeUnit.MILLISECONDS);
+        Map<String, Object> controller = resolveClusterController(metadataQuorum, cluster, nodes, timeout);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("clusterId", clusterId);
-        result.put("controller", controller != null ? nodeToMap(controller) : null);
+        result.put("controller", controller);
         List<Map<String, Object>> brokerList = new ArrayList<>();
         for (Node node : nodes) {
             brokerList.add(nodeToMap(node));
@@ -1835,6 +1836,52 @@ public final class KafkaAgent {
         result.put("brokers", brokerList);
         result.put("nodeCount", nodes.size());
         return result;
+    }
+
+    private static Map<String, Object> resolveClusterController(
+        DescribeMetadataQuorumResult metadataQuorum,
+        DescribeClusterResult cluster,
+        Collection<Node> brokers,
+        int timeout
+    ) throws Exception {
+        try {
+            QuorumInfo quorum = metadataQuorum.quorumInfo().get(timeout, TimeUnit.MILLISECONDS);
+            Map<Integer, List<RaftVoterEndpoint>> endpointsByNode = new HashMap<>();
+            for (Map.Entry<Integer, QuorumInfo.Node> entry : quorum.nodes().entrySet()) {
+                endpointsByNode.put(entry.getKey(), entry.getValue().endpoints());
+            }
+            return metadataQuorumControllerToMap(quorum.leaderId(), brokers, endpointsByNode);
+        } catch (Exception e) {
+            if (isUnsupportedVersionError(e)) {
+                Node controller = cluster.controller().get(timeout, TimeUnit.MILLISECONDS);
+                return controller != null ? nodeToMap(controller) : null;
+            }
+            logger().warn("Unable to resolve Kafka metadata quorum leader; omitting the controller", e);
+            return null;
+        }
+    }
+
+    static Map<String, Object> metadataQuorumControllerToMap(
+        int leaderId,
+        Collection<Node> brokers,
+        Map<Integer, List<RaftVoterEndpoint>> endpointsByNode
+    ) {
+        if (leaderId < 0) {
+            return null;
+        }
+        for (Node broker : brokers) {
+            if (broker.id() == leaderId) {
+                return nodeToMap(broker);
+            }
+        }
+        List<RaftVoterEndpoint> endpoints = endpointsByNode.getOrDefault(leaderId, Collections.emptyList());
+        if (!endpoints.isEmpty()) {
+            RaftVoterEndpoint endpoint = endpoints.get(0);
+            return nodeToMap(new Node(leaderId, endpoint.host(), endpoint.port()));
+        }
+        Map<String, Object> controller = new LinkedHashMap<>();
+        controller.put("id", leaderId);
+        return controller;
     }
 
     private static Object getConsumerLag(JsonObject params) throws Exception {

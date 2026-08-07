@@ -141,6 +141,26 @@ pub struct RedisHashRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisHashFieldTtlRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub field: String,
+    pub ttl: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisHashFieldExpireAtRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub field: String,
+    pub expire_at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisZaddRequest {
     pub connection_id: String,
     pub db: u32,
@@ -492,6 +512,42 @@ pub async fn hash_del(
     dbx_core::redis_ops::redis_hash_del_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw, &req.field)
         .await
         .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn hash_field_set_ttl(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisHashFieldTtlRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "HEXPIRE").await?;
+    dbx_core::redis_ops::redis_hash_field_set_ttl_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.field,
+        req.ttl,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn hash_field_set_expire_at(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisHashFieldExpireAtRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "HEXPIREAT").await?;
+    dbx_core::redis_ops::redis_hash_field_set_expire_at_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.field,
+        req.expire_at,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(()))
 }
 

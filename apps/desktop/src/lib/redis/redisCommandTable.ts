@@ -166,6 +166,8 @@ const RAW_COMMANDS: Record<string, Spec> = {
 
   // ---- Hash ----
   HDEL: [-3, "hash", "confirm"],
+  HEXPIRE: [-6, "hash", "confirm"],
+  HEXPIREAT: [-6, "hash", "confirm"],
   HEXISTS: [3, "hash"],
   HGET: [3, "hash"],
   HGETALL: [2, "hash"],
@@ -180,6 +182,11 @@ const RAW_COMMANDS: Record<string, Spec> = {
   HSET: [-4, "hash", "confirm"],
   HSETNX: [4, "hash", "confirm"],
   HSTRLEN: [3, "hash"],
+  HPERSIST: [-5, "hash", "confirm"],
+  HPEXPIRE: [-6, "hash", "confirm"],
+  HPEXPIREAT: [-6, "hash", "confirm"],
+  HPTTL: [-5, "hash"],
+  HTTL: [-5, "hash"],
   HVALS: [2, "hash"],
 
   // ---- Set ----

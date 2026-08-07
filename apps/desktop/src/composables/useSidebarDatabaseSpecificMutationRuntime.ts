@@ -294,7 +294,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       if (liveNode) liveNode.isExpanded = true;
       toast(t("nacos.namespaceCreated", { name: namespaceName }), 3000);
     } catch (error: any) {
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error?.message || String(error)) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
     } finally {
       createNacosNamespaceLoading.value = false;
     }
@@ -322,7 +322,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       await connectionStore.loadNacosNamespaces(node.connectionId, { force: true });
       toast(t("nacos.namespaceUpdated", { name: namespaceName }), 3000);
     } catch (error: any) {
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error?.message || String(error)) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
     } finally {
       editNacosNamespaceLoading.value = false;
     }

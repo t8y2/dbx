@@ -35,7 +35,7 @@ test("query result toolbar reuses the production icon contract", () => {
   assert.match(contentArea, /<Pin class="h-3\.5 w-3\.5"/);
   assert.match(contentArea, /<Wrench class="h-4 w-4"/);
   assert.match(contentArea, /<ChevronDown class="h-3\.5 w-3\.5"/);
-  assert.match(viewSwitcher, /import \{ BarChart3, ListChecks \} from "@lucide\/vue"/);
+  assert.match(viewSwitcher, /import \{ BarChart3, ListChecks, MessageSquareText \} from "@lucide\/vue"/);
   assert.match(toolbarActions, /import \{ GitBranch, Loader2, Upload \} from "@lucide\/vue"/);
   assert.match(viewSwitcher, /inline-flex h-4 items-center leading-none/);
   assert.match(toolbarActions, /block h-3\.5 w-3\.5 self-center/);

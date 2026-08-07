@@ -6,23 +6,32 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, normalizeDataGridExtractorOptions, validateDataGridExtractorOptions, type DataGridCopyExtractorId, type DataGridExtractorOptions, type DataGridExtractPreview, type DataGridExtractWarningCode } from "@/lib/dataGrid/dataGridCopyExtractor";
+import {
+  DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS,
+  normalizeDataGridExtractorOptions,
+  validateDataGridExtractorOptions,
+  type DataGridCopyExtractorId,
+  type DataGridCopyPreference,
+  type DataGridExtractorOptions,
+  type DataGridExtractPreview,
+  type DataGridExtractWarningCode,
+} from "@/lib/dataGrid/dataGridCopyExtractor";
 
 const props = defineProps<{
   open: boolean;
-  extractor: DataGridCopyExtractorId;
+  preference: DataGridCopyPreference;
   options: DataGridExtractorOptions;
-  items: Array<{ value: DataGridCopyExtractorId; label: string; disabled?: boolean }>;
-  preview: (extractor: DataGridCopyExtractorId, options: DataGridExtractorOptions) => Promise<DataGridExtractPreview>;
+  items: Array<{ value: DataGridCopyPreference; label: string; disabled?: boolean }>;
+  preview: (preference: DataGridCopyPreference, options: DataGridExtractorOptions) => Promise<DataGridExtractPreview>;
 }>();
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
-  save: [value: { extractor: DataGridCopyExtractorId; options: DataGridExtractorOptions }];
+  save: [value: { preference: DataGridCopyPreference; options: DataGridExtractorOptions }];
 }>();
 
 const { t } = useI18n();
-const draftExtractor = ref<DataGridCopyExtractorId>(props.extractor);
+const draftPreference = ref<DataGridCopyPreference>(props.preference);
 const draftOptions = ref<DataGridExtractorOptions>(normalizeDataGridExtractorOptions(props.options));
 const previewText = ref("");
 const previewError = ref("");
@@ -32,11 +41,13 @@ const previewTruncatedRows = ref(0);
 let previewSequence = 0;
 let previewTimer: ReturnType<typeof setTimeout> | undefined;
 
-const extractorCategory = computed(() => DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[draftExtractor.value].category);
+const draftExtractor = computed<DataGridCopyExtractorId | null>(() => (draftPreference.value === "smart" ? null : draftPreference.value));
+const extractorCategory = computed(() => (draftExtractor.value ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[draftExtractor.value].category : null));
 const isDsv = computed(() => extractorCategory.value === "delimited");
 const isSql = computed(() => draftExtractor.value === "sql-inserts" || draftExtractor.value === "sql-updates");
 const isJson = computed(() => extractorCategory.value === "json");
 const optionsError = computed(() => {
+  if (!draftExtractor.value) return "";
   const code = validateDataGridExtractorOptions(draftExtractor.value, draftOptions.value);
   if (!code) return "";
   return t(`grid.copyExtractorValidation.${code}`);
@@ -70,7 +81,7 @@ async function refreshPreview() {
     return;
   }
   try {
-    const result = await props.preview(draftExtractor.value, normalizeDataGridExtractorOptions(draftOptions.value));
+    const result = await props.preview(draftPreference.value, normalizeDataGridExtractorOptions(draftOptions.value));
     if (sequence === previewSequence) {
       previewText.value = result.text;
       previewWarnings.value = (result.warnings ?? []).map((warning) => warningText(warning.code, result.omittedColumns));
@@ -105,14 +116,14 @@ watch(
       previewLoading.value = false;
       return;
     }
-    draftExtractor.value = props.extractor;
+    draftPreference.value = props.preference;
     draftOptions.value = normalizeDataGridExtractorOptions(props.options);
     schedulePreview();
   },
 );
 
 watch(
-  [draftExtractor, draftOptions],
+  [draftPreference, draftOptions],
   () => {
     if (props.open) schedulePreview();
   },
@@ -126,7 +137,7 @@ onBeforeUnmount(() => {
 
 function save() {
   if (optionsError.value) return;
-  emit("save", { extractor: draftExtractor.value, options: normalizeDataGridExtractorOptions(draftOptions.value) });
+  emit("save", { preference: draftPreference.value, options: normalizeDataGridExtractorOptions(draftOptions.value) });
   emit("update:open", false);
 }
 </script>
@@ -142,7 +153,7 @@ function save() {
         <div class="space-y-3">
           <div class="space-y-1.5">
             <Label>{{ t("grid.copyExtractorDefaultFormat") }}</Label>
-            <Select v-model="draftExtractor">
+            <Select v-model="draftPreference">
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem v-for="item in items" :key="item.value" :value="item.value" :disabled="item.disabled">{{ item.label }}</SelectItem>

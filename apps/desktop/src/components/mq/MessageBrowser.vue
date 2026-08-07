@@ -225,6 +225,8 @@ watch(kafkaStartPosition, () => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .message-browser {
   margin-top: 4px;
   padding: 14px;
@@ -255,20 +257,6 @@ watch(kafkaStartPosition, () => {
   color: var(--color-text);
   font-size: 14px;
   font-weight: 600;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.btn-sm:hover:not(:disabled) {
-  background: var(--color-background-secondary);
 }
 
 .btn-sm:disabled,

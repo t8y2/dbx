@@ -1,4 +1,5 @@
 import { normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
+import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 /**
  * Minimal shape of a translate function, satisfied by both `useI18n().t` inside
@@ -32,6 +33,11 @@ const taggedAiCliErrorKeys: Record<string, string> = {
   piAgentProtocolError: "ai.cliErrors.piAgentProtocolError",
   piAgentModelInvalid: "ai.cliErrors.piAgentModelInvalid",
   piAgentRunFailed: "ai.cliErrors.piAgentRunFailed",
+};
+
+const exactMessageKeys: Record<string, string> = {
+  [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
+  [PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
 };
 
 const patterns: [RegExp, string][] = [
@@ -128,7 +134,10 @@ function translateStructuredBackendError(t: BackendErrorTranslate, error: Backen
   const translated = t(error.messageKey, error.messageParams);
   const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
   const detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : undefined;
-  return detail && detail !== summary ? `${summary}\n\n${detail}` : summary;
+  const rawAdapterCode = error.diagnostics?.adapterCode;
+  const adapterCode = typeof rawAdapterCode === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawAdapterCode) ? rawAdapterCode : undefined;
+  const diagnosticDetail = detail && adapterCode ? `[${adapterCode}] ${detail}` : (detail ?? adapterCode);
+  return diagnosticDetail && diagnosticDetail !== summary ? `${summary}\n\n${diagnosticDetail}` : summary;
 }
 
 export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
@@ -136,6 +145,9 @@ export function translateBackendError(t: BackendErrorTranslate, error: unknown):
   if (structured) return translateStructuredBackendError(t, structured);
 
   const message = backendErrorMessage(error);
+  const exactKey = exactMessageKeys[message];
+  if (exactKey) return t(exactKey);
+
   const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
   if (tagged) {
     const [, code, rawDetail] = tagged;

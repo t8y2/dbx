@@ -3,6 +3,15 @@ import { BackendErrorException, type BackendError } from "@/lib/backend/errorUti
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
+
+/** Normalize Tauri rejections once at the public backend boundary. */
+async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
+  }
+}
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -47,8 +56,10 @@ import type {
   SshConfigHostEntry,
   TunnelProfile,
   TransactionLog,
+  ExternalSqlFileVersion,
 } from "@/types/database";
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
+import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
@@ -745,19 +756,41 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
   return invoke("pending_open_connection_links");
 }
 
-export async function readExternalSqlFile(path: string): Promise<string> {
-  const result = await invoke<{ kind: "content"; content: string } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+export interface ExternalSqlFileSnapshot {
+  content: string;
+  version: ExternalSqlFileVersion;
+}
+
+export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifiedNs: string } | { kind: "missing" };
+
+export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
+
+export async function readExternalSqlFileSnapshot(path: string): Promise<ExternalSqlFileSnapshot> {
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
-  return result.content;
+  return { content: result.content, version: result.version };
 }
 
-export async function writeExternalSqlFile(path: string, content: string): Promise<void> {
-  return invoke("write_external_sql_file", { path, content });
+export async function readExternalSqlFile(path: string): Promise<string> {
+  return (await readExternalSqlFileSnapshot(path)).content;
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<string | null> {
+export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlFileStatus> {
+  return invoke("inspect_external_sql_file", { path });
+}
+
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+  return invoke("write_external_sql_file", {
+    path,
+    content,
+    expectedContentHash: options.expectedContentHash ?? null,
+    expectedMissing: options.expectedMissing ?? false,
+  });
+}
+
+export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
   return invoke("save_external_sql_file", { defaultFileName, content });
 }
 
@@ -835,7 +868,7 @@ export async function setAiGlobalCustomInstructions(content: string): Promise<vo
 }
 
 export async function testConnection(config: ConnectionConfig): Promise<string> {
-  return invoke("test_connection", { config });
+  return invokeBackend("test_connection", { config });
 }
 
 export async function testConnectionWithInfo(config: ConnectionConfig): Promise<ConnectionTestResult> {
@@ -851,31 +884,31 @@ export async function testConnectionWithInfo(config: ConnectionConfig): Promise<
 }
 
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
-  return invoke("connect_db", { config, clientAttempt });
+  return invokeBackend("connect_db", { config, clientAttempt });
 }
 
 export async function connectionDatabaseInfo(connectionId: string, database?: string): Promise<DatabaseConnectionInfo | undefined> {
-  const info = await invoke<DatabaseConnectionInfo | null>("connection_database_info", { connectionId, database });
+  const info = await invokeBackend<DatabaseConnectionInfo | null>("connection_database_info", { connectionId, database });
   return info ?? undefined;
 }
 
 export async function saveConnectionDatabaseInfo(connectionId: string, databaseInfo: DatabaseConnectionInfo): Promise<void> {
-  return invoke("save_connection_database_info", {
+  return invokeBackend("save_connection_database_info", {
     connectionId,
     databaseInfo,
   });
 }
 
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
-  return invoke("connection_final_proxy_port", { config });
+  return invokeBackend("connection_final_proxy_port", { config });
 }
 
 export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
-  return invoke("disconnect_db", { connectionId, clientAttempt });
+  return invokeBackend("disconnect_db", { connectionId, clientAttempt });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
-  return invoke("check_connection_health", { connectionId });
+  return invokeBackend("check_connection_health", { connectionId });
 }
 
 export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
@@ -1630,6 +1663,24 @@ export async function listAvailableExtensions(connectionId: string, database: st
   return invoke("list_available_extensions", { connectionId, database });
 }
 
+// --- Docs ---
+
+export async function collectDocsSnapshot(connectionId: string, database: string, schemas: string[], tables: string[], projectName?: string): Promise<SchemaSnapshot> {
+  return invoke("docs_collect_snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
+  return invoke("docs_load_annotations", { connectionId });
+}
+
+export async function applyDocsAnnotations(connectionId: string, snapshot: SchemaSnapshot, annotations: AnnotationFile): Promise<SchemaSnapshot> {
+  return invoke("docs_apply_annotations", { connectionId, snapshot, annotations });
+}
+
+export async function saveDocsAnnotations(connectionId: string, annotations: AnnotationFile): Promise<void> {
+  return invoke("docs_save_annotations", { connectionId, annotations });
+}
+
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
   return invoke("save_connections", { configs });
 }
@@ -1990,6 +2041,7 @@ export interface RedisSetItem {
 export interface RedisHashItem {
   field: RedisBlob;
   value: RedisBlob;
+  field_ttl?: number;
 }
 
 export interface RedisZsetItem {
@@ -2201,6 +2253,14 @@ export async function redisHashSet(connectionId: string, db: number, keyRaw: str
 
 export async function redisHashDel(connectionId: string, db: number, keyRaw: string, field: string): Promise<void> {
   return invoke("redis_hash_del", { connectionId, db, keyRaw, field });
+}
+
+export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {
+  return invoke("redis_hash_field_set_ttl", { connectionId, db, keyRaw, field, ttl });
+}
+
+export async function redisHashFieldSetExpireAt(connectionId: string, db: number, keyRaw: string, field: string, expireAt: number): Promise<void> {
+  return invoke("redis_hash_field_set_expire_at", { connectionId, db, keyRaw, field, expireAt });
 }
 
 export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
@@ -3405,7 +3465,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
         await invoke("start_transfer", { request });
       } catch (e) {
         unlisten?.();
-        reject(e);
+        reject(e instanceof BackendErrorException ? e : new BackendErrorException(e));
       }
     })();
   });
@@ -3561,7 +3621,7 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
     return summary;
   } catch (e) {
     unlisten();
-    throw e;
+    throw e instanceof BackendErrorException ? e : new BackendErrorException(e);
   }
 }
 
@@ -3707,7 +3767,7 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
       onProgress(event.payload);
       if (event.payload.status === "Done" || event.payload.status === "Error" || event.payload.status === "Cancelled") {
         if (event.payload.status === "Error") {
-          finish(() => rejectTerminal(new Error(event.payload.errorMessage || "Export failed")));
+          finish(() => rejectTerminal(new BackendErrorException(event.payload.errorMessage || "Export failed")));
         } else {
           finish(() => resolveTerminal(event.payload));
         }
@@ -3720,7 +3780,7 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
       settled = true;
       unlisten?.();
     }
-    throw error;
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
   }
 }
 
@@ -3752,7 +3812,7 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
       onProgress(event.payload);
       if (event.payload.status === "Done" || event.payload.status === "Error" || event.payload.status === "Cancelled") {
         if (event.payload.status === "Error") {
-          finish(() => rejectTerminal(new Error(event.payload.errorMessage || "Export failed")));
+          finish(() => rejectTerminal(new BackendErrorException(event.payload.errorMessage || "Export failed")));
         } else {
           finish(() => resolveTerminal(event.payload));
         }
@@ -3765,7 +3825,7 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
       settled = true;
       unlisten?.();
     }
-    throw error;
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
   }
 }
 

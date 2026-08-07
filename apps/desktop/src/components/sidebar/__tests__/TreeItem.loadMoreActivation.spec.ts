@@ -61,6 +61,7 @@ function runtimeHost(): SidebarTreeRuntimeHost {
     handleRowClick: vi.fn(),
     handleRowDoubleClick: vi.fn(),
     handleRowKeydown: vi.fn(),
+    openPrimaryVisibleFilter: vi.fn(),
     openDataInNewTab: vi.fn(),
     requestPaste: vi.fn(() => false),
     toggleNode: vi.fn(),
@@ -136,5 +137,47 @@ describe("TreeItem load-more activation", () => {
     row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
 
     expect(host.handleRowClick).not.toHaveBeenCalled();
+  });
+
+  it("shows the invalid marker for objects reported as invalid", async () => {
+    const node: TreeNode = {
+      id: "connection-1:app:dbo:broken_proc",
+      label: "broken_proc",
+      type: "procedure",
+      connectionId: "connection-1",
+      database: "app",
+      schema: "dbo",
+      valid: false,
+    };
+    const { row } = await mountTreeItem(node);
+
+    expect(row.textContent).toContain("broken_proc · INVALID");
+    expect(row.querySelector('[data-invalid-object-indicator="true"]')).not.toBeNull();
+  });
+
+  it("does not show the invalid marker for valid or unknown-status objects", async () => {
+    const validNode: TreeNode = {
+      id: "connection-1:app:dbo:healthy_proc",
+      label: "healthy_proc",
+      type: "procedure",
+      connectionId: "connection-1",
+      database: "app",
+      schema: "dbo",
+      valid: true,
+    };
+    const unknownNode: TreeNode = {
+      ...validNode,
+      id: "connection-1:app:dbo:unknown_proc",
+      label: "unknown_proc",
+      valid: null,
+    };
+
+    const valid = await mountTreeItem(validNode);
+    expect(valid.row.textContent).not.toContain("INVALID");
+    expect(valid.row.querySelector('[data-invalid-object-indicator="true"]')).toBeNull();
+
+    const unknown = await mountTreeItem(unknownNode);
+    expect(unknown.row.textContent).not.toContain("INVALID");
+    expect(unknown.row.querySelector('[data-invalid-object-indicator="true"]')).toBeNull();
   });
 });

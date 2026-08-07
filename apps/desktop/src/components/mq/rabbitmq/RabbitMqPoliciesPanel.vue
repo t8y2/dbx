@@ -5,6 +5,7 @@ import type { MqPolicyInfo, MqPolicyUpsertRequest } from "@/types/mq";
 import { mqDeletePolicy, mqListNamespaces, mqListPolicies, mqSetPolicy } from "@/lib/backend/api";
 import { isAllVhostsNamespace, RABBITMQ_MQ_TENANT } from "@/lib/mq/mqConsoleDefaults";
 import { formatError } from "@/lib/backend/errorUtils";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 interface Props {
@@ -21,6 +22,7 @@ interface DefinitionEntry {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 /** Well-known policy definition keys offered in the editor dropdown. */
 const COMMON_DEFINITION_KEYS = ["message-ttl", "expires", "max-length", "max-length-bytes", "dead-letter-exchange", "dead-letter-routing-key", "max-age"];
@@ -47,12 +49,12 @@ const showDeleteDialog = ref(false);
 const deleteTarget = ref<MqPolicyInfo>();
 const deleting = ref(false);
 
-function guardWritable(): boolean {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqRabbitMqPolicies.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadPolicies() {
@@ -88,7 +90,10 @@ function definitionEntriesFrom(policy: MqPolicyInfo): DefinitionEntry[] {
 }
 
 function openCreateDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqRabbitMqPolicies.readOnly");
+    return;
+  }
   const currentVhost = props.namespace && !isAllVhostsNamespace(props.namespace) ? props.namespace : "";
   editingPolicy.value = undefined;
   editForm.value = { name: "", virtualHost: currentVhost || vhosts.value[0] || "", pattern: "", applyTo: "queues", priority: 0 };
@@ -98,7 +103,10 @@ function openCreateDialog() {
 }
 
 function openEditDialog(policy: MqPolicyInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqRabbitMqPolicies.readOnly");
+    return;
+  }
   editingPolicy.value = policy;
   editForm.value = { name: policy.name, virtualHost: policy.vhost, pattern: policy.pattern, applyTo: policy.applyTo || "queues", priority: policy.priority };
   definitionEntries.value = definitionEntriesFrom(policy);
@@ -130,6 +138,7 @@ function buildDefinition(): Record<string, unknown> {
 }
 
 async function handleSave() {
+  if (!(await guardWritable(t("mqRabbitMqPolicies.save")))) return;
   const name = editForm.value.name.trim();
   const virtualHost = editForm.value.virtualHost.trim();
   const pattern = editForm.value.pattern.trim();
@@ -167,12 +176,16 @@ async function handleSave() {
 }
 
 function openDeleteDialog(policy: MqPolicyInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqRabbitMqPolicies.readOnly");
+    return;
+  }
   deleteTarget.value = policy;
   showDeleteDialog.value = true;
 }
 
 async function confirmDelete() {
+  if (!(await guardWritable(t("mqRabbitMqPolicies.delete")))) return;
   const target = deleteTarget.value;
   if (!target) return;
   deleting.value = true;
@@ -331,6 +344,8 @@ watch(
 </template>
 
 <style scoped>
+@import "../shared/mqPanel.css";
+
 .policies-panel {
   display: flex;
   flex-direction: column;
@@ -467,48 +482,6 @@ td {
   align-items: center;
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: var(--color-hover);
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -547,16 +520,6 @@ button:disabled {
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
 }
 
 .dialog-body {

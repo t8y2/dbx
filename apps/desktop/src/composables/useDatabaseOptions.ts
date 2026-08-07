@@ -96,6 +96,9 @@ export function useDatabaseOptions() {
         );
       } else if (connection.db_type === "mongodb") {
         databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(await api.mongoListDatabases(connectionId), connection);
+      } else if (connection.db_type === "dameng") {
+        // 达梦的"数据库"概念对应 schema，使用 listSchemas 获取 schema 列表
+        databaseOptions.value[connectionId] = await fetchNamespaceOptionsForConnection(connectionId, connection);
       } else if (catalog && isDorisFamilyCatalogCapable(connection?.db_type, connection?.driver_profile)) {
         const dbs = await api.listDorisCatalogDatabases(connectionId, catalog);
         databaseOptions.value[connectionId] = databaseOptionsForConnection(

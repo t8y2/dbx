@@ -259,25 +259,27 @@ fn stream_export_was_cancelled(error: &str, token_cancelled: bool, export_cancel
 ///
 /// `column_types` are the types returned by the executed query (original column
 /// order). The request's overrides are expected to align 1:1 in the same order.
-/// If the request provides fewer overrides than the result has columns the
-/// extra columns are left untyped. Overrides that are `None` or empty are
-/// treated as "infer from the query result".
+/// Missing, `None`, or empty overrides infer only MySQL spatial types, which
+/// preserves the historical literal formatting of other database types.
 fn sql_insert_column_types(request: &QueryResultExportRequest, column_types: &[String]) -> Vec<Option<String>> {
-    match request.export_column_types.as_ref() {
-        Some(overrides) => {
-            let mut result: Vec<Option<String>> = overrides
-                .iter()
-                .map(|t| match t {
-                    Some(s) if !s.is_empty() => Some(s.clone()),
-                    _ => None,
+    column_types
+        .iter()
+        .enumerate()
+        .map(|(index, inferred)| {
+            request
+                .export_column_types
+                .as_ref()
+                .and_then(|overrides| overrides.get(index))
+                .and_then(|override_type| override_type.as_deref())
+                .filter(|override_type| !override_type.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    (request.database_type == DatabaseType::Mysql
+                        && crate::database_export::is_mysql_spatial_export_type(inferred))
+                    .then(|| inferred.clone())
                 })
-                .collect();
-            // Pad with None if fewer overrides than result columns
-            result.resize(column_types.len(), None);
-            result
-        }
-        None => vec![None; column_types.len()],
-    }
+        })
+        .collect()
 }
 
 /// Bounded SQL INSERT writer with staged-file replacement safety.
@@ -1197,6 +1199,7 @@ async fn try_export_mysql_query_result_stream(
         stream_row_limit,
         mysql_dialect,
         &export_cancelled,
+        format.eq_ignore_ascii_case("sql"),
         |item| {
             if export_cancelled.load(Ordering::SeqCst)
                 || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
@@ -1845,17 +1848,17 @@ mod tests {
     #[test]
     fn sql_insert_column_types_maps_request_types_to_option_vec() {
         let req = request("sql", None, None);
-        // No export_column_types set → every column becomes None
+        // Non-MySQL exports preserve their historical untyped behavior.
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into()]);
         assert_eq!(result, vec![None, None]);
 
-        // Export_column_types provided → null becomes None, Some becomes Some
+        // Explicit non-empty overrides take precedence; missing values stay untyped.
         let mut req = req;
         req.export_column_types = Some(vec![Some("int4".into()), None, Some("jsonb".into())]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into()]);
         assert_eq!(result, vec![Some("int4".into()), None, Some("jsonb".into())]);
 
-        // Empty string in an override is treated as None
+        // Empty string in an override stays untyped for non-MySQL exports.
         req.export_column_types = Some(vec![Some("".into())]);
         let result = sql_insert_column_types(&req, &["int4".into()]);
         assert_eq!(result, vec![None]);
@@ -1864,7 +1867,7 @@ mod tests {
     #[test]
     fn sql_insert_column_types_handles_partial_overrides_gracefully() {
         let req = request("sql", None, None);
-        // Fewer overrides than result columns → extra columns become None
+        // Fewer overrides than result columns → extra columns remain untyped.
         let mut req = req;
         req.export_column_types = Some(vec![Some("int4".into()), None]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into(), "bool".into()]);
@@ -1885,7 +1888,7 @@ mod tests {
     #[test]
     fn sql_insert_column_types_handles_all_none_and_all_some() {
         let req = request("sql", None, None);
-        // All None
+        // All None remains untyped for non-MySQL exports.
         let mut req = req;
         req.export_column_types = Some(vec![None, None, None]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into()]);
@@ -1895,6 +1898,16 @@ mod tests {
         req.export_column_types = Some(vec![Some("int4".into()), Some("text".into()), Some("json".into())]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into()]);
         assert_eq!(result, vec![Some("int4".into()), Some("text".into()), Some("json".into())]);
+    }
+
+    #[test]
+    fn sql_insert_column_types_infers_only_mysql_spatial_result_types() {
+        let mut req = request("sql", None, None);
+        req.database_type = DatabaseType::Mysql;
+        assert_eq!(
+            sql_insert_column_types(&req, &["int".into(), "geometry".into(), "varchar".into()]),
+            vec![None, Some("geometry".into()), None]
+        );
     }
 
     #[test]

@@ -66,6 +66,7 @@ export type DatabaseType =
   | "zookeeper"
   | "iris"
   | "influxdb"
+  | "victoriametrics"
   | "jdbc"
   | "mq"
   | "mqtt"
@@ -143,6 +144,12 @@ export interface ConnectionConfig {
   attached_databases?: AttachedDatabaseConfig[];
   init_script?: string;
   color?: string;
+  /**
+   * Where this connection's documentation notes are stored. Absent means the
+   * per-connection default inside the app data directory; an explicit path
+   * lets the notes file live in a repository and be reviewed in pull requests.
+   */
+  docs_notes_path?: string;
   transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
   query_timeout_secs?: number;
@@ -566,6 +573,15 @@ export interface OwnerInfo {
   owner: string;
 }
 
+/** A database server message carried on a query result (e.g. PostgreSQL RAISE NOTICE, MySQL warnings). */
+export interface QueryMessage {
+  severity: string;
+  message: string;
+  code?: string;
+  detail?: string;
+  hint?: string;
+}
+
 export interface QueryResult {
   columns: string[];
   /** One SRID per geometry/geography column (first non-null observed). */
@@ -580,6 +596,8 @@ export interface QueryResult {
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Set only for SQL Server informational messages emitted by the backend. */
+  server_message?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -625,6 +643,8 @@ export interface QueryResult {
   /** Absolute offsets in the editor document at execution time. */
   sourceFrom?: number;
   sourceTo?: number;
+  /** Database server messages (notices, warnings) emitted while producing this result. Omitted when empty. */
+  messages?: QueryMessage[];
 }
 
 export type BatchStatementExecutionStatus = "pending" | "running" | "success" | "error" | "skipped" | "cancelled";
@@ -922,6 +942,12 @@ export interface ObjectBrowserViewport {
   viewMode: ObjectBrowserViewMode;
 }
 
+export interface ExternalSqlFileVersion {
+  sizeBytes: number;
+  modifiedNs: string;
+  contentHash: string;
+}
+
 export interface QueryTab {
   id: string;
   title: string;
@@ -935,6 +961,9 @@ export interface QueryTab {
   sql: string;
   savedSqlId?: string;
   externalSqlPath?: string;
+  externalSqlFileVersion?: ExternalSqlFileVersion;
+  externalSqlIgnoredFileVersion?: ExternalSqlFileVersion;
+  externalSqlFileMissing?: boolean;
   originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;
@@ -1059,6 +1088,8 @@ export interface QueryTab {
   };
   tableMetaUpdatedAt?: number;
   pendingDataChangeCount?: number;
+  /** Ephemeral editor draft that has not yet been applied to the data grid. */
+  hasPendingDataEditorDraft?: boolean;
   /** 冷缓存打开表数据时元数据仍在途：行标识未知，编辑/保存必须等待其落地 */
   tableMetaPending?: boolean;
   /** 取消请求单调计数：isCancelling 是瞬态的（取消失败/查询先完成会被清），

@@ -31,6 +31,10 @@ test("builds SELECT template with explicit table columns", () => {
   );
 });
 
+test("builds a MetricsQL range query for VictoriaMetrics metrics", () => {
+  assert.equal(buildTableSelectTemplate({ databaseType: "victoriametrics", tableName: "flag" }), '{__name__="flag"}[1h]');
+});
+
 test("builds INSERT template without auto generated columns", () => {
   assert.equal(
     buildTableInsertTemplate({

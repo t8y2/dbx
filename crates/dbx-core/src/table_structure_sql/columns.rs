@@ -1,9 +1,9 @@
 use super::column_alter::{
     build_clickhouse_existing_column_sql, build_doris_existing_column_sql, build_h2_existing_column_sql,
     build_informix_existing_column_sql, build_iris_existing_column_sql, build_mysql_existing_column_sql,
-    build_oracle_like_existing_column_sql, build_postgres_existing_column_sql, build_questdb_existing_column_sql,
-    build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
-    has_column_extra_change, has_existing_column_attribute_change,
+    build_oracle_like_existing_column_sql, build_oscar_existing_column_sql, build_postgres_existing_column_sql,
+    build_questdb_existing_column_sql, build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql,
+    build_xugu_existing_column_sql, has_column_extra_change, has_existing_column_attribute_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
@@ -186,6 +186,8 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                     statements.extend(build_oracle_like_existing_column_sql(dialect, &table, column))
                 }
             }
+            // 神通 MODIFY 语法与 Oracle 有差异（NULL/NOT NULL 须单独一条），用专属实现。
+            StructureDialect::Oscar => statements.extend(build_oscar_existing_column_sql(dialect, &table, column)),
             StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, column)),
             StructureDialect::ClickHouse => statements.extend(build_clickhouse_existing_column_sql(
                 &table,
@@ -301,7 +303,10 @@ fn drop_primary_key_statement(
             let pk_name = format!("{}_pkey", clean(raw_table));
             Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, &pk_name)))
         }
-        StructureDialect::Mysql | StructureDialect::Dameng => Some(format!("ALTER TABLE {table} DROP PRIMARY KEY;")),
+        // 神通 Oscar 实测支持 `ALTER TABLE ... DROP PRIMARY KEY`（与 Dameng/MySQL 一致）。
+        StructureDialect::Mysql | StructureDialect::Dameng | StructureDialect::Oscar => {
+            Some(format!("ALTER TABLE {table} DROP PRIMARY KEY;"))
+        }
         _ => None,
     }
 }
@@ -362,7 +367,10 @@ pub(super) fn build_add_column_sql(
         vec![format!("ALTER TABLE {table} {add_keyword} {definition}{position_clause};")]
     };
     if supports_comments
-        && matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng)
+        && matches!(
+            dialect,
+            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar
+        )
         && !clean(&column.comment).is_empty()
     {
         statements.push(format!(

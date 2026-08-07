@@ -1006,12 +1006,48 @@ func TestMetadataNormalizationHelpers(t *testing.T) {
 	}
 }
 
+func TestListDatabasesKeepsConnectableCustomTemplates(t *testing.T) {
+	for _, query := range []string{kingbaseListDatabasesSQL, kingbaseListDatabasesPostgresSQL} {
+		lowerQuery := strings.ToLower(query)
+		if !strings.Contains(lowerQuery, "where datallowconn") {
+			t.Fatalf("database query must keep the connectable filter: %s", query)
+		}
+		if strings.Contains(lowerQuery, "not datistemplate") {
+			t.Fatalf("database query must not hide connectable custom templates: %s", query)
+		}
+		if !strings.Contains(lowerQuery, "lower(datname) not in ('template0', 'template1')") {
+			t.Fatalf("database query must hide only the standard template databases: %s", query)
+		}
+		if strings.Contains(lowerQuery, "'template2'") {
+			t.Fatalf("database query must keep a connectable database named template2: %s", query)
+		}
+	}
+
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if query != kingbaseListDatabasesSQL {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{columns: []string{"datname"}, rows: [][]driver.Value{{"JA_SICP_GEOSMARTER"}}}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.params.Database = "configured"
+
+	databases, err := server.listDatabases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(databases) != 1 || databases[0].Name != "JA_SICP_GEOSMARTER" {
+		t.Fatalf("unexpected databases: %#v", databases)
+	}
+}
+
 func TestListDatabasesFallsBackToPostgresCatalog(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
-		case strings.Contains(query, "sys_catalog.sys_database"):
+		case query == kingbaseListDatabasesSQL:
 			return nil, errors.New("sys catalog unavailable")
-		case strings.Contains(query, "pg_catalog.pg_database"):
+		case query == kingbaseListDatabasesPostgresSQL:
 			return &valueRows{columns: []string{"datname"}, rows: [][]driver.Value{{"app"}, {"test"}}}, nil
 		default:
 			return nil, errors.New("unexpected query: " + query)

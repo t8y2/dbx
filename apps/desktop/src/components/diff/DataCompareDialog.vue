@@ -10,7 +10,7 @@ import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
@@ -334,10 +334,14 @@ async function loadSchemas(side: "source" | "target", preferredSchema = "") {
 async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   await store.ensureConnected(connectionId);
-  const names = databaseOptionsForConnection(
-    (await api.listDatabases(connectionId)).map((database) => database.name),
-    store.getConfig(connectionId),
-  );
+  const config = store.getConfig(connectionId);
+  const names =
+    config?.db_type === "dameng"
+      ? await fetchNamespaceOptionsForConnection(connectionId, config)
+      : databaseOptionsForConnection(
+          (await api.listDatabases(connectionId)).map((database) => database.name),
+          config,
+        );
   if (side === "source") {
     sourceDatabases.value = names;
     sourceDatabase.value = names.length === 1 ? names[0] : "";

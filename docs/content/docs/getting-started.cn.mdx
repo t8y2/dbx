@@ -94,6 +94,18 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
 
     `latest` 标签会拉取当前发布版本。这里使用跨平台的 `dbx-data` 命名卷；中国大陆用户可改用 `docker.cnb.cool/dbxio.com/dbx:latest`，以获得更快的拉取速度。
 
+    ### 环境变量
+
+    Docker 镜像支持以下启动参数。使用 `-e 变量名=值` 指定，例如生产环境可添加 `-e DBX_PASSWORD=your-password`：
+
+    | 参数 | 默认值 | 用途 |
+    | --- | --- | --- |
+    | `DBX_PASSWORD` | 未设置 | Web 登录密码，生产环境建议设置 |
+    | `DBX_DISABLE_PASSWORD` | `false` | 设为 `true` 或 `1` 可关闭登录保护 |
+    | `DBX_DATA_DIR` | `/app/data` | 持久化数据目录 |
+    | `DBX_PORT` | `4224` | 容器内监听端口 |
+    | `DBX_PUBLIC_BASE_PATH` | `/` | 子路径部署，例如 `/dbx` |
+
     启动后访问 `http://localhost:4224`。
 
     `deploy/docker-compose.yml` 用于构建当前源码。若要部署已发布镜像，请使用 `deploy/docker-compose.release.yml`：

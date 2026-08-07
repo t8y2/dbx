@@ -79,6 +79,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     triggers: false,
     ddl: false,
   },
+  victoriametrics: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
   questdb: {
     indexes: true,
     foreignKeys: false,

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildSqlCompletionItems, getSqlCompletionContext, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
+import { buildSelectStarExpansion, buildSqlCompletionItems, getSqlCompletionContext, selectStarResultColumnsMatch, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
+import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
+import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 
 describe("sqlCompletion keyword snippets", () => {
   it("auto-opens and suggests SELECT when typing sel", () => {
@@ -11,6 +13,118 @@ describe("sqlCompletion keyword snippets", () => {
 
     expect(shouldAutoOpenSqlCompletion(sql, sql.length)).toBe(true);
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "select *", type: "snippet" }), expect.objectContaining({ label: "SELECT", type: "keyword" })]));
+  });
+});
+
+describe("SELECT star expansion", () => {
+  it("reuses completion column ordering for an unqualified star", () => {
+    const sql = "SELECT * FROM apis";
+    const context = getSqlCompletionContext(sql, "SELECT *".length);
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "apis",
+            [
+              { name: "id", table: "apis" },
+              { name: "created_at", table: "apis" },
+              { name: "method", table: "apis" },
+            ],
+          ],
+        ]),
+      ),
+    ).toBe("id, created_at, method");
+  });
+
+  it("preserves an alias while replacing only the star", () => {
+    const sql = "SELECT ap.* FROM apis AS ap";
+    const cursor = "SELECT ap.*".length;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor), getSqlCompletionContext(sql, cursor));
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "apis",
+            [
+              { name: "id", table: "apis" },
+              { name: "created_at", table: "apis" },
+            ],
+          ],
+        ]),
+      ),
+    ).toBe("id, ap.created_at");
+  });
+
+  it.each([
+    ["postgres", "postgres", '"Order Alias"', '"created at"'],
+    ["mysql", "mysql", "`Order Alias`", "`created at`"],
+    ["sqlserver", "sqlserver", "[Order Alias]", "[created at]"],
+    ["oracle", "mysql", '"Order Alias"', '"created at"'],
+  ] as const)("preserves a quoted %s alias for every expanded column", (databaseType, dialect, qualifierSql, quotedColumn) => {
+    const sql = `SELECT ${qualifierSql}.* FROM orders AS ${qualifierSql}`;
+    const cursor = sql.indexOf("*") + 1;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, { databaseType, dialect }), getSqlCompletionContext(sql, cursor, { databaseType, dialect }));
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "orders",
+            [
+              { name: "id", table: "orders" },
+              { name: "created at", table: "orders" },
+            ],
+          ],
+        ]),
+        dialect,
+        qualifierSql,
+        databaseType,
+      ),
+    ).toBe(`id, ${qualifierSql}.${quotedColumn}`);
+  });
+
+  it("expands an unqualified star from result columns when the table has an alias", () => {
+    const sql = "select *\nfrom apis as ap\nlimit 100;";
+    const cursor = "select *".length;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor), getSqlCompletionContext(sql, cursor));
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "apis",
+            [
+              { name: "id", table: "apis" },
+              { name: "created_at", table: "apis" },
+              { name: "updated_at", table: "apis" },
+              { name: "deleted_at", table: "apis" },
+              { name: "method", table: "apis" },
+            ],
+          ],
+        ]),
+      ),
+    ).toBe("id, created_at, updated_at, deleted_at, method");
+  });
+
+  it("accepts result columns only when their source still contains the target star", () => {
+    const currentSql = "select * from apis;\nselect * from users;";
+    const sourceStatement = "select * from users";
+    const sourceFrom = currentSql.lastIndexOf("select");
+    const targetFrom = currentSql.lastIndexOf("*");
+
+    expect(selectStarResultColumnsMatch({ currentSql, targetFrom, targetTo: targetFrom + 1, statementSql: sourceStatement, sourceStatement, sourceFrom, sourceTo: sourceFrom + sourceStatement.length })).toBe(true);
+    expect(selectStarResultColumnsMatch({ currentSql, targetFrom: currentSql.indexOf("*"), targetTo: currentSql.indexOf("*") + 1, statementSql: "select * from apis", sourceStatement, sourceFrom, sourceTo: sourceFrom + sourceStatement.length })).toBe(false);
+  });
+
+  it("rejects stale and incomplete result source metadata", () => {
+    expect(selectStarResultColumnsMatch({ currentSql: "select * from users", targetFrom: 7, targetTo: 8, statementSql: "select * from users", sourceStatement: "select * from apis" })).toBe(false);
+    expect(selectStarResultColumnsMatch({ currentSql: "select * from users", targetFrom: 7, targetTo: 8, statementSql: "select * from users", sourceStatement: "select * from users", sourceFrom: 0 })).toBe(false);
   });
 });
 

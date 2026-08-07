@@ -4,6 +4,7 @@ import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 
 export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Done" | "Error" | "Cancelled";
+export type DatabaseExportSource = "manual" | "scheduled";
 
 export interface DataTransferFailure {
   table: string;
@@ -21,6 +22,9 @@ export interface ExportTask {
   totalRows: number | null;
   status: BackgroundTaskStatus;
   errorMessage: string | null;
+  databaseExportSource?: DatabaseExportSource;
+  currentObject?: string;
+  preparing?: boolean;
   objectIndex?: number;
   totalObjects?: number;
   overallPercent?: number;
@@ -254,7 +258,7 @@ export function useExportTracker() {
     return task;
   }
 
-  function addDatabaseExportTask(exportId: string, label: string, filePath: string): ExportTask {
+  function addDatabaseExportTask(exportId: string, label: string, filePath: string, databaseExportSource: DatabaseExportSource = "manual"): ExportTask {
     const task = reactive<ExportTask>({
       exportId,
       kind: "database-export",
@@ -265,6 +269,9 @@ export function useExportTracker() {
       totalRows: null,
       status: "Running",
       errorMessage: null,
+      databaseExportSource,
+      currentObject: "",
+      preparing: true,
       objectIndex: 0,
       totalObjects: 0,
       startedAt: Date.now(),
@@ -392,10 +399,8 @@ export function useExportTracker() {
   function updateDatabaseExportTask(exportId: string, progress: api.ExportProgress & { overallPercent?: number }) {
     const task = taskMap.get(exportId);
     if (!task) return;
-    // Keep the database label during metadata prefetch; only follow object names while writing.
-    if (!progress.preparing && progress.currentObject) {
-      task.tableName = progress.currentObject;
-    }
+    task.currentObject = progress.currentObject;
+    task.preparing = !!progress.preparing;
     task.rowsExported = progress.rowsExported;
     task.totalRows = progress.totalRows;
     task.status = normalizeExportStatus(progress.status);

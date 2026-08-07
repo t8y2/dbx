@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2 } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +11,7 @@ import DataGridExportMenu from "@/components/grid/DataGridExportMenu.vue";
 
 const { t } = useI18n();
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     paginationEnabled?: boolean;
     selectionSummary: { cellCount: number; rowCount: number } | null;
@@ -22,6 +23,7 @@ withDefaults(
     pageSizeMenuItems: LightDropdownItem[];
     exportMenuItems: LightDropdownItem[];
     currentPage: number;
+    maxPage?: number;
     canGoNextPage: boolean;
     canJumpLastPage: boolean;
   }>(),
@@ -29,6 +31,13 @@ withDefaults(
 );
 
 const customPageSizeInput = defineModel<string>("customPageSizeInput", { default: "" });
+const pageInput = ref(String(props.currentPage));
+const maximumInputPage = computed(() => {
+  const pageSize = Math.max(1, Math.trunc(props.pageSize));
+  const maximumSafeOffsetPage = Math.min(Number.MAX_SAFE_INTEGER, Math.floor(Number.MAX_SAFE_INTEGER / pageSize) + 1);
+  if (typeof props.maxPage !== "number" || !Number.isFinite(props.maxPage) || props.maxPage < 1) return maximumSafeOffsetPage;
+  return Math.min(maximumSafeOffsetPage, Math.floor(props.maxPage));
+});
 
 const emit = defineEmits<{
   selectPageSize: [value: string];
@@ -36,9 +45,41 @@ const emit = defineEmits<{
   firstPage: [];
   previousPage: [];
   nextPage: [];
+  jumpPage: [page: number];
   lastPage: [];
   selectExport: [value: string];
 }>();
+
+watch(
+  () => props.currentPage,
+  (page) => {
+    pageInput.value = String(page);
+  },
+);
+watch(
+  () => props.loading,
+  (loading, wasLoading) => {
+    if (wasLoading && !loading) pageInput.value = String(props.currentPage);
+  },
+);
+
+function applyPageInput() {
+  const page = Number(pageInput.value);
+  if (!Number.isSafeInteger(page) || page < 1) {
+    pageInput.value = String(props.currentPage);
+    return;
+  }
+  const targetPage = Math.min(page, maximumInputPage.value);
+  pageInput.value = String(targetPage);
+  if (targetPage !== props.currentPage) emit("jumpPage", targetPage);
+}
+
+function handlePageInputKeydown(event: KeyboardEvent) {
+  event.stopPropagation();
+  if (event.key !== "Enter" || event.isComposing) return;
+  event.preventDefault();
+  applyPageInput();
+}
 </script>
 
 <template>
@@ -88,7 +129,17 @@ const emit = defineEmits<{
       </LightDropdown>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || currentPage <= 1" @click="emit('firstPage')"><ChevronsLeft class="h-3 w-3" /></Button>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || currentPage <= 1" @click="emit('previousPage')"><ChevronLeft class="h-3 w-3" /></Button>
-      <span class="shrink-0 tabular-nums">{{ currentPage }}</span>
+      <Input
+        v-model="pageInput"
+        type="number"
+        inputmode="numeric"
+        :min="1"
+        :max="maximumInputPage"
+        :disabled="loading"
+        :aria-label="t('grid.jumpToPage')"
+        class="h-5 w-14 shrink-0 px-1 text-center text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+        @keydown="handlePageInputKeydown"
+      />
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canGoNextPage" @click="emit('nextPage')"><ChevronRight class="h-3 w-3" /></Button>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canJumpLastPage" @click="emit('lastPage')"><ChevronsRight class="h-3 w-3" /></Button>
     </template>

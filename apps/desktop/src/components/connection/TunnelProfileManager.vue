@@ -156,7 +156,7 @@ async function save() {
     await store.saveProfiles(cloneProfiles(draft.value));
     toast(t("settings.tunnelsSaved"));
   } catch (error) {
-    toast(t("settings.tunnelsSaveFailed", { message: translateBackendError(t, String(error)) }), 5000);
+    toast(t("settings.tunnelsSaveFailed", { message: translateBackendError(t, error) }), 5000);
   } finally {
     isSaving.value = false;
   }
@@ -175,7 +175,7 @@ async function testSelected() {
     testResult.value = { ok: true, message: message ? t("settings.tunnelsTestSuccess") + ": " + message : t("settings.tunnelsTestSuccess") };
   } catch (error) {
     if (!testGuard.isCurrent(requestId, profile)) return;
-    testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, String(error)) }) };
+    testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, error) }) };
   } finally {
     if (testGuard.isCurrent(requestId, selectedSsh.value || selectedProxy.value)) isTesting.value = false;
   }

@@ -850,6 +850,27 @@ class JdbcConnectionPoolingTest {
         }
     }
 
+    @RepeatedTest(5)
+    void unsupportedNetworkTimeoutDoesNotPoisonIdentity() throws Exception {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        String url = h2Url("unsupported_network_timeout");
+        try (Connection ignored = openH2(url, physicalOpens)) {
+            // Keep H2 bootstrap outside the setup classification watchdog.
+        }
+        physicalOpens.set(0);
+        try (JdbcConnectionPoolRegistry registry = new JdbcConnectionPoolRegistry(shortTimeoutPoolSettings(1, 32))) {
+            for (int attempt = 0; attempt < 2; attempt++) {
+                try (JdbcConnectionPoolRegistry.Lease lease = registry.borrow(
+                    "unsupported-network-timeout",
+                    () -> unsupportedNetworkTimeoutConnection(openH2(url, physicalOpens))
+                )) {
+                    assertTrue(lease.connection().isValid(1));
+                }
+            }
+            assertEquals(1, physicalOpens.get());
+        }
+    }
+
     @Test
     void blockedSetupAfterKnownFailurePoisonsCurrentAttemptGeneration() throws Exception {
         AtomicInteger connectionAttempts = new AtomicInteger();
@@ -2126,6 +2147,23 @@ class JdbcConnectionPoolingTest {
                 if ("setNetworkTimeout".equals(method.getName()) && blockNetworkTimeout.get()) {
                     networkTimeoutStarted.countDown();
                     awaitUninterruptibly(releaseNetworkTimeout);
+                }
+                try {
+                    return method.invoke(delegate, args);
+                } catch (InvocationTargetException error) {
+                    throw error.getCause();
+                }
+            }
+        );
+    }
+
+    private static Connection unsupportedNetworkTimeoutConnection(Connection delegate) {
+        return (Connection) Proxy.newProxyInstance(
+            Connection.class.getClassLoader(),
+            new Class<?>[] {Connection.class},
+            (proxy, method, args) -> {
+                if ("setNetworkTimeout".equals(method.getName())) {
+                    throw new SQLException("Does not support setNetworkTimeout");
                 }
                 try {
                     return method.invoke(delegate, args);

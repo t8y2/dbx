@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { MqAdminConfig, MqClusterInfo, MqSystemKind, NamespaceRef, TopicInfo } from "@/types/mq";
 import { mqCreateNamespace, mqListNamespaces, mqTestConnection } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import { mqClusterOptionsFromExtra } from "@/lib/mq/mqTenantForm";
 import {
   defaultMqCapabilitiesForSystemKind,
@@ -50,6 +51,8 @@ interface Props {
 const props = defineProps<Props>();
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
+const isProductionConnection = computed(() => !!connectionStore.getConfig(props.connectionId)?.is_production);
 const configuredSystemKind = computed(() => resolveMqSystemKindFromConnection(connectionStore.getConfig(props.connectionId)));
 const FLAT_MQ_CONTEXT = "_flat_mq";
 
@@ -225,6 +228,7 @@ function handleNamespaceSelect(value: AcceptableValue) {
 
 async function handleCreateNamespace() {
   if (props.readOnly) return;
+  if (!(await confirmMqWrite(t("mqNamespaces.create")))) return;
   const name = createNamespaceName.value.trim();
   if (!name) {
     createNamespaceError.value = t("mqNamespaces.namespaceNameRequired");
@@ -398,6 +402,7 @@ onMounted(async () => {
         <button v-if="selectedTopic" class="breadcrumb-button" @click="goToTopicLevel" :title="t('mqAdmin.viewTopic')">{{ selectedTopic.shortName }}</button>
       </div>
       <div class="toolbar-status">
+        <span v-if="isProductionConnection" class="prod-badge">PROD</span>
         <span v-if="readOnly" class="readonly-badge">{{ t("mqAdmin.readOnly") }}</span>
         <span v-if="error" class="toolbar-error">{{ error }}</span>
       </div>
@@ -560,6 +565,8 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .mq-admin-console {
   display: flex;
   flex-direction: column;
@@ -633,6 +640,15 @@ onMounted(async () => {
   color: var(--color-warning);
   font-size: 12px;
   font-weight: 500;
+}
+
+.prod-badge {
+  padding: 2px 8px;
+  border: 1px solid rgb(220 38 38 / 0.55);
+  border-radius: var(--dbx-radius-fixed-4);
+  color: rgb(185 28 28);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .mq-tabs {
@@ -735,16 +751,6 @@ onMounted(async () => {
   font-size: 18px;
 }
 
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
-}
-
 .dialog-body {
   padding: 20px;
 }
@@ -782,28 +788,6 @@ onMounted(async () => {
 .form-error {
   color: var(--color-error);
   font-size: 13px;
-}
-
-.btn-primary,
-.btn-secondary {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
 }
 
 button:disabled {

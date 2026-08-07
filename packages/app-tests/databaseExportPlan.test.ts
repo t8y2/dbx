@@ -33,3 +33,36 @@ test("all-database export uses the database as schema for non-schema-aware datab
     { database: "analytics", schema: "analytics", fileStem: "analytics", displayName: "analytics" },
   ]);
 });
+
+test("all-database export treats selected items as schemas for single-database types (dameng)", () => {
+  // 达梦等单数据库架构：选中的"数据库"就是 schema 本身，不应做笛卡尔积展开
+  const plan = buildAllDatabaseExportPlan({
+    databases: ["COSIMULATION", "DATAMANAGE"],
+    schemaAware: true,
+    schemasByDatabase: {
+      COSIMULATION: ["COSIMULATION", "DATAMANAGE", "MULTITEST"],
+      DATAMANAGE: ["COSIMULATION", "DATAMANAGE", "MULTITEST"],
+    },
+    dbType: "dameng",
+  });
+
+  assert.deepEqual(plan, [
+    { database: "", schema: "COSIMULATION", fileStem: "COSIMULATION", displayName: "COSIMULATION" },
+    { database: "", schema: "DATAMANAGE", fileStem: "DATAMANAGE", displayName: "DATAMANAGE" },
+  ]);
+});
+
+test("all-database export preserves real database for non-schema-aware single-database types (firebird)", () => {
+  // firebird/questdb/access 是单库但非 schema-aware：不能短路成 database:"",
+  // 否则空 database 会覆盖后端 db_config.database 破坏连接。
+  const plan = buildAllDatabaseExportPlan({
+    databases: ["inventory", "archive"],
+    schemaAware: false,
+    dbType: "firebird",
+  });
+
+  assert.deepEqual(plan, [
+    { database: "inventory", schema: "inventory", fileStem: "inventory", displayName: "inventory" },
+    { database: "archive", schema: "archive", fileStem: "archive", displayName: "archive" },
+  ]);
+});

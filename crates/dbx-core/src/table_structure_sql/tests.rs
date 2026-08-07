@@ -4109,3 +4109,242 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
     );
 }
+
+// ---- Oscar (神通) ----
+// 神通 v7 是 Oracle 兼容方言，且实测支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
+// 不同于 Oracle）。DDL 生成走 StructureDialect::Oscar，与 Dameng 共享 Oracle-like 分支。
+// 这些测试锁定 issue #5505 的核心场景：建表/改列/主键/索引/注释，防回归。
+
+#[test]
+fn oscar_create_table_with_primary_key_and_comments() {
+    let mut id = column("ID");
+    id.data_type = "NUMBER(10)".to_string();
+    id.is_nullable = false;
+    id.is_primary_key = true;
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = false;
+    name.comment = "name col".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![id, name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("user table".to_string()),
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("CREATE TABLE \"SYSDBA\".\"USERS\""), "ddl: {}", result.statements[0]);
+    // Oracle 风格：PK 在表定义末尾单独声明；PK 列省略 NOT NULL（主键隐含），非 PK 非空列显式 NOT NULL。
+    assert!(result.statements[0].contains("\"ID\" NUMBER(10),"), "ddl: {}", result.statements[0]);
+    assert!(result.statements[0].contains("\"NAME\" VARCHAR2(100) NOT NULL,"), "ddl: {}", result.statements[0]);
+    assert!(result.statements[0].contains("PRIMARY KEY (\"ID\")"), "ddl: {}", result.statements[0]);
+    assert!(
+        result.statements.iter().any(|s| s == "COMMENT ON TABLE \"SYSDBA\".\"USERS\" IS 'user table';"),
+        "comments: {:?}",
+        result.statements
+    );
+    assert!(
+        result.statements.iter().any(|s| s == "COMMENT ON COLUMN \"SYSDBA\".\"USERS\".\"NAME\" IS 'name col';"),
+        "comments: {:?}",
+        result.statements
+    );
+}
+
+#[test]
+fn oscar_add_column_with_comment() {
+    let mut age = column("AGE");
+    age.data_type = "NUMBER(3)".to_string();
+    age.is_nullable = true;
+    age.comment = "age col".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![age],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // Oracle 风格：ADD 用圆括号包裹列定义，可空列省略 NULL 关键字。
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"AGE\" NUMBER(3));",
+            "COMMENT ON COLUMN \"SYSDBA\".\"users\".\"AGE\" IS 'age col';",
+        ]
+    );
+}
+
+#[test]
+fn oscar_alter_existing_column_modify_type_and_nullability() {
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = false;
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // 神通 MODIFY 语法差异：类型变更与可空性变更需拆成两条（带括号的 MODIFY 不允许 NULL/NOT NULL）。
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" MODIFY (\"NAME\" VARCHAR2(100));",
+            "ALTER TABLE \"SYSDBA\".\"users\" MODIFY \"NAME\" NOT NULL;",
+        ]
+    );
+}
+
+#[test]
+fn oscar_alter_only_nullability_emits_single_unparenthesized_modify() {
+    // 只改可空性（类型不变）：应只生成一条不带括号的 MODIFY col NOT NULL，不重复发类型变更。
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = false;
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(100)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"users\" MODIFY \"NAME\" NOT NULL;"]);
+}
+
+#[test]
+fn oscar_alter_only_default_keeps_parenthesized_modify() {
+    // 只改默认值（类型与可空性不变）：带括号的 MODIFY 允许 DEFAULT，不触发可空性单独语句。
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(100)".to_string();
+    name.is_nullable = true;
+    name.default_value = "'guest'".to_string();
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(100)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"SYSDBA\".\"users\" MODIFY (\"NAME\" VARCHAR2(100) DEFAULT 'guest');"]
+    );
+}
+
+#[test]
+fn oscar_drop_and_readd_primary_key() {
+    // 神通实测支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致）。
+    let mut old_pk = existing_pk_column("id", "INT", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut new_pk = existing_pk_column("code", "VARCHAR(50)", false, true);
+    new_pk.id = "new_code".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oscar,
+        Some("SYSDBA"),
+        "users",
+        vec![old_pk, new_pk],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" DROP PRIMARY KEY;",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"code\");",
+        ]
+    );
+}
+
+#[test]
+fn oscar_drop_index_with_schema_qualifier() {
+    let mut idx = index("DBX_PROBE_IDX", &["NAME"]);
+    idx.marked_for_drop = true;
+    idx.original = Some(IndexInfo {
+        name: "DBX_PROBE_IDX".to_string(),
+        columns: vec!["NAME".to_string()],
+        is_unique: false,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "users".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["DROP INDEX \"SYSDBA\".\"DBX_PROBE_IDX\";"]);
+}
+
+#[test]
+fn oscar_table_comment_uses_comment_on_table() {
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "users".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("new comment".to_string()),
+        original_table_comment: Some("old comment".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["COMMENT ON TABLE \"SYSDBA\".\"users\" IS 'new comment';"]);
+}

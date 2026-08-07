@@ -1,6 +1,8 @@
 //! MQTT 客户端封装（基于 rumqttc），管理 MQTT broker 的长连接和消息收发。
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::File;
+use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,8 +14,8 @@ use rumqttc::tokio_rustls::rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use rumqttc::v5::{
-    mqttbytes::QoS as QoSV5, AsyncClient as AsyncClientV5, Event as EventV5, Incoming as IncomingV5,
-    MqttOptions as MqttOptionsV5,
+    mqttbytes::{v5::Filter as MqttV5Filter, QoS as QoSV5},
+    AsyncClient as AsyncClientV5, Event as EventV5, Incoming as IncomingV5, MqttOptions as MqttOptionsV5,
 };
 use rumqttc::{
     mqttbytes::Protocol, valid_filter, valid_topic, AsyncClient as AsyncClientV4, Event as EventV4,
@@ -25,7 +27,7 @@ use tokio::task::JoinHandle;
 
 use super::types::{
     MqttAuth, MqttBrokerInfo, MqttConnectionConfig, MqttMessage, MqttMessageDirection, MqttPublishRequest, MqttQoS,
-    MqttTlsVerificationMode, MqttTopicNode, MqttTransport,
+    MqttSavedTopic, MqttTlsVerificationMode, MqttTopicNode, MqttTransport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +58,7 @@ struct PendingSubscribe {
     sequence: u64,
     topic: String,
     qos: MqttQoS,
+    no_local: bool,
     add_to_desired: bool,
     completion: Option<SubscriptionCompletion>,
 }
@@ -308,6 +311,7 @@ pub struct MqttClient {
     granted_subscriptions: RwLock<Vec<(String, MqttQoS)>>,
     /// 需要在无会话重连后恢复的 topic 集合
     desired_subscriptions: RwLock<Vec<(String, MqttQoS)>>,
+    no_local_topics: RwLock<HashSet<String>>,
     /// 当前连接是否已收到有效 CONNACK
     connected: AtomicBool,
     /// 订阅请求与 packet id 的关联状态
@@ -337,7 +341,7 @@ impl MqttClient {
         if !(1024..=268_435_455).contains(&config.max_packet_size_bytes) {
             return Err("MQTT 最大报文大小必须在 1024 到 268435455 字节之间".to_string());
         }
-        let plan = build_connect_plan(&config);
+        let plan = build_connect_plan(&config)?;
         match plan.backend {
             MqttBackendKind::V4 => Self::connect_v4(config, plan).await,
             MqttBackendKind::V5 => Self::connect_v5(config, plan).await,
@@ -388,12 +392,16 @@ impl MqttClient {
         backend: MqttBackendClient,
         shutdown_notify: Arc<Notify>,
     ) -> Arc<Self> {
+        let desired_subscriptions = config.saved_topics.iter().map(|saved| (saved.topic.clone(), saved.qos)).collect();
+        let no_local_topics =
+            config.saved_topics.iter().filter(|saved| saved.no_local).map(|saved| saved.topic.clone()).collect();
         Arc::new(Self {
             backend,
             config,
             subscriptions: RwLock::new(Vec::new()),
             granted_subscriptions: RwLock::new(Vec::new()),
-            desired_subscriptions: RwLock::new(Vec::new()),
+            desired_subscriptions: RwLock::new(desired_subscriptions),
+            no_local_topics: RwLock::new(no_local_topics),
             connected: AtomicBool::new(false),
             subscription_requests: Mutex::new(SubscriptionRequestTracker::default()),
             subscription_send_lock: Mutex::new(()),
@@ -775,7 +783,8 @@ impl MqttClient {
             if has_pending {
                 continue;
             }
-            if let Err(error) = self.queue_subscribe_request(topic.clone(), qos, false, None).await {
+            let no_local = self.no_local_topics.read().await.contains(&topic);
+            if let Err(error) = self.queue_subscribe_request(topic.clone(), qos, no_local, false, None).await {
                 log::warn!("MQTT 重连后恢复订阅 {topic} 失败: {error}");
             }
         }
@@ -833,6 +842,11 @@ impl MqttClient {
                 upsert_subscription(&self.granted_subscriptions, &pending.topic, granted_qos).await;
                 self.seen_retained.write().await.clear_filter(&pending.topic);
                 if pending.add_to_desired {
+                    if pending.no_local {
+                        self.no_local_topics.write().await.insert(pending.topic.clone());
+                    } else {
+                        self.no_local_topics.write().await.remove(&pending.topic);
+                    }
                     upsert_subscription(&self.desired_subscriptions, &pending.topic, pending.qos).await;
                 }
                 Ok(())
@@ -859,6 +873,7 @@ impl MqttClient {
             remove_subscription(&self.subscriptions, &pending.topic).await;
             remove_subscription(&self.granted_subscriptions, &pending.topic).await;
             remove_subscription(&self.desired_subscriptions, &pending.topic).await;
+            self.no_local_topics.write().await.remove(&pending.topic);
             self.seen_retained.write().await.clear_filter(&pending.topic);
         } else if let Err(error) = &result {
             log::warn!("{error}");
@@ -873,6 +888,7 @@ impl MqttClient {
         &self,
         topic: String,
         qos: MqttQoS,
+        no_local: bool,
         add_to_desired: bool,
         completion: Option<SubscriptionCompletion>,
     ) -> Result<(), String> {
@@ -887,13 +903,14 @@ impl MqttClient {
                 sequence,
                 topic: topic.clone(),
                 qos,
+                no_local,
                 add_to_desired,
                 completion,
             });
             sequence
         };
 
-        if let Err(error) = self.backend.subscribe(&topic, mqtt_qos(qos)).await {
+        if let Err(error) = self.backend.subscribe(&topic, mqtt_qos(qos), no_local).await {
             self.subscription_requests.lock().await.queued_subscribes.retain(|pending| pending.sequence != sequence);
             return Err(error);
         }
@@ -941,15 +958,16 @@ impl MqttClient {
     }
 
     /// 订阅 topic
-    pub async fn subscribe(&self, topic: &str, qos: MqttQoS) -> Result<(), String> {
+    pub async fn subscribe(&self, topic: &str, qos: MqttQoS, no_local: bool) -> Result<(), String> {
         validate_topic_filter(topic)?;
-        if self
+        let has_desired = self
             .desired_subscriptions
             .read()
             .await
             .iter()
-            .any(|(current, current_qos)| current == topic && *current_qos == qos)
-        {
+            .any(|(current, current_qos)| current == topic && *current_qos == qos);
+        let no_local_matches = self.no_local_topics.read().await.contains(topic);
+        if has_desired && no_local_matches == no_local {
             return Ok(());
         }
         if self.subscription_requests.lock().await.has_pending_topic(topic) {
@@ -957,7 +975,7 @@ impl MqttClient {
         }
 
         let (completion, result) = oneshot::channel();
-        self.queue_subscribe_request(topic.to_string(), qos, true, Some(completion)).await?;
+        self.queue_subscribe_request(topic.to_string(), qos, no_local, true, Some(completion)).await?;
         result.await.map_err(|_| "订阅确认通道已关闭，请检查 MQTT 连接状态".to_string())?
     }
 
@@ -1031,6 +1049,19 @@ impl MqttClient {
         self.subscriptions.read().await.clone()
     }
 
+    /// 获取持久化意图中的订阅 Topic，用于保存连接配置。
+    pub async fn desired_topics(&self) -> Vec<(String, MqttQoS)> {
+        self.desired_subscriptions.read().await.clone()
+    }
+
+    pub async fn desired_topic_configs(&self) -> Vec<MqttSavedTopic> {
+        let desired = self.desired_subscriptions.read().await.clone();
+        let no_local = self.no_local_topics.read().await;
+        desired
+            .into_iter()
+            .map(|(topic, qos)| MqttSavedTopic { no_local: no_local.contains(&topic), topic, qos })
+            .collect()
+    }
     /// 获取消息缓冲区中的消息
     pub async fn get_messages(&self, topic_filter: Option<&str>, limit: usize) -> Vec<MqttMessage> {
         let buffer = self.message_buffer.read().await;
@@ -1117,13 +1148,18 @@ impl Drop for MqttClient {
 }
 
 impl MqttBackendClient {
-    async fn subscribe(&self, topic: &str, qos: QoSV4) -> Result<(), String> {
+    async fn subscribe(&self, topic: &str, qos: QoSV4, no_local: bool) -> Result<(), String> {
         match self {
             MqttBackendClient::V4(client) => {
+                if no_local {
+                    return Err("MQTT 3.x 不支持 No Local 订阅选项".to_string());
+                }
                 client.subscribe(topic, qos).await.map_err(|e| format!("订阅 topic 失败: {e}"))
             }
             MqttBackendClient::V5(client) => {
-                client.subscribe(topic, qos_v4_to_v5(qos)).await.map_err(|e| format!("订阅 topic 失败: {e}"))
+                let mut filter = MqttV5Filter::new(topic.to_string(), qos_v4_to_v5(qos));
+                filter.nolocal = no_local;
+                client.subscribe_many([filter]).await.map_err(|e| format!("订阅 topic 失败: {e}"))
             }
         }
     }
@@ -1159,7 +1195,7 @@ impl MqttBackendClient {
     }
 }
 
-fn build_connect_plan(config: &MqttConnectionConfig) -> MqttConnectPlan {
+fn build_connect_plan(config: &MqttConnectionConfig) -> Result<MqttConnectPlan, String> {
     let backend = match config.protocol_version {
         super::types::MqttProtocolVersion::V3 | super::types::MqttProtocolVersion::V4 => MqttBackendKind::V4,
         super::types::MqttProtocolVersion::V5 => MqttBackendKind::V5,
@@ -1170,13 +1206,27 @@ fn build_connect_plan(config: &MqttConnectionConfig) -> MqttConnectPlan {
         super::types::MqttProtocolVersion::V5 => None,
     };
     let tls_verification_mode = config.tls_verification_mode();
-    let transport = build_transport(config.transport, tls_verification_mode);
+    let transport = build_transport(config.transport, tls_verification_mode, &config.auth)?;
 
-    MqttConnectPlan { backend, broker_addr: config.broker_addr_for_transport(), transport, protocol }
+    Ok(MqttConnectPlan { backend, broker_addr: config.broker_addr_for_transport(), transport, protocol })
 }
 
-fn build_transport(transport: MqttTransport, tls_verification_mode: Option<MqttTlsVerificationMode>) -> Transport {
-    match (transport, tls_verification_mode) {
+fn build_transport(
+    transport: MqttTransport,
+    tls_verification_mode: Option<MqttTlsVerificationMode>,
+    auth: &MqttAuth,
+) -> Result<Transport, String> {
+    if let Some(mode) = tls_verification_mode {
+        if matches!(auth, MqttAuth::Certificate { .. }) {
+            let tls = certificate_tls_configuration(auth, mode)?;
+            return Ok(match transport {
+                MqttTransport::Tcp => Transport::tls_with_config(tls),
+                MqttTransport::WebSocket => Transport::wss_with_config(tls),
+            });
+        }
+    }
+
+    Ok(match (transport, tls_verification_mode) {
         (MqttTransport::Tcp, None) => Transport::Tcp,
         (MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert)) => Transport::tls_with_default_config(),
         (MqttTransport::Tcp, Some(MqttTlsVerificationMode::SkipServerCertVerification)) => {
@@ -1189,9 +1239,57 @@ fn build_transport(transport: MqttTransport, tls_verification_mode: Option<MqttT
         (MqttTransport::WebSocket, Some(MqttTlsVerificationMode::SkipServerCertVerification)) => {
             Transport::wss_with_config(insecure_tls_configuration())
         }
-    }
+    })
 }
 
+fn certificate_tls_configuration(auth: &MqttAuth, mode: MqttTlsVerificationMode) -> Result<TlsConfiguration, String> {
+    let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path } = auth else {
+        return Err("MQTT 证书认证配置无效".to_string());
+    };
+    let client_cert_path = client_cert_path.as_deref().ok_or("MQTT 证书认证缺少客户端证书路径")?;
+    let client_key_path = client_key_path.as_deref().ok_or("MQTT 证书认证缺少客户端私钥路径")?;
+
+    let mut root_cert_store = rustls::RootCertStore::empty();
+    if let Some(ca_cert_path) = ca_cert_path.as_deref().filter(|path| !path.trim().is_empty()) {
+        let file = File::open(ca_cert_path).map_err(|e| format!("读取 MQTT CA 证书失败: {e}"))?;
+        let certs = rustls_pemfile::certs(&mut BufReader::new(file))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("解析 MQTT CA 证书失败: {e}"))?;
+        let (added, _) = root_cert_store.add_parsable_certificates(certs);
+        if added == 0 {
+            return Err("MQTT CA 证书文件不包含有效证书".to_string());
+        }
+    } else {
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
+    let builder = match mode {
+        MqttTlsVerificationMode::VerifyServerCert => {
+            rustls::ClientConfig::builder().with_root_certificates(root_cert_store)
+        }
+        MqttTlsVerificationMode::SkipServerCertVerification => {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoCertificateVerification { provider }))
+        }
+    };
+    let cert_file = File::open(client_cert_path).map_err(|e| format!("读取 MQTT 客户端证书失败: {e}"))?;
+    let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("解析 MQTT 客户端证书失败: {e}"))?;
+    if certs.is_empty() {
+        return Err("MQTT 客户端证书文件不包含有效证书".to_string());
+    }
+    let key_file = File::open(client_key_path).map_err(|e| format!("读取 MQTT 客户端私钥失败: {e}"))?;
+    let mut key_reader = BufReader::new(key_file);
+    let key = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| format!("解析 MQTT 客户端私钥失败: {e}"))?
+        .ok_or("MQTT 客户端私钥文件不包含有效私钥")?;
+    let config =
+        builder.with_client_auth_cert(certs, key).map_err(|e| format!("构建 MQTT 客户端 TLS 配置失败: {e}"))?;
+    Ok(TlsConfiguration::from(config))
+}
 fn insecure_tls_configuration() -> TlsConfiguration {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder()
@@ -1503,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_plan_uses_ws_path_and_insecure_tls_transport() {
+    fn connect_plan_uses_ws_path_and_insecure_tls_transport() -> Result<(), Box<dyn std::error::Error>> {
         let config = MqttConnectionConfig {
             host: "broker.example.com".to_string(),
             port: 8084,
@@ -1514,13 +1612,15 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = build_connect_plan(&config);
+        let plan = build_connect_plan(&config)?;
         assert_eq!(plan.broker_addr, "wss://broker.example.com:8084/custom/mqtt");
         assert_eq!(plan.backend, MqttBackendKind::V5);
         match plan.transport {
             Transport::Wss(TlsConfiguration::Rustls(_)) => {}
             _ => panic!("tlsSkipVerify 应使用显式 Rustls 自定义校验器"),
         }
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -1572,7 +1672,7 @@ mod tests {
         let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
         let client = MqttClient::connect(config).await.unwrap();
 
-        client.subscribe("device/reconnect/#", MqttQoS::AtMostOnce).await.unwrap();
+        client.subscribe("device/reconnect/#", MqttQoS::AtMostOnce, false).await.unwrap();
         assert!(client.broker_info().await.connected);
         assert_eq!(client.list_topics().await.len(), 1);
 
@@ -1597,7 +1697,9 @@ mod tests {
 
         let subscribing_client = Arc::clone(&client);
         let subscribe =
-            tokio::spawn(async move { subscribing_client.subscribe("device/ack/#", MqttQoS::AtLeastOnce).await });
+            tokio::spawn(
+                async move { subscribing_client.subscribe("device/ack/#", MqttQoS::AtLeastOnce, false).await },
+            );
         subscribe_seen.await.unwrap();
         assert!(client.list_topics().await.is_empty());
         allow_suback.send(()).unwrap();
@@ -1687,7 +1789,7 @@ mod tests {
         let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
         let client = MqttClient::connect(config).await.unwrap();
 
-        client.subscribe("device/downgraded/#", MqttQoS::ExactlyOnce).await.unwrap();
+        client.subscribe("device/downgraded/#", MqttQoS::ExactlyOnce, false).await.unwrap();
         assert_eq!(client.list_topics().await, vec![("device/downgraded/#".to_string(), MqttQoS::AtMostOnce)]);
 
         client.disconnect().await;
@@ -1700,14 +1802,14 @@ mod tests {
         let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
         let client = MqttClient::connect(config).await.unwrap();
 
-        client.subscribe("retained/#", MqttQoS::AtMostOnce).await.unwrap();
+        client.subscribe("retained/#", MqttQoS::AtMostOnce, false).await.unwrap();
         wait_for_message_count(&client, 2).await;
         let initial = client.get_messages(None, 10).await;
         assert_eq!(initial.iter().filter(|message| message.payload_text.as_deref() == Some("v1")).count(), 1);
         assert!(initial.iter().any(|message| message.payload_text.as_deref() == Some("v2")));
 
         client.unsubscribe("retained/#").await.unwrap();
-        client.subscribe("retained/#", MqttQoS::AtMostOnce).await.unwrap();
+        client.subscribe("retained/#", MqttQoS::AtMostOnce, false).await.unwrap();
         wait_for_message_count(&client, 3).await;
         assert_eq!(
             client
@@ -1777,7 +1879,7 @@ mod tests {
         let config = mqtt_config(port, crate::mqtt::types::MqttProtocolVersion::V4);
         let client = MqttClient::connect(config).await.unwrap();
 
-        let error = client.subscribe("device/rejected/#", MqttQoS::AtMostOnce).await.unwrap_err();
+        let error = client.subscribe("device/rejected/#", MqttQoS::AtMostOnce, false).await.unwrap_err();
         assert!(error.contains("拒绝"), "unexpected error: {error}");
         assert!(client.list_topics().await.is_empty());
 

@@ -1138,6 +1138,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function isFixedPriorityTreeNode(node: TreeNode): boolean {
+    if (node.type === "schema") {
+      return !!node.connectionId && !!node.schema && isDefaultSchema(node.connectionId, node.schema);
+    }
     if (node.type !== "database" && node.type !== "redis-db" && node.type !== "mongo-db") return false;
     return !!node.connectionId && typeof node.database === "string" && isDefaultDatabase(node.connectionId, node.database);
   }

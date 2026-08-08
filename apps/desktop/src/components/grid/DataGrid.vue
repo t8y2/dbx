@@ -7,7 +7,7 @@ import {
   ArrowUpDown,
   ArrowUpRight,
   Download,
-  Upload,
+  FileUp,
   Trash2,
   ChevronDown,
   ChevronUp,
@@ -7054,6 +7054,17 @@ function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuIt
   };
 }
 
+function binaryImportItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  if (!canImportDetailBinaryValue(detail)) return null;
+  return {
+    label: t("grid.importBinaryValue"),
+    icon: FileUp,
+    action: () => {
+      void importDetailBinaryValue(detail);
+    },
+  };
+}
+
 async function copyDetailSqlCondition() {
   if (!canCopyPreparedDetailSqlCondition()) return;
   copyText(detailSqlConditionCopy.value.text);
@@ -8740,7 +8751,7 @@ function exportSubmenu(): ContextMenuItem {
       { label: t("grid.exportSelectedRowsTxt"), action: exportSelectedRowsTxt },
     );
   }
-  return { label: t("grid.export"), icon: Upload, children: items };
+  return { label: t("grid.export"), icon: Download, children: items };
 }
 
 const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
@@ -8833,6 +8844,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       },
       icons: { cellDetails: Maximize2, columnDetails: TableProperties, rowDetails: ListTree, setNull: X, bulkEdit: Pencil, transpose: Rows3 },
       actions: { cellDetails: openContextCellDetailDialog, columnDetails: openContextColumnDetailDialog, rowDetails: openContextRowDetailDialog, setNull: setSelectionNull, bulkEdit: openBulkEditDialog, transpose: openContextTranspose },
+      importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
       foreignKeyItem: contextForeignKeyMenuItem(),
       copySubmenu: copySubmenu(),

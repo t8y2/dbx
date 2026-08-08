@@ -755,6 +755,8 @@ mod tests {
             claude_code_cli_env: HashMap::new(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: HashMap::new(),
+            opencode_cli_path: None,
+            opencode_cli_env: HashMap::new(),
         }
     }
 

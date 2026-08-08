@@ -416,6 +416,22 @@ describe("settingsStore AI API key normalization", () => {
   it("trims API keys when normalizing loaded configurations", () => {
     expect(normalizeAiConfig({ provider: "openai", apiKey: "  secret  " }).apiKey).toBe("secret");
   });
+
+  it("normalizes OpenCode CLI path and environment settings", () => {
+    expect(
+      normalizeAiConfig({
+        provider: "opencode-cli",
+        opencodeCliPath: "  /opt/homebrew/bin/opencode  ",
+        opencodeCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: null as unknown as string },
+      }),
+    ).toMatchObject({
+      provider: "opencode-cli",
+      endpoint: "",
+      model: "default",
+      opencodeCliPath: "/opt/homebrew/bin/opencode",
+      opencodeCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", EMPTY: "" },
+    });
+  });
 });
 
 describe("settingsStore MCP policy persistence", () => {

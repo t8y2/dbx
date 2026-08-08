@@ -455,6 +455,54 @@ public final class MongoAgent {
         return documentQueryResult(documents, total);
     }
 
+    private static Object explainFind(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        Document result = c.getDatabase(database).runCommand(buildFindExplainCommand(params));
+        return bsonToExtendedJson(result);
+    }
+
+    static Document buildFindExplainCommand(JsonObject params) {
+        String collection = params.get("collection").getAsString();
+        Document find = new Document("find", collection);
+        Document filter = documentOrNull(params, "filter");
+        find.append("filter", filter == null ? new Document() : filter);
+
+        Document projection = documentOrNull(params, "projection");
+        if (projection != null) {
+            find.append("projection", projection);
+        }
+        Document sort = documentOrNull(params, "sort");
+        if (sort != null) {
+            find.append("sort", sort);
+        }
+        Document collation = documentOrNull(params, "collation");
+        if (collation != null) {
+            collationOrNull(collation);
+            find.append("collation", collation);
+        }
+
+        long skip = params.has("skip") ? params.get("skip").getAsLong() : 0;
+        if (skip > 0) {
+            find.append("skip", skip);
+        }
+        long limit = params.has("limit") ? params.get("limit").getAsLong() : 0;
+        if (limit > 0) {
+            find.append("limit", limit);
+        }
+        return new Document("explain", find)
+            .append("verbosity", findExplainVerbosity(params));
+    }
+
+    private static String findExplainVerbosity(JsonObject params) {
+        String verbosity = defaultString(stringOrNull(params, "verbosity"), "queryPlanner");
+        if (!Set.of("queryPlanner", "executionStats", "allPlansExecution").contains(verbosity)) {
+            throw new IllegalArgumentException(
+                "MongoDB explain verbosity must be queryPlanner, executionStats, or allPlansExecution");
+        }
+        return verbosity;
+    }
+
     private static Object findOne(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -1294,6 +1342,7 @@ public final class MongoAgent {
             case AgentProtocol.METHOD_LIST_INDEXES -> listIndexes(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS -> findDocuments(params);
             case AgentProtocol.MONGO_METHOD_FIND_ONE -> findOne(params);
+            case AgentProtocol.MONGO_METHOD_EXPLAIN_FIND -> explainFind(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON -> findDocumentsExtendedJson(params);
             case AgentProtocol.MONGO_METHOD_COUNT_DOCUMENTS -> countDocuments(params);
             case AgentProtocol.MONGO_METHOD_SERVER_VERSION -> serverVersion(params);

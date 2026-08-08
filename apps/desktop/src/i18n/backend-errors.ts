@@ -33,6 +33,15 @@ const taggedAiCliErrorKeys: Record<string, string> = {
   piAgentProtocolError: "ai.cliErrors.piAgentProtocolError",
   piAgentModelInvalid: "ai.cliErrors.piAgentModelInvalid",
   piAgentRunFailed: "ai.cliErrors.piAgentRunFailed",
+  openCodeNotInstalled: "ai.cliErrors.openCodeNotInstalled",
+  openCodeCliPathInvalid: "ai.cliErrors.openCodeCliPathInvalid",
+  openCodeEnvInvalid: "ai.cliErrors.openCodeEnvInvalid",
+  openCodeEnvReserved: "ai.cliErrors.openCodeEnvReserved",
+  openCodeNotAuthenticated: "ai.cliErrors.openCodeNotAuthenticated",
+  openCodeMcpStartupFailed: "ai.cliErrors.openCodeMcpStartupFailed",
+  openCodeTimeout: "ai.cliErrors.openCodeTimeout",
+  openCodeProtocolError: "ai.cliErrors.openCodeProtocolError",
+  openCodeRunFailed: "ai.cliErrors.openCodeRunFailed",
 };
 
 const exactMessageKeys: Record<string, string> = {

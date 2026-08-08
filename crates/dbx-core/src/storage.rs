@@ -5467,6 +5467,8 @@ mod tests {
                 claude_code_cli_env: std::collections::HashMap::new(),
                 pi_agent_cli_path: None,
                 pi_agent_cli_env: std::collections::HashMap::new(),
+                opencode_cli_path: None,
+                opencode_cli_env: std::collections::HashMap::new(),
             },
         }
     }
@@ -5499,6 +5501,33 @@ mod tests {
         assert_eq!(
             loaded[0].config.models[0].supported_effort_levels,
             vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh]
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn opencode_cli_ai_config_roundtrip() {
+        let db = temp_db_path("opencode-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("opencode-cli", true);
+        cfg.config.provider = AiProvider::OpenCodeCli;
+        cfg.config.api_key.clear();
+        cfg.config.endpoint.clear();
+        cfg.config.model = "openai/gpt-5.4-mini".to_string();
+        cfg.config.opencode_cli_path = Some("/opt/homebrew/bin/opencode".to_string());
+        cfg.config.opencode_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::OpenCodeCli));
+        assert_eq!(loaded[0].config.model, "openai/gpt-5.4-mini");
+        assert_eq!(loaded[0].config.opencode_cli_path.as_deref(), Some("/opt/homebrew/bin/opencode"));
+        assert_eq!(
+            loaded[0].config.opencode_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
         );
 
         std::fs::remove_file(&db).ok();

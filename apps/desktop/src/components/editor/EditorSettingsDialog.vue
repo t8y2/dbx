@@ -2553,7 +2553,7 @@ async function saveMaxAgentTurnsSetting() {
 }
 
 // Max Retries (global). Default 2, range 0–10. Applied to all API-backed
-// AI providers.  CLI providers (claude-code, codex, pi) are unaffected
+// AI providers. CLI providers (Claude Code, Codex, OpenCode, Pi) are unaffected
 // because they use their own retry logic.
 const editMaxRetries = ref<number | undefined>(undefined);
 const maxRetriesSaving = ref(false);
@@ -2604,7 +2604,8 @@ function normalizeMaxRetries(value: number | undefined): number {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "pi-agent-cli", "codex-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli"]);
+const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
@@ -2626,6 +2627,8 @@ const aiEditClaudeCodeCliPath = ref("");
 const aiEditClaudeCodeCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditPiAgentCliPath = ref("");
 const aiEditPiAgentCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditOpenCodeCliPath = ref("");
+const aiEditOpenCodeCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 
@@ -2656,22 +2659,26 @@ const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
 const aiIsPiAgentCli = computed(() => aiEditProvider.value === "pi-agent-cli");
+const aiIsOpenCodeCli = computed(() => aiEditProvider.value === "opencode-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
 const aiCliCommandName = computed(() => {
   if (aiIsClaudeCodeCli.value) return "claude";
   if (aiIsPiAgentCli.value) return "pi";
+  if (aiIsOpenCodeCli.value) return "opencode";
   return "codex";
 });
 const aiCliLoginCommand = computed(() => {
   if (aiIsClaudeCodeCli.value) return "claude auth login";
   if (aiIsPiAgentCli.value) return "pi";
+  if (aiIsOpenCodeCli.value) return "opencode auth login";
   return "codex login";
 });
 const aiEditCliPath = computed({
   get: () => {
     if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliPath.value;
     if (aiIsPiAgentCli.value) return aiEditPiAgentCliPath.value;
+    if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliPath.value;
     return aiEditCodexCliPath.value;
   },
   set: (value: string) => {
@@ -2679,6 +2686,8 @@ const aiEditCliPath = computed({
       aiEditClaudeCodeCliPath.value = value;
     } else if (aiIsPiAgentCli.value) {
       aiEditPiAgentCliPath.value = value;
+    } else if (aiIsOpenCodeCli.value) {
+      aiEditOpenCodeCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
@@ -2687,6 +2696,7 @@ const aiEditCliPath = computed({
 const aiEditCliEnvRows = computed(() => {
   if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliEnvRows.value;
   if (aiIsPiAgentCli.value) return aiEditPiAgentCliEnvRows.value;
+  if (aiIsOpenCodeCli.value) return aiEditOpenCodeCliEnvRows.value;
   return aiEditCodexCliEnvRows.value;
 });
 watch(aiIsCliProvider, (isCliProvider) => {
@@ -2763,7 +2773,7 @@ function cliEnvValidationError(): string {
     const key = row.key.trim();
     if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.cliEnvInvalidName", { name: key });
     const upper = key.toUpperCase();
-    if (upper.startsWith("DBX_MCP_") || (aiIsPiAgentCli.value && upper.startsWith("DBX_PI_"))) {
+    if (upper.startsWith("DBX_MCP_") || (aiIsPiAgentCli.value && upper.startsWith("DBX_PI_")) || (aiIsOpenCodeCli.value && OPENCODE_CONTROL_ENV.has(upper))) {
       return t("ai.cliEnvReservedName", { name: key });
     }
   }
@@ -2779,6 +2789,8 @@ function removeCliEnvRow(id: string) {
     aiEditClaudeCodeCliEnvRows.value = aiEditClaudeCodeCliEnvRows.value.filter((row) => row.id !== id);
   } else if (aiIsPiAgentCli.value) {
     aiEditPiAgentCliEnvRows.value = aiEditPiAgentCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsOpenCodeCli.value) {
+    aiEditOpenCodeCliEnvRows.value = aiEditOpenCodeCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
@@ -2807,6 +2819,8 @@ function currentAiEditConfig() {
     claudeCodeCliEnv: aiIsClaudeCodeCli.value ? cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value) : {},
     piAgentCliPath: aiEditPiAgentCliPath.value.trim() || undefined,
     piAgentCliEnv: aiIsPiAgentCli.value ? cliEnvFromRows(aiEditPiAgentCliEnvRows.value) : {},
+    opencodeCliPath: aiEditOpenCodeCliPath.value.trim() || undefined,
+    opencodeCliEnv: aiIsOpenCodeCli.value ? cliEnvFromRows(aiEditOpenCodeCliEnvRows.value) : {},
   };
 }
 
@@ -2876,6 +2890,8 @@ function aiEnterEditMode(configId?: string) {
       aiEditClaudeCodeCliEnvRows.value = aiEnvRowsFromConfig(config.claudeCodeCliEnv);
       aiEditPiAgentCliPath.value = config.piAgentCliPath ?? "";
       aiEditPiAgentCliEnvRows.value = aiEnvRowsFromConfig(config.piAgentCliEnv);
+      aiEditOpenCodeCliPath.value = config.opencodeCliPath ?? "";
+      aiEditOpenCodeCliEnvRows.value = aiEnvRowsFromConfig(config.opencodeCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
@@ -2897,6 +2913,8 @@ function aiEnterEditMode(configId?: string) {
     aiEditClaudeCodeCliEnvRows.value = [];
     aiEditPiAgentCliPath.value = "";
     aiEditPiAgentCliEnvRows.value = [];
+    aiEditOpenCodeCliPath.value = "";
+    aiEditOpenCodeCliEnvRows.value = [];
   }
 }
 

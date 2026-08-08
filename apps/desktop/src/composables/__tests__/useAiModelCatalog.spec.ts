@@ -94,6 +94,30 @@ describe("useAiModelCatalog", () => {
     expect(apiMock.aiResolveModelEffort).toHaveBeenCalledTimes(2);
   });
 
+  it("tracks OpenCode executable and environment changes without depending on environment key order", async () => {
+    const initial: AiConfigItem = {
+      ...config(),
+      provider: "opencode-cli",
+      endpoint: "",
+      apiKey: "",
+      model: "default",
+      opencodeCliPath: "/opt/homebrew/bin/opencode",
+      opencodeCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" },
+    };
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "first" }]).mockResolvedValueOnce([{ id: "second" }]);
+
+    await expect(catalog.loadModels(initial)).resolves.toEqual([{ id: "first" }]);
+    await expect(
+      catalog.loadModels({
+        ...initial,
+        opencodeCliEnv: { NO_PROXY: "localhost", HTTPS_PROXY: "http://127.0.0.1:7890" },
+      }),
+    ).resolves.toEqual([{ id: "first" }]);
+    await expect(catalog.loadModels({ ...initial, opencodeCliPath: "/usr/local/bin/opencode" })).resolves.toEqual([{ id: "second" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let a stale request overwrite a newer provider catalog", async () => {
     let resolveInitial: ((models: { id: string }[]) => void) | undefined;
     apiMock.aiListModels

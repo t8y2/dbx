@@ -259,6 +259,97 @@ async fn executes_mongo_shell_commands_without_desktop_process() {
     server_task.abort();
 }
 
+#[tokio::test]
+#[ignore = "requires DBX_MCP_TEST_MONGO_HOST and DBX_MCP_TEST_MONGO_PORT pointing at MongoDB 4.0+"]
+async fn executes_legacy_mongo_get_indexes_without_desktop_process() {
+    let host = std::env::var("DBX_MCP_TEST_MONGO_HOST").expect("MongoDB host");
+    let port = std::env::var("DBX_MCP_TEST_MONGO_PORT")
+        .unwrap_or_else(|_| "27017".to_string())
+        .parse::<u16>()
+        .expect("MongoDB port");
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    let connection: ConnectionConfig = serde_json::from_value(json!({
+        "id": "mongo-e2e",
+        "name": "mongo-legacy-e2e",
+        "db_type": "mongodb",
+        "driver_profile": "mongodb-legacy",
+        "host": host,
+        "port": port,
+        "username": "",
+        "password": "",
+        "database": "dbx_mcp_test",
+        "ssl": false
+    }))
+    .expect("MongoDB Legacy connection config");
+    storage.save_connections(&[connection]).await.expect("save connection");
+
+    let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
+    let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize client");
+
+    let result = call_query(&client, "db.im_msg.getIndexes()").await;
+    assert!(result.contains("| name | columns | unique | primary | type | filter |"), "{result}");
+    assert!(result.contains("_id_"), "{result}");
+    assert!(result.contains("email_1"), "{result}");
+
+    client.cancel().await.expect("close client");
+    server_task.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_MCP_TEST_MONGO_HOST and DBX_MCP_TEST_MONGO_PORT pointing at MongoDB 4.0+"]
+async fn executes_legacy_mongo_find_explain_without_desktop_process() {
+    let host = std::env::var("DBX_MCP_TEST_MONGO_HOST").expect("MongoDB host");
+    let port = std::env::var("DBX_MCP_TEST_MONGO_PORT")
+        .unwrap_or_else(|_| "27017".to_string())
+        .parse::<u16>()
+        .expect("MongoDB port");
+    let collection = std::env::var("DBX_MCP_TEST_MONGO_COLLECTION").unwrap_or_else(|_| "im_msg".to_string());
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    let connection: ConnectionConfig = serde_json::from_value(json!({
+        "id": "mongo-e2e",
+        "name": "mongo-legacy-e2e",
+        "db_type": "mongodb",
+        "driver_profile": "mongodb-legacy",
+        "host": host,
+        "port": port,
+        "username": "",
+        "password": "",
+        "database": "dbx_mcp_test",
+        "ssl": false
+    }))
+    .expect("MongoDB Legacy connection config");
+    storage.save_connections(&[connection]).await.expect("save connection");
+
+    let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
+    let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize client");
+
+    let planner =
+        call_query(&client, &format!("db.{collection}.find({{active: true}}).sort({{email: 1}}).limit(1).explain()"))
+            .await;
+    assert!(planner.contains("queryPlanner"), "unexpected MongoDB explain result: {planner}");
+
+    let result = call_query(
+        &client,
+        &format!("db.{collection}.find({{active: true}}).sort({{email: 1}}).limit(1).explain(\"executionStats\")"),
+    )
+    .await;
+    assert!(result.contains("queryPlanner"), "unexpected MongoDB explain result: {result}");
+    assert!(result.contains("executionStats"), "unexpected MongoDB explain result: {result}");
+
+    client.cancel().await.expect("close client");
+    server_task.abort();
+}
+
 #[test]
 #[cfg(feature = "mq-admin")]
 fn mcp_default_features_include_message_queue_admin() {

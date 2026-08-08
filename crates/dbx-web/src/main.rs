@@ -623,6 +623,7 @@ async fn main() {
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
+        .route("/mongo/explain-find", post(routes::mongo::explain_find))
         .route("/mongo/find-one", post(routes::mongo::find_one))
         .route("/mongo/count-documents", post(routes::mongo::count_documents))
         .route("/mongo/server-version", post(routes::mongo::server_version))

@@ -232,6 +232,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "opencode-cli": {
+    label: "OpenCode CLI",
+    iconSlug: "opencode",
+    provider: "opencode-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "pi-agent-cli": {
     label: "Pi Coding Agent",
     iconSlug: "pi",
@@ -298,6 +308,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
     piAgentCliPath: config?.piAgentCliPath?.trim() || undefined,
     piAgentCliEnv: normalizeAiEnv(config?.piAgentCliEnv),
+    opencodeCliPath: config?.opencodeCliPath?.trim() || undefined,
+    opencodeCliEnv: normalizeAiEnv(config?.opencodeCliEnv),
   };
 }
 
@@ -1390,7 +1402,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli" || config.provider === "opencode-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 

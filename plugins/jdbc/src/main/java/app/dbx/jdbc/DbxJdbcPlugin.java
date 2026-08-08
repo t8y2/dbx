@@ -519,8 +519,25 @@ public final class DbxJdbcPlugin {
             applyOracleProperties(connection, properties);
         }
         sharedConnection = DriverManager.getConnection(url, properties);
+        configurePhoenixAutoCommit(connection, url, sharedConnection);
         sharedConnectionKey = key;
         return sharedConnection;
+    }
+
+    private static void configurePhoenixAutoCommit(JsonNode connection, String url, Connection jdbcConnection)
+        throws SQLException {
+        if (!isPhoenixConnection(connection, url) || jdbcConnection.getAutoCommit()) {
+            return;
+        }
+        jdbcConnection.setAutoCommit(true);
+    }
+
+    private static boolean isPhoenixConnection(JsonNode connection, String url) {
+        if (urlMatchesPrefix(url, "jdbc:phoenix:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        return driverClass != null && driverClass.equalsIgnoreCase("org.apache.phoenix.jdbc.PhoenixDriver");
     }
 
     private static void applyJdbcxExtensionSecurity(JsonNode connection, String url, Properties properties) {

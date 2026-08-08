@@ -173,6 +173,42 @@ class MongoAgentTest {
     }
 
     @Test
+    void explainFindBuildsOneCommandWithFindOptions() {
+        JsonObject params = JsonParser.parseString(
+            "{\"database\":\"app\",\"collection\":\"orders\","
+                + "\"filter\":\"{\\\"status\\\":\\\"open\\\"}\","
+                + "\"projection\":\"{\\\"email\\\":1}\","
+                + "\"sort\":\"{\\\"createdAt\\\":-1}\","
+                + "\"collation\":\"{\\\"locale\\\":\\\"en\\\",\\\"strength\\\":1}\","
+                + "\"skip\":2,\"limit\":5,\"verbosity\":\"executionStats\"}"
+        ).getAsJsonObject();
+
+        Document command = MongoAgent.buildFindExplainCommand(params);
+        Document find = command.get("explain", Document.class);
+
+        assertEquals("orders", find.getString("find"));
+        assertEquals(new Document("status", "open"), find.get("filter"));
+        assertEquals(new Document("email", 1), find.get("projection"));
+        assertEquals(new Document("createdAt", -1), find.get("sort"));
+        assertEquals(new Document("locale", "en").append("strength", 1), find.get("collation"));
+        assertEquals(2L, find.getLong("skip"));
+        assertEquals(5L, find.getLong("limit"));
+        assertEquals("executionStats", command.getString("verbosity"));
+    }
+
+    @Test
+    void explainFindMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"explain_find\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\"}}"
+        );
+
+        JsonObject error = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
+        assertEquals("Not connected", error.get("message").getAsString());
+        assertFalse(error.get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
     void findOneUsesOneBoundedReadWithoutCounting() {
         List<String> calls = new ArrayList<>();
         MongoClient client = recordingFindOneMongoClient(

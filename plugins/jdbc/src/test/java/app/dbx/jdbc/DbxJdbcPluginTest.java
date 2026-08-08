@@ -523,6 +523,69 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void phoenixConnectionsEnableAutoCommitWhenDriverDefaultsToManualTransactions() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "configurePhoenixAutoCommit",
+            JsonNode.class,
+            String.class,
+            Connection.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:phoenix:localhost"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:phoenix:localhost", pagedQueryConnection(calls, false));
+
+        assertEquals(List.of("getAutoCommit", "setAutoCommit:true"), calls);
+    }
+
+    @Test
+    void phoenixAutoCommitConfigurationSkipsNonPhoenixConnections() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "configurePhoenixAutoCommit",
+            JsonNode.class,
+            String.class,
+            Connection.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:h2:mem:dbx"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:h2:mem:dbx", pagedQueryConnection(calls, false));
+
+        assertEquals(List.of(), calls);
+    }
+
+    @Test
+    void phoenixAutoCommitConfigurationDoesNotResetExistingAutoCommit() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "configurePhoenixAutoCommit",
+            JsonNode.class,
+            String.class,
+            Connection.class
+        );
+        method.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "jdbc_driver_class": "org.apache.phoenix.jdbc.PhoenixDriver"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:custom:phoenix", pagedQueryConnection(calls, true));
+
+        assertEquals(List.of("getAutoCommit"), calls);
+    }
+
+    @Test
     void mysqlPagedQueriesEnableConnectorCursorFetchingByDefault() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
             "applyPagedFetchProperties",

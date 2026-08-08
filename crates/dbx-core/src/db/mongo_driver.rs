@@ -733,6 +733,70 @@ pub async fn find_documents_without_total(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn explain_find(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    verbosity: &str,
+) -> Result<serde_json::Value, String> {
+    let command = build_find_explain_command(collection, skip, limit, filter, projection, sort, collation, verbosity)?;
+    let result = client.database(database).run_command(command).await.map_err(|error| error.to_string())?;
+    Ok(bson_to_json(&Bson::Document(result)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_find_explain_command(
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    verbosity: &str,
+) -> Result<Document, String> {
+    let mut find = doc! {
+        "find": collection,
+        "filter": parse_optional_filter_document(filter)?.unwrap_or_default(),
+    };
+    if let Some(projection) = parse_optional_json_document(projection, "projection")? {
+        find.insert("projection", projection);
+    }
+    if let Some(sort) = parse_optional_json_document(sort, "sort")? {
+        find.insert("sort", sort);
+    }
+    if let Some(collation) = parse_find_collation(collation)? {
+        find.insert(
+            "collation",
+            mongodb::bson::to_document(&collation).map_err(|error| format!("Invalid collation: {error}"))?,
+        );
+    }
+    if skip > 0 {
+        find.insert("skip", i64::try_from(skip).map_err(|_| "MongoDB skip exceeds the supported range")?);
+    }
+    if limit > 0 {
+        find.insert("limit", limit);
+    }
+    Ok(doc! {
+        "explain": find,
+        "verbosity": validate_find_explain_verbosity(verbosity)?,
+    })
+}
+
+fn validate_find_explain_verbosity(verbosity: &str) -> Result<&str, String> {
+    match verbosity {
+        "queryPlanner" | "executionStats" | "allPlansExecution" => Ok(verbosity),
+        _ => Err("MongoDB explain verbosity must be queryPlanner, executionStats, or allPlansExecution.".to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn find_documents_with_total(
     client: &Client,
     database: &str,
@@ -2238,6 +2302,37 @@ mod tests {
         assert!(parse_find_collation(Some(r#"{"locale":"en","strength":"primary"}"#))
             .unwrap_err()
             .contains("Invalid collation"));
+    }
+
+    #[test]
+    fn builds_find_explain_command_with_all_find_options() {
+        let command = build_find_explain_command(
+            "im_msg",
+            2,
+            5,
+            Some(r#"{"active":true}"#),
+            Some(r#"{"email":1}"#),
+            Some(r#"{"email":1}"#),
+            Some(r#"{"locale":"en","strength":1}"#),
+            "executionStats",
+        )
+        .unwrap();
+
+        let find = command.get_document("explain").unwrap();
+        assert_eq!(find.get_str("find").unwrap(), "im_msg");
+        assert_eq!(find.get_document("filter").unwrap().get_bool("active").unwrap(), true);
+        assert_eq!(find.get_document("projection").unwrap().get_i64("email").unwrap(), 1);
+        assert_eq!(find.get_document("sort").unwrap().get_i64("email").unwrap(), 1);
+        assert_eq!(find.get_i64("skip").unwrap(), 2);
+        assert_eq!(find.get_i64("limit").unwrap(), 5);
+        assert_eq!(find.get_document("collation").unwrap().get_str("locale").unwrap(), "en");
+        assert_eq!(command.get_str("verbosity").unwrap(), "executionStats");
+    }
+
+    #[test]
+    fn rejects_invalid_find_explain_verbosity() {
+        let error = build_find_explain_command("items", 0, 0, None, None, None, None, "invalid").unwrap_err();
+        assert!(error.contains("queryPlanner, executionStats, or allPlansExecution"));
     }
 
     #[test]

@@ -152,6 +152,7 @@ export interface ConnectionConfig {
   docs_notes_path?: string;
   transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
+  connect_timeout_inherit?: boolean;
   query_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;

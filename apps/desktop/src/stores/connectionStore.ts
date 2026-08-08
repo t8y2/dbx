@@ -71,6 +71,7 @@ import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
+import { loadTimeoutInheritanceBackup, saveTimeoutInheritanceBackup } from "@/lib/connection/timeoutInheritanceBackup";
 import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
@@ -974,6 +975,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function normalizeConnection(config: ConnectionConfig): ConnectionConfig {
     config = { ...config };
     migrateSqlServerLegacyCompatibilityConfig(config);
+    const connectTimeoutInherit = config.connect_timeout_inherit ?? settingsStore.editorSettings.connectTimeoutInheritConnectionIds.includes(config.id);
     const queryTimeoutInherit = config.query_timeout_inherit ?? settingsStore.editorSettings.queryTimeoutInheritConnectionIds.includes(config.id);
     const labelMap: Record<string, string> = {
       mysql: "MySQL",
@@ -1065,7 +1067,8 @@ export const useConnectionStore = defineStore("connection", () => {
       docs_notes_path: config.docs_notes_path?.trim() ? config.docs_notes_path.trim() : undefined,
       transport_layers: Array.isArray(config.transport_layers) ? config.transport_layers : [],
       show_system_schemas: config.show_system_schemas === true,
-      connect_timeout_secs: config.connect_timeout_secs || 10,
+      connect_timeout_secs: connectTimeoutInherit ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
+      connect_timeout_inherit: connectTimeoutInherit,
       query_timeout_secs: queryTimeoutInherit ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? 30),
       query_timeout_inherit: queryTimeoutInherit,
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
@@ -2269,7 +2272,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
-    await persistQueryTimeoutInheritance(normalized.id, normalized.query_timeout_inherit === true);
+    await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
     if (existing >= 0) {
@@ -2281,6 +2284,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    syncTimeoutInheritanceBackup();
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
     stopCreatingConnectionInGroup();
@@ -2382,8 +2386,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const removedIds = new Set(connectionIds);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     await persistConnections(nextConnections);
-    await persistQueryTimeoutInheritanceIds(settingsStore.editorSettings.queryTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)));
+    await persistTimeoutInheritanceIds(
+      settingsStore.editorSettings.connectTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
+      settingsStore.editorSettings.queryTimeoutInheritConnectionIds.filter((id) => !removedIds.has(id)),
+    );
     connections.value = nextConnections;
+    syncTimeoutInheritanceBackup();
     let nextPinnedOrder = pinnedTreeNodeOrder.value;
     for (const id of removedIds) {
       const prefix = `${id}:`;
@@ -2428,9 +2436,10 @@ export const useConnectionStore = defineStore("connection", () => {
     const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
     const nextConnections = [...connections.value];
     nextConnections[idx] = config;
-    await persistQueryTimeoutInheritance(config.id, config.query_timeout_inherit === true);
+    await persistTimeoutInheritance(config.id, config.connect_timeout_inherit === true, config.query_timeout_inherit === true);
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    syncTimeoutInheritanceBackup();
     rebuildTreeNodes();
     if (!runtimeConfigChanged) return;
     clearPrimaryVisibleObjectNames(config.id);
@@ -6381,25 +6390,93 @@ export const useConnectionStore = defineStore("connection", () => {
     await api.saveConnections(nextConnections.filter((connection) => connection.one_time !== true));
   }
 
-  async function persistQueryTimeoutInheritanceIds(ids: string[]) {
-    settingsStore.updateEditorSettings({ queryTimeoutInheritConnectionIds: ids });
+  function sameIds(left: string[], right: string[]) {
+    return left.length === right.length && left.every((id, index) => id === right[index]);
+  }
+
+  async function persistTimeoutInheritanceIds(connectIds: string[], queryIds: string[]) {
+    if (sameIds(connectIds, settingsStore.editorSettings.connectTimeoutInheritConnectionIds) && sameIds(queryIds, settingsStore.editorSettings.queryTimeoutInheritConnectionIds)) return;
+    settingsStore.updateEditorSettings({
+      connectTimeoutInheritConnectionIds: connectIds,
+      queryTimeoutInheritConnectionIds: queryIds,
+    });
     await settingsStore.persistEditorSettings();
   }
 
-  async function persistQueryTimeoutInheritance(connectionId: string, inherit: boolean) {
-    const ids = new Set(settingsStore.editorSettings.queryTimeoutInheritConnectionIds);
-    if (inherit) ids.add(connectionId);
-    else ids.delete(connectionId);
-    const next = [...ids];
-    if (next.length === settingsStore.editorSettings.queryTimeoutInheritConnectionIds.length && next.every((id, index) => id === settingsStore.editorSettings.queryTimeoutInheritConnectionIds[index])) return;
-    await persistQueryTimeoutInheritanceIds(next);
+  async function persistTimeoutInheritance(connectionId: string, connectInherit: boolean, queryInherit: boolean) {
+    const connectIds = new Set(settingsStore.editorSettings.connectTimeoutInheritConnectionIds);
+    const queryIds = new Set(settingsStore.editorSettings.queryTimeoutInheritConnectionIds);
+    if (connectInherit) connectIds.add(connectionId);
+    else connectIds.delete(connectionId);
+    if (queryInherit) queryIds.add(connectionId);
+    else queryIds.delete(connectionId);
+    await persistTimeoutInheritanceIds([...connectIds], [...queryIds]);
   }
 
-  async function applyGlobalQueryTimeout(globalQueryTimeoutSecs: number) {
-    const nextConnections = connections.value.map((connection) => (connection.query_timeout_inherit === true && connection.query_timeout_secs !== globalQueryTimeoutSecs ? { ...connection, query_timeout_secs: globalQueryTimeoutSecs } : connection));
-    if (nextConnections.every((connection, index) => connection === connections.value[index])) return;
-    await persistConnections(nextConnections);
-    connections.value = nextConnections;
+  function syncTimeoutInheritanceBackup(source: ConnectionConfig[] = connections.value) {
+    const connectSnapshots: Record<string, number> = {};
+    const querySnapshots: Record<string, number> = {};
+    for (const connection of source) {
+      if (connection.connect_timeout_inherit === true) connectSnapshots[connection.id] = connection.connect_timeout_secs || settingsStore.editorSettings.globalConnectTimeoutSecs;
+      if (connection.query_timeout_inherit === true) querySnapshots[connection.id] = connection.query_timeout_secs ?? settingsStore.editorSettings.globalQueryTimeoutSecs;
+    }
+    saveTimeoutInheritanceBackup({
+      version: 1,
+      globalConnectTimeoutSecs: settingsStore.editorSettings.globalConnectTimeoutSecs,
+      globalQueryTimeoutSecs: settingsStore.editorSettings.globalQueryTimeoutSecs,
+      connectSnapshots,
+      querySnapshots,
+    });
+  }
+
+  async function applyGlobalTimeouts({ connectTimeoutSecs, queryTimeoutSecs }: { connectTimeoutSecs?: number; queryTimeoutSecs?: number }) {
+    const nextConnections = connections.value.map((connection) => {
+      const nextConnectTimeout = connectTimeoutSecs !== undefined && connection.connect_timeout_inherit === true ? connectTimeoutSecs : connection.connect_timeout_secs;
+      const nextQueryTimeout = queryTimeoutSecs !== undefined && connection.query_timeout_inherit === true ? queryTimeoutSecs : connection.query_timeout_secs;
+      if (nextConnectTimeout === connection.connect_timeout_secs && nextQueryTimeout === connection.query_timeout_secs) return connection;
+      return { ...connection, connect_timeout_secs: nextConnectTimeout, query_timeout_secs: nextQueryTimeout };
+    });
+    if (nextConnections.some((connection, index) => connection !== connections.value[index])) {
+      await persistConnections(nextConnections);
+      connections.value = nextConnections;
+    }
+    syncTimeoutInheritanceBackup();
+  }
+
+  async function migrateTimeoutInheritance(saved: ConnectionConfig[]) {
+    const migrationVersion = settingsStore.editorSettings.timeoutInheritanceMigrationVersion;
+    const backup = loadTimeoutInheritanceBackup();
+    const connectIdsBefore = new Set(settingsStore.editorSettings.connectTimeoutInheritConnectionIds);
+    const queryIdsBefore = new Set(settingsStore.editorSettings.queryTimeoutInheritConnectionIds);
+    const globalConnectTimeoutSecs = migrationVersion < 2 && backup ? backup.globalConnectTimeoutSecs : settingsStore.editorSettings.globalConnectTimeoutSecs;
+    const globalQueryTimeoutSecs = migrationVersion < 2 && backup ? backup.globalQueryTimeoutSecs : settingsStore.editorSettings.globalQueryTimeoutSecs;
+
+    const resolveInheritance = (connection: ConnectionConfig, scope: "connect" | "query") => {
+      const explicit = scope === "connect" ? connection.connect_timeout_inherit : connection.query_timeout_inherit;
+      if (explicit === true || explicit === false) return explicit;
+      const ids = scope === "connect" ? connectIdsBefore : queryIdsBefore;
+      const snapshots = scope === "connect" ? backup?.connectSnapshots : backup?.querySnapshots;
+      const value = Number(scope === "connect" ? (connection.connect_timeout_secs ?? 10) : (connection.query_timeout_secs ?? 30));
+      const snapshot = snapshots?.[connection.id];
+      if (snapshot !== undefined && (ids.has(connection.id) || migrationVersion < 2)) return value === snapshot;
+      if (ids.has(connection.id)) return true;
+      if (scope === "connect" && migrationVersion < 2) return value === 10;
+      if (scope === "query" && migrationVersion < 1) return value === 30;
+      return false;
+    };
+
+    const connectIds = saved.filter((connection) => resolveInheritance(connection, "connect")).map((connection) => connection.id);
+    const queryIds = saved.filter((connection) => resolveInheritance(connection, "query")).map((connection) => connection.id);
+    settingsStore.updateEditorSettings({
+      globalConnectTimeoutSecs,
+      connectTimeoutInheritConnectionIds: connectIds,
+      globalQueryTimeoutSecs,
+      queryTimeoutInheritConnectionIds: queryIds,
+      timeoutInheritanceMigrationVersion: 2,
+    });
+    if (migrationVersion !== 2 || !sameIds(connectIds, [...connectIdsBefore]) || !sameIds(queryIds, [...queryIdsBefore])) {
+      await settingsStore.persistEditorSettings();
+    }
   }
 
   function persistSidebarLayoutDebounced() {
@@ -6530,7 +6607,14 @@ export const useConnectionStore = defineStore("connection", () => {
     const { encryptConfig } = await import("@/lib/backend/configCrypto");
     const tunnelProfileStore = useTunnelProfileStore();
     await tunnelProfileStore.init();
-    const exportData = { connections: connections.value, layout: sidebarLayout.value, tunnelProfiles: tunnelProfileStore.profiles };
+    // Older DBX versions ignore inheritance flags, so always include the
+    // effective numeric values as a backward-compatible snapshot.
+    const exportedConnections = connections.value.map((connection) => ({
+      ...connection,
+      connect_timeout_secs: connection.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : connection.connect_timeout_secs,
+      query_timeout_secs: connection.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : connection.query_timeout_secs,
+    }));
+    const exportData = { connections: exportedConnections, layout: sidebarLayout.value, tunnelProfiles: tunnelProfileStore.profiles };
     const json = JSON.stringify(exportData);
     const payload = await encryptConfig(json, passphrase);
     const content = JSON.stringify(payload, null, 2);
@@ -6910,10 +6994,12 @@ export const useConnectionStore = defineStore("connection", () => {
       initFromDiskPromise = (async () => {
         const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);
         setPinnedTreeNodeOrder(pinnedOrder);
+        await migrateTimeoutInheritance(saved);
         connections.value = saved.map(normalizeConnection);
-        if (connections.value.some((connection, index) => connection.query_timeout_inherit === true && connection.query_timeout_secs !== saved[index]?.query_timeout_secs)) {
+        if (connections.value.some((connection, index) => (connection.connect_timeout_inherit === true && connection.connect_timeout_secs !== saved[index]?.connect_timeout_secs) || (connection.query_timeout_inherit === true && connection.query_timeout_secs !== saved[index]?.query_timeout_secs))) {
           await persistConnections();
         }
+        syncTimeoutInheritanceBackup();
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
         sidebarLayout.value = reconcileLayout(
@@ -6991,7 +7077,7 @@ export const useConnectionStore = defineStore("connection", () => {
     pasteConnectionClipboard,
     addEphemeralConnection,
     updateConnection,
-    applyGlobalQueryTimeout,
+    applyGlobalTimeouts,
     updateConnectionDatabaseInfo,
     setDefaultDatabase,
     clearDefaultDatabase,

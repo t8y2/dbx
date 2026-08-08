@@ -16,7 +16,7 @@ describe("queryTimeout", () => {
 
   it("keeps the existing frontend guard for other database types", () => {
     expect(frontendQueryTimeoutSecsForSql("SELECT * FROM sample_records LIMIT 2000", "mysql", 30)).toBe(60);
-    expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(60);
+    expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(30);
   });
 
   it("uses the global timeout only for inheriting connections", () => {
@@ -26,6 +26,6 @@ describe("queryTimeout", () => {
   });
 
   it("falls back safely when an inherited global timeout is invalid", () => {
-    expect(queryTimeoutSecsForConnection({ query_timeout_inherit: true }, Number.NaN)).toBe(60);
+    expect(queryTimeoutSecsForConnection({ query_timeout_inherit: true }, Number.NaN)).toBe(30);
   });
 });

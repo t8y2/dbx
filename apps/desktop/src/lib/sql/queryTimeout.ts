@@ -2,7 +2,7 @@ import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
-export const DEFAULT_QUERY_TIMEOUT_SECS = 60;
+export const DEFAULT_QUERY_TIMEOUT_SECS = 30;
 
 const POSTGRES_ROW_STATEMENT_KEYWORDS = new Set(["select", "show", "explain", "table", "with"]);
 const POSTGRES_RETURNING_STATEMENT_KEYWORDS = new Set(["insert", "update", "delete", "merge"]);

@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowUpDown,
   ArrowUpRight,
+  Download,
   Upload,
   Trash2,
   ChevronDown,
@@ -7043,7 +7044,7 @@ function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuIt
   if (!canDownloadDetailBinaryValue(detail)) return null;
   return {
     label: t("grid.downloadBinaryValue"),
-    icon: Upload,
+    icon: Download,
     children: BINARY_CELL_DOWNLOAD_MODES.map((mode) => ({
       label: t(`grid.binaryDownload.${mode}`),
       action: () => {
@@ -9268,7 +9269,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           >
                             <template #trigger="{ open, toggle }">
                               <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                <Upload class="h-3 w-3" />
+                                <Download class="h-3 w-3" />
                               </button>
                             </template>
                           </LightDropdownMenu>
@@ -9778,7 +9779,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       >
                         <template #trigger="{ open, toggle }">
                           <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                            <Upload class="h-3 w-3" />
+                            <Download class="h-3 w-3" />
                           </button>
                         </template>
                       </LightDropdownMenu>
@@ -9981,7 +9982,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             >
                               <template #trigger="{ open, toggle }">
                                 <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                  <Upload class="h-3 w-3" />
+                                  <Download class="h-3 w-3" />
                                 </button>
                               </template>
                             </LightDropdownMenu>

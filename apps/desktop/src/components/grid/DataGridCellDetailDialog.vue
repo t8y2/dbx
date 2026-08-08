@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Code2, Copy, Eye, FileUp, Info, Pencil, Upload } from "@lucide/vue";
+import { Code2, Copy, Download, Eye, FileUp, Info, Pencil } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -160,7 +160,7 @@ watch(
               <DropdownMenu v-if="canDownloadBinaryValue(detail)">
                 <DropdownMenuTrigger as-child>
                   <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.downloadBinaryValue')">
-                    <Upload class="h-3 w-3" />
+                    <Download class="h-3 w-3" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" class="w-44">

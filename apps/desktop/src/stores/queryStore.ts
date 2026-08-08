@@ -2702,11 +2702,16 @@ export const useQueryStore = defineStore("query", () => {
   function reorderTab(id: string, targetId: string, position: "before" | "after") {
     const fromIdx = tabs.value.findIndex((t) => t.id === id);
     const toIdx = tabs.value.findIndex((t) => t.id === targetId);
-    if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return;
-    const [tab] = tabs.value.splice(fromIdx, 1);
-    const newToIdx = tabs.value.findIndex((t) => t.id === targetId);
-    tabs.value.splice(newToIdx + (position === "after" ? 1 : 0), 0, tab);
-    tabs.value = orderPinnedFirst(tabs.value, (item) => !!item.pinned);
+    if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return false;
+
+    const reordered = [...tabs.value];
+    const [tab] = reordered.splice(fromIdx, 1);
+    const newToIdx = reordered.findIndex((t) => t.id === targetId);
+    reordered.splice(newToIdx + (position === "after" ? 1 : 0), 0, tab);
+    const nextTabs = orderPinnedFirst(reordered, (item) => !!item.pinned);
+    if (nextTabs.every((item, index) => item.id === tabs.value[index]?.id)) return false;
+    tabs.value = nextTabs;
+    return true;
   }
 
   function persistSavedSqlExecutionTarget(tab: QueryTab, options: UpdateExecutionTargetOptions) {

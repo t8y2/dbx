@@ -7302,9 +7302,26 @@ test("reorderTab with after position places tab correctly", () => {
   const tabC = store.createTab("conn-1", "db", "C", "query");
 
   // Drag A after C
-  store.reorderTab(tabA, tabC, "after");
+  assert.equal(store.reorderTab(tabA, tabC, "after"), true);
   assert.deepEqual(
     store.tabs.map((t) => t.id),
     [tabB, tabC, tabA],
   );
+});
+
+test("reorderTab reports adjacent no-op drops without replacing tab order", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const tabA = store.createTab("conn-1", "db", "A", "query");
+  const tabB = store.createTab("conn-1", "db", "B", "query");
+  const tabC = store.createTab("conn-1", "db", "C", "query");
+  const originalTabs = [...store.tabs];
+
+  assert.equal(store.reorderTab(tabA, tabB, "before"), false);
+  assert.deepEqual(store.tabs, originalTabs);
+  assert.equal(store.reorderTab(tabB, tabA, "after"), false);
+  assert.deepEqual(store.tabs, originalTabs);
+  assert.equal(store.reorderTab(tabC, "missing", "before"), false);
+  assert.deepEqual(store.tabs, originalTabs);
 });

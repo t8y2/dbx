@@ -408,6 +408,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "get_object_source":
 		result, err := s.getObjectSource(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"))
 		return result, false, err
+	case "get_type_details":
+		result, err := s.getTypeDetails(stringParam(params, "schema"), stringParam(params, "name"))
+		return result, false, err
 	case "get_table_ddl":
 		result, err := s.getTableDDL(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err

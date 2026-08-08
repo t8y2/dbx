@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -106,9 +107,11 @@ type connectionAttemptConn struct {
 }
 
 type valueRows struct {
-	columns []string
-	rows    [][]driver.Value
-	index   int
+	columns  []string
+	rows     [][]driver.Value
+	index    int
+	nextErr  error
+	closeErr error
 }
 
 func (fakeDriver) Open(string) (driver.Conn, error) {
@@ -286,10 +289,13 @@ func (connection *metadataConn) QueryContext(_ context.Context, query string, _ 
 
 func (rows *valueRows) Columns() []string { return rows.columns }
 
-func (*valueRows) Close() error { return nil }
+func (rows *valueRows) Close() error { return rows.closeErr }
 
 func (rows *valueRows) Next(values []driver.Value) error {
 	if rows.index >= len(rows.rows) {
+		if rows.nextErr != nil {
+			return rows.nextErr
+		}
 		return io.EOF
 	}
 	copy(values, rows.rows[rows.index])
@@ -1102,15 +1108,15 @@ func TestListTablesPreservesKingbaseObjectTypesAndComments(t *testing.T) {
 
 func TestListCustomTypesUsesPostgresCatalog(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-		if !strings.Contains(query, "FROM pg_catalog.pg_type t") || !strings.Contains(query, "t.typtype IN ('b','c','d','e','r','m')") || !strings.Contains(query, "t.typelem = 0") || !strings.Contains(query, "(t.typrelid = 0 OR c.relkind = 'c')") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") {
+		if !strings.Contains(query, "FROM pg_catalog.pg_type t") || !strings.Contains(query, "t.typtype IN ('b','c','d','e','r','m')") || !strings.Contains(query, "t.typisdefined") || !strings.Contains(query, "t.typelem = 0") || !strings.Contains(query, "(t.typrelid = 0 OR c.relkind = 'c')") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") || !strings.Contains(query, "n.nspname <> 'pg_catalog'") || !strings.Contains(query, "n.nspname <> 'information_schema'") || !strings.Contains(query, "n.nspname NOT LIKE 'pg_toast%'") || !strings.Contains(query, "n.nspname NOT LIKE 'pg_temp%'") {
 			return nil, errors.New("unexpected query: " + query)
 		}
 		return &valueRows{
-			columns: []string{"typname", "description"},
+			columns: []string{"typname", "description", "typtype", "has_members"},
 			rows: [][]driver.Value{
-				{"status", "order status"},
-				{"email", nil},
-				{"address", nil},
+				{"status", "order status", "e", true},
+				{"email", nil, "d", false},
+				{"address", nil, "c", true},
 			},
 		}, nil
 	}}
@@ -1136,16 +1142,22 @@ func TestListCustomTypesUsesPostgresCatalog(t *testing.T) {
 	if types[1].Comment != nil {
 		t.Fatalf("nil comment became non-nil: %#v", types[1])
 	}
+	if types[0].CustomTypeKind == nil || *types[0].CustomTypeKind != "enum" || types[0].HasMembers == nil || !*types[0].HasMembers {
+		t.Fatalf("type kind/member metadata was lost: %#v", types[0])
+	}
+	if types[1].CustomTypeKind == nil || *types[1].CustomTypeKind != "domain" || types[1].HasMembers == nil || *types[1].HasMembers {
+		t.Fatalf("leaf type metadata was lost: %#v", types[1])
+	}
 }
 
 func TestListCustomTypesUsesSystemCatalog(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-		if !strings.Contains(query, "FROM sys_catalog.sys_type t") || strings.Contains(query, "FROM pg_catalog") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") {
+		if !strings.Contains(query, "FROM sys_catalog.sys_type t") || strings.Contains(query, "FROM pg_catalog") || !strings.Contains(query, "t.typisdefined") || !strings.Contains(query, "n.nspname <> 'pg_catalog'") || !strings.Contains(query, "d.classoid = 'pg_catalog.pg_type'::regclass") {
 			return nil, errors.New("unexpected query: " + query)
 		}
 		return &valueRows{
-			columns: []string{"typname", "description"},
-			rows:    [][]driver.Value{{"status", "order status"}},
+			columns: []string{"typname", "description", "typtype", "has_members"},
+			rows:    [][]driver.Value{{"status", "order status", "e", true}},
 		}, nil
 	}}
 	server := newServer()
@@ -1183,10 +1195,10 @@ func TestListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
 		switch {
 		case strings.Contains(query, "sys_type t"):
 			return &valueRows{
-				columns: []string{"typname", "description"},
+				columns: []string{"typname", "description", "typtype", "has_members"},
 				rows: [][]driver.Value{
-					{"status", "order status"},
-					{"email", nil},
+					{"status", "order status", "e", true},
+					{"email", nil, "d", false},
 				},
 			}, nil
 		case strings.Contains(query, "sys_proc p"):
@@ -1232,8 +1244,8 @@ func TestListObjectsOnlyCustomTypesWhenTypeRequested(t *testing.T) {
 			return nil, errors.New("unexpected query: " + query)
 		}
 		return &valueRows{
-			columns: []string{"typname", "description"},
-			rows:    [][]driver.Value{{"status", "order status"}},
+			columns: []string{"typname", "description", "typtype", "has_members"},
+			rows:    [][]driver.Value{{"status", "order status", "e", true}},
 		}, nil
 	}}
 	server := newServer()
@@ -1341,6 +1353,217 @@ func TestListObjectsUnfilteredPropagatesCustomTypesError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "list custom types") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestKingbaseCustomTypeQueriesFollowCatalog(t *testing.T) {
+	pgQueries := customTypeCatalogQueriesFor("pg_catalog", "pg", "app", "status")
+	for _, fragment := range []string{
+		"pg_catalog.pg_type", "pg_catalog.pg_namespace", "pg_catalog.pg_description", "pg_catalog.pg_proc",
+		"pg_catalog.pg_collation", "pg_get_expr", "pg_get_constraintdef",
+		"n.nspname = 'app' AND t.typname = 'status'",
+	} {
+		if !strings.Contains(pgQueries.general, fragment) && !strings.Contains(pgQueries.compositeMembers, fragment) && !strings.Contains(pgQueries.domainConstraints, fragment) {
+			t.Fatalf("pg catalog queries missing %q: %s", fragment, pgQueries.general)
+		}
+	}
+	if !strings.Contains(pgQueries.enumMembers, "pg_catalog.pg_enum") {
+		t.Fatalf("enum query must use pg_catalog.pg_enum: %s", pgQueries.enumMembers)
+	}
+	if !strings.Contains(pgQueries.compositeMembers, "pg_catalog.pg_attribute") {
+		t.Fatalf("composite query must use pg_catalog.pg_attribute: %s", pgQueries.compositeMembers)
+	}
+	if !strings.Contains(pgQueries.rangeAttributes, "pg_catalog.pg_range") {
+		t.Fatalf("range query must use pg_catalog.pg_range: %s", pgQueries.rangeAttributes)
+	}
+	for _, fragment := range []string{"JOIN pg_catalog.pg_type at", "quote_ident(atn.nspname)", "LEFT JOIN pg_catalog.pg_type elem"} {
+		if !strings.Contains(pgQueries.compositeMembers, fragment) {
+			t.Fatalf("composite query must schema-qualify member types; missing %q: %s", fragment, pgQueries.compositeMembers)
+		}
+	}
+	for _, fragment := range []string{"JOIN pg_catalog.pg_namespace n", "quote_ident(n.nspname)", "WHERE t.oid = %[1]d"} {
+		if !strings.Contains(pgQueries.domainBaseType, fragment) {
+			t.Fatalf("domain query must schema-qualify its base type; missing %q: %s", fragment, pgQueries.domainBaseType)
+		}
+	}
+	formattedDomainBaseType := fmt.Sprintf(pgQueries.domainBaseType, 25, -1)
+	if strings.Contains(formattedDomainBaseType, "%") || !strings.Contains(formattedDomainBaseType, "format_type(t.oid, -1::int4)") {
+		t.Fatalf("domain base type query must format both OID and typmod: %s", formattedDomainBaseType)
+	}
+	for _, query := range []string{pgQueries.rangeAttributes, pgQueries.rangeAttributesForMultirange} {
+		for _, fragment := range []string{"JOIN pg_catalog.pg_type st", "quote_ident(stn.nspname)", "quote_ident(ncan.nspname)", "quote_ident(ndiff.nspname)", "quote_ident(nopc.nspname)", "ncan.oid = pcan.pronamespace", "ndiff.oid = pdiff.pronamespace", "nopc.oid = opc.opcnamespace"} {
+			if !strings.Contains(query, fragment) {
+				t.Fatalf("range query must qualify catalog names with schema; missing %q: %s", fragment, query)
+			}
+		}
+		if strings.Contains(query, "%!") {
+			t.Fatalf("range query contains an unresolved format directive: %s", query)
+		}
+	}
+
+	sysQueries := customTypeCatalogQueriesFor("sys_catalog", "sys", "app", "status")
+	for _, fragment := range []string{"sys_catalog.sys_type", "sys_catalog.sys_namespace", "sys_catalog.sys_description", "sys_catalog.sys_proc", "sys_get_expr", "sys_get_constraintdef"} {
+		if !strings.Contains(sysQueries.general, fragment) && !strings.Contains(sysQueries.compositeMembers, fragment) && !strings.Contains(sysQueries.domainConstraints, fragment) {
+			t.Fatalf("sys catalog queries missing %q: %s", fragment, sysQueries.general)
+		}
+	}
+	if strings.Contains(sysQueries.general, "FROM pg_catalog") || strings.Contains(sysQueries.general, "pg_get_expr") {
+		t.Fatalf("sys catalog general query leaked pg_catalog references: %s", sysQueries.general)
+	}
+	if strings.Contains(pgQueries.general, "pg_get_expr") || strings.Contains(sysQueries.general, "sys_get_expr") {
+		t.Fatal("general type lookup must not depend on default-expression rendering")
+	}
+	if !strings.Contains(pgQueries.domainRenderedDefault, "pg_get_expr") || !strings.Contains(sysQueries.domainRenderedDefault, "sys_get_expr") {
+		t.Fatal("domain default renderer must follow the selected catalog")
+	}
+}
+
+func TestKingbaseDomainDefaultRenderFailureIsDegradable(t *testing.T) {
+	bin := sql.NullString{String: "{CONST ...}", Valid: true}
+	value, warnings := resolveCustomTypeDomainDefault(bin, sql.NullString{}, func() (string, error) {
+		return "", errors.New("function sys_get_expr does not exist")
+	})
+	if value != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "DDL is incomplete") {
+		t.Fatalf("unexpected fallback result: value=%v warnings=%v", value, warnings)
+	}
+}
+
+func TestKingbaseDomainConstraintReadFailuresMarkDDLIncomplete(t *testing.T) {
+	queries := customTypeCatalogQueriesFor("pg_catalog", "pg", "app", "email")
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "WHERE t.oid = 1"):
+			return &valueRows{columns: []string{"base_type"}, rows: [][]driver.Value{{"text"}}}, nil
+		case strings.Contains(query, "WHERE c.contypid = 9"):
+			return &valueRows{columns: []string{"conname", "definition"}, rows: [][]driver.Value{{"email_valid"}}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	properties := customTypeProperties{DomainConstraints: []customTypeDomainConstraint{}}
+	warnings := server.customTypeDomainAttributes(queries, &properties, 9, 1, -1, false, sql.NullString{}, sql.NullString{}, 0, sql.NullString{})
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "domain constraints could not be decoded") {
+		t.Fatalf("constraint scan failures must be retained as warnings: %v", warnings)
+	}
+	ddl := buildCustomTypeDDL("app", "email", customTypeKindDomain, sql.NullString{}, &[]customTypeMember{}, &properties, warnings)
+	if ddl.Complete {
+		t.Fatalf("domain DDL must be incomplete after a constraint scan failure: %+v", ddl)
+	}
+}
+
+func TestKingbaseGetTypeDetailsRejectsMySQLCompat(t *testing.T) {
+	server := newServer()
+	server.mode.mysqlCompat = true
+	_, err := server.getTypeDetails("public", "status")
+	if err == nil || !strings.Contains(err.Error(), "MySQL compatibility mode") {
+		t.Fatalf("expected MySQL compat rejection, got %v", err)
+	}
+}
+
+func TestKingbaseGetTypeDetailsPropagatesRowIterationError(t *testing.T) {
+	state := &metadataDriverState{query: func(string) (driver.Rows, error) {
+		return &valueRows{nextErr: errors.New("row stream failed")}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	_, err := server.getTypeDetails("public", "status")
+	if err == nil || !strings.Contains(err.Error(), "failed to read type") || !strings.Contains(err.Error(), "row stream failed") {
+		t.Fatalf("expected row iteration error to be propagated, got %v", err)
+	}
+}
+
+func TestKingbaseCustomTypeKindFromCode(t *testing.T) {
+	for code, expected := range map[string]customTypeKind{
+		"b": customTypeKindBase, "c": customTypeKindComposite, "d": customTypeKindDomain,
+		"e": customTypeKindEnum, "r": customTypeKindRange, "m": customTypeKindMultirange,
+	} {
+		kind, ok := customTypeKindFromCode(code)
+		if !ok || kind != expected {
+			t.Fatalf("customTypeKindFromCode(%q) = %v, %v", code, kind, ok)
+		}
+	}
+	if _, ok := customTypeKindFromCode("p"); ok {
+		t.Fatal("pseudo type must not map to a kind")
+	}
+}
+
+func TestKingbaseSystemSchemasAreRejectedForCustomTypeDetails(t *testing.T) {
+	for _, schema := range []string{"pg_catalog", "information_schema", "pg_toast", "pg_toast_temp_5", "pg_temp_5"} {
+		if !isSystemSchema(schema) {
+			t.Fatalf("%q should be recognized as a system schema", schema)
+		}
+	}
+	if isSystemSchema("public") || isSystemSchema("app") {
+		t.Fatal("user schemas must remain eligible for custom type details")
+	}
+	server := newServer()
+	if _, err := server.getTypeDetails("pg_catalog", "int4"); err == nil || !strings.Contains(err.Error(), "system schema") {
+		t.Fatalf("system schema must be rejected before catalog access, got %v", err)
+	}
+}
+
+func TestKingbaseCustomTypeDDL(t *testing.T) {
+	nullInput := sql.NullString{}
+	enumMembers := []customTypeMember{
+		{Ordinal: 1, EnumValue: stringPtr("draft")},
+		{Ordinal: 2, EnumValue: stringPtr("已归档")},
+	}
+	enumDDL := buildCustomTypeDDL("app", "status", customTypeKindEnum, nullInput, &enumMembers, &customTypeProperties{}, nil)
+	if enumDDL.SQL != "CREATE TYPE \"app\".\"status\" AS ENUM ('draft', '已归档');" || !enumDDL.Complete {
+		t.Fatalf("unexpected enum DDL: %+v", enumDDL)
+	}
+
+	compositeMembers := []customTypeMember{
+		{Name: "city", DataType: "text", Ordinal: 1, Comment: stringPtr("city name")},
+	}
+	compositeDDL := buildCustomTypeDDL("app", "address", customTypeKindComposite, nullInput, &compositeMembers, &customTypeProperties{}, nil)
+	if !strings.Contains(compositeDDL.SQL, "\"city\" text") || !strings.Contains(compositeDDL.SQL, "COMMENT ON COLUMN \"app\".\"address\".\"city\" IS 'city name';") {
+		t.Fatalf("unexpected composite DDL: %+v", compositeDDL)
+	}
+
+	notNull := true
+	domainProps := customTypeProperties{BaseType: stringPtr("text"), NotNull: &notNull, DomainConstraints: []customTypeDomainConstraint{{Name: "email_valid", Definition: "CHECK ((VALUE <> ''::text))"}}}
+	domainDDL := buildCustomTypeDDL("app", "email", customTypeKindDomain, nullInput, &[]customTypeMember{}, &domainProps, nil)
+	if !strings.Contains(domainDDL.SQL, "CREATE DOMAIN \"app\".\"email\" AS text") || !strings.Contains(domainDDL.SQL, "NOT NULL") || !strings.Contains(domainDDL.SQL, "CHECK ((VALUE <> ''::text))") {
+		t.Fatalf("unexpected domain DDL: %+v", domainDDL)
+	}
+
+	rangeProps := customTypeProperties{RangeSubtype: stringPtr("numeric"), RangeCanonicalFunction: stringPtr("\"extensions\".\"numeric_range_canonical\"")}
+	rangeDDL := buildCustomTypeDDL("app", "price_range", customTypeKindRange, nullInput, &[]customTypeMember{}, &rangeProps, nil)
+	if !rangeDDL.Complete || !strings.Contains(rangeDDL.SQL, "subtype = numeric") || !strings.Contains(rangeDDL.SQL, "canonical = \"extensions\".\"numeric_range_canonical\"") {
+		t.Fatalf("unexpected range DDL: %+v", rangeDDL)
+	}
+	missingSubtype := buildCustomTypeDDL("app", "price_range", customTypeKindRange, nullInput, &[]customTypeMember{}, &customTypeProperties{RangeMultirangeName: stringPtr("price_multirange")}, nil)
+	if missingSubtype.Complete || missingSubtype.SQL != "CREATE TYPE \"app\".\"price_range\" AS RANGE (subtype = unknown);" {
+		t.Fatalf("range DDL without subtype must be incomplete: %+v", missingSubtype)
+	}
+
+	multirangeDDL := buildCustomTypeDDL("app", "_price_range", customTypeKindMultirange, nullInput, &[]customTypeMember{}, &customTypeProperties{}, nil)
+	if multirangeDDL.Complete || len(multirangeDDL.Warnings) == 0 {
+		t.Fatalf("multirange DDL must be incomplete with warnings: %+v", multirangeDDL)
+	}
+
+	baseDDL := buildCustomTypeDDL("app", "point2d", customTypeKindBase, nullInput, &[]customTypeMember{}, &customTypeProperties{}, nil)
+	if baseDDL.Complete || len(baseDDL.Warnings) == 0 {
+		t.Fatalf("base DDL must be incomplete with warnings: %+v", baseDDL)
+	}
+}
+
+func TestCustomTypeDetailsJSONNeverNullsSlices(t *testing.T) {
+	props := customTypeProperties{DomainConstraints: []customTypeDomainConstraint{}}
+	details := customTypeDetails{Name: "status", Schema: "app", Kind: customTypeKindEnum, Members: []customTypeMember{}, Properties: props}
+	raw, err := json.Marshal(details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "null") {
+		t.Fatalf("empty slices must encode as [] not null: %s", text)
+	}
+	if !strings.Contains(text, `"members":[]`) || !strings.Contains(text, `"domainConstraints":[]`) {
+		t.Fatalf("empty slices must be present as []: %s", text)
 	}
 }
 

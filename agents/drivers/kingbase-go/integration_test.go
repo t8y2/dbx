@@ -302,6 +302,115 @@ func TestKingbaseCustomTypesIntegration(t *testing.T) {
 	}
 }
 
+func TestKingbaseCustomTypeDetailsIntegration(t *testing.T) {
+	host := os.Getenv("KINGBASE_TEST_HOST")
+	portText := os.Getenv("KINGBASE_TEST_PORT")
+	username := os.Getenv("KINGBASE_TEST_USERNAME")
+	password := os.Getenv("KINGBASE_TEST_PASSWORD")
+	if host == "" || portText == "" || username == "" || password == "" {
+		t.Skip("Kingbase integration environment is not configured")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := os.Getenv("KINGBASE_TEST_DATABASE")
+	if database == "" {
+		database = "test"
+	}
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	schema := "dbx_details_" + suffix
+	schemaIdent := quoteIdentifier(schema)
+	statusType := schemaIdent + "." + quoteIdentifier("status")
+	emailDomain := schemaIdent + "." + quoteIdentifier("email")
+	addressType := schemaIdent + "." + quoteIdentifier("address")
+	priceRangeType := schemaIdent + "." + quoteIdentifier("price_range")
+	ordersTable := schemaIdent + "." + quoteIdentifier("orders")
+
+	server := newServer()
+	cp := connectParams{
+		Host: host, Port: port, Database: database, Username: username, Password: password,
+		ConnectionString: fmt.Sprintf("jdbc:kingbase8://%s:%d/%s", host, port, database),
+	}
+	if err := server.connect(cp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.disconnect() })
+	t.Cleanup(func() {
+		_, _ = server.executeQuery(queryOptions{SQL: "DROP SCHEMA IF EXISTS " + schemaIdent + " CASCADE"})
+	})
+
+	mustExecute(t, server, "CREATE SCHEMA "+schemaIdent)
+
+	// MySQL compatibility mode has no pg_type contract; details must return an
+	// explicit unsupported error instead of executing PG catalog SQL.
+	if server.mode.mysqlCompat {
+		if _, err := server.getTypeDetails(schema, "status"); err == nil || !strings.Contains(err.Error(), "MySQL compatibility mode") {
+			t.Fatalf("expected MySQL compat rejection, got %v", err)
+		}
+		return
+	}
+
+	mustExecute(t, server, "CREATE TYPE "+statusType+" AS ENUM ('draft', 'published', '已归档')")
+	mustExecute(t, server, "CREATE DOMAIN "+emailDomain+" AS text DEFAULT '' CHECK (VALUE <> '')")
+	mustExecute(t, server, "CREATE TYPE "+addressType+" AS (city text, zip numeric(6))")
+	mustExecute(t, server, "COMMENT ON TYPE "+addressType+" IS 'shipping address'")
+	mustExecute(t, server, "COMMENT ON COLUMN "+addressType+".city IS 'city name'")
+	mustExecute(t, server, "CREATE TYPE "+priceRangeType+" AS RANGE (subtype = numeric)")
+	mustExecute(t, server, "CREATE TABLE "+ordersTable+" (state "+statusType+", address "+addressType+")")
+
+	status, err := server.getTypeDetails(schema, "status")
+	if err != nil {
+		t.Fatalf("getTypeDetails(status) failed: %v", err)
+	}
+	if status.Kind != customTypeKindEnum || len(status.Members) != 3 {
+		t.Fatalf("unexpected enum details: %+v", status)
+	}
+	if status.Members[0].EnumValue == nil || *status.Members[0].EnumValue != "draft" || status.Members[2].EnumValue == nil || *status.Members[2].EnumValue != "已归档" {
+		t.Fatalf("enum values out of order: %+v", status.Members)
+	}
+	if status.DDL == nil || !status.DDL.Complete || !strings.Contains(status.DDL.SQL, "AS ENUM ('draft', 'published', '已归档')") {
+		t.Fatalf("unexpected enum DDL: %+v", status.DDL)
+	}
+
+	email, err := server.getTypeDetails(schema, "email")
+	if err != nil {
+		t.Fatalf("getTypeDetails(email) failed: %v", err)
+	}
+	if email.Kind != customTypeKindDomain || email.Properties.BaseType == nil || *email.Properties.BaseType != "text" {
+		t.Fatalf("unexpected domain details: %+v", email)
+	}
+	if len(email.Properties.DomainConstraints) == 0 || !strings.Contains(email.Properties.DomainConstraints[0].Definition, "VALUE") {
+		t.Fatalf("domain constraint lost: %+v", email.Properties.DomainConstraints)
+	}
+
+	address, err := server.getTypeDetails(schema, "address")
+	if err != nil {
+		t.Fatalf("getTypeDetails(address) failed: %v", err)
+	}
+	if address.Kind != customTypeKindComposite || len(address.Members) != 2 || address.Members[0].Name != "city" || address.Members[0].Comment == nil || *address.Members[0].Comment != "city name" {
+		t.Fatalf("unexpected composite details: %+v", address)
+	}
+	if address.DDL == nil || !address.DDL.Complete || !strings.Contains(address.DDL.SQL, "COMMENT ON COLUMN "+schemaIdent+".\"address\".\"city\" IS 'city name';") {
+		t.Fatalf("unexpected composite DDL: %+v", address.DDL)
+	}
+
+	priceRange, err := server.getTypeDetails(schema, "price_range")
+	if err != nil {
+		t.Fatalf("getTypeDetails(price_range) failed: %v", err)
+	}
+	if priceRange.Kind != customTypeKindRange || priceRange.Properties.RangeSubtype == nil || *priceRange.Properties.RangeSubtype != "numeric" {
+		t.Fatalf("unexpected range details: %+v", priceRange)
+	}
+
+	if _, err := server.getTypeDetails(schema, "orders"); err == nil || !strings.Contains(err.Error(), "row type") {
+		t.Fatalf("relation row type must be rejected, got %v", err)
+	}
+	if _, err := server.getTypeDetails(schema, "_status"); err == nil || !strings.Contains(err.Error(), "array companion") {
+		t.Fatalf("array companion must be rejected, got %v", err)
+	}
+}
+
 func rawJSON(value any) json.RawMessage {
 	data, err := json.Marshal(value)
 	if err != nil {

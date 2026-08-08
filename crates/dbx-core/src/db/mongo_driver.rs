@@ -2320,7 +2320,7 @@ mod tests {
 
         let find = command.get_document("explain").unwrap();
         assert_eq!(find.get_str("find").unwrap(), "im_msg");
-        assert_eq!(find.get_document("filter").unwrap().get_bool("active").unwrap(), true);
+        assert!(find.get_document("filter").unwrap().get_bool("active").unwrap());
         assert_eq!(find.get_document("projection").unwrap().get_i64("email").unwrap(), 1);
         assert_eq!(find.get_document("sort").unwrap().get_i64("email").unwrap(), 1);
         assert_eq!(find.get_i64("skip").unwrap(), 2);

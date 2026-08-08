@@ -1135,6 +1135,7 @@ const driverProfiles: Record<
     icon: "mysql",
     urlParams: "",
   },
+  dolt: { type: "mysql", port: 3306, user: "root", label: "Dolt", icon: "dolt", urlParams: "" },
   custom_postgres: {
     type: "postgres",
     port: 5432,
@@ -2643,6 +2644,7 @@ const iconTypeMap: Record<string, string> = {
   victoriametrics: "victoriametrics",
   jdbc: "jdbc",
   custom_mysql: "mysql",
+  dolt: "dolt",
   custom_postgres: "postgres",
   ...jdbcProductIconTypes(),
 };
@@ -2730,6 +2732,7 @@ const dbOptions: DbOption[] = [
   { value: "jdbcx", label: "JDBCX" },
   { value: "manticoresearch", label: "Manticore Search" },
   { value: "custom_mysql", label: "Custom (MySQL)" },
+  { value: "dolt", label: "Dolt" },
   { value: "custom_postgres", label: "Custom (PostgreSQL)" },
   { value: "dremio", label: "Dremio" },
   ...jdbcProductPickerOptions(),
@@ -2743,7 +2746,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "sql",
     titleKey: "connection.databaseCategorySql",
-    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "jdbcx", "custom_mysql", "custom_postgres"],
+    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
   },
   {
     key: "analytics",

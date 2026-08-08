@@ -2532,6 +2532,8 @@ mod tests {
             schema: Some("public".to_string()),
             valid: None,
             signature: Some(signature.to_string()),
+            custom_type_kind: None,
+            has_members: None,
             comment: None,
             created_at: None,
             updated_at: None,

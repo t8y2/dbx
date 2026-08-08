@@ -6991,7 +6991,7 @@ export default withEnglishFallback({
     queueNamePlaceholder: "ex.: dbx-queue",
     exchangeNamePlaceholder: "ex.: dbx-events",
     routingKeyPlaceholder: "ex.: orders.*",
-    argumentsPlaceholder: 'Objeto JSON opcional, ex.: {"x-match": "all"}',
+    argumentsPlaceholder: 'Objeto JSON opcional, ex.: {'{'}"x-match": "all"{'}'}',
     nameRequired: "O nome do exchange é obrigatório",
     destinationRequired: "O destino é obrigatório",
     argumentsMustBeObject: "Os argumentos devem ser um objeto JSON",

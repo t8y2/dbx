@@ -7044,7 +7044,7 @@ export default withEnglishFallback({
     queueNamePlaceholder: "例: dbx-queue",
     exchangeNamePlaceholder: "例: dbx-events",
     routingKeyPlaceholder: "例: orders.*",
-    argumentsPlaceholder: '任意の JSON オブジェクト。例: {"x-match": "all"}',
+    argumentsPlaceholder: '任意の JSON オブジェクト。例: {'{'}"x-match": "all"{'}'}',
     nameRequired: "エクスチェンジ名は必須です",
     destinationRequired: "宛先は必須です",
     argumentsMustBeObject: "引数は JSON オブジェクトである必要があります",

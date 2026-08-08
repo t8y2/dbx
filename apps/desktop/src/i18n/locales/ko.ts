@@ -5550,7 +5550,7 @@ export default withEnglishFallback({
     queueNamePlaceholder: "예: dbx-queue",
     exchangeNamePlaceholder: "예: dbx-events",
     routingKeyPlaceholder: "예: orders.*",
-    argumentsPlaceholder: '선택 JSON 객체, 예: {"x-match": "all"}',
+    argumentsPlaceholder: '선택 JSON 객체, 예: {'{'}"x-match": "all"{'}'}',
     nameRequired: "익스체인지 이름은 필수입니다",
     destinationRequired: "대상은 필수입니다",
     argumentsMustBeObject: "인자는 JSON 객체여야 합니다",

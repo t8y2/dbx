@@ -6052,7 +6052,7 @@ export default {
     queueNamePlaceholder: "e.g. dbx-queue",
     exchangeNamePlaceholder: "e.g. dbx-events",
     routingKeyPlaceholder: "e.g. orders.*",
-    argumentsPlaceholder: 'Optional JSON object, e.g. {"x-match": "all"}',
+    argumentsPlaceholder: "Optional JSON object, e.g. {'{'}\"x-match\": \"all\"{'}'} ",
     nameRequired: "Exchange name is required",
     destinationRequired: "Destination is required",
     argumentsMustBeObject: "Arguments must be a JSON object",

@@ -6984,7 +6984,7 @@ export default withEnglishFallback({
     queueNamePlaceholder: "例如 dbx-queue",
     exchangeNamePlaceholder: "例如 dbx-events",
     routingKeyPlaceholder: "例如 orders.*",
-    argumentsPlaceholder: '可選 JSON 物件,例如 {"x-match": "all"}',
+    argumentsPlaceholder: '可選 JSON 物件,例如 {'{'}"x-match": "all"{'}'}',
     nameRequired: "交換機名稱不能為空",
     destinationRequired: "綁定目標不能為空",
     argumentsMustBeObject: "參數必須是 JSON 物件",

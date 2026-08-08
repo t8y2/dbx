@@ -2,6 +2,43 @@ import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
 
 export default withEnglishFallback({
+  customType: {
+    kinds: {
+      base: "基础类型",
+      composite: "复合类型",
+      domain: "域",
+      enum: "枚举",
+      range: "范围",
+      multirange: "多范围",
+    },
+    tabs: {
+      members: "成员",
+      properties: "属性",
+      ddl: "DDL",
+    },
+    members: {
+      empty: "该类型没有成员。",
+      name: "名称",
+      type: "类型",
+      nullable: "可空",
+      default: "默认值",
+      comment: "注释",
+    },
+    properties: {
+      empty: "没有可用属性。",
+      baseType: "基础类型",
+      notNull: "非空",
+      default: "默认值",
+      collation: "排序规则",
+      domainConstraint: "约束",
+      rangeSubtype: "范围子类型",
+      rangeMultirange: "多范围类型",
+    },
+    ddl: {
+      empty: "该类型没有可用 DDL。",
+      incomplete: "生成的 DDL 不完整，未复制。请打开类型详情查看警告。",
+    },
+  },
   app: {
     name: "DBX",
   },
@@ -2456,6 +2493,7 @@ export default withEnglishFallback({
     editView: "编辑视图",
     viewSource: "查看源码",
     changeOpenMode: "修改打开方式",
+    viewDetails: "查看详情",
     viewDdl: "查看 DDL",
     viewDdlLoading: "正在读取 DDL...",
     ddlCopied: "DDL 已复制",

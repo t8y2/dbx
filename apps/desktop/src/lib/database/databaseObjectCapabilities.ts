@@ -120,6 +120,24 @@ export function supportsTypeObjectSource(dbType?: DatabaseType): boolean {
   return dbType === "xugu";
 }
 
+export type CustomTypeCapabilities = {
+  details: boolean;
+  members: boolean;
+  ddl: boolean;
+};
+
+const VERIFIED_CUSTOM_TYPE_DATABASES = new Set<DatabaseType>(["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"]);
+
+/**
+ * Whether a connection may open read-only custom type details (phase 2).
+ * Kept separate from the listing capability so a future per-kind DDL toggle
+ * can be introduced without touching the object-list sets.
+ */
+export function customTypeCapabilities(dbType?: DatabaseType): CustomTypeCapabilities {
+  const supported = !!dbType && VERIFIED_CUSTOM_TYPE_DATABASES.has(dbType);
+  return { details: supported, members: supported, ddl: supported };
+}
+
 export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");

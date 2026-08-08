@@ -1,6 +1,43 @@
 import docs from "./docs/en";
 
 export default {
+  customType: {
+    kinds: {
+      base: "Base",
+      composite: "Composite",
+      domain: "Domain",
+      enum: "Enum",
+      range: "Range",
+      multirange: "Multirange",
+    },
+    tabs: {
+      members: "Members",
+      properties: "Properties",
+      ddl: "DDL",
+    },
+    members: {
+      empty: "This type has no members.",
+      name: "Name",
+      type: "Type",
+      nullable: "Nullable",
+      default: "Default",
+      comment: "Comment",
+    },
+    properties: {
+      empty: "No attributes available.",
+      baseType: "Base type",
+      notNull: "Not null",
+      default: "Default",
+      collation: "Collation",
+      domainConstraint: "Constraint",
+      rangeSubtype: "Range subtype",
+      rangeMultirange: "Multirange type",
+    },
+    ddl: {
+      empty: "No DDL is available for this type.",
+      incomplete: "The generated DDL is incomplete and was not copied. Open the type details to review its warnings.",
+    },
+  },
   app: {
     name: "DBX",
   },
@@ -2456,6 +2493,7 @@ export default {
     editView: "Edit View",
     viewSource: "View Source",
     changeOpenMode: "Change open mode",
+    viewDetails: "View Details",
     viewDdl: "View DDL",
     viewDdlLoading: "Loading DDL...",
     ddlCopied: "DDL copied",

@@ -49,7 +49,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
@@ -72,6 +72,7 @@ import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
+import { customTypeCapabilities } from "@/lib/database/databaseObjectCapabilities";
 
 const { t } = useI18n();
 
@@ -295,6 +296,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Braces, colorClass: "text-violet-500" };
     case "type-body":
       return { icon: FileCode, colorClass: "text-violet-400" };
+    case "type-member":
+      return { icon: Columns3, colorClass: "text-muted-foreground" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
     case "group-views":
@@ -337,6 +340,12 @@ function displayLabel(node: TreeNode): string {
   if (node.type === "linked-server-root") return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
+}
+
+function treeNodeSecondaryValue(node: TreeNode): string | undefined {
+  if (node.type === "type" && node.customTypeKind) return t(`customType.kinds.${node.customTypeKind}`);
+  if (node.type === "type-member") return (node.meta as CustomTypeTreeMemberMeta | undefined)?.displayValue;
+  return undefined;
 }
 
 function visibleLabel(node: TreeNode): string {
@@ -551,10 +560,12 @@ async function cancelConnectionAttempt() {
 }
 
 const canExpand = computed(() =>
-  canTreeNodeShowExpander({
-    type: activeNode.value.type,
-    childCount: activeNode.value.children?.length ?? 0,
-  }),
+  activeNode.value.type === "type" && (!customTypeCapabilities(currentDatabaseType()).details || activeNode.value.hasMembers === false)
+    ? false
+    : canTreeNodeShowExpander({
+        type: activeNode.value.type,
+        childCount: activeNode.value.children?.length,
+      }),
 );
 
 const isPinned = computed(() => activeNode.value.pinned || connectionStore.isTreeNodePinned(activeNode.value));
@@ -1182,6 +1193,7 @@ function onKeydown(event: KeyboardEvent) {
               @click.stop
             />
             <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' && !trailingComment }]">{{ visibleLabel(node) }}</span>
+            <span v-if="treeNodeSecondaryValue(node)" class="min-w-0 max-w-[55%] shrink truncate text-xs text-muted-foreground" :title="treeNodeSecondaryValue(node)">{{ treeNodeSecondaryValue(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
               type="button"

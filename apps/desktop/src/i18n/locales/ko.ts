@@ -2,6 +2,43 @@ import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ko";
 
 export default withEnglishFallback({
+  customType: {
+    kinds: {
+      base: "기본형",
+      composite: "복합형",
+      domain: "도메인",
+      enum: "열거형",
+      range: "범위형",
+      multirange: "다중 범위형",
+    },
+    tabs: {
+      members: "멤버",
+      properties: "속성",
+      ddl: "DDL",
+    },
+    members: {
+      empty: "이 형식에는 멤버가 없습니다.",
+      name: "이름",
+      type: "형식",
+      nullable: "NULL 허용",
+      default: "기본값",
+      comment: "설명",
+    },
+    properties: {
+      empty: "사용 가능한 속성이 없습니다.",
+      baseType: "기본 형식",
+      notNull: "NULL 불가",
+      default: "기본값",
+      collation: "정렬 규칙",
+      domainConstraint: "제약 조건",
+      rangeSubtype: "범위 하위 형식",
+      rangeMultirange: "다중 범위 형식",
+    },
+    ddl: {
+      empty: "이 형식에 사용할 수 있는 DDL이 없습니다.",
+      incomplete: "생성된 DDL이 불완전하여 복사되지 않았습니다. 형식 세부 정보에서 경고를 확인하세요.",
+    },
+  },
   app: {
     name: "DBX",
   },
@@ -2311,6 +2348,7 @@ export default withEnglishFallback({
     dropTableSuccess: '테이블 "{name}" 삭제됨',
     editView: "뷰 편집",
     viewSource: "소스 보기",
+    viewDetails: "세부 정보 보기",
     viewDdl: "DDL 보기",
     viewDdlLoading: "DDL을 불러오는 중...",
     ddlCopied: "DDL을 복사했습니다",

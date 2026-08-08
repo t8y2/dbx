@@ -2,6 +2,43 @@ import { withEnglishFallback } from "./fallback";
 import docs from "./docs/ja";
 
 export default withEnglishFallback({
+  customType: {
+    kinds: {
+      base: "基本型",
+      composite: "複合型",
+      domain: "ドメイン",
+      enum: "列挙型",
+      range: "範囲型",
+      multirange: "多重範囲型",
+    },
+    tabs: {
+      members: "メンバー",
+      properties: "プロパティ",
+      ddl: "DDL",
+    },
+    members: {
+      empty: "この型にはメンバーがありません。",
+      name: "名前",
+      type: "型",
+      nullable: "NULL 許可",
+      default: "デフォルト",
+      comment: "コメント",
+    },
+    properties: {
+      empty: "利用可能な属性がありません。",
+      baseType: "基底型",
+      notNull: "NOT NULL",
+      default: "デフォルト",
+      collation: "照合順序",
+      domainConstraint: "制約",
+      rangeSubtype: "範囲のサブタイプ",
+      rangeMultirange: "多重範囲型",
+    },
+    ddl: {
+      empty: "この型で利用可能な DDL はありません。",
+      incomplete: "生成された DDL は不完全なためコピーされませんでした。型の詳細で警告を確認してください。",
+    },
+  },
   app: {
     name: "DBX",
   },
@@ -2413,6 +2450,7 @@ export default withEnglishFallback({
     dropTableSuccess: "テーブル「{name}」をドロップ（削除）しました",
     editView: "ビューを編集",
     viewSource: "ソースを表示",
+    viewDetails: "詳細を表示",
     viewDdl: "DDLを表示",
     dropObject: "オブジェクトを削除",
     dropView: "ビューを削除",

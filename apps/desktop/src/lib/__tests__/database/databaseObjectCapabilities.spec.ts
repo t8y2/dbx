@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { databaseObjectCapabilities, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, databaseObjectCapabilities, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 
 describe("databaseObjectCapabilities", () => {
   it("exposes supported programmable objects for Dameng", () => {
@@ -58,6 +58,15 @@ describe("databaseObjectCapabilities", () => {
       expect(databaseObjectCapabilities(dbType).sourceReadable, dbType).not.toContain("TYPE_BODY");
       // Non-type programmable objects stay source-readable on PG-family.
       expect(databaseObjectCapabilities(dbType).sourceReadable, dbType).toContain("FUNCTION");
+    }
+  });
+
+  it("enables custom type details only for verified PG-family databases", () => {
+    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
+      expect(customTypeCapabilities(dbType), dbType).toEqual({ details: true, members: true, ddl: true });
+    }
+    for (const dbType of ["xugu", "highgo", "uxdb", "redshift", "mysql", undefined] as const) {
+      expect(customTypeCapabilities(dbType), String(dbType)).toEqual({ details: false, members: false, ddl: false });
     }
   });
 });

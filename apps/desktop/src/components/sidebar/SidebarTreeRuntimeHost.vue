@@ -95,7 +95,7 @@ import {
   isSingleDatabase,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
-import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { mongoCollectionTableTypeFromNode, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -534,6 +534,7 @@ function isGroupLabel(node: TreeNode): boolean {
 
 async function toggle() {
   const node = activeNode.value;
+  if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.hasMembers === false) return;
   if (node.isLoading) {
     if (node.isExpanded) {
       node.isExpanded = false;
@@ -558,6 +559,12 @@ async function toggle() {
 
   if (node.type === "group-partitions") {
     node.isExpanded = !node.isExpanded;
+    emitNodeToggled(node, wasExpanded);
+    return;
+  }
+
+  if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined) {
+    node.isExpanded = node.children.length > 0 ? !node.isExpanded : false;
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -588,6 +595,12 @@ async function toggle() {
   }
 
   try {
+    if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details) {
+      await connectionStore.loadCustomTypeChildren(node);
+      emitNodeToggled(node, wasExpanded);
+      return;
+    }
+
     if (await loadSidebarObjectGroup(node, connectionStore)) {
       emitNodeToggled(node, wasExpanded);
       return;
@@ -1452,6 +1465,28 @@ async function copyName() {
     toast(t("connection.copied"), 2000);
   } catch (e: any) {
     toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyCustomTypeDdl() {
+  const node = createSidebarActionTarget(activeNode.value);
+  if (!node.connectionId || !node.database) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const details = await api.getCustomTypeDetails(node.connectionId, node.database, node.schema || node.database, node.objectName || node.label);
+    const sql = details.ddl?.sql?.trim();
+    if (!sql) {
+      toast(t("customType.ddl.empty"), 3000);
+      return;
+    }
+    if (!details.ddl?.complete) {
+      toast(t("customType.ddl.incomplete"), 5000);
+      return;
+    }
+    await copyToClipboard(sql);
+    toast(t("contextMenu.ddlCopied"), 2000);
+  } catch (error: any) {
+    toast(t("grid.copyFailed", { message: translateBackendError(t, error) }), 5000);
   }
 }
 
@@ -3361,10 +3396,12 @@ function createMysqlObjectTemplate() {
 }
 
 const canExpand = computed(() =>
-  canTreeNodeShowExpander({
-    type: activeNode.value.type,
-    childCount: activeNode.value.children?.length ?? 0,
-  }),
+  activeNode.value.type === "type" && (!customTypeCapabilities(currentDatabaseType()).details || activeNode.value.hasMembers === false)
+    ? false
+    : canTreeNodeShowExpander({
+        type: activeNode.value.type,
+        childCount: activeNode.value.children?.length,
+      }),
 );
 
 const canPin = computed(() => canTreeNodePin(activeNode.value.type));
@@ -4652,15 +4689,18 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  // Types are listed on PostgreSQL-family databases without a source getter;
-  // only Xugu keeps the “view source”/“change open mode” entries. For other
-  // databases the menu intentionally stops at copy-name (read-only listing).
+  // PostgreSQL-family types expand in the tree and expose DDL as a lightweight
+  // copy action. Xugu keeps its source/change-open-mode entries.
   if (node.type === "type" || node.type === "type-body") {
     if (supportsTypeObjectSource(currentDatabaseType())) {
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
       return true;
+    }
+    if (customTypeCapabilities(currentDatabaseType()).details) {
+      items.push({ label: t("contextMenu.copyDdl"), action: copyCustomTypeDdl, icon: Copy });
+      items.push({ label: "", separator: true });
     }
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     return true;

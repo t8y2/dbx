@@ -2,6 +2,43 @@ import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-TW";
 
 export default withEnglishFallback({
+  customType: {
+    kinds: {
+      base: "基礎型別",
+      composite: "複合型別",
+      domain: "定義域",
+      enum: "列舉型別",
+      range: "範圍型別",
+      multirange: "多重範圍型別",
+    },
+    tabs: {
+      members: "成員",
+      properties: "屬性",
+      ddl: "DDL",
+    },
+    members: {
+      empty: "此型別沒有成員。",
+      name: "名稱",
+      type: "型別",
+      nullable: "可為 NULL",
+      default: "預設值",
+      comment: "註解",
+    },
+    properties: {
+      empty: "沒有可用的屬性。",
+      baseType: "基礎型別",
+      notNull: "不可為 NULL",
+      default: "預設值",
+      collation: "定序規則",
+      domainConstraint: "限制條件",
+      rangeSubtype: "範圍子型別",
+      rangeMultirange: "多重範圍型別",
+    },
+    ddl: {
+      empty: "此型別沒有可用的 DDL。",
+      incomplete: "產生的 DDL 不完整，未複製。請開啟型別詳細資料查看警告。",
+    },
+  },
   app: {
     name: "DBX",
   },
@@ -2389,6 +2426,7 @@ export default withEnglishFallback({
     dropTableSuccess: "資料表「{name}」已刪除",
     editView: "編輯檢視",
     viewSource: "檢視原始碼",
+    viewDetails: "檢視詳細資料",
     viewDdl: "檢視 DDL",
     viewDdlLoading: "正在讀取 DDL...",
     ddlCopied: "DDL 已複製",

@@ -47,11 +47,16 @@ describe("singleClickRowAction", () => {
     expect(singleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
     expect(doubleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
     expect(singleClickRowAction(row("TYPE_BODY", "app_status"), "xugu")).toBe("open-source");
-    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase", undefined] as const) {
-      expect(singleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("none");
-      expect(doubleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("none");
+    for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
+      // Verified PG-family TYPE rows open the read-only details panel.
+      expect(singleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("type-info");
+      expect(doubleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("type-info");
+      // TYPE_BODY has no backend getter on these databases.
       expect(singleClickRowAction(row("TYPE_BODY", "app_status"), dbType), String(dbType)).toBe("none");
     }
+    // Unknown connection type keeps the conservative no-action behavior.
+    expect(singleClickRowAction(row("TYPE", "app_status"), undefined)).toBe("none");
+    expect(doubleClickRowAction(row("TYPE", "app_status"), undefined)).toBe("none");
   });
 
   it("keeps source actions for non-type rows on PG-family databases", () => {

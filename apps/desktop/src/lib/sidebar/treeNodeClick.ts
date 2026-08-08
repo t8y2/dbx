@@ -1,5 +1,5 @@
 import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
-import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
 export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "toggle" | "none";
@@ -49,6 +49,7 @@ export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activa
   if (activation === "double") return "none";
   if (type === "extension") return "open-extension-details";
   if (dataNodeTypes.has(type)) return "open-data";
+  if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
   if (sourceNodeTypes.has(type) && canOpenTreeNodeSource(type, dbType)) return "open-source";
   if (toggleLeafNodeTypes.has(type)) return "toggle";
   if (canExpand) return "toggle";
@@ -69,6 +70,7 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
   if (activation === "double") {
     if (type === "extension") return "open-extension-details";
     if (dataNodeTypes.has(type)) return "open-data";
+    if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
     if (sourceNodeTypes.has(type) && canOpenTreeNodeSource(type, dbType)) return "open-source";
     if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
     if (toggleLeafNodeTypes.has(type)) return "toggle";

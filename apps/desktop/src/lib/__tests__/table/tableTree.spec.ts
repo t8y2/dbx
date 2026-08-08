@@ -95,6 +95,27 @@ describe("PostgreSQL overloaded routines", () => {
   });
 });
 
+describe("PostgreSQL custom type metadata", () => {
+  it("preserves type kind and member capability in simple and grouped trees", () => {
+    const objects: ObjectInfo[] = [
+      { name: "address", object_type: "TYPE", schema: "public", custom_type_kind: "composite", has_members: true },
+      { name: "email", object_type: "TYPE", schema: "public", custom_type_kind: "domain", has_members: false },
+    ];
+
+    const simple = buildSimpleObjectTreeNodes({ ...context, schema: "public", objects });
+    expect(simple.map((node) => ({ name: node.label, kind: node.customTypeKind, hasMembers: node.hasMembers }))).toEqual([
+      { name: "address", kind: "composite", hasMembers: true },
+      { name: "email", kind: "domain", hasMembers: false },
+    ]);
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "public", objects });
+    expect(grouped.find((node) => node.type === "group-types")?.children?.map((node) => ({ name: node.label, kind: node.customTypeKind, hasMembers: node.hasMembers }))).toEqual([
+      { name: "address", kind: "composite", hasMembers: true },
+      { name: "email", kind: "domain", hasMembers: false },
+    ]);
+  });
+});
+
 describe("programmable database objects", () => {
   it("keeps Xugu trigger/type nodes distinct and preserves an invalid status", () => {
     const objects: ObjectInfo[] = [

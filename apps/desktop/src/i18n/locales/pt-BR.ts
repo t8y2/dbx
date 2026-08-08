@@ -2,6 +2,43 @@ import { withEnglishFallback } from "./fallback";
 import docs from "./docs/pt-BR";
 
 export default withEnglishFallback({
+  customType: {
+    kinds: {
+      base: "Base",
+      composite: "Composto",
+      domain: "Domínio",
+      enum: "Enumeração",
+      range: "Intervalo",
+      multirange: "Multi-intervalo",
+    },
+    tabs: {
+      members: "Membros",
+      properties: "Propriedades",
+      ddl: "DDL",
+    },
+    members: {
+      empty: "Este tipo não possui membros.",
+      name: "Nome",
+      type: "Tipo",
+      nullable: "Aceita NULL",
+      default: "Valor padrão",
+      comment: "Comentário",
+    },
+    properties: {
+      empty: "Nenhum atributo disponível.",
+      baseType: "Tipo base",
+      notNull: "Não nulo",
+      default: "Valor padrão",
+      collation: "Ordenação",
+      domainConstraint: "Restrição",
+      rangeSubtype: "Subtipo do intervalo",
+      rangeMultirange: "Tipo multi-intervalo",
+    },
+    ddl: {
+      empty: "Nenhum DDL disponível para este tipo.",
+      incomplete: "O DDL gerado está incompleto e não foi copiado. Abra os detalhes do tipo para revisar os avisos.",
+    },
+  },
   app: {
     name: "DBX",
   },
@@ -2390,6 +2427,7 @@ export default withEnglishFallback({
     dropTableSuccess: 'Tabela "{name}" removida',
     editView: "Editar Visão",
     viewSource: "Ver Código-fonte",
+    viewDetails: "Ver detalhes",
     viewDdl: "Ver DDL",
     viewDdlLoading: "Carregando DDL...",
     ddlCopied: "DDL copiado",

@@ -63,18 +63,30 @@ async function withMockLocalStorage(initial: Record<string, string>, run: () => 
 test("normalizes saved query result page size", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.pageSize, 100);
   assert.equal(normalizeEditorSettings({ pageSize: 5000 }).pageSize, 5000);
-  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 100000);
+  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 200000);
+  assert.equal(normalizeEditorSettings({ pageSize: 2000000 }).pageSize, 1000000);
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
 });
 
 test("normalizes the dedicated default row limit for table opens", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.tableOpenPageSize, 100);
   assert.equal(normalizeEditorSettings({ tableOpenPageSize: 1000 }).tableOpenPageSize, 1000);
-  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 200000 }).tableOpenPageSize, 100000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 200000 }).tableOpenPageSize, 200000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 2000000 }).tableOpenPageSize, 1000000);
   assert.equal(normalizeEditorSettings({ tableOpenPageSize: 0 }).tableOpenPageSize, 100);
   assert.equal(tableOpenPageLimit(), 100);
   assert.equal(tableOpenPageLimit(1000), 1000);
   assert.equal(tableOpenPageLimit(0), 100);
+});
+
+test("normalizes the global query result row limit", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled, true);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.queryResultMaxRows, 100000);
+  assert.equal(normalizeEditorSettings({}).queryResultMaxRowsEnabled, true);
+  assert.equal(normalizeEditorSettings({}).queryResultMaxRows, 100000);
+  assert.equal(normalizeEditorSettings({ queryResultMaxRowsEnabled: false, queryResultMaxRows: 250000 }).queryResultMaxRowsEnabled, false);
+  assert.equal(normalizeEditorSettings({ queryResultMaxRows: 250000 }).queryResultMaxRows, 250000);
+  assert.equal(normalizeEditorSettings({ queryResultMaxRows: 2147483648 }).queryResultMaxRows, 2147483647);
 });
 
 test("numericColumnRightAlign defaults to true and round-trips through normalizeEditorSettings", () => {

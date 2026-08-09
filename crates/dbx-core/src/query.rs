@@ -30,6 +30,7 @@ use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
+pub const AGENT_PROTOCOL_MAX_ROWS: usize = i32::MAX as usize;
 pub const QUERY_CANCELED: &str = "Query canceled";
 /// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
 /// Wording must match packages/mongo-shell `MONGO_SHELL_COMMAND_HINT`
@@ -659,7 +660,7 @@ pub fn agent_execute_query_params(
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "sql": sql,
-        "maxRows": options.max_rows.unwrap_or(MAX_ROWS),
+        "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -668,7 +669,7 @@ pub fn agent_execute_query_params(
         params["schema"] = serde_json::json!(schema);
     }
     if let Some(fetch_size) = options.fetch_size {
-        params["fetchSize"] = serde_json::json!(fetch_size);
+        params["fetchSize"] = serde_json::json!(agent_protocol_row_count(fetch_size));
     }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
@@ -684,8 +685,8 @@ pub fn agent_execute_query_page_params(
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "sql": sql,
-        "pageSize": options.page_size.unwrap_or(MAX_ROWS),
-        "maxRows": options.max_rows.unwrap_or(MAX_ROWS),
+        "pageSize": agent_protocol_row_count(options.page_size.unwrap_or(MAX_ROWS)),
+        "maxRows": agent_protocol_row_count(options.max_rows.unwrap_or(MAX_ROWS)),
     });
     if let Some(database) = database.map(str::trim).filter(|database| !database.is_empty()) {
         params["database"] = serde_json::json!(database);
@@ -694,7 +695,7 @@ pub fn agent_execute_query_page_params(
         params["schema"] = serde_json::json!(schema);
     }
     if let Some(fetch_size) = options.fetch_size {
-        params["fetchSize"] = serde_json::json!(fetch_size);
+        params["fetchSize"] = serde_json::json!(agent_protocol_row_count(fetch_size));
     }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
@@ -705,8 +706,12 @@ pub fn agent_execute_query_page_params(
 pub fn agent_fetch_query_page_params(session_id: &str, page_size: usize) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
-        "pageSize": page_size,
+        "pageSize": agent_protocol_row_count(page_size),
     })
+}
+
+fn agent_protocol_row_count(value: usize) -> usize {
+    value.clamp(1, AGENT_PROTOCOL_MAX_ROWS)
 }
 
 pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
@@ -6098,6 +6103,27 @@ for line in sys.stdin:
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["timeoutSecs"], 600);
         assert_eq!(params["maxRows"], MAX_ROWS);
+    }
+
+    #[test]
+    fn agent_query_row_counts_are_clamped_to_java_signed_int_range() {
+        let oversized = AGENT_PROTOCOL_MAX_ROWS.saturating_add(1);
+        let params = agent_execute_query_page_params(
+            "SELECT * FROM events",
+            None,
+            None,
+            QueryExecutionOptions {
+                page_size: Some(oversized),
+                fetch_size: Some(oversized),
+                max_rows: Some(oversized),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(params["pageSize"], AGENT_PROTOCOL_MAX_ROWS);
+        assert_eq!(params["fetchSize"], AGENT_PROTOCOL_MAX_ROWS);
+        assert_eq!(params["maxRows"], AGENT_PROTOCOL_MAX_ROWS);
+        assert_eq!(agent_fetch_query_page_params("session-1", oversized)["pageSize"], AGENT_PROTOCOL_MAX_ROWS);
     }
 
     #[test]

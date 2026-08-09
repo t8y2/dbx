@@ -1421,7 +1421,7 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
-      this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, this.databaseType, this.input.keywordCase));
+      this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, this.databaseType, this.input.keywordCase, this.input.currentSchema));
       this.items.push(...buildTableItems(context, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType, this.input.currentSchema, this.input.keywordCase));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table"));
@@ -2872,6 +2872,49 @@ function quoteSelectStarColumnIdentifier(identifier: string, dialect?: "mysql" |
   return quoteSqlIdentifier(identifier, dialect);
 }
 
+/**
+ * Build a normalized table-name -> set-of-schemas index used to detect when a
+ * bare table name is ambiguous across schemas. Shared by buildTableItems and
+ * buildForeignKeyRelatedTableItems so both apply the same ambiguity signal.
+ */
+function collectSchemasByTableName(tables: SqlCompletionTable[]): Map<string, Set<string>> {
+  const schemasByTableName = new Map<string, Set<string>>();
+  for (const table of tables) {
+    const tableName = normalizeIdentifierPart(table.name);
+    const schemas = schemasByTableName.get(tableName) ?? new Set<string>();
+    schemas.add(normalizeIdentifierPart(table.schema ?? ""));
+    schemasByTableName.set(tableName, schemas);
+  }
+  return schemasByTableName;
+}
+
+/**
+ * Resolve the schema-qualification signals for a completion table.
+ *
+ * Shared by buildTableItems and buildForeignKeyRelatedTableItems so foreign-key
+ * related candidates stay consistent with regular table candidates: when the
+ * same table name exists in multiple schemas, both qualify the apply text with
+ * `schema.table`. Otherwise an FK candidate would insert a bare `customers AS cs`
+ * that may reference the wrong schema and carry a different dedupeKey than the
+ * regular candidate, producing a duplicate. Oracle keeps its current-schema
+ * behavior; the generic/PostgreSQL/SQL Server paths qualify on ambiguity.
+ */
+function resolveTableSchemaQualification(
+  table: SqlCompletionTable,
+  dialect: "mysql" | "postgres" | "sqlserver" | undefined,
+  databaseType: DatabaseType | undefined,
+  currentSchema: string | undefined,
+  schemasByTableName: Map<string, Set<string>>,
+): { ambiguousTableName: boolean; schemaQualification: boolean; defaultApplyName: string } {
+  const oracleSchemaQualification = databaseType === "oracle" && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
+  // A bare table name is ambiguous when metadata contains the same name in multiple schemas.
+  // Keep Oracle's current-schema behavior, but qualify the generic/PostgreSQL/SQL Server paths.
+  const ambiguousTableName = databaseType !== "oracle" && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
+  const schemaQualification = !!table.schema && (oracleSchemaQualification || ambiguousTableName);
+  const defaultApplyName = schemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
+  return { ambiguousTableName, schemaQualification, defaultApplyName };
+}
+
 function buildTableItems(
   context: Pick<SqlCompletionContext, "prefix" | "qualifier">,
   tables: SqlCompletionTable[],
@@ -2886,22 +2929,12 @@ function buildTableItems(
   const qualifierSchema = context.qualifier?.split(".").filter(Boolean).pop();
   const existingAliases = new Set(referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   const matchingTables = tables.filter((table) => matchesPrefix(table.name, prefix));
-  const schemasByTableName = new Map<string, Set<string>>();
-  for (const table of matchingTables) {
-    const tableName = normalizeIdentifierPart(table.name);
-    const schemas = schemasByTableName.get(tableName) ?? new Set<string>();
-    schemas.add(normalizeIdentifierPart(table.schema ?? ""));
-    schemasByTableName.set(tableName, schemas);
-  }
+  // Ambiguity is decided among prefix-matching tables only, matching prior behavior.
+  const schemasByTableName = collectSchemasByTableName(matchingTables);
   return matchingTables
     .map((table) => {
       const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
-      const oracleSchemaQualification = databaseType === "oracle" && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
-      // A bare table name is ambiguous when metadata contains the same name in multiple schemas.
-      // Keep Oracle's current-schema behavior, but qualify the generic/PostgreSQL/SQL Server paths.
-      const ambiguousTableName = databaseType !== "oracle" && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
-      const schemaQualification = !!table.schema && (oracleSchemaQualification || ambiguousTableName);
-      const defaultApplyName = schemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
+      const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName);
       const suppliedApplyName = table.applyName?.trim();
       const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
       const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
@@ -2927,6 +2960,7 @@ function buildForeignKeyRelatedTableItems(
   autoAliasTables = false,
   databaseType?: DatabaseType,
   keywordCase?: SqlKeywordCase,
+  currentSchema?: string,
 ): SqlCompletionItem[] {
   if (!foreignKeysByTable || context.referencedTables.length === 0) return [];
   const candidates = new Map<string, { table: SqlCompletionTable; detail: string }>();
@@ -2950,9 +2984,15 @@ function buildForeignKeyRelatedTableItems(
     }
   }
 
+  // Reuse buildTableItems' ambiguity signal so FK candidates qualify with
+  // `schema.table` exactly when regular candidates would. Built from the same
+  // prefix-matching table set buildTableItems uses, keeping the two in lockstep.
+  const schemasByTableName = collectSchemasByTableName(tables.filter((table) => matchesPrefix(table.name, context.prefix)));
+
   return [...candidates.values()]
     .map(({ table, detail }) => {
-      const applyName = quoteSqlIdentifier(table.name, dialect);
+      const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName);
+      const applyName = defaultApplyName;
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
       return {
         label: table.name,
@@ -2960,6 +3000,9 @@ function buildForeignKeyRelatedTableItems(
         detail,
         apply: formatTableAliasApply(applyName, alias, databaseType, keywordCase),
         boost: computeBoost(table.name, context.prefix) + 3600,
+        // Mirror buildTableItems' dedupeKey so an FK candidate and the regular
+        // candidate for the same schema-qualified table collapse to one entry.
+        dedupeKey: ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
       };
     })
     .sort(compareCompletionItems);

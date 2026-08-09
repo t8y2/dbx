@@ -3130,6 +3130,38 @@ test("does not add aliases to foreign-key related JOIN candidates when disabled"
   assert.equal(items[0]?.apply, "customers");
 });
 
+test("schema-qualifies foreign-key related JOIN candidates when the target table name spans schemas", () => {
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
+    ["dbo.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "sales", ref_table: "customers", ref_column: "id" }]],
+  ]);
+  const sql = "select * from dbo.orders o join cus";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", schema: "dbo", type: "table" },
+      { name: "customers", schema: "dbo", type: "table" },
+      { name: "customers", schema: "sales", type: "table" },
+    ],
+    columnsByTable,
+    foreignKeysByTable,
+    dialect: "sqlserver",
+    databaseType: "sqlserver",
+    autoAliasTables: true,
+  });
+
+  const fkCandidate = items.find((item) => item.type === "table" && item.detail?.includes("related by"));
+  assert.ok(fkCandidate, "should surface the foreign-key related candidate");
+  // customers exists in both dbo and sales, so the FK candidate must qualify with
+  // the referenced schema (sales.customers) instead of a bare, ambiguous customers.
+  assert.equal(fkCandidate?.apply, "sales.customers AS cs");
+  assert.equal(fkCandidate?.dedupeKey, "sales.customers");
+  // The FK candidate (higher boost) should win dedupe against the regular
+  // sales.customers candidate, leaving no bare `customers AS cs` entry.
+  assert.ok(
+    !items.some((item) => item.type === "table" && item.apply === "customers AS cs"),
+    "should not emit a bare unqualified customers candidate alongside the qualified FK candidate",
+  );
+});
+
 test("boosts inbound foreign-key table candidates in JOIN table context", () => {
   const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["public.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "public", ref_table: "customers", ref_column: "id" }]]]);
   const sql = "select * from public.customers c join ord";
@@ -3159,7 +3191,9 @@ test("uses owner schema when ranking inbound foreign-key table candidates", () =
 
   assert.equal(items[0]?.label, "orders");
   assert.equal(items[0]?.detail, "related by sales.orders.customer_id → id");
-  assert.equal(items[0]?.apply, "orders");
+  // orders exists in both public and sales, so the FK candidate must schema-qualify
+  // with the owner schema (sales.orders) to match buildTableItems' qualification.
+  assert.equal(items[0]?.apply, "sales.orders");
 });
 
 test("suggests composite explicit foreign-key join conditions", () => {

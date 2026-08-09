@@ -83,6 +83,22 @@ import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, 
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
+  ActivePluginSession,
+  PluginBinaryEvent,
+  PluginConnectionActionResult,
+  PluginEvent,
+  PluginFilesystemListResult,
+  PluginFilesystemMutationResult,
+  PluginFilesystemReadResult,
+  PluginInstallResult,
+  PluginMarketplaceInstallRequest,
+  PluginRepository,
+  PluginRepositoryCatalogResult,
+  PluginRollbackResult,
+  PluginTrustedKey,
+  PluginUiAssetPayload,
+} from "@/types/database";
+import type {
   DataGridColumnDistinctValuesSqlOptions,
   DataGridColumnValueFilterConditionOptions,
   DataGridColumnValuesFilterConditionOptions,
@@ -2232,6 +2248,124 @@ export async function decryptConfig(payload: unknown, passphrase: string): Promi
 
 export async function listPlugins(): Promise<InstalledPlugin[]> {
   return invoke("list_plugins");
+}
+
+export async function listPluginTrustedKeys(): Promise<PluginTrustedKey[]> {
+  return invoke("list_plugin_trusted_keys");
+}
+
+export async function savePluginTrustedKey(keyId: string, publicKey: string): Promise<PluginTrustedKey[]> {
+  return invoke("save_plugin_trusted_key", { keyId, publicKey });
+}
+
+export async function removePluginTrustedKey(keyId: string): Promise<PluginTrustedKey[]> {
+  return invoke("remove_plugin_trusted_key", { keyId });
+}
+
+export async function listPluginRepositories(): Promise<PluginRepository[]> {
+  return invoke("list_plugin_repositories");
+}
+
+export async function savePluginRepository(repository: PluginRepository): Promise<PluginRepository[]> {
+  return invoke("save_plugin_repository", { repository });
+}
+
+export async function removePluginRepository(repositoryId: string): Promise<PluginRepository[]> {
+  return invoke("remove_plugin_repository", { repositoryId });
+}
+
+export async function fetchPluginMarketplaceCatalogs(): Promise<PluginRepositoryCatalogResult[]> {
+  return invoke("fetch_plugin_marketplace_catalogs");
+}
+
+export async function installMarketplacePlugin(request: PluginMarketplaceInstallRequest): Promise<PluginInstallResult> {
+  return invoke("install_marketplace_plugin", { request });
+}
+
+export async function installPluginPackage(pathOrFile: string | File, allowUnsigned = false): Promise<PluginInstallResult> {
+  if (typeof pathOrFile !== "string") throw new Error("Desktop plugin installation requires a local .dbxp file path");
+  return invoke("install_plugin_package", { path: pathOrFile, allowUnsigned });
+}
+
+export async function rollbackPlugin(pluginId: string): Promise<PluginRollbackResult> {
+  return invoke("rollback_plugin", { pluginId });
+}
+
+export async function uninstallPlugin(pluginId: string): Promise<InstalledPlugin[]> {
+  return invoke("uninstall_plugin", { pluginId });
+}
+
+export async function activatePlugin(pluginId: string): Promise<ActivePluginSession[]> {
+  return invoke("activate_plugin", { pluginId });
+}
+
+export async function listActivePlugins(): Promise<ActivePluginSession[]> {
+  return invoke("list_active_plugins");
+}
+
+export async function stopPlugin(pluginId: string): Promise<void> {
+  return invoke("stop_plugin", { pluginId });
+}
+
+export async function invokePlugin<T = unknown>(pluginId: string, method: string, params: unknown = null, timeoutMs?: number): Promise<T> {
+  return invoke("invoke_plugin", { pluginId, method, params, timeoutMs });
+}
+
+export async function invokePluginConnectionAction(config: ConnectionConfig, actionId: string): Promise<PluginConnectionActionResult> {
+  return invoke("invoke_plugin_connection_action", { config, actionId });
+}
+
+export async function notifyPlugin(pluginId: string, method: string, params: unknown = null): Promise<void> {
+  return invoke("notify_plugin", { pluginId, method, params });
+}
+
+export async function sendPluginBinary(pluginId: string, channel: string, dataBase64: string): Promise<void> {
+  return invoke("send_plugin_binary", { pluginId, channel, dataBase64 });
+}
+
+export async function listPluginFilesystemEntries(pluginId: string, providerId: string, options: { connectionId?: string; uri?: string; cursor?: string; limit?: number } = {}): Promise<PluginFilesystemListResult> {
+  return invoke("list_plugin_filesystem_entries", { pluginId, providerId, ...options });
+}
+
+export async function readPluginFilesystemFile(pluginId: string, providerId: string, uri: string, options: { connectionId?: string; maxBytes?: number } = {}): Promise<PluginFilesystemReadResult> {
+  return invoke("read_plugin_filesystem_file", { pluginId, providerId, uri, ...options });
+}
+
+export async function writePluginFilesystemFile(pluginId: string, providerId: string, uri: string, dataBase64: string, options: { connectionId?: string; create?: boolean; overwrite?: boolean; etag?: string } = {}): Promise<PluginFilesystemMutationResult> {
+  return invoke("write_plugin_filesystem_file", { pluginId, providerId, uri, dataBase64, create: options.create === true, overwrite: options.overwrite === true, connectionId: options.connectionId, etag: options.etag });
+}
+
+export async function createPluginFilesystemDirectory(pluginId: string, providerId: string, uri: string, connectionId?: string): Promise<PluginFilesystemMutationResult> {
+  return invoke("create_plugin_filesystem_directory", { pluginId, providerId, uri, connectionId });
+}
+
+export async function deletePluginFilesystemEntry(pluginId: string, providerId: string, uri: string, options: { connectionId?: string; recursive?: boolean } = {}): Promise<PluginFilesystemMutationResult> {
+  return invoke("delete_plugin_filesystem_entry", { pluginId, providerId, uri, connectionId: options.connectionId, recursive: options.recursive === true });
+}
+
+export async function renamePluginFilesystemEntry(pluginId: string, providerId: string, sourceUri: string, targetUri: string, options: { connectionId?: string; overwrite?: boolean } = {}): Promise<PluginFilesystemMutationResult> {
+  return invoke("rename_plugin_filesystem_entry", { pluginId, providerId, sourceUri, targetUri, connectionId: options.connectionId, overwrite: options.overwrite === true });
+}
+
+export async function readPluginAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload> {
+  return invoke("read_plugin_asset", { pluginId, path });
+}
+
+export async function readPluginUiEntry(pluginId: string): Promise<PluginUiAssetPayload> {
+  return invoke("read_plugin_ui_entry", { pluginId });
+}
+
+export async function readPluginUiAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload> {
+  return invoke("read_plugin_ui_asset", { pluginId, path });
+}
+
+export async function subscribePluginEvents(onEvent: (event: PluginEvent) => void, onBinary?: (event: PluginBinaryEvent) => void): Promise<UnlistenFn> {
+  const unlistenEvent = await listen<PluginEvent>("dbx-plugin-event", (event) => onEvent(event.payload));
+  const unlistenBinary = await listen<PluginBinaryEvent>("dbx-plugin-binary", (event) => onBinary?.(event.payload));
+  return () => {
+    unlistenEvent();
+    unlistenBinary();
+  };
 }
 
 export async function listJdbcDrivers(): Promise<JdbcDriverInfo[]> {

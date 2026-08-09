@@ -125,6 +125,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
   return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "mq" && dbType !== "mqtt";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase";
 }
 
 /**

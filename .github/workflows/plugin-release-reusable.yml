@@ -1,0 +1,216 @@
+name: Reusable DBX plugin release
+
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Existing GitHub Release tag that receives the plugin assets
+        required: true
+        type: string
+      package-command:
+        description: Command that builds one unsigned candidate .dbxp and one .artifact.json for DBX_PLUGIN_TARGET
+        required: true
+        type: string
+      working-directory:
+        description: Plugin repository directory containing the package command
+        default: .
+        required: false
+        type: string
+      package-path:
+        description: Glob relative to working-directory for built .dbxp files
+        default: dist/*.dbxp
+        required: false
+        type: string
+      metadata-path:
+        description: Glob relative to working-directory for built .artifact.json files
+        default: dist/*.artifact.json
+        required: false
+        type: string
+      node-version:
+        default: "22"
+        required: false
+        type: string
+      go-version:
+        default: "1.22.x"
+        required: false
+        type: string
+      rust-toolchain:
+        default: stable
+        required: false
+        type: string
+      sdk-ref:
+        description: DBX tag or commit used only when installing the plugin CLI from source
+        default: plugin-sdk-v1
+        required: false
+        type: string
+      plugin-cli-version:
+        description: Published @dbx-app/plugin-cli version used to package the plugin
+        default: "0.1.0"
+        required: false
+        type: string
+      install-plugin-cli:
+        description: Install the dbx-plugin CLI before packaging
+        default: true
+        required: false
+        type: boolean
+      install-plugin-cli-from-source:
+        description: Build the CLI from sdk-ref instead of installing its precompiled npm package
+        default: false
+        required: false
+        type: boolean
+      build-matrix:
+        description: JSON matrix with runner and DBX target pairs; use one universal entry for platform-independent plugins
+        default: >-
+          {"include":[{"runner":"ubuntu-24.04","target":"linux-x64"},{"runner":"ubuntu-24.04-arm","target":"linux-arm64"},{"runner":"windows-2022","target":"windows-x64"},{"runner":"macos-15-intel","target":"darwin-x64"},{"runner":"macos-15","target":"darwin-arm64"}]}
+        required: false
+        type: string
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.build-matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+
+      - name: Checkout DBX plugin SDK
+        if: inputs.install-plugin-cli && inputs.install-plugin-cli-from-source
+        uses: actions/checkout@v4
+        with:
+          repository: t8y2/dbx
+          ref: ${{ inputs.sdk-ref }}
+          path: .dbx-plugin-sdk
+
+      - name: Install precompiled DBX plugin CLI
+        if: inputs.install-plugin-cli && !inputs.install-plugin-cli-from-source
+        shell: bash
+        run: npm install --global "@dbx-app/plugin-cli@${{ inputs.plugin-cli-version }}"
+
+      - name: Install DBX plugin CLI from source
+        if: inputs.install-plugin-cli && inputs.install-plugin-cli-from-source
+        shell: bash
+        run: cargo install --locked --path .dbx-plugin-sdk/plugins/sdk/cli
+
+      - name: Build unsigned plugin candidate
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          DBX_PLUGIN_TARGET: ${{ matrix.target }}
+          DBX_PLUGIN_SDK_ROOT: ${{ inputs.install-plugin-cli-from-source && format('{0}/.dbx-plugin-sdk', github.workspace) || '' }}
+        run: ${{ inputs.package-command }}
+
+      - name: Upload target artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbx-plugin-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            ${{ inputs.working-directory }}/${{ inputs.package-path }}
+            ${{ inputs.working-directory }}/${{ inputs.metadata-path }}
+
+  publish:
+    name: Publish plugin release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dbx-plugin-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate and merge candidate metadata
+        shell: bash
+        run: |
+          node <<'NODE'
+          const childProcess = require("node:child_process");
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          function filesUnder(root) {
+            return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+              const current = path.join(root, entry.name);
+              return entry.isDirectory() ? filesUnder(current) : [current];
+            });
+          }
+
+          const files = filesUnder("release-assets");
+          const metadataFiles = files.filter((file) => file.endsWith(".artifact.json"));
+          const packages = new Map();
+          for (const file of files.filter((file) => file.endsWith(".dbxp"))) {
+            const name = path.basename(file);
+            if (packages.has(name)) throw new Error(`Duplicate package filename ${name}`);
+            packages.set(name, file);
+          }
+          if (metadataFiles.length === 0 || packages.size === 0) throw new Error("Release produced no DBX plugin artifacts");
+
+          const targets = new Set();
+          let pluginIdentity;
+          const artifacts = metadataFiles.map((file) => {
+            const artifact = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (!/^[a-z0-9-]{1,64}$/.test(artifact.target || "")) throw new Error(`Invalid artifact target in ${file}`);
+            if (!/^[a-fA-F0-9]{64}$/.test(artifact.sha256 || "")) throw new Error(`Invalid artifact SHA-256 in ${file}`);
+            if (artifact.signingKeyId !== undefined) throw new Error(`Candidate metadata ${file} must not declare signingKeyId`);
+            if (!Number.isSafeInteger(artifact.size) || artifact.size < 0) throw new Error(`Invalid artifact size in ${file}`);
+            const packageName = path.basename(new URL(artifact.url, "https://plugins.invalid/releases/").pathname);
+            const packageFile = packages.get(packageName);
+            if (!packageFile) throw new Error(`Artifact metadata ${file} references missing package ${packageName}`);
+            const packageBytes = fs.readFileSync(packageFile);
+            const packageSha256 = crypto.createHash("sha256").update(packageBytes).digest("hex");
+            if (artifact.size !== packageBytes.length) throw new Error(`Artifact metadata ${file} has the wrong package size`);
+            if (artifact.sha256.toLowerCase() !== packageSha256) throw new Error(`Artifact metadata ${file} has the wrong package SHA-256`);
+            const entries = childProcess.execFileSync("unzip", ["-Z1", packageFile], { encoding: "utf8" }).split(/\r?\n/);
+            if (entries.includes("signature.json")) throw new Error(`Candidate package ${packageName} must be unsigned`);
+            const manifest = JSON.parse(childProcess.execFileSync("unzip", ["-p", packageFile, "manifest.json"], { encoding: "utf8" }));
+            const identity = {
+              id: manifest.id,
+              name: manifest.name,
+              description: manifest.description || "",
+              publisher: manifest.publisher,
+              version: manifest.version,
+              permissions: [...(manifest.permissions || [])].sort(),
+            };
+            if (!identity.id || !identity.name || !identity.publisher || !identity.version) throw new Error(`Package ${packageName} has incomplete manifest identity`);
+            if (pluginIdentity && JSON.stringify(pluginIdentity) !== JSON.stringify(identity)) throw new Error(`Package ${packageName} manifest identity differs from other targets`);
+            pluginIdentity ||= identity;
+            if (targets.has(artifact.target)) throw new Error(`Duplicate artifact target ${artifact.target}`);
+            targets.add(artifact.target);
+            return artifact;
+          }).sort((left, right) => left.target.localeCompare(right.target));
+
+          fs.writeFileSync("release-assets/release-candidates.json", `${JSON.stringify({ plugin: pluginIdentity, artifacts }, null, 2)}\n`);
+          NODE
+
+      - name: Upload assets to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          mapfile -d '' packages < <(find release-assets -type f -name '*.dbxp' -print0)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "No .dbxp packages were downloaded" >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${packages[@]}" release-assets/release-candidates.json --clobber

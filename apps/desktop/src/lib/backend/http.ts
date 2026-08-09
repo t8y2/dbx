@@ -203,6 +203,22 @@ import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions 
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
+import type {
+  ActivePluginSession,
+  PluginBinaryEvent,
+  PluginConnectionActionResult,
+  PluginEvent,
+  PluginFilesystemListResult,
+  PluginFilesystemMutationResult,
+  PluginFilesystemReadResult,
+  PluginInstallResult,
+  PluginMarketplaceInstallRequest,
+  PluginRepository,
+  PluginRepositoryCatalogResult,
+  PluginRollbackResult,
+  PluginTrustedKey,
+  PluginUiAssetPayload,
+} from "@/types/database";
 import type { DataGridSavePreparation } from "@/lib/backend/tauri";
 import type {
   NacosBatchPreview,
@@ -517,6 +533,158 @@ export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
 
 export async function listPlugins(): Promise<InstalledPlugin[]> {
   return get("/api/plugins");
+}
+
+export async function listPluginTrustedKeys(): Promise<PluginTrustedKey[]> {
+  return get("/api/plugins/trusted-keys");
+}
+
+export async function savePluginTrustedKey(keyId: string, publicKey: string): Promise<PluginTrustedKey[]> {
+  return post("/api/plugins/trusted-keys/save", { keyId, publicKey });
+}
+
+export async function removePluginTrustedKey(keyId: string): Promise<PluginTrustedKey[]> {
+  return post("/api/plugins/trusted-keys/remove", { keyId });
+}
+
+export async function listPluginRepositories(): Promise<PluginRepository[]> {
+  return get("/api/plugins/repositories");
+}
+
+export async function savePluginRepository(repository: PluginRepository): Promise<PluginRepository[]> {
+  return post("/api/plugins/repositories/save", repository);
+}
+
+export async function removePluginRepository(repositoryId: string): Promise<PluginRepository[]> {
+  return post("/api/plugins/repositories/remove", { repositoryId });
+}
+
+export async function fetchPluginMarketplaceCatalogs(): Promise<PluginRepositoryCatalogResult[]> {
+  return get("/api/plugins/marketplace/catalogs");
+}
+
+export async function installMarketplacePlugin(request: PluginMarketplaceInstallRequest): Promise<PluginInstallResult> {
+  return post("/api/plugins/marketplace/install", request);
+}
+
+export async function installPluginPackage(pathOrFile: string | File, allowUnsigned = false): Promise<PluginInstallResult> {
+  let blob: Blob;
+  let fileName: string;
+  if (pathOrFile instanceof File) {
+    blob = pathOrFile;
+    fileName = pathOrFile.name;
+  } else {
+    fileName = pathOrFile.split("/").pop() || "plugin.dbxp";
+    blob = await (await fetch(pathOrFile)).blob();
+  }
+  const formData = new FormData();
+  formData.append("file", blob, fileName);
+  const response = await fetch(apiUrl(`/api/plugins/install?allow_unsigned=${allowUnsigned}`), { method: "POST", body: formData });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+export async function rollbackPlugin(pluginId: string): Promise<PluginRollbackResult> {
+  return post("/api/plugins/rollback", { plugin_id: pluginId });
+}
+
+export async function uninstallPlugin(pluginId: string): Promise<InstalledPlugin[]> {
+  return post("/api/plugins/uninstall", { plugin_id: pluginId });
+}
+
+export async function activatePlugin(pluginId: string): Promise<ActivePluginSession[]> {
+  return post("/api/plugins/activate", { plugin_id: pluginId });
+}
+
+export async function listActivePlugins(): Promise<ActivePluginSession[]> {
+  return get("/api/plugins/active");
+}
+
+export async function stopPlugin(pluginId: string): Promise<void> {
+  await post("/api/plugins/stop", { plugin_id: pluginId });
+}
+
+export async function invokePlugin<T = unknown>(pluginId: string, method: string, params: unknown = null, timeoutMs?: number): Promise<T> {
+  return post("/api/plugins/invoke", { pluginId, method, params, timeoutMs });
+}
+
+export async function invokePluginConnectionAction(config: ConnectionConfig, actionId: string): Promise<PluginConnectionActionResult> {
+  return post("/api/plugins/connection-action", { config, actionId });
+}
+
+export async function notifyPlugin(pluginId: string, method: string, params: unknown = null): Promise<void> {
+  await post("/api/plugins/notify", { pluginId, method, params });
+}
+
+export async function sendPluginBinary(pluginId: string, channel: string, dataBase64: string): Promise<void> {
+  await post("/api/plugins/binary", { pluginId, channel, dataBase64 });
+}
+
+export async function listPluginFilesystemEntries(pluginId: string, providerId: string, options: { connectionId?: string; uri?: string; cursor?: string; limit?: number } = {}): Promise<PluginFilesystemListResult> {
+  return post("/api/plugins/filesystem/list", { pluginId, providerId, ...options });
+}
+
+export async function readPluginFilesystemFile(pluginId: string, providerId: string, uri: string, options: { connectionId?: string; maxBytes?: number } = {}): Promise<PluginFilesystemReadResult> {
+  return post("/api/plugins/filesystem/read", { pluginId, providerId, uri, ...options });
+}
+
+export async function writePluginFilesystemFile(pluginId: string, providerId: string, uri: string, dataBase64: string, options: { connectionId?: string; create?: boolean; overwrite?: boolean; etag?: string } = {}): Promise<PluginFilesystemMutationResult> {
+  return post("/api/plugins/filesystem/write", { pluginId, providerId, uri, dataBase64, create: options.create === true, overwrite: options.overwrite === true, connectionId: options.connectionId, etag: options.etag });
+}
+
+export async function createPluginFilesystemDirectory(pluginId: string, providerId: string, uri: string, connectionId?: string): Promise<PluginFilesystemMutationResult> {
+  return post("/api/plugins/filesystem/create-directory", { pluginId, providerId, uri, connectionId });
+}
+
+export async function deletePluginFilesystemEntry(pluginId: string, providerId: string, uri: string, options: { connectionId?: string; recursive?: boolean } = {}): Promise<PluginFilesystemMutationResult> {
+  return post("/api/plugins/filesystem/delete", { pluginId, providerId, uri, connectionId: options.connectionId, recursive: options.recursive === true });
+}
+
+export async function renamePluginFilesystemEntry(pluginId: string, providerId: string, sourceUri: string, targetUri: string, options: { connectionId?: string; overwrite?: boolean } = {}): Promise<PluginFilesystemMutationResult> {
+  return post("/api/plugins/filesystem/rename", { pluginId, providerId, sourceUri, targetUri, connectionId: options.connectionId, overwrite: options.overwrite === true });
+}
+
+export async function readPluginAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload> {
+  const encodedPath = path
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return pluginAssetPayload(`/api/plugins/${encodeURIComponent(pluginId)}/assets/${encodedPath}`);
+}
+
+export async function readPluginUiEntry(pluginId: string): Promise<PluginUiAssetPayload> {
+  return pluginAssetPayload(`/api/plugins/${encodeURIComponent(pluginId)}/ui`);
+}
+
+export async function readPluginUiAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload> {
+  const encodedPath = path
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return pluginAssetPayload(`/api/plugins/${encodeURIComponent(pluginId)}/ui/${encodedPath}`);
+}
+
+export async function subscribePluginEvents(onEvent: (event: PluginEvent) => void, onBinary?: (event: PluginBinaryEvent) => void): Promise<() => void> {
+  const source = new EventSource(apiUrl("/api/plugins/events"));
+  source.onmessage = (message) => {
+    const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
+    if (payload.kind === "event") onEvent(payload);
+    if (payload.kind === "binary") onBinary?.(payload);
+  };
+  return () => source.close();
+}
+
+async function pluginAssetPayload(path: string): Promise<PluginUiAssetPayload> {
+  const response = await fetch(apiUrl(path));
+  if (!response.ok) throw new Error(await response.text());
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return {
+    contentType: response.headers.get("content-type") || "application/octet-stream",
+    dataBase64: btoa(binary),
+    etag: response.headers.get("etag") || "",
+  };
 }
 
 export async function listJdbcDrivers(): Promise<JdbcDriverInfo[]> {

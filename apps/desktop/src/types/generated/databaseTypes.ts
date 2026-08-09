@@ -80,6 +80,7 @@ export const DATABASE_TYPES = [
   "victoriametrics",
   "jdbc",
   "spark",
+  "plugin",
 ] as const;
 
 export type DatabaseType = (typeof DATABASE_TYPES)[number];

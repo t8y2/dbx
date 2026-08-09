@@ -177,4 +177,62 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.originalSql).toBe("SELECT 1");
     expect(restored.externalSqlFileMissing).toBe(true);
   });
+
+  it("preserves plugin workbench identity and connection-safe context", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        id: "plugin-tab",
+        title: "Hello connection · Workbench",
+        connectionId: "plugin-connection",
+        database: "",
+        mode: "plugin-workbench",
+        pluginWorkbench: {
+          pluginId: "dbx.example.hello",
+          contributionId: "dbx.example.hello.main",
+          context: {
+            connectionId: "plugin-connection",
+            providerId: "hello.connection",
+            connectionType: "hello",
+          },
+        },
+      }),
+    ]);
+
+    expect(restored.mode).toBe("plugin-workbench");
+    expect(restored.pluginWorkbench).toEqual({
+      pluginId: "dbx.example.hello",
+      contributionId: "dbx.example.hello.main",
+      context: {
+        connectionId: "plugin-connection",
+        providerId: "hello.connection",
+        connectionType: "hello",
+      },
+    });
+  });
+
+  it("preserves host-owned plugin filesystem navigation", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        id: "plugin-files",
+        title: "Object storage · Files",
+        connectionId: "plugin-connection",
+        database: "",
+        mode: "plugin-filesystem",
+        pluginFilesystem: {
+          pluginId: "dbx.example.storage",
+          providerId: "dbx.example.storage.files",
+          rootUri: "s3://bucket/",
+          currentUri: "s3://bucket/reports/",
+        },
+      }),
+    ]);
+
+    expect(restored.mode).toBe("plugin-filesystem");
+    expect(restored.pluginFilesystem).toEqual({
+      pluginId: "dbx.example.storage",
+      providerId: "dbx.example.storage.files",
+      rootUri: "s3://bucket/",
+      currentUri: "s3://bucket/reports/",
+    });
+  });
 });

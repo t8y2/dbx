@@ -1,0 +1,11 @@
+[package]
+name = "dbx-example-hello"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+dbx-plugin-sdk = { path = "../../../sdk/rust/dbx-plugin-sdk" }
+serde_json = "1"

@@ -1,0 +1,17 @@
+{
+  "name": "@dbx-app/plugin-cli-darwin-x64",
+  "version": "0.1.0",
+  "description": "Precompiled DBX Plugin CLI binary for darwin x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/plugin-cli-darwin-x64"
+  },
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "bin": {
+    "dbx-plugin-native": "bin/dbx-plugin"
+  },
+  "files": ["bin"]
+}

@@ -833,6 +833,9 @@ mod tests {
         CASSANDRA_TRUSTSTORE_PASSWORD_KEY, CONNECTION_STRING_KEY, INIT_SCRIPT_KEY, MAIN_PASSWORD_KEY,
         MQTT_AUTH_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
         REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
+        load_connections_from_file, save_connections_to_file, ConnectionSecretStore, CONNECTION_STRING_KEY,
+        INIT_SCRIPT_KEY, MAIN_PASSWORD_KEY, MQTT_AUTH_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
+        MQ_TOKEN_SIGNING_KEY, REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
     };
     use crate::models::connection::{
         ConnectionConfig, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,

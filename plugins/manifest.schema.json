@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dbx.local/schemas/plugin-manifest-v1.json",
+  "title": "DBX Plugin Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_version", "id", "name", "version", "publisher", "engines"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifest_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/identifier" },
+    "name": { "type": "string", "minLength": 1 },
+    "icon": { "$ref": "#/$defs/assetPath" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "publisher": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "engines": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_api"],
+      "properties": {
+        "dbx": { "type": "string" },
+        "host_api": { "type": "string", "minLength": 1 }
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem"] }
+    },
+    "entrypoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "$ref": "#/$defs/backendEntrypoint" },
+        "ui": { "$ref": "#/$defs/uiEntrypoint" }
+      }
+    },
+    "contributions": {
+      "type": "array",
+      "items": {
+        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }]
+      }
+    },
+    "localizations": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$" },
+      "additionalProperties": { "$ref": "#/$defs/manifestLocalization" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "capability": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+    },
+    "assetPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).+$"
+    },
+    "backendEntrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable"],
+      "properties": {
+        "protocol_versions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "transport": { "enum": ["stdio-jsonl", "stdio-framed"] },
+        "executable": { "$ref": "#/$defs/assetPath" }
+      }
+    },
+    "uiEntrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "entry": { "type": "string", "minLength": 1 }
+      }
+    },
+    "selectOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" }
+      }
+    },
+    "formFieldLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "placeholder": { "type": "string" },
+        "options": { "type": "object", "propertyNames": { "minLength": 1 }, "additionalProperties": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "actionLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      }
+    },
+    "contributionLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "fields": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/formFieldLocalization" } },
+        "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/actionLocalization" } }
+      }
+    },
+    "manifestLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "contributions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/contributionLocalization" } }
+      }
+    },
+    "formField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "label", "type"],
+      "properties": {
+        "key": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["text", "password", "number", "boolean", "select", "textarea"] },
+        "description": { "type": ["string", "null"] },
+        "placeholder": { "type": ["string", "null"] },
+        "required": { "type": "boolean" },
+        "default": { "type": ["string", "number", "boolean", "null"] },
+        "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
+        "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "select" } }, "required": ["type"] },
+          "then": { "required": ["options"], "properties": { "options": { "minItems": 1 } } },
+          "else": { "not": { "required": ["options"] } }
+        },
+        {
+          "if": { "properties": { "binding": { "const": "port" } }, "required": ["binding"] },
+          "then": { "properties": { "type": { "const": "number" } } }
+        },
+        {
+          "if": {
+            "properties": { "binding": { "enum": ["secret", "name", "host", "username", "password", "database"] } },
+            "required": ["binding"]
+          },
+          "then": { "properties": { "type": { "enum": ["text", "password", "select", "textarea"] } } }
+        }
+      ]
+    },
+    "connectionProviderContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "database_type", "fields"],
+      "properties": {
+        "type": { "const": "connection-provider" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "icon": { "$ref": "#/$defs/assetPath" },
+        "database_type": { "$ref": "#/$defs/identifier" },
+        "description": { "type": "string" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/formField" } },
+        "workbench": { "$ref": "#/$defs/identifier" },
+        "filesystem_provider": { "$ref": "#/$defs/identifier" },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["test", "connect", "disconnect"] }
+        },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/connectionAction" } }
+      }
+    },
+    "connectionAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "variant": { "enum": ["default", "outline", "secondary", "destructive", "ghost"] },
+        "when": { "enum": ["always", "create", "edit"] },
+        "close_on_success": { "type": "boolean" },
+        "requires_valid_form": { "type": "boolean" },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 120000 }
+      }
+    },
+    "workbenchContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "label"],
+      "properties": {
+        "type": { "const": "workbench" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "icon": { "$ref": "#/$defs/assetPath" }
+      }
+    },
+    "filesystemProviderContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "label", "schemes"],
+      "properties": {
+        "type": { "const": "filesystem-provider" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "schemes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/capability" } },
+        "root_uri": { "type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^[a-z0-9._-]+:.+$" },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["read", "write", "delete", "rename", "mkdir"] }
+        }
+      }
+    }
+  }
+}

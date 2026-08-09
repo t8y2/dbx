@@ -4876,6 +4876,7 @@ impl AppState {
                         false
                     }
                 },
+                PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy && !matches!(pool, PoolKind::Agent(_)) {
                 dead_pools.push((key.clone(), checked.publication.clone()));
@@ -5602,6 +5603,52 @@ fn pool_key_for_session_role(
 #[cfg(test)]
 fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
     pool.clone()
+    match pool {
+        PoolKind::Mysql(p, mode) => PoolKind::Mysql(p.clone(), *mode),
+        PoolKind::Postgres(p) => PoolKind::Postgres(p.clone()),
+        PoolKind::Sqlite(p) => PoolKind::Sqlite(p.clone()),
+        PoolKind::Rqlite(client) => PoolKind::Rqlite(client.clone()),
+        PoolKind::Turso(client) => PoolKind::Turso(client.clone()),
+        PoolKind::CloudflareD1(client) => PoolKind::CloudflareD1(client.clone()),
+        #[cfg(feature = "duckdb-sidecar")]
+        PoolKind::DuckDbWorker(client) => PoolKind::DuckDbWorker(client.clone()),
+        #[cfg(not(feature = "duckdb-sidecar"))]
+        PoolKind::DuckDbWorker(_) => PoolKind::DuckDbWorker(()),
+        PoolKind::MongoDb(client) => PoolKind::MongoDb(client.clone()),
+        PoolKind::DynamoDb(client) => PoolKind::DynamoDb(client.clone()),
+        PoolKind::ClickHouse(client) => PoolKind::ClickHouse(client.clone()),
+        PoolKind::SqlServer(client) => PoolKind::SqlServer(client.clone()),
+        PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
+        PoolKind::Easysearch(client) => PoolKind::Easysearch(client.clone()),
+        PoolKind::Meilisearch(client) => PoolKind::Meilisearch(client.clone()),
+        PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
+        PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
+        PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
+        PoolKind::InfluxDb3(client) => PoolKind::InfluxDb3(client.clone()),
+        PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
+        PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
+        PoolKind::ExternalDriver { driver_id, config, session } => {
+            PoolKind::ExternalDriver { driver_id: driver_id.clone(), config: config.clone(), session: session.clone() }
+        }
+        PoolKind::MessageQueue => PoolKind::MessageQueue,
+        PoolKind::Nacos => PoolKind::Nacos,
+        PoolKind::Consul(client) => PoolKind::Consul(client.clone()),
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
+        PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
+    }
+}
+
+fn remove_mysql_pool_if_current(
+    connections: &mut HashMap<String, PoolKind>,
+    pool_key: &str,
+    expected: &db::mysql::MySqlPool,
+) -> Option<PoolKind> {
+    let is_current = matches!(
+        connections.get(pool_key),
+        Some(PoolKind::Mysql(current, _)) if expected.is_same_pool(current)
+    );
+    is_current.then(|| connections.remove(pool_key)).flatten()
 }
 
 async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {

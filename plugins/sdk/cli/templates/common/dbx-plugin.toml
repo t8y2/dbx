@@ -1,0 +1,9 @@
+schema_version = 1
+
+[backend]
+language = "{{LANGUAGE}}"
+directory = "backend"
+binary = "{{BINARY_NAME}}"
+
+[package]
+include = ["assets", "ui"]

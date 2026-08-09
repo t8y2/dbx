@@ -1,0 +1,235 @@
+{
+  "$schema": "../../manifest.schema.json",
+  "manifest_version": 1,
+  "id": "dbx.example.hello",
+  "name": "DBX Hello Workbench",
+  "icon": "assets/plugin.svg",
+  "version": "1.0.0",
+  "publisher": "dbx",
+  "description": "A complete DBX plugin example with a native sidecar, events, workbench UI, connection provider, and virtual filesystem provider.",
+  "engines": {
+    "dbx": ">=0.5.68",
+    "host_api": "^1.0"
+  },
+  "permissions": ["host.events", "host.filesystem"],
+  "entrypoints": {
+    "backend": {
+      "executable": "bin/dbx-example-hello"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "connection-provider",
+      "id": "dbx.example.hello.connection",
+      "label": "Hello connection",
+      "icon": "assets/connection.svg",
+      "database_type": "hello",
+      "description": "Shows how a plugin can declare connection fields without adding DBX frontend branches.",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "default": "Hello connection",
+          "binding": "name",
+          "required": true
+        },
+        {
+          "key": "host",
+          "label": "Host",
+          "type": "text",
+          "default": "localhost",
+          "binding": "host",
+          "required": true
+        },
+        {
+          "key": "port",
+          "label": "Port",
+          "type": "number",
+          "default": 22,
+          "binding": "port",
+          "required": true
+        },
+        {
+          "key": "greeting",
+          "label": "Greeting",
+          "type": "text",
+          "default": "Hello",
+          "binding": "config"
+        },
+        {
+          "key": "api_token",
+          "label": "Example secret token",
+          "type": "password",
+          "binding": "secret",
+          "description": "Stored in DBX connection_secrets and never written into config_json."
+        }
+      ],
+      "workbench": "dbx.example.hello.main",
+      "filesystem_provider": "dbx.example.hello.files",
+      "capabilities": ["test", "connect", "disconnect"],
+      "actions": [
+        {
+          "id": "suggest-greeting",
+          "label": "Fill example greeting",
+          "description": "Calls the plugin sidecar before saving and writes the returned value back into the form.",
+          "variant": "outline",
+          "requires_valid_form": false
+        }
+      ]
+    },
+    {
+      "type": "workbench",
+      "id": "dbx.example.hello.main",
+      "label": "Hello Workbench",
+      "description": "A sandboxed plugin UI hosted in a normal DBX workbench tab."
+    },
+    {
+      "type": "filesystem-provider",
+      "id": "dbx.example.hello.files",
+      "label": "Hello virtual files",
+      "description": "A minimal read-only filesystem provider contract example.",
+      "schemes": ["hello"],
+      "root_uri": "hello:/",
+      "capabilities": ["read"]
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "DBX Hello 工作台",
+      "description": "完整的 DBX 插件示例，包含原生 Sidecar、事件、工作台界面、连接提供者和虚拟文件系统提供者。",
+      "contributions": {
+        "dbx.example.hello.connection": {
+          "label": "Hello 连接",
+          "description": "演示插件如何声明连接字段，而无需在 DBX 前端增加专用分支。",
+          "fields": {
+            "display_name": { "label": "连接名称" },
+            "host": { "label": "主机" },
+            "port": { "label": "端口" },
+            "greeting": { "label": "问候语" },
+            "api_token": { "label": "示例密钥令牌", "description": "保存在 DBX connection_secrets 中，不会写入 config_json。" }
+          },
+          "actions": {
+            "suggest-greeting": { "label": "填入示例问候语", "description": "保存前调用插件 Sidecar，并把返回值回填到表单。" }
+          }
+        },
+        "dbx.example.hello.main": { "label": "Hello 工作台", "description": "托管在普通 DBX 工作台标签页中的沙箱插件界面。" },
+        "dbx.example.hello.files": { "label": "Hello 虚拟文件", "description": "最小化的只读文件系统提供者契约示例。" }
+      }
+    },
+    "zh-TW": {
+      "name": "DBX Hello 工作台",
+      "description": "完整的 DBX 外掛範例，包含原生 Sidecar、事件、工作台介面、連線提供者和虛擬檔案系統提供者。",
+      "contributions": {
+        "dbx.example.hello.connection": {
+          "label": "Hello 連線",
+          "description": "示範外掛如何宣告連線欄位，而不需要在 DBX 前端增加專用分支。",
+          "fields": {
+            "display_name": { "label": "連線名稱" },
+            "host": { "label": "主機" },
+            "port": { "label": "連接埠" },
+            "greeting": { "label": "問候語" },
+            "api_token": { "label": "範例密鑰權杖", "description": "儲存在 DBX connection_secrets 中，不會寫入 config_json。" }
+          },
+          "actions": {
+            "suggest-greeting": { "label": "填入範例問候語", "description": "儲存前呼叫外掛 Sidecar，並將回傳值填回表單。" }
+          }
+        },
+        "dbx.example.hello.main": { "label": "Hello 工作台", "description": "託管在一般 DBX 工作台分頁中的沙箱外掛介面。" },
+        "dbx.example.hello.files": { "label": "Hello 虛擬檔案", "description": "最小化的唯讀檔案系統提供者契約範例。" }
+      }
+    },
+    "ja": {
+      "name": "DBX Hello ワークベンチ",
+      "description": "ネイティブ Sidecar、イベント、ワークベンチ UI、接続プロバイダー、仮想ファイルシステムプロバイダーを含む完全な DBX プラグイン例です。",
+      "contributions": {
+        "dbx.example.hello.connection": {
+          "label": "Hello 接続",
+          "description": "DBX フロントエンドに専用分岐を追加せず、プラグインが接続フィールドを宣言する方法を示します。",
+          "fields": {
+            "display_name": { "label": "接続名" },
+            "host": { "label": "ホスト" },
+            "port": { "label": "ポート" },
+            "greeting": { "label": "あいさつ" },
+            "api_token": { "label": "サンプル秘密トークン", "description": "DBX connection_secrets に保存され、config_json には書き込まれません。" }
+          },
+          "actions": {
+            "suggest-greeting": { "label": "サンプルのあいさつを入力", "description": "保存前にプラグイン Sidecar を呼び出し、返された値をフォームへ反映します。" }
+          }
+        },
+        "dbx.example.hello.main": { "label": "Hello ワークベンチ", "description": "通常の DBX ワークベンチタブ内でホストされるサンドボックス化されたプラグイン UI です。" },
+        "dbx.example.hello.files": { "label": "Hello 仮想ファイル", "description": "最小限の読み取り専用ファイルシステムプロバイダー契約例です。" }
+      }
+    },
+    "es": {
+      "name": "Área de trabajo Hello de DBX",
+      "description": "Ejemplo completo de plugin de DBX con sidecar nativo, eventos, interfaz de trabajo, proveedor de conexión y proveedor de sistema de archivos virtual.",
+      "contributions": {
+        "dbx.example.hello.connection": {
+          "label": "Conexión Hello",
+          "description": "Muestra cómo un plugin declara campos de conexión sin añadir ramas específicas al frontend de DBX.",
+          "fields": {
+            "display_name": { "label": "Nombre de conexión" },
+            "host": { "label": "Host" },
+            "port": { "label": "Puerto" },
+            "greeting": { "label": "Saludo" },
+            "api_token": { "label": "Token secreto de ejemplo", "description": "Se guarda en DBX connection_secrets y nunca se escribe en config_json." }
+          },
+          "actions": {
+            "suggest-greeting": { "label": "Rellenar saludo de ejemplo", "description": "Invoca el sidecar antes de guardar y aplica el valor devuelto al formulario." }
+          }
+        },
+        "dbx.example.hello.main": { "label": "Área de trabajo Hello", "description": "Interfaz de plugin aislada alojada en una pestaña de trabajo normal de DBX." },
+        "dbx.example.hello.files": { "label": "Archivos virtuales Hello", "description": "Ejemplo mínimo de contrato de proveedor de sistema de archivos de solo lectura." }
+      }
+    },
+    "it": {
+      "name": "Area di lavoro Hello di DBX",
+      "description": "Esempio completo di plugin DBX con sidecar nativo, eventi, interfaccia di lavoro, provider di connessione e provider di file system virtuale.",
+      "contributions": {
+        "dbx.example.hello.connection": {
+          "label": "Connessione Hello",
+          "description": "Mostra come un plugin può dichiarare campi di connessione senza aggiungere rami dedicati al frontend DBX.",
+          "fields": {
+            "display_name": { "label": "Nome connessione" },
+            "host": { "label": "Host" },
+            "port": { "label": "Porta" },
+            "greeting": { "label": "Saluto" },
+            "api_token": { "label": "Token segreto di esempio", "description": "Salvato in DBX connection_secrets e mai scritto in config_json." }
+          },
+          "actions": {
+            "suggest-greeting": { "label": "Inserisci saluto di esempio", "description": "Invoca il sidecar prima del salvataggio e applica al modulo il valore restituito." }
+          }
+        },
+        "dbx.example.hello.main": { "label": "Area di lavoro Hello", "description": "Interfaccia plugin in sandbox ospitata in una normale scheda di lavoro DBX." },
+        "dbx.example.hello.files": { "label": "File virtuali Hello", "description": "Esempio minimo di contratto provider di file system in sola lettura." }
+      }
+    },
+    "pt-BR": {
+      "name": "Área de trabalho Hello do DBX",
+      "description": "Exemplo completo de plugin do DBX com sidecar nativo, eventos, interface de trabalho, provedor de conexão e provedor de sistema de arquivos virtual.",
+      "contributions": {
+        "dbx.example.hello.connection": {
+          "label": "Conexão Hello",
+          "description": "Mostra como um plugin declara campos de conexão sem adicionar ramificações específicas ao frontend do DBX.",
+          "fields": {
+            "display_name": { "label": "Nome da conexão" },
+            "host": { "label": "Host" },
+            "port": { "label": "Porta" },
+            "greeting": { "label": "Saudação" },
+            "api_token": { "label": "Token secreto de exemplo", "description": "Armazenado em DBX connection_secrets e nunca gravado em config_json." }
+          },
+          "actions": {
+            "suggest-greeting": { "label": "Preencher saudação de exemplo", "description": "Invoca o sidecar antes de salvar e aplica ao formulário o valor retornado." }
+          }
+        },
+        "dbx.example.hello.main": { "label": "Área de trabalho Hello", "description": "Interface de plugin em sandbox hospedada em uma aba normal de trabalho do DBX." },
+        "dbx.example.hello.files": { "label": "Arquivos virtuais Hello", "description": "Exemplo mínimo de contrato de provedor de sistema de arquivos somente leitura." }
+      }
+    }
+  }
+}

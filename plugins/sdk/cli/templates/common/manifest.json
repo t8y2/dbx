@@ -1,0 +1,89 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "{{PLUGIN_ID}}",
+  "name": "{{PLUGIN_NAME_JSON}}",
+  "version": "{{VERSION}}",
+  "publisher": "{{PUBLISHER_JSON}}",
+  "description": "{{DESCRIPTION_JSON}}",
+  "icon": "assets/plugin.svg",
+  "engines": {
+    "dbx": ">=0.5.68",
+    "host_api": "1"
+  },
+  "entrypoints": {
+    "backend": {
+      "executable": "bin/{{BINARY_NAME}}"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "connection-provider",
+      "id": "{{PLUGIN_ID}}.connection",
+      "label": "{{PLUGIN_NAME_JSON}} connection",
+      "icon": "assets/plugin.svg",
+      "database_type": "{{CONNECTION_TYPE}}",
+      "description": "Connection form contributed by {{PLUGIN_NAME_JSON}}.",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "default": "{{PLUGIN_NAME_JSON}} connection",
+          "binding": "name",
+          "required": true
+        },
+        {
+          "key": "host",
+          "label": "Host",
+          "type": "text",
+          "default": "localhost",
+          "binding": "host",
+          "required": true
+        },
+        {
+          "key": "port",
+          "label": "Port",
+          "type": "number",
+          "default": 0,
+          "binding": "port",
+          "required": true
+        }
+      ],
+      "workbench": "{{PLUGIN_ID}}.workbench",
+      "capabilities": ["test", "connect", "disconnect"]
+    },
+    {
+      "type": "workbench",
+      "id": "{{PLUGIN_ID}}.workbench",
+      "label": "{{PLUGIN_NAME_JSON}} Workbench",
+      "description": "Sandboxed UI contributed by {{PLUGIN_NAME_JSON}}.",
+      "icon": "assets/plugin.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "{{PLUGIN_NAME_JSON}}",
+      "description": "{{DESCRIPTION_JSON}}",
+      "contributions": {
+        "{{PLUGIN_ID}}.connection": {
+          "label": "{{PLUGIN_NAME_JSON}} 连接",
+          "description": "由插件声明的连接表单。",
+          "fields": {
+            "display_name": { "label": "连接名称" },
+            "host": { "label": "主机" },
+            "port": { "label": "端口" }
+          }
+        },
+        "{{PLUGIN_ID}}.workbench": {
+          "label": "{{PLUGIN_NAME_JSON}} 工作台",
+          "description": "由插件提供的沙箱工作台界面。"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,361 @@
+name: Plugin CLI Release
+
+on:
+  push:
+    tags:
+      - "plugin-cli-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin CLI version to publish, for example 0.1.0"
+        required: true
+        default: "0.1.0"
+      npm-tag:
+        description: "npm distribution tag"
+        required: true
+        default: "latest"
+        type: choice
+        options:
+          - latest
+          - next
+
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
+
+concurrency:
+  group: plugin-cli-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate plugin CLI release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      npm-tag: ${{ steps.release.outputs.npm-tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.22.x"
+
+      - name: Validate release branch and versions
+        id: release
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_NPM_TAG: ${{ inputs.npm-tag }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          let version;
+          let tag;
+          let npmTag;
+          if (process.env.GITHUB_EVENT_NAME === "push") {
+            tag = process.env.GITHUB_REF_NAME;
+            const match = /^plugin-cli-v(.+)$/.exec(tag);
+            if (!match) throw new Error(`Unexpected plugin CLI tag: ${tag}`);
+            version = match[1];
+            npmTag = version.includes("-") ? "next" : "latest";
+          } else {
+            if (process.env.GITHUB_REF !== "refs/heads/main") {
+              throw new Error(`Manual plugin CLI releases must run from main, received ${process.env.GITHUB_REF}.`);
+            }
+            version = process.env.INPUT_VERSION.trim();
+            tag = `plugin-cli-v${version}`;
+            npmTag = process.env.INPUT_NPM_TAG;
+          }
+          if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+            throw new Error(`Invalid semantic version: ${version}`);
+          }
+          if (version.includes("-") && npmTag === "latest") {
+            throw new Error(`Prerelease ${version} cannot use the npm latest tag.`);
+          }
+
+          const packagePaths = [
+            "packages/plugin-cli/package.json",
+            "packages/plugin-cli-darwin-arm64/package.json",
+            "packages/plugin-cli-darwin-x64/package.json",
+            "packages/plugin-cli-linux-arm64-gnu/package.json",
+            "packages/plugin-cli-linux-x64-gnu/package.json",
+            "packages/plugin-cli-win32-arm64/package.json",
+            "packages/plugin-cli-win32-x64/package.json",
+          ];
+          for (const path of packagePaths) {
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+            if (pkg.version !== version) {
+              throw new Error(`${path} has version ${pkg.version}; expected ${version}.`);
+            }
+          }
+
+          const cliCargo = fs.readFileSync("plugins/sdk/cli/Cargo.toml", "utf8");
+          const cliVersion = cliCargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          if (cliVersion !== version) {
+            throw new Error(`plugins/sdk/cli/Cargo.toml has version ${cliVersion}; expected ${version}.`);
+          }
+
+          const launcher = JSON.parse(fs.readFileSync(packagePaths[0], "utf8"));
+          for (const [dependency, dependencyVersion] of Object.entries(launcher.optionalDependencies ?? {})) {
+            if (dependencyVersion !== version) {
+              throw new Error(`${dependency} is pinned to ${dependencyVersion}; expected ${version}.`);
+            }
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `npm-tag=${npmTag}\n`);
+          NODE
+
+      - name: Check npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN secret is required to publish @dbx-app/plugin-cli."
+            exit 1
+          fi
+
+      - name: Test Rust CLI
+        run: cargo test --locked --manifest-path plugins/sdk/cli/Cargo.toml
+
+      - name: Test npm launcher
+        run: npm --prefix packages/plugin-cli test
+
+      - name: Verify packed npm installation
+        env:
+          DBX_PLUGIN_CLI_VERIFY_NATIVE: "1"
+        run: node scripts/verify-plugin-cli-package.mjs
+
+      - name: Create immutable source tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git fetch origin --tags --force
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            TAG_SHA="$(git rev-list -n 1 "refs/tags/${TAG}")"
+            HEAD_SHA="$(git rev-parse HEAD)"
+            if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
+              echo "::error::${TAG} already points to ${TAG_SHA}, not ${HEAD_SHA}."
+              exit 1
+            fi
+            echo "${TAG} already points to this commit."
+          else
+            git tag "${TAG}" HEAD
+            git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
+
+  publish-platforms:
+    name: Publish ${{ matrix.package-name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            package-dir: plugin-cli-darwin-arm64
+            package-name: "@dbx-app/plugin-cli-darwin-arm64"
+            binary: dbx-plugin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            package-dir: plugin-cli-darwin-x64
+            package-name: "@dbx-app/plugin-cli-darwin-x64"
+            binary: dbx-plugin
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package-dir: plugin-cli-linux-arm64-gnu
+            package-name: "@dbx-app/plugin-cli-linux-arm64-gnu"
+            binary: dbx-plugin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            package-dir: plugin-cli-linux-x64-gnu
+            package-name: "@dbx-app/plugin-cli-linux-x64-gnu"
+            binary: dbx-plugin
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            package-dir: plugin-cli-win32-arm64
+            package-name: "@dbx-app/plugin-cli-win32-arm64"
+            binary: dbx-plugin.exe
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            package-dir: plugin-cli-win32-x64
+            package-name: "@dbx-app/plugin-cli-win32-x64"
+            binary: dbx-plugin.exe
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
+        with:
+          python-version: "3.x"
+
+      - name: Install Linux compatibility builder
+        if: runner.os == 'Linux'
+        run: pip install ziglang==0.14.0 cargo-zigbuild==0.23.0
+
+      - name: Build precompiled CLI
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/plugin-cli
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cargo zigbuild --locked --release --manifest-path plugins/sdk/cli/Cargo.toml --target "${{ matrix.target }}.2.31"
+          else
+            cargo build --locked --release --manifest-path plugins/sdk/cli/Cargo.toml --target "${{ matrix.target }}"
+          fi
+
+      - name: Stage platform package
+        shell: bash
+        run: |
+          mkdir -p "packages/${{ matrix.package-dir }}/bin"
+          cp "target/plugin-cli/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          fi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish platform package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NPM_TAG: ${{ needs.prepare.outputs.npm-tag }}
+        run: |
+          if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${{ matrix.package-name }}@${VERSION} already exists; refreshing ${NPM_TAG}."
+            npm dist-tag add "${{ matrix.package-name }}@${VERSION}" "${NPM_TAG}"
+          else
+            npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance --tag "${NPM_TAG}"
+          fi
+
+  publish-launcher:
+    name: Publish @dbx-app/plugin-cli
+    needs: [prepare, publish-platforms]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Wait for platform packages
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          wait_for_package() {
+            package="$1"
+            for attempt in $(seq 1 18); do
+              if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "Waiting for ${package}@${VERSION} (${attempt}/18)."
+              sleep 10
+            done
+            return 1
+          }
+
+          for package in \
+            @dbx-app/plugin-cli-darwin-arm64 \
+            @dbx-app/plugin-cli-darwin-x64 \
+            @dbx-app/plugin-cli-linux-arm64-gnu \
+            @dbx-app/plugin-cli-linux-x64-gnu \
+            @dbx-app/plugin-cli-win32-arm64 \
+            @dbx-app/plugin-cli-win32-x64; do
+            wait_for_package "${package}" || {
+              echo "::error::${package}@${VERSION} is unavailable; refusing to publish the launcher."
+              exit 1
+            }
+          done
+
+      - name: Publish launcher and bundled SDK
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NPM_TAG: ${{ needs.prepare.outputs.npm-tag }}
+        run: |
+          if npm view "@dbx-app/plugin-cli@${VERSION}" version >/dev/null 2>&1; then
+            echo "@dbx-app/plugin-cli@${VERSION} already exists; refreshing ${NPM_TAG}."
+            npm dist-tag add "@dbx-app/plugin-cli@${VERSION}" "${NPM_TAG}"
+          else
+            npm publish ./packages/plugin-cli --access public --provenance --tag "${NPM_TAG}"
+          fi
+
+  verify-published-package:
+    name: Verify clean npm installation
+    needs: [prepare, publish-launcher]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.22.x"
+
+      - name: Install from npm and package every template
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cd "${work}"
+          npm init -y >/dev/null
+
+          for attempt in $(seq 1 18); do
+            if npm view "@dbx-app/plugin-cli@${VERSION}" version >/dev/null 2>&1; then
+              break
+            fi
+            if [ "${attempt}" -eq 18 ]; then
+              echo "::error::@dbx-app/plugin-cli@${VERSION} did not become visible on npm."
+              exit 1
+            fi
+            sleep 10
+          done
+
+          npm install --ignore-scripts --no-audit --no-fund "@dbx-app/plugin-cli@${VERSION}"
+          ./node_modules/.bin/dbx-plugin --version
+
+          for template in frontend rust go; do
+            ./node_modules/.bin/dbx-plugin create "${template}-plugin" \
+              --template "${template}" \
+              --yes \
+              --id "com.example.npm-${template}" \
+              --name "npm ${template} smoke" \
+              --publisher example \
+              --description "Published npm package smoke"
+            ./node_modules/.bin/dbx-plugin package "${template}-plugin"
+            test "$(find "${template}-plugin/dist" -maxdepth 1 -name '*.dbxp' | wc -l)" -eq 1
+          done

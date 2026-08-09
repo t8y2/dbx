@@ -353,6 +353,39 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/plugin-cli:
+    optionalDependencies:
+      '@dbx-app/plugin-cli-darwin-arm64':
+        specifier: 0.1.0
+        version: link:../plugin-cli-darwin-arm64
+      '@dbx-app/plugin-cli-darwin-x64':
+        specifier: 0.1.0
+        version: link:../plugin-cli-darwin-x64
+      '@dbx-app/plugin-cli-linux-arm64-gnu':
+        specifier: 0.1.0
+        version: link:../plugin-cli-linux-arm64-gnu
+      '@dbx-app/plugin-cli-linux-x64-gnu':
+        specifier: 0.1.0
+        version: link:../plugin-cli-linux-x64-gnu
+      '@dbx-app/plugin-cli-win32-arm64':
+        specifier: 0.1.0
+        version: link:../plugin-cli-win32-arm64
+      '@dbx-app/plugin-cli-win32-x64':
+        specifier: 0.1.0
+        version: link:../plugin-cli-win32-x64
+
+  packages/plugin-cli-darwin-arm64: {}
+
+  packages/plugin-cli-darwin-x64: {}
+
+  packages/plugin-cli-linux-arm64-gnu: {}
+
+  packages/plugin-cli-linux-x64-gnu: {}
+
+  packages/plugin-cli-win32-arm64: {}
+
+  packages/plugin-cli-win32-x64: {}
+
 packages:
 
   '@babel/code-frame@7.29.7':

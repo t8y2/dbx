@@ -1,0 +1,11 @@
+[package]
+name = "{{BINARY_NAME}}"
+version = "{{VERSION}}"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+dbx-plugin-sdk = {{RUST_SDK_DEPENDENCY}}
+serde_json = "1"

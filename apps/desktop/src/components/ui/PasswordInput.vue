@@ -4,6 +4,8 @@ import { useI18n } from "vue-i18n";
 import { Eye, EyeOff } from "@lucide/vue";
 import { Input } from "@/components/ui/input";
 
+defineOptions({ inheritAttrs: false });
+
 const model = defineModel<string>();
 
 const props = withDefaults(

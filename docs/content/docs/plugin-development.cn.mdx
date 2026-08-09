@@ -1,0 +1,196 @@
+---
+title: 开发和提交 DBX 插件
+description: 创建 DBX 插件、构建未签名候选包，并明确源码、框架和官方商店分别向哪个仓库提交 Issue 或 Pull Request。
+---
+
+DBX 插件是独立安装的 `.dbxp` 包，可以提供连接类型、工作台、文件系统和原生 Sidecar。插件源码、DBX 插件框架和官方商店目录由不同仓库负责。
+
+<Callout type="warn">
+  **插件上架 Pull Request 提交到 [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store)，不是 `t8y2/dbx`。** 插件自己的功能代码通常保留在开发者自己的源码仓库；只有修改 DBX Host、SDK、CLI、协议、Schema、文档或官方示例时，才向 [`t8y2/dbx`](https://github.com/t8y2/dbx) 提交 PR。
+</Callout>
+
+## 应该提交到哪个仓库
+
+| 你要修改的内容 | 提交位置 | 是否向 DBX 官方提 PR |
+| --- | --- | --- |
+| 你的插件前端、Rust/Go 后端、测试和发布脚本 | 插件自己的源码仓库 | 不向 `dbx` 提交；在自己的仓库开发和发布 |
+| 新插件上架、版本更新、商店图标和介绍 | [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) | 是，目标分支为 `main` |
+| DBX 插件 Host、Manifest/Marketplace Schema、SDK、CLI、Packager | [`t8y2/dbx`](https://github.com/t8y2/dbx) | 是，目标分支为 `main` |
+| DBX 官方示例或插件开发文档 | [`t8y2/dbx`](https://github.com/t8y2/dbx) | 是 |
+| 某个第三方插件自身的 Bug | 该插件的源码仓库 | 不要提交到 `dbx-store` |
+| 自定义或企业私有仓库 | 你的私有仓库 | 不需要向官方商店提交 |
+| 数据库厂商 JDBC Driver JAR | 不提交到 Git 仓库 | 用户在本机或服务器中导入 |
+
+DBX 官方维护但需要独立发布节奏的插件，通常也应使用独立源码仓库。只有与 Host 强耦合的最小示例、SDK 验证项目或维护者明确同意的组件才放进 `t8y2/dbx`。
+
+## 插件由哪些部分组成
+
+```text
+my-plugin/
+├── manifest.json
+├── dbx-plugin.toml
+├── assets/
+├── ui/
+├── backend/                       # frontend 模板没有此目录
+├── .github/workflows/
+│   └── plugin-release.yml
+└── dist/                          # 构建输出，不提交到 Git
+```
+
+- `manifest.json` 声明插件身份、版本、权限、入口和 Contributions。
+- `ui/` 在沙箱工作台中运行，通过 Host API 与 DBX 交互。
+- `backend/` 是可选的原生 Sidecar，可以使用 Rust、Go 或其他能够实现 DBX JSON-RPC 协议的语言。
+- `.dbxp` 是安装包，不是源码仓库。
+- 前端插件可以发布一个 `universal` 包；包含原生 Sidecar 的插件需要按操作系统和 CPU 架构分别构建。
+
+## 创建插件
+
+直接安装预编译 CLI，不需要 Rust，也不需要克隆 DBX 源码：
+
+```bash
+npm install --global @dbx-app/plugin-cli
+dbx-plugin --help
+```
+
+也可以直接使用 `npx`：
+
+```bash
+npx @dbx-app/plugin-cli create my-ui-plugin --template frontend
+```
+
+npm 包会自动选择当前平台的预编译二进制，并携带匹配版本的 Rust/Go 插件 SDK。纯前端插件不需要 Rust 或 Go；原生编译环境只用于构建插件自己的 Sidecar。
+
+创建项目：
+
+```bash
+# 纯前端、跨平台
+dbx-plugin create my-ui-plugin --template frontend
+
+# Rust Sidecar + 前端
+dbx-plugin create my-rust-plugin --template rust
+
+# Go Sidecar + 前端
+dbx-plugin create my-go-plugin --template go
+```
+
+生成项目后，先在自己的插件源码仓库开发、测试和维护版本记录。不要为了发布一个普通插件而把整个源码目录复制进 `t8y2/dbx`。
+
+## 构建候选包
+
+在插件项目根目录执行：
+
+```bash
+dbx-plugin package .
+```
+
+该命令只生成**未签名审核候选包**：
+
+```text
+dist/<plugin-id>-<version>-<target>.dbxp
+dist/<plugin-id>-<version>-<target>.artifact.json
+```
+
+官方插件作者不创建或持有 DBX Store 私钥。生成的 GitHub Release 工作流会按目标平台构建候选包，并合并产生 `release-candidates.json`。
+
+本地测试未签名包时，需要在插件中心显式开启“允许安装未签名开发包”。该选项不会放宽官方商店安装校验。
+
+## 提交官方商店的完整流程
+
+### 第一步：发布源码和候选 Release
+
+在插件自己的源码仓库创建版本 Tag 和 GitHub Release。Release 中应包含：
+
+- 每个平台的未签名 `.dbxp` 候选包；
+- 每个候选包对应的 `.artifact.json`；
+- 汇总后的 `release-candidates.json`；
+- Release Notes 和对应源码 Tag。
+
+候选包可以放在插件源码仓库的 GitHub Releases、CDN 或对象存储中，但不要把 `.dbxp` 提交到 Git 历史。
+
+### 第二步：在 dbx-store 发起审核 Issue
+
+前往 [`t8y2/dbx-store` Issues](https://github.com/t8y2/dbx-store/issues/new/choose)，选择 **Plugin submission**，填写：
+
+- 插件 ID、版本和发布者；
+- 源码仓库和对应 Tag；
+- `release-candidates.json` 的 HTTPS 地址；
+- 权限、数据访问、网络访问和原生 Sidecar 行为；
+- 许可证、隐私政策和支持地址。
+
+审核 Issue 属于签名前的审核入口。此时不要向 `t8y2/dbx` 提交插件源码 PR，也不要自行添加官方 `signingKeyId`。
+
+### 第三步：DBX Store 审核并签名
+
+维护者会检查源码、Manifest、权限、候选 SHA-256、大小和原生行为。审核通过后，受保护的 DBX Store 工作流会：
+
+1. 按已审核 SHA-256 和大小下载候选包；
+2. 确认候选包没有已有签名，并核对插件 ID 和版本；
+3. 使用 DBX Store 仓库密钥添加 Ed25519 签名；
+4. 发布最终 `.dbxp`、最终 artifact metadata 和 signing receipt。
+
+开发者不会接触官方仓库私钥。
+
+### 第四步：向 dbx-store 提交上架 PR
+
+获得最终签名 artifact metadata 后，Fork [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store)，添加或更新：
+
+```text
+publishers/<publisher-id>.json    # 仅发布者首次提交时需要
+plugins/<plugin-id>.json
+catalog/index.json                # 由验证脚本生成
+```
+
+运行：
+
+```bash
+node scripts/validate.mjs
+```
+
+然后创建 Pull Request：
+
+```text
+目标仓库：t8y2/dbx-store
+目标分支：main
+```
+
+<Callout type="info">
+  一个新插件的正式上架 PR **只提交到 `t8y2/dbx-store`**。`t8y2/dbx` PR 只用于修改插件平台本身，不用于登记普通第三方插件版本。
+</Callout>
+
+上架 PR 中不要包含：
+
+- `.dbxp` 二进制；
+- 插件完整源码副本；
+- Ed25519 私钥、Token 或下载凭据；
+- 未经 DBX Store 签名的候选包 URL；
+- 自行伪造的 `verified: true`。
+
+## 更新已有插件
+
+每次更新都发布新语义版本，不允许覆盖旧版本的 Release 资产：
+
+1. 在插件源码仓库发布新的源码 Tag 和候选 Release。
+2. 在 `t8y2/dbx-store` 创建新的 Plugin submission Issue，并引用旧插件和新版本。
+3. 等待新候选包完成审核和仓库签名。
+4. 向 `t8y2/dbx-store` 提交更新 `plugins/<plugin-id>.json` 的 PR。
+
+插件代码问题继续在插件源码仓库修复；只有目录、审核状态、最终下载地址、哈希、大小或商店文案变更才进入 `dbx-store`。
+
+## 签名和发布者身份
+
+DBX 当前使用单一仓库签名：
+
+- `publisher` 表示作者归属和商店记录；
+- `signingKeyId` 表示发布最终安装包的仓库密钥；
+- 官方插件由 DBX Store 审核后统一签名；
+- 自定义或私有仓库由仓库运营方维护自己的密钥；
+- 开发者签名或双签名不是当前上架要求。
+
+人工审核决定插件能否展示，Ed25519 仓库签名保证审核后的安装包没有被替换。签名不能替代源码审查，也不是原生 Sidecar 的操作系统沙箱。
+
+## 相关资料
+
+- [JDBC 插件与数据库驱动](/cn/docs/plugins)
+- [参与 DBX 主仓库贡献](/cn/docs/contributing)
+- [`t8y2/dbx` 插件平台源码](https://github.com/t8y2/dbx/tree/main/plugins)
+- [`t8y2/dbx-store` 官方商店仓库](https://github.com/t8y2/dbx-store)

@@ -1,0 +1,196 @@
+---
+title: Develop and Submit DBX Plugins
+description: Create DBX plugins, build unsigned candidates, and identify the correct repository for source, framework, and official Marketplace pull requests.
+---
+
+DBX plugins are independently installed `.dbxp` packages that can contribute connection types, workbenches, filesystems, and native sidecars. Plugin source, the DBX plugin platform, and the official Marketplace catalog are owned by different repositories.
+
+<Callout type="warn">
+  **Marketplace listing pull requests go to [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store), not `t8y2/dbx`.** A plugin's feature code normally remains in its author's source repository. Open a PR against [`t8y2/dbx`](https://github.com/t8y2/dbx) only when changing the DBX host, SDK, CLI, protocol, schemas, documentation, or official examples.
+</Callout>
+
+## Which Repository Receives the Change
+
+| Change | Destination | Official DBX PR? |
+| --- | --- | --- |
+| Your plugin frontend, Rust/Go backend, tests, and release scripts | The plugin's source repository | Do not submit it to `dbx`; develop and release it in its own repository |
+| A new Marketplace listing, version update, icon, or description | [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) | Yes, target `main` |
+| DBX plugin host, Manifest/Marketplace schemas, SDK, CLI, or packager | [`t8y2/dbx`](https://github.com/t8y2/dbx) | Yes, target `main` |
+| Official examples or plugin-development documentation | [`t8y2/dbx`](https://github.com/t8y2/dbx) | Yes |
+| A bug in a specific third-party plugin | That plugin's source repository | Do not submit it to `dbx-store` |
+| A custom or enterprise private repository | Your private repository | No official Marketplace submission is required |
+| A vendor JDBC driver JAR | Do not commit it to either repository | Users import it locally or on the server |
+
+DBX-maintained plugins that need an independent release cadence should normally use separate source repositories as well. Only tightly coupled host examples, SDK verification projects, or components explicitly accepted by maintainers belong in `t8y2/dbx`.
+
+## Plugin Project Layout
+
+```text
+my-plugin/
+├── manifest.json
+├── dbx-plugin.toml
+├── assets/
+├── ui/
+├── backend/                       # absent from the frontend template
+├── .github/workflows/
+│   └── plugin-release.yml
+└── dist/                          # generated; do not commit
+```
+
+- `manifest.json` declares identity, version, permissions, entrypoints, and contributions.
+- `ui/` runs in a sandboxed workbench and talks to DBX through Host APIs.
+- `backend/` is an optional native sidecar. Rust and Go SDKs are provided, while other languages may implement the DBX JSON-RPC protocol directly.
+- `.dbxp` is an installable artifact, not the source repository.
+- Frontend-only plugins can publish one `universal` package. Native sidecars require packages for each operating-system and CPU target.
+
+## Create a Plugin
+
+Install the precompiled CLI without Rust or a DBX source checkout:
+
+```bash
+npm install --global @dbx-app/plugin-cli
+dbx-plugin --help
+```
+
+Or run it directly through `npx`:
+
+```bash
+npx @dbx-app/plugin-cli create my-ui-plugin --template frontend
+```
+
+The npm package selects the precompiled binary for the current platform and bundles the matching Rust and Go plugin SDK sources. Frontend-only plugins do not need Rust or Go; native toolchains are required only to compile the plugin's own sidecar.
+
+Create a project:
+
+```bash
+# Frontend only and cross-platform
+dbx-plugin create my-ui-plugin --template frontend
+
+# Rust sidecar plus frontend
+dbx-plugin create my-rust-plugin --template rust
+
+# Go sidecar plus frontend
+dbx-plugin create my-go-plugin --template go
+```
+
+Develop, test, and version the generated project in the plugin's own source repository. Do not copy an ordinary plugin source tree into `t8y2/dbx` merely to publish it.
+
+## Build Review Candidates
+
+From the plugin project root, run:
+
+```bash
+dbx-plugin package .
+```
+
+The command produces **unsigned review candidates** only:
+
+```text
+dist/<plugin-id>-<version>-<target>.dbxp
+dist/<plugin-id>-<version>-<target>.artifact.json
+```
+
+Official plugin authors do not create or possess the DBX Store private key. The generated GitHub Release workflow builds candidates for each target and merges their metadata into `release-candidates.json`.
+
+To install an unsigned package during local development, explicitly enable **Allow unsigned development packages** in Plugin Center. This option never relaxes official Marketplace verification.
+
+## Complete Official Marketplace Flow
+
+### Step 1: Publish Source and a Candidate Release
+
+Create a version tag and GitHub Release in the plugin's source repository. The Release should contain:
+
+- one unsigned `.dbxp` candidate for each supported target;
+- the corresponding `.artifact.json` files;
+- merged `release-candidates.json`;
+- release notes and the matching source tag.
+
+Candidate packages may live in GitHub Releases, a CDN, or object storage. Do not commit `.dbxp` binaries to Git history.
+
+### Step 2: Open a Review Issue in dbx-store
+
+Open [`t8y2/dbx-store` Issues](https://github.com/t8y2/dbx-store/issues/new/choose), choose **Plugin submission**, and provide:
+
+- plugin ID, version, and publisher;
+- source repository and exact tag;
+- the HTTPS URL of `release-candidates.json`;
+- permissions, data access, network access, and native-sidecar behavior;
+- license, privacy policy, and support links.
+
+The Issue is the pre-signing review entrypoint. Do not submit the plugin source to `t8y2/dbx`, and do not invent an official `signingKeyId` yourself.
+
+### Step 3: DBX Store Reviews and Signs
+
+Maintainers review the source, Manifest, permissions, candidate SHA-256 values, sizes, and native behavior. After approval, the protected DBX Store workflow:
+
+1. downloads the candidate using its reviewed SHA-256 and size;
+2. confirms that it is unsigned and matches the expected plugin ID and version;
+3. adds an Ed25519 signature using the DBX Store repository key;
+4. publishes the final `.dbxp`, final artifact metadata, and signing receipt.
+
+Plugin authors never receive the official repository private key.
+
+### Step 4: Open the Listing PR Against dbx-store
+
+After receiving final signed artifact metadata, fork [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) and add or update:
+
+```text
+publishers/<publisher-id>.json    # only for a publisher's first submission
+plugins/<plugin-id>.json
+catalog/index.json                # generated by validation
+```
+
+Run:
+
+```bash
+node scripts/validate.mjs
+```
+
+Then open the pull request with:
+
+```text
+Base repository: t8y2/dbx-store
+Base branch: main
+```
+
+<Callout type="info">
+  A new plugin's final listing PR goes **only to `t8y2/dbx-store`**. A `t8y2/dbx` PR is for changes to the plugin platform itself, not for registering ordinary third-party plugin versions.
+</Callout>
+
+Do not include the following in a listing PR:
+
+- `.dbxp` binaries;
+- a copied plugin source tree;
+- Ed25519 private keys, tokens, or download credentials;
+- unsigned candidate URLs as final install artifacts;
+- a self-assigned `verified: true` value.
+
+## Update an Existing Plugin
+
+Every update uses a new semantic version. Existing Release assets cannot be replaced:
+
+1. Publish a new source tag and candidate Release in the plugin source repository.
+2. Open a new Plugin submission Issue in `t8y2/dbx-store` and reference the existing plugin and new version.
+3. Wait for the new candidates to complete review and repository signing.
+4. Open a PR against `t8y2/dbx-store` that updates `plugins/<plugin-id>.json`.
+
+Fix plugin-code problems in the plugin source repository. Only catalog metadata, review status, final URLs, hashes, sizes, and Marketplace copy belong in `dbx-store`.
+
+## Signatures and Publisher Identity
+
+DBX currently uses one repository signature:
+
+- `publisher` records authorship and Marketplace ownership;
+- `signingKeyId` identifies the repository key that published the final installable package;
+- DBX Store reviews and signs official plugins centrally;
+- custom and private repository operators manage their own repository keys;
+- developer signatures and dual signatures are not current listing requirements.
+
+Human review determines whether a plugin may appear in the Marketplace. Ed25519 repository signing ensures that the reviewed package was not replaced afterward. A signature does not replace source review and is not an operating-system sandbox for native sidecars.
+
+## Related Documentation
+
+- [JDBC Plugin and Database Drivers](/en/docs/plugins)
+- [Contribute to the DBX Core Repository](/en/docs/contributing)
+- [`t8y2/dbx` plugin platform source](https://github.com/t8y2/dbx/tree/main/plugins)
+- [`t8y2/dbx-store` official Marketplace repository](https://github.com/t8y2/dbx-store)

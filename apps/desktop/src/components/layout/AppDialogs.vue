@@ -31,10 +31,12 @@ import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import type { DatabaseType } from "@/types/database";
+import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 
 const props = defineProps<{
   showConnectionDialog: boolean;
   connectionPrefill?: ConnectionDeepLinkDraft | null;
+  connectionPluginProvider?: PluginCenterFocus | null;
   connectionInitialTab?: ConfigTab;
   showDangerDialog: boolean;
   dangerSql: string;
@@ -139,7 +141,8 @@ const editConfig = computed(() => {
 const shouldShowConnectionDialog = computed(() => props.showConnectionDialog || !!editConfig.value);
 
 watch(editConfig, (v) => {
-  if (v) emit("update:showConnectionDialog", true);
+  if (!v) return;
+  emit("update:showConnectionDialog", true);
 });
 
 watch(
@@ -166,6 +169,7 @@ watch(
     :open="shouldShowConnectionDialog"
     :edit-config="editConfig"
     :prefill-config="connectionPrefill"
+    :plugin-provider="connectionPluginProvider"
     :initial-tab="connectionInitialTab"
     @update:open="emit('update:showConnectionDialog', $event)"
     @connect-started="emit('connectStarted', $event)"

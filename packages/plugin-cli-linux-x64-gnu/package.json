@@ -1,0 +1,18 @@
+{
+  "name": "@dbx-app/plugin-cli-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Precompiled DBX Plugin CLI binary for linux x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/plugin-cli-linux-x64-gnu"
+  },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "bin": {
+    "dbx-plugin-native": "bin/dbx-plugin"
+  },
+  "files": ["bin"]
+}

@@ -360,6 +360,8 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    store.setAutoCommit(tabId, true);
 
     await store.executeTabSql(tabId, "SELECT t.* FROM SH_SMCVDMS_OVERSEAS_DRSSITB.TT_PLATFORM_CARS t WHERE t.PLATFORM = '轻卡'");
 
@@ -398,6 +400,8 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    store.setAutoCommit(tabId, true);
 
     await store.executeTabSql(tabId, "SELECT * FROM aa");
 
@@ -434,6 +438,8 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    store.setAutoCommit(tabId, true);
 
     const execution = store.executeTabSql(tabId, "SELECT t.* FROM APP.WIDE_TABLE t");
     await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled());
@@ -484,6 +490,8 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    store.setAutoCommit(tabId, true);
 
     await store.executeTabSql(tabId, sql);
 
@@ -531,6 +539,8 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    store.setAutoCommit(tabId, true);
     const tab = store.tabs.find((item) => item.id === tabId)!;
     tab.tableMeta = { schema: "APP", tableName: "PLATFORM_VIEW", tableType: "VIEW", columns: [], primaryKeys: [] };
 
@@ -674,6 +684,8 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "XEPDB1", "Query");
+    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    store.setAutoCommit(tabId, true);
 
     await store.executeTabSql(tabId, "SELECT NAME FROM DBX_HIDDEN_PK_EDIT_TEST");
 

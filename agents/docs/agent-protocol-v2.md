@@ -11,6 +11,16 @@ Protocol v2 allows one Agent process to serve multiple isolated database session
 - `close_session` closes the session resources, query cursors, and table-read cursors without affecting other sessions.
 - `shutdown` closes all sessions and terminates the runtime.
 
+## Manual (interactive) transactions
+
+When a runtime advertises the `transaction` capability and supports sticky sessions, DBX may open a dedicated workload session and call:
+
+- `begin_manual_transaction` `{ schema? }` — pin one physical connection / start an open transaction
+- `execute_query` (and related query methods) — run on the open transaction until commit/rollback
+- `commit_manual_transaction` / `rollback_manual_transaction` — end the interactive transaction
+
+This is separate from one-shot `execute_transaction`, which begins, runs a statement list, and commits/rolls back inside a single RPC. Runtimes that reconnect a session (`validate_session`) must clear any open manual transaction on that session.
+
 `agentSessionId` identifies a logical database connection. Existing `sessionId` fields remain pagination cursor identifiers and must not be used as logical connection identifiers.
 
 `sessionRole` is `workload` by default. DBX sends `metadata` for object-tree, completion, and other read-only metadata sessions. New runtimes use this role to preserve metadata checkout capacity; older runtimes may ignore the field.

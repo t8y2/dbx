@@ -42,6 +42,9 @@ public final class AgentProtocol {
     public static final String METHOD_GET_EXPLAIN_INFO = "get_explain_info";
     public static final String METHOD_EXECUTE_BATCH = "execute_batch";
     public static final String METHOD_EXECUTE_TRANSACTION = "execute_transaction";
+    public static final String METHOD_BEGIN_MANUAL_TRANSACTION = "begin_manual_transaction";
+    public static final String METHOD_COMMIT_MANUAL_TRANSACTION = "commit_manual_transaction";
+    public static final String METHOD_ROLLBACK_MANUAL_TRANSACTION = "rollback_manual_transaction";
     public static final String METHOD_DISCONNECT = "disconnect";
     public static final String METHOD_SHUTDOWN = "shutdown";
 
@@ -190,6 +193,9 @@ public final class AgentProtocol {
         METHOD_GET_EXPLAIN_INFO,
         METHOD_EXECUTE_BATCH,
         METHOD_EXECUTE_TRANSACTION,
+        METHOD_BEGIN_MANUAL_TRANSACTION,
+        METHOD_COMMIT_MANUAL_TRANSACTION,
+        METHOD_ROLLBACK_MANUAL_TRANSACTION,
         METHOD_DISCONNECT,
         METHOD_SHUTDOWN
     ));

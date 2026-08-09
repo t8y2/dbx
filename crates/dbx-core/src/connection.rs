@@ -147,6 +147,13 @@ enum ConnectionDatabaseInfoSource {
 pub enum TxnConnection {
     Postgres(Box<deadpool_postgres::Object>),
     Mysql(mysql_async::Conn),
+    /// Dedicated agent multi_session workload client with an open sticky TX.
+    Agent {
+        client: Arc<db::agent_driver::PooledAgentClient>,
+        /// Client-session id used when opening the dedicated agent pool.
+        client_session_id: String,
+        database: Option<String>,
+    },
 }
 
 pub struct TransactionSession {
@@ -366,12 +373,20 @@ impl PoolRoutingControl {
             let mut removed = vec![(pool_key.to_string(), pool)];
             if replace_agent_runtime {
                 let sibling_keys = shared_runtime_sibling_keys(&connections, &removed[0].1);
-                for key in sibling_keys {
-                    if let Some(pool) = connections.remove(&key) {
-                        removed.push((key, pool));
+                let protects_manual_txn = sibling_keys.iter().any(|key| key.contains(":session:manual-txn-"))
+                    || pool_key.contains(":session:manual-txn-");
+                if protects_manual_txn {
+                    log::warn!(
+                        "Skipping shared Agent runtime kill for '{pool_key}' because a manual-transaction session is active on the same runtime"
+                    );
+                } else {
+                    for key in sibling_keys {
+                        if let Some(pool) = connections.remove(&key) {
+                            removed.push((key, pool));
+                        }
                     }
+                    fail_stop_removed_agent_pool(pool_key, &removed[0].1);
                 }
-                fail_stop_removed_agent_pool(pool_key, &removed[0].1);
             }
             removed
         };
@@ -403,14 +418,30 @@ impl PoolRoutingControl {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                let removed = runtime_keys
-                    .into_iter()
-                    .filter_map(|key| connections.remove(&key).map(|pool| (key, pool)))
-                    .collect::<Vec<_>>();
-                if !expected_client.fail_stop() {
-                    log::warn!("Failed to terminate the shared Agent runtime while detaching pool '{pool_key}'");
+                // Sticky manual-transaction sessions pin work on the shared runtime.
+                // Prefer quarantining only the failed route over killing every sibling TX.
+                let protects_manual_txn = runtime_keys.iter().any(|key| key.contains(":session:manual-txn-"))
+                    || pool_key.contains(":session:manual-txn-");
+                if protects_manual_txn {
+                    log::warn!(
+                        "Agent pool '{pool_key}' requested runtime replacement, but a manual-transaction session shares the runtime; detaching only this pool"
+                    );
+                    if is_current {
+                        let pool = connections.remove(pool_key).expect("current Agent pool must still exist");
+                        vec![(pool_key.to_string(), pool)]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    let removed = runtime_keys
+                        .into_iter()
+                        .filter_map(|key| connections.remove(&key).map(|pool| (key, pool)))
+                        .collect::<Vec<_>>();
+                    if !expected_client.fail_stop() {
+                        log::warn!("Failed to terminate the shared Agent runtime while detaching pool '{pool_key}'");
+                    }
+                    removed
                 }
-                removed
             } else {
                 let pool = connections.remove(pool_key).expect("current Agent pool must still exist");
                 vec![(pool_key.to_string(), pool)]
@@ -442,20 +473,34 @@ impl PoolRoutingControl {
             PoolKind::Agent(client) => Some(client.clone()),
             _ => None,
         };
+        // Shared multi-session runtimes host sticky work (manual transactions, tab
+        // sessions). Never kill the whole process because one session close is slow
+        // or fails — that would abort unrelated open transactions on sibling sessions.
+        let shared_agent = agent_client.as_ref().is_some_and(|client| client.uses_shared_runtime());
         match tokio::time::timeout(Duration::from_secs(POOL_CLOSE_TIMEOUT_SECS), close_pool_kind(pool)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 log::warn!("Failed to close connection pool '{pool_key}': {error}");
-                if let Some(client) = agent_client.filter(|_| should_replace_agent_runtime(&error)) {
+                if shared_agent {
+                    log::warn!(
+                        "Leaving shared Agent runtime running after close failure for '{pool_key}' to protect sibling sessions"
+                    );
+                } else if let Some(client) = agent_client.filter(|_| should_replace_agent_runtime(&error)) {
                     self.replace_runtime_after_close_failure(&pool_key, &client).await;
                 }
             }
             Err(_) => {
-                log::warn!(
-                    "Timed out closing connection pool '{pool_key}' after {POOL_CLOSE_TIMEOUT_SECS}s; replacing a shared Agent runtime when present."
-                );
-                if let Some(client) = agent_client {
-                    self.replace_runtime_after_close_failure(&pool_key, &client).await;
+                if shared_agent {
+                    log::warn!(
+                        "Timed out closing shared Agent pool '{pool_key}' after {POOL_CLOSE_TIMEOUT_SECS}s; leaving the runtime running so sibling sessions (e.g. manual transactions) stay alive"
+                    );
+                } else {
+                    log::warn!(
+                        "Timed out closing connection pool '{pool_key}' after {POOL_CLOSE_TIMEOUT_SECS}s; replacing a shared Agent runtime when present."
+                    );
+                    if let Some(client) = agent_client {
+                        self.replace_runtime_after_close_failure(&pool_key, &client).await;
+                    }
                 }
             }
         }
@@ -1315,13 +1360,19 @@ impl AppState {
             // candidate never reaches this point, so the existing route keeps its state.
             routing.stop_keepalive(&pool_key);
             activity.insert(pool_key.clone(), PoolActivity::now());
-            self.start_keepalive_task(
-                &pool_key,
-                &pool,
-                config,
-                #[cfg(feature = "mq-admin")]
-                mq_keepalive_adapter.clone(),
-            );
+            // Manual-transaction sessions pin a sticky connection/TX. Keepalive
+            // detach on these pools was able to tear down the shared agent runtime
+            // (and any open TX) when close timed out — skip probes for them.
+            let skip_keepalive = pool_key.contains(":session:manual-txn-");
+            if !skip_keepalive {
+                self.start_keepalive_task(
+                    &pool_key,
+                    &pool,
+                    config,
+                    #[cfg(feature = "mq-admin")]
+                    mq_keepalive_adapter.clone(),
+                );
+            }
             break Ok(connections.insert(pool_key.clone(), pool));
         };
         let previous = match previous {

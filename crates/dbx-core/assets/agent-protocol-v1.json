@@ -36,6 +36,9 @@
     "get_explain_info",
     "execute_batch",
     "execute_transaction",
+    "begin_manual_transaction",
+    "commit_manual_transaction",
+    "rollback_manual_transaction",
     "disconnect",
     "shutdown"
   ],

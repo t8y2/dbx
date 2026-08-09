@@ -1863,6 +1863,7 @@ export default withEnglishFallback({
       "O search_after do Elasticsearch não pode ir diretamente para uma página. O DBX precisa buscar os cursores ausentes em ordem e, ao voltar, reinicia pela página 1. Ir para a página {page} deve enviar cerca de {requests} consultas. Isso pode demorar e aumentar a carga do cluster. Continuar?",
     esDeepPageJumpContinue: "Continuar",
     allLoaded: "tudo carregado",
+    loadAllAndGoToLastRow: "Carregar tudo e ir para a última linha",
     calculateTotalRows: "Contar total de linhas",
     calculateTotalRowsInline: "(contar total de linhas)",
     calculateTotalRowsFailed: "Falha ao contar: {message}",

@@ -208,6 +208,7 @@ import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid
 import {
   canFetchNextDataGridSegment,
   canGoNextDataGridPage,
+  dataGridLoadAllSegment,
   dataGridTotalRowCountLabelKey,
   dataGridTruncationHintKey,
   ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS,
@@ -3002,6 +3003,7 @@ let infiniteScrollCheckScheduled = false;
 let infiniteScrollAllLoaded = false;
 let infiniteScrollRequestedOffset: number | undefined;
 let infiniteScrollRequestedLimit: number | undefined;
+let infiniteScrollLoadAllPending = false;
 // Tracks whether the current loading cycle was triggered by a refresh/rollback
 // (as opposed to a normal paginate). Used to decide whether to auto-redirect
 // when the current page no longer exists after data was deleted.
@@ -3044,6 +3046,8 @@ watch(
   () => props.loading,
   (loading, prevLoading) => {
     if (prevLoading && !loading && infiniteScrollLoading.value) {
+      const shouldSelectLastRow = infiniteScrollLoadAllPending;
+      infiniteScrollLoadAllPending = false;
       infiniteScrollLoading.value = false;
       isInfiniteScrollPaginating.value = false;
       const requestedOffset = infiniteScrollRequestedOffset;
@@ -3061,6 +3065,7 @@ watch(
       if (props.result.rows.length >= infiniteScrollMaxRows.value || appendedRows < (requestedLimit ?? pageSize.value)) {
         infiniteScrollAllLoaded = true;
       }
+      if (shouldSelectLastRow) selectAndRevealLastLoadedRow();
     }
   },
 );
@@ -3394,6 +3399,36 @@ function infiniteScrollNextPage() {
   // Fetch only the missing segment. Re-reading offset 0 grows transfer and replaces
   // row identities, which would invalidate pending edits while the user scrolls.
   emit("paginate", nextOffset, nextLimit, currentWhereInput(), currentOrderBy());
+}
+
+function selectAndRevealLastLoadedRow() {
+  let rowIndex = displayRowRefs.value.length - 1;
+  while (rowIndex >= 0 && !("sourceIndex" in displayRowRefs.value[rowIndex])) rowIndex--;
+  if (rowIndex < 0) return;
+  selectRow(rowIndex);
+  if (showTranspose.value) {
+    transposeRowIndex.value = rowIndex;
+    nextTick(() => scrollTransposeRecordIntoView(rowIndex, "nearest"));
+    return;
+  }
+  scrollGridRowIntoView(rowIndex);
+}
+
+function loadAllRowsAndGoToLast() {
+  if (gridSurfaceBusy.value || infiniteScrollLoading.value || props.result.rows.length === 0) return;
+  const segment = dataGridLoadAllSegment(props.result.rows.length, infiniteScrollMaxRows.value, !infiniteScrollAllLoaded && canFetchNextInfiniteScrollSegment.value);
+  if (!segment) {
+    infiniteScrollAllLoaded = true;
+    selectAndRevealLastLoadedRow();
+    return;
+  }
+  infiniteScrollLoadAllPending = true;
+  infiniteScrollLoading.value = true;
+  isInfiniteScrollPaginating.value = true;
+  infiniteScrollRequestedOffset = segment.offset;
+  infiniteScrollRequestedLimit = segment.limit;
+  currentPage.value++;
+  emit("paginate", segment.offset, segment.limit, currentWhereInput(), currentOrderBy());
 }
 function checkInfiniteScroll(scroller: HTMLElement) {
   if (!infiniteScrollEnabled.value || infiniteScrollLoading.value || props.loading) return;
@@ -4192,6 +4227,7 @@ function resetInfiniteScrollState() {
   infiniteScrollRequestedLimit = undefined;
   isInfiniteScrollPaginating.value = false;
   infiniteScrollLoading.value = false;
+  infiniteScrollLoadAllPending = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
 }
@@ -13849,9 +13885,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :selection-summary="selectionSummary"
         :selection-summary-sum-text="selectionSummarySumText"
         :selection-summary-average-text="selectionSummaryAverageText"
-        :loading="gridPaginationBusy"
+        :loading="gridPaginationBusy || infiniteScrollLoading"
         :infinite-scroll-enabled="infiniteScrollEnabled"
         :infinite-scroll-all-loaded="infiniteScrollAllLoaded"
+        :can-load-all-rows="result.rows.length > 0"
         :page-size="pageSize"
         :default-page-size="defaultPageSize"
         :page-size-menu-items="pageSizeMenuItems"
@@ -13868,6 +13905,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         @next-page="nextPage"
         @jump-page="jumpPage"
         @last-page="lastPage"
+        @load-all-rows="loadAllRowsAndGoToLast"
         @select-export="selectExportMenuItem"
       />
     </div>

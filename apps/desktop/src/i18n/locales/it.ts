@@ -1861,6 +1861,7 @@ export default withEnglishFallback({
       "search_after di Elasticsearch non può passare direttamente a una pagina. DBX deve recuperare in ordine i cursori mancanti e, tornando indietro, riparte dalla pagina 1. Il passaggio alla pagina {page} invierà circa {requests} query. Potrebbe richiedere tempo e aumentare il carico del cluster. Continuare?",
     esDeepPageJumpContinue: "Continua",
     allLoaded: "tutto caricato",
+    loadAllAndGoToLastRow: "Carica tutto e vai all'ultima riga",
     calculateTotalRows: "Conta righe totali",
     calculateTotalRowsInline: "(conta righe totali)",
     calculateTotalRowsFailed: "Conteggio non riuscito: {message}",

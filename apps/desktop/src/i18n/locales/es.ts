@@ -1864,6 +1864,7 @@ export default withEnglishFallback({
       "search_after de Elasticsearch no puede saltar directamente a una página. DBX debe obtener en orden los cursores que faltan y, al retroceder, comienza de nuevo desde la página 1. Saltar a la página {page} enviará aproximadamente {requests} consultas. Puede tardar y aumentar la carga del clúster. ¿Continuar?",
     esDeepPageJumpContinue: "Continuar",
     allLoaded: "todo cargado",
+    loadAllAndGoToLastRow: "Cargar todo e ir a la última fila",
     calculateTotalRows: "Contar filas totales",
     calculateTotalRowsInline: "(contar filas totales)",
     calculateTotalRowsFailed: "Error al contar: {message}",

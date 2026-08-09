@@ -1852,6 +1852,7 @@ export default withEnglishFallback({
     esDeepPageJumpConfirmMessage: "Elasticsearch 的 search_after 無法直接定位到指定頁面。DBX 必須依序取得缺少的游標，跳回較小頁碼時還會從第 1 頁重新開始。跳轉到第 {page} 頁預計會傳送 {requests} 次查詢，可能耗時較長並增加叢集負載。是否繼續？",
     esDeepPageJumpContinue: "繼續跳轉",
     allLoaded: "已全部載入",
+    loadAllAndGoToLastRow: "載入全部並前往最後一列",
     calculateTotalRows: "統計總筆數",
     calculateTotalRowsInline: "（統計總筆數）",
     calculateTotalRowsFailed: "統計失敗：{message}",

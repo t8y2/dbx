@@ -48,3 +48,15 @@ test("infinite scroll requests only the next bounded segment", () => {
   assert.doesNotMatch(source, /emit\("paginate", 0, cumulativeLimit/);
   assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset/);
 });
+
+test("load-all selects the last loaded row only after a valid append completes", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const loadAllFn = source.match(/function loadAllRowsAndGoToLast\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(loadAllFn, /gridSurfaceBusy\.value \|\| infiniteScrollLoading\.value/);
+  assert.match(loadAllFn, /dataGridLoadAllSegment/);
+  assert.match(loadAllFn, /if \(!segment\) \{[\s\S]*?selectAndRevealLastLoadedRow\(\);[\s\S]*?return;/);
+  assert.match(loadAllFn, /infiniteScrollLoadAllPending = true/);
+  assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit/);
+  assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset[\s\S]*?return;[\s\S]*?if \(shouldSelectLastRow\) selectAndRevealLastLoadedRow\(\)/);
+  assert.match(source, /function selectAndRevealLastLoadedRow\(\)[\s\S]*?selectRow\(rowIndex\)[\s\S]*?scrollGridRowIntoView\(rowIndex\)/);
+});

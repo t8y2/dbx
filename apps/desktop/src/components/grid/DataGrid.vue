@@ -1730,6 +1730,11 @@ let gridVerticalScrollbarThumbHeightPercent = 100;
 let gridScrollbarsRuntime: DataGridScrollbarsRuntime;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let cellEditResizeObserver: ResizeObserver | null = null;
+// vue-virtual-scroller's @resize only fires in pageMode (it observes window),
+// so in container-scroll mode (transpose uses RecycleScroller without pageMode)
+// container size changes from window resize / sidebar drag never reach
+// updateTransposeViewport. Observe the scroller element directly instead.
+let transposeViewportResizeObserver: ResizeObserver | null = null;
 let resetCellEditTextareaScrollOnResize = false;
 let gridHorizontalScrollbarDragState: {
   scroller: HTMLElement;
@@ -5639,6 +5644,7 @@ function pauseCanvasGridWork() {
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
+  disconnectTransposeViewportObserver();
   canvasPixelRatioMediaQueryCleanup?.();
   canvasPixelRatioMediaQueryCleanup = null;
   canvasPixelRatioMediaQuery = null;
@@ -5654,6 +5660,7 @@ function resumeCanvasGridWork() {
   nextTick(() => {
     attachCanvasResizeObserver();
     observeDataGridTopbarWidth();
+    observeTransposeViewport();
     refreshGridScrollerMetrics();
     observeGridHorizontalScrollbarScroller();
   });
@@ -5706,6 +5713,7 @@ onUnmounted(() => {
   gridScrollbarsRuntime.dispose();
   dataGridTopbarResizeObserver?.disconnect();
   disconnectCellEditResizeObserver();
+  disconnectTransposeViewportObserver();
   stopGridHorizontalScrollbarDrag();
   stopGridVerticalScrollbarDrag();
   if (columnLayoutRefreshFrame) cancelAnimationFrame(columnLayoutRefreshFrame);
@@ -7204,6 +7212,24 @@ function updateTransposeViewport() {
   transposeViewportWidth.value = el.clientWidth;
 }
 
+function disconnectTransposeViewportObserver() {
+  transposeViewportResizeObserver?.disconnect();
+  transposeViewportResizeObserver = null;
+}
+
+// Attach a ResizeObserver on the transpose scroller so clientWidth is re-measured
+// when the container resizes (window resize, sidebar drag). RecycleScroller's own
+// @resize event does not fire outside pageMode, so this is the only reliable hook.
+function observeTransposeViewport() {
+  disconnectTransposeViewportObserver();
+  if (typeof ResizeObserver === "undefined") return;
+  const el = transposeScrollElement();
+  if (!el) return;
+  updateTransposeViewport();
+  transposeViewportResizeObserver = new ResizeObserver(updateTransposeViewport);
+  transposeViewportResizeObserver.observe(el);
+}
+
 function onTransposeScroll() {
   updateTransposeViewport();
   const el = transposeScrollElement();
@@ -7437,10 +7463,16 @@ function transposeNav(delta: number) {
 watch(isTransposeMode, (active) => {
   if (active) {
     gridScrollLeftBeforeTranspose = gridScrollerElement()?.scrollLeft ?? gridHorizontalScrollLeft.value;
-    nextTick(updateTransposeViewport);
+    nextTick(() => {
+      updateTransposeViewport();
+      observeTransposeViewport();
+    });
     return;
   }
 
+  // The transpose scroller is v-if-removed by isTransposeMode; drop the observer
+  // before the element unmounts so it never observes a detached node.
+  disconnectTransposeViewportObserver();
   const scrollTopBeforeTranspose = restoreGridScrollTopAfterTranspose ? (gridScrollTopBeforeKeyboardTranspose ?? undefined) : undefined;
   restoreGridScrollTopAfterTranspose = false;
   gridScrollTopBeforeKeyboardTranspose = null;

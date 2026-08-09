@@ -60,10 +60,11 @@ pub struct ConsulConfig {
 
 impl fmt::Debug for ConsulConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let token = if self.token.is_empty() { "none" } else { "redacted" };
         formatter
             .debug_struct("ConsulConfig")
             .field("base_url", &self.base_url)
-            .field("token", &self.token.is_empty().then_some("none").unwrap_or("redacted"))
+            .field("token", &token)
             .field("datacenter", &self.datacenter)
             .field("namespace", &self.namespace)
             .field("partition", &self.partition)

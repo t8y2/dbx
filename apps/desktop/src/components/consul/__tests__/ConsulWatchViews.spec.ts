@@ -18,7 +18,7 @@ describe("Consul Catalog and Health watch views", () => {
     for (const target of ["catalogServices", "catalogServiceNodes", "catalogNodes", "catalogNodeServices"]) {
       expect(services).toContain(`kind: "${target}"`);
     }
-    expect(services).toContain("onBeforeUnmount(() => { void stopWatches(); });");
+    expect(services).toMatch(/onBeforeUnmount\(\(\) => \{\s*void stopWatches\(\);\s*\}\);/);
     expect(services).toContain("switchBrowseMode");
   });
 
@@ -27,7 +27,7 @@ describe("Consul Catalog and Health watch views", () => {
       expect(health).toContain(`kind: "${target}"`);
     }
     expect(health).toContain('browseMode = ref<"state" | "node" | "service">');
-    expect(health).toContain("onBeforeUnmount(() => { void stopWatch(); });");
+    expect(health).toMatch(/onBeforeUnmount\(\(\) => \{\s*void stopWatch\(\);\s*\}\);/);
     expect(health).toContain("selectedCheck");
     expect(health).toContain("selectedCheck.Definition");
   });
@@ -228,8 +228,8 @@ describe("Consul Catalog and Health watch views", () => {
   });
 
   it("preserves Exported Services CAS state and capability-gates advanced writes", () => {
-    expect(mesh).toContain('consulMeshConfigList(props.connectionId,"exported-services")');
-    expect(mesh).toContain("editingExported.value?.modifyIndex||0");
+    expect(mesh).toContain('consulMeshConfigList(props.connectionId, "exported-services")');
+    expect(mesh).toContain("editingExported.value?.modifyIndex || 0");
     expect(tools).toContain("canWriteQueries");
     expect(tools).toContain("canFireEvents");
     expect(operator).toContain("keyringWriteVisible");

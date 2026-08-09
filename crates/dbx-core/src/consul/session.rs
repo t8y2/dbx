@@ -21,7 +21,7 @@ pub struct ConsulSession {
     pub lock_delay: u64,
     #[serde(default)]
     pub behavior: String,
-    #[serde(default)]
+    #[serde(default, rename = "TTL", alias = "Ttl")]
     pub ttl: String,
     #[serde(default, rename = "NodeChecks", alias = "Checks", deserialize_with = "deserialize_null_default")]
     pub node_checks: Vec<String>,
@@ -95,6 +95,7 @@ pub struct ConsulSessionDestroyRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct SessionCreateResponse {
+    #[serde(rename = "ID", alias = "Id")]
     id: String,
 }
 

@@ -69,6 +69,7 @@ const extraAliases = {
 const supplementalDrivers = [
   { dbType: "turso", label: "Turso", aliases: ["libsql", "lib sql"] },
   { dbType: "nacos", label: "Nacos", aliases: ["r-nacos", "rnacos"] },
+  { dbType: "consul", label: "Consul", aliases: ["hashicorp consul"] },
   { dbType: "cloudberry", label: "Apache Cloudberry" },
   { dbType: "mariadb", label: "MariaDB" },
   { dbType: "tidb", label: "TiDB" },

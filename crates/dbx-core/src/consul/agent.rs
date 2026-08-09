@@ -612,22 +612,17 @@ fn required<'a>(value: &'a str, field: &str) -> Result<&'a str, String> {
 
 fn service_registration_json(registration: ConsulAgentServiceRegistration) -> Result<serde_json::Value, String> {
     validate_service_registration(&registration, 0)?;
-    service_registration_json_inner(registration, 0)
+    service_registration_json_inner(registration)
 }
 
-fn service_registration_json_inner(
-    registration: ConsulAgentServiceRegistration,
-    depth: usize,
-) -> Result<serde_json::Value, String> {
+fn service_registration_json_inner(registration: ConsulAgentServiceRegistration) -> Result<serde_json::Value, String> {
     let checks = registration.checks.into_iter().map(check_registration_json).collect::<Result<Vec<_>, _>>()?;
     let proxy = registration.proxy.map(proxy_registration_json);
     let connect = registration
         .connect
         .map(|connect| {
-            let sidecar = connect
-                .sidecar_service
-                .map(|sidecar| service_registration_json_inner(*sidecar, depth + 1))
-                .transpose()?;
+            let sidecar =
+                connect.sidecar_service.map(|sidecar| service_registration_json_inner(*sidecar)).transpose()?;
             Ok::<_, String>(serde_json::json!({
                 "Native": connect.native,
                 "SidecarService": sidecar,

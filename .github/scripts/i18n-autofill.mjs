@@ -351,15 +351,15 @@ function applyEdits(text, edits) {
 
 function flattenLeaves(root) {
   const result = new Map();
-  flattenNode(root, [], result, root.externalObjects || new Map());
+  flattenNode(root, [], result, root.externalObjects || new Map(), new Set());
   return result;
 }
 
-function flattenNode(node, path, result, externalObjects) {
+function flattenNode(node, path, result, externalObjects, activeExternalObjects) {
   for (const property of node.properties) {
     const nextPath = [...path, property.key];
     if (property.value.type === "object") {
-      flattenNode(property.value, nextPath, result, externalObjects);
+      flattenNode(property.value, nextPath, result, externalObjects, activeExternalObjects);
     } else if (property.value.type === "string") {
       result.set(nextPath.join("."), property.value.value);
     } else if (property.value.type === "spread") {
@@ -368,27 +368,60 @@ function flattenNode(node, path, result, externalObjects) {
       for (const member of members) {
         spreadObject = spreadObject?.properties.find((candidate) => candidate.key === member && candidate.value.type === "object")?.value;
       }
-      if (spreadObject) flattenNode(spreadObject, path, result, externalObjects);
+      flattenExternalObject(property.value.expression, spreadObject, path, result, externalObjects, activeExternalObjects);
+    } else if (property.value.type === "external") {
+      flattenExternalObject(property.key, externalObjects.get(property.key), nextPath, result, externalObjects, activeExternalObjects);
     }
   }
+}
+
+function flattenExternalObject(name, object, path, result, externalObjects, activeExternalObjects) {
+  if (!object || activeExternalObjects.has(name)) return;
+  activeExternalObjects.add(name);
+  flattenNode(object, path, result, externalObjects, activeExternalObjects);
+  activeExternalObjects.delete(name);
 }
 
 function parseLocaleFile(text, file) {
   const parser = new Parser(text, file);
   const root = parser.parseLocaleRoot();
   root.externalObjects = parseImportedObjects(text, file);
+  for (const [name, object] of parseDeclaredObjects(text, file)) {
+    root.externalObjects.set(name, object);
+  }
   return { root };
 }
 
-function parseImportedObjects(text, file) {
+function parseDeclaredObjects(text, file) {
+  const result = new Map();
+  const declarations = /^\s*const\s+([A-Za-z_$][\w$]*)\s*=/gm;
+  const exportIndex = text.indexOf("export default");
+
+  for (const match of text.slice(0, exportIndex).matchAll(declarations)) {
+    const parser = new Parser(text, file);
+    parser.index = match.index + match[0].length;
+    parser.skipSpace();
+    if (parser.peek() === "{") result.set(match[1], parser.parseObject());
+  }
+
+  return result;
+}
+
+function parseImportedObjects(text, file, visited = new Set()) {
   const result = new Map();
   const actualFile = existsSync(file) ? file : file.slice(file.indexOf(":") + 1);
+  const resolvedFile = resolve(actualFile);
+  if (visited.has(resolvedFile)) return result;
+  visited.add(resolvedFile);
   const importPattern = /import\s*\{([^}]+)\}\s*from\s*["'](\.\.?\/[^"']+)["'];?/g;
 
   for (const match of text.matchAll(importPattern)) {
     const modulePath = resolve(dirname(actualFile), `${match[2]}.ts`);
     if (!existsSync(modulePath)) continue;
     const moduleText = readFileSync(modulePath, "utf8");
+    for (const [name, object] of parseImportedObjects(moduleText, modulePath, visited)) {
+      if (!result.has(name)) result.set(name, object);
+    }
     for (const specifier of match[1].split(",")) {
       const [exportedName, localName = exportedName] = specifier.trim().split(/\s+as\s+/);
       if (!exportedName) continue;

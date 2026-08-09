@@ -110,6 +110,7 @@ struct RawTxnResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct RawTxnResult {
+    #[serde(rename = "KV", alias = "Kv")]
     kv: Option<RawTxnKvResult>,
 }
 

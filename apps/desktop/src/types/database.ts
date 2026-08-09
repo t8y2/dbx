@@ -639,6 +639,8 @@ export interface QueryResult {
   /** Whether a backend-reported result total is exact. */
   total_is_exact?: boolean;
   truncated?: boolean;
+  /** Variable-length cells represented by bounded previews in `rows`. */
+  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number }>;
   session_id?: string | null;
   has_more?: boolean;
   /** For Elasticsearch REST search results parsed into a _source table,
@@ -704,6 +706,7 @@ export interface QueryResultRun {
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
+  resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
@@ -994,6 +997,7 @@ export interface QueryTab {
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
+  resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;

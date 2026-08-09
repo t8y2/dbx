@@ -1131,6 +1131,8 @@ export async function executeMulti(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1175,6 +1177,8 @@ export async function executeMultiWithProgress(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;

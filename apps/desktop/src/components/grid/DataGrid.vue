@@ -149,6 +149,7 @@ import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowSho
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
+import { largeValueCellKey, largeValueCellMap } from "@/lib/dataGrid/dataGridLargeValues";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, isDataGridPrefixAppend, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
@@ -194,6 +195,7 @@ import {
 import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyMetadataRequestCurrent, foreignKeyNavigationTarget, foreignKeySourceColumnName, foreignKeyTableIdentity, type ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
 
 import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/useDataGridExport";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
@@ -254,6 +256,7 @@ import { dataGridConditionColumnOptions, dataGridConditionIdentifierQuote } from
 import { isMacOS } from "@/lib/backend/platform";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
+import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
@@ -281,6 +284,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const rowNumberWidth = ref(DATA_GRID_ROW_NUM_WIDTH);
+const largeValueResolutionVersion = ref(0);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
 const booleanCellsUseCheckbox = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode === "checkbox");
@@ -3046,7 +3050,7 @@ const {
   onEditKeydown,
   addRows: addEditorRows,
   appendPastedRowsToNewRow,
-  cloneRow,
+  cloneRow: cloneEditorRow,
   showDeleteRowConfirm,
   requestDeleteRow,
   confirmDeleteRow,
@@ -3054,7 +3058,7 @@ const {
   restoreRows,
   pendingDeleteRowIds,
   requestDeleteRows,
-  cloneRows,
+  cloneRows: cloneEditorRows,
   saveChanges,
   discardChanges,
   canUndoPendingChange,
@@ -3198,15 +3202,17 @@ function cellUsesExpandedEditor(rowId: number | undefined, columnIndex: number):
   return !!expandedCellEditor.value && expandedCellEditor.value.rowId === rowId && expandedCellEditor.value.col === columnIndex;
 }
 
-function startCellEdit(rowId: number, columnIndex: number, expanded: boolean) {
+async function startCellEdit(rowId: number, columnIndex: number, expanded: boolean) {
+  if (!(await hydrateLargeValueCell(rowId, columnIndex))) return;
   expandedCellEditor.value = expanded ? { rowId, col: columnIndex } : null;
   startEdit(rowId, columnIndex);
 }
 
-function startDomCellEdit(rowId: number, columnIndex: number, displayText: string, event: MouseEvent) {
+async function startDomCellEdit(rowId: number, columnIndex: number, displayText: string, event: MouseEvent) {
+  if (!(await hydrateLargeValueCell(rowId, columnIndex))) return;
   const item = getRowItem(rowId);
   const editText = item ? cellEditorTextForValue(item.data[columnIndex], columnIndex) : displayText;
-  startCellEdit(rowId, columnIndex, cellEditContentNeedsExpandedEditor({ displayText, editText, target: event.currentTarget }));
+  await startCellEdit(rowId, columnIndex, cellEditContentNeedsExpandedEditor({ displayText, editText, target: event.currentTarget }));
 }
 
 function showReadonlyCellDetailsOnDblClick(item: RowItem, rowIndex: number, visibleColIdx: number, actualColIdx: number): boolean {
@@ -3215,10 +3221,10 @@ function showReadonlyCellDetailsOnDblClick(item: RowItem, rowIndex: number, visi
   return true;
 }
 
-function onDomCellDblClick(item: RowItem, rowIndex: number, visibleColIdx: number, actualColIdx: number, event: MouseEvent) {
+async function onDomCellDblClick(item: RowItem, rowIndex: number, visibleColIdx: number, actualColIdx: number, event: MouseEvent) {
   if (booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && canEditCellItem(item, actualColIdx)) return;
   if (showReadonlyCellDetailsOnDblClick(item, rowIndex, visibleColIdx, actualColIdx)) return;
-  startDomCellEdit(item.id, actualColIdx, formatCellCached(item.data[actualColIdx], actualColIdx), event);
+  await startDomCellEdit(item.id, actualColIdx, formatCellCached(item.data[actualColIdx], actualColIdx), event);
 }
 
 function cellEditContentNeedsExpandedEditor(options: { displayText: string; editText: string; target: EventTarget | null }): boolean {
@@ -3640,6 +3646,7 @@ const displayRowIndexByIdLookup = computed(() => {
 });
 
 function rowItemFromDisplayRef(ref: DisplayRowRef): RowItem {
+  largeValueResolutionVersion.value;
   if (ref.isNew) {
     return {
       ...ref,
@@ -3819,6 +3826,215 @@ const visibleDisplayItems = computed<RowItem[]>(() =>
     isDirtyCol: visibleDirtyColumns(item.isDirtyCol),
   })),
 );
+
+type ResolvedLargeValueCells = Map<number, Map<number, CellValue>>;
+type LargeValueCellRequest = {
+  item: RowItem;
+  sourceIndex: number;
+  columnIndex: number;
+  originalBytes: number;
+};
+
+const LARGE_VALUE_FETCH_MAX_ROWS = 200;
+const LARGE_VALUE_FETCH_TARGET_BYTES = 64 * 1024 * 1024;
+const pendingLargeValueHydrations = new Map<string, Promise<boolean>>();
+const largeValueCellsByKey = computed(() => largeValueCellMap(props.result));
+
+function isLargeValuePreview(item: RowItem | undefined, columnIndex: number): boolean {
+  if (!item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return false;
+  return largeValueCellsByKey.value.has(largeValueCellKey(item.sourceIndex, columnIndex));
+}
+
+function normalizedLargeValueIdentityPart(value: CellValue): string {
+  if (value === null) return "null";
+  return `${typeof value}:${JSON.stringify(value)}`;
+}
+
+function largeValueIdentityKey(row: readonly CellValue[], indexes: readonly number[]): string {
+  return indexes.map((index) => normalizedLargeValueIdentityPart(row[index] ?? null)).join("\u001f");
+}
+
+function largeValueSourceColumnIndex(columnName: string): number {
+  const normalized = columnName.toLocaleLowerCase();
+  return resultSourceColumns.value.findIndex((column) => column.toLocaleLowerCase() === normalized);
+}
+
+function chunkLargeValueRequests(requests: LargeValueCellRequest[]): LargeValueCellRequest[][] {
+  const chunks: LargeValueCellRequest[][] = [];
+  let chunk: LargeValueCellRequest[] = [];
+  let bytes = 0;
+  for (const request of requests) {
+    if (chunk.length > 0 && (chunk.length >= LARGE_VALUE_FETCH_MAX_ROWS || bytes + request.originalBytes > LARGE_VALUE_FETCH_TARGET_BYTES)) {
+      chunks.push(chunk);
+      chunk = [];
+      bytes = 0;
+    }
+    chunk.push(request);
+    bytes += request.originalBytes;
+  }
+  if (chunk.length > 0) chunks.push(chunk);
+  return chunks;
+}
+
+async function largeValueRowPredicate(item: RowItem, primaryKeyIndexes: number[]): Promise<string> {
+  const originalRow = item.sourceIndex === undefined ? undefined : props.result.rows[item.sourceIndex];
+  if (!originalRow) throw new Error(t("grid.largeValueRowUnavailable"));
+  const tableMeta = props.tableMeta!;
+  const conditions = await Promise.all(
+    tableMeta.primaryKeys.map((columnName, index) =>
+      buildDataGridContextFilterCondition({
+        databaseType: resolvedDatabaseType.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+        columnName,
+        columnInfo: tableMeta.columns.find((column) => column.name.toLocaleLowerCase() === columnName.toLocaleLowerCase()),
+        mode: "equals",
+        value: originalRow[primaryKeyIndexes[index]!] ?? null,
+      }),
+    ),
+  );
+  if (conditions.some((condition) => !condition)) throw new Error(t("grid.largeValueRowUnavailable"));
+  return conditions.map((condition) => `(${condition})`).join(" AND ");
+}
+
+async function fetchLargeValueRequestChunk(columnIndex: number, requests: LargeValueCellRequest[], primaryKeyIndexes: number[], resolved: ResolvedLargeValueCells) {
+  const tableMeta = props.tableMeta!;
+  const sourceColumn = resultSourceColumns.value[columnIndex];
+  if (!sourceColumn) throw new Error(t("grid.largeValueColumnUnavailable"));
+  const predicates = await Promise.all(requests.map((request) => largeValueRowPredicate(request.item, primaryKeyIndexes)));
+  const selectedColumns = [...new Set([...tableMeta.primaryKeys, sourceColumn])];
+  const sql = await buildTableSelectSql({
+    databaseType: resolvedDatabaseType.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+    database: tableMeta.database,
+    schema: tableMeta.schema,
+    tableName: tableMeta.tableName,
+    tableType: tableMeta.tableType,
+    catalog: tableMeta.catalog,
+    columns: selectedColumns,
+    primaryKeys: tableMeta.primaryKeys,
+    whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
+    limit: requests.length,
+    offset: 0,
+  });
+  const connection = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
+  const results = await api.executeMulti(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, undefined, uuid(), {
+    maxRows: requests.length,
+    fetchSize: requests.length,
+    timeoutSecs: queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs),
+  });
+  const result = results[0];
+  if (!result || result.execution_error) {
+    throw new Error(result?.error ? translateBackendError(t, result.error) : String(result?.rows?.[0]?.[0] ?? t("grid.largeValueLoadFailed")));
+  }
+  const resultColumnIndexes = selectedColumns.map((column) => {
+    const normalized = column.toLocaleLowerCase();
+    return result.columns.findIndex((resultColumn) => resultColumn.toLocaleLowerCase() === normalized);
+  });
+  if (resultColumnIndexes.some((index) => index < 0)) throw new Error(t("grid.largeValueColumnUnavailable"));
+  const resultPrimaryKeyIndexes = resultColumnIndexes.slice(0, tableMeta.primaryKeys.length);
+  const resultValueIndex = resultColumnIndexes[selectedColumns.indexOf(sourceColumn)];
+  const valuesByIdentity = new Map(result.rows.map((row) => [largeValueIdentityKey(row, resultPrimaryKeyIndexes), row[resultValueIndex!] ?? null]));
+  for (const request of requests) {
+    const originalRow = props.result.rows[request.sourceIndex];
+    const identity = originalRow ? largeValueIdentityKey(originalRow, primaryKeyIndexes) : "";
+    if (!valuesByIdentity.has(identity)) throw new Error(t("grid.largeValueRowUnavailable"));
+    const rowValues = resolved.get(request.item.id) ?? new Map<number, CellValue>();
+    rowValues.set(columnIndex, valuesByIdentity.get(identity) ?? null);
+    resolved.set(request.item.id, rowValues);
+  }
+}
+
+async function resolveLargeValueCells(rowIds: number[], columnIndexes: number[]): Promise<ResolvedLargeValueCells> {
+  const resolved: ResolvedLargeValueCells = new Map();
+  const requestedColumns = new Set(columnIndexes);
+  const requestsByColumn = new Map<number, LargeValueCellRequest[]>();
+  for (const rowId of new Set(rowIds)) {
+    const item = getRowItem(rowId);
+    if (!item || item.sourceIndex === undefined) continue;
+    for (const columnIndex of requestedColumns) {
+      if (!isLargeValuePreview(item, columnIndex)) continue;
+      const metadata = largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex));
+      if (!metadata) continue;
+      const requests = requestsByColumn.get(columnIndex) ?? [];
+      requests.push({ item, sourceIndex: item.sourceIndex, columnIndex, originalBytes: metadata.original_bytes });
+      requestsByColumn.set(columnIndex, requests);
+    }
+  }
+  if (requestsByColumn.size === 0) return resolved;
+  if (resolvedDatabaseType.value !== "mysql" || !props.connectionId || !props.tableMeta?.tableName || props.tableMeta.primaryKeys.length === 0) {
+    throw new Error(t("grid.largeValueNeedsStableKey"));
+  }
+  const primaryKeyIndexes = props.tableMeta.primaryKeys.map(largeValueSourceColumnIndex);
+  if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(t("grid.largeValueNeedsStableKey"));
+
+  for (const [columnIndex, requests] of requestsByColumn) {
+    for (const chunk of chunkLargeValueRequests(requests)) {
+      await fetchLargeValueRequestChunk(columnIndex, chunk, primaryKeyIndexes, resolved);
+    }
+  }
+  return resolved;
+}
+
+function reportLargeValueLoadError(error: unknown) {
+  toast(t("grid.largeValueLoadFailedWithMessage", { message: translateBackendError(t, error) }), 5000);
+}
+
+async function cloneRow(rowId: number) {
+  try {
+    const resolved = await resolveLargeValueCells(
+      [rowId],
+      props.result.columns.map((_, index) => index),
+    );
+    cloneEditorRow(rowId, resolved.get(rowId));
+  } catch (error) {
+    reportLargeValueLoadError(error);
+  }
+}
+
+async function cloneRows(rowIds: number[]) {
+  try {
+    const resolved = await resolveLargeValueCells(
+      rowIds,
+      props.result.columns.map((_, index) => index),
+    );
+    cloneEditorRows(rowIds, resolved);
+  } catch (error) {
+    reportLargeValueLoadError(error);
+  }
+}
+
+async function hydrateLargeValueCell(rowId: number, columnIndex: number): Promise<boolean> {
+  const item = getRowItem(rowId);
+  if (!isLargeValuePreview(item, columnIndex) || item?.sourceIndex === undefined) return true;
+  const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
+  const pending = pendingLargeValueHydrations.get(hydrationKey);
+  if (pending) return pending;
+  const hydration = (async () => {
+    try {
+      const resolved = await resolveLargeValueCells([rowId], [columnIndex]);
+      const value = resolved.get(rowId)?.get(columnIndex);
+      if (value === undefined && !resolved.get(rowId)?.has(columnIndex)) return false;
+      const row = [...(props.result.rows[item.sourceIndex!] ?? [])];
+      row[columnIndex] = value ?? null;
+      const rows = props.result.rows.slice();
+      rows[item.sourceIndex!] = row;
+      props.result.rows = rows;
+      props.result.large_value_cells = props.result.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
+      largeValueResolutionVersion.value += 1;
+      clearCellFormatCache();
+      queryStore.invalidateResultEstimateForPayload(props.result);
+      return true;
+    } catch (error) {
+      reportLargeValueLoadError(error);
+      return false;
+    } finally {
+      pendingLargeValueHydrations.delete(hydrationKey);
+    }
+  })();
+  pendingLargeValueHydrations.set(hydrationKey, hydration);
+  return hydration;
+}
+
 const exportContextCell = computed(() => {
   if (!contextCell.value) return null;
   const visibleCol = visibleColumnIndexes.value.indexOf(contextCell.value.col);
@@ -4192,6 +4408,7 @@ function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetai
     commentByColumn: columnCommentMap.value,
     displayValue: (value, index) => formatCellCached(value, index),
     isEditable: canEditGridCellDetail({ canEditCell: canEditCellItem(item, columnIndex), isDraft: !!item.isDraft }),
+    isValuePreviewTruncated: isLargeValuePreview(item, columnIndex),
   });
 }
 
@@ -4260,6 +4477,7 @@ const rowDetail = computed(() => {
     commentByColumn: columnCommentMap.value,
     displayValue: (value, index) => formatCellCached(value, index),
     isEditableColumn: (columnIndex) => canEditGridCellDetail({ canEditCell: canEditCellItem(item, columnIndex), isDraft: !!item.isDraft }),
+    isValuePreviewTruncated: (columnIndex) => isLargeValuePreview(item, columnIndex),
   });
 });
 
@@ -4274,6 +4492,7 @@ const columnDetail = computed(() => {
         rowId: item.id,
         row: item.data,
         isEditable: canEditGridCellDetail({ canEditCell: canEditCellItem(item, columnIndex), isDraft: !!item.isDraft }),
+        isValuePreviewTruncated: isLargeValuePreview(item, columnIndex),
       })),
     columns: props.result.columns,
     columnIndex,
@@ -4332,7 +4551,7 @@ watch(activeCellDetailTabs, (tabs) => {
 
 watch(activeCellDetailTab, (tab) => {
   if (tab === "valueEditor") {
-    startDetailEdit();
+    void startDetailEdit();
   } else {
     resetDetailEdit();
   }
@@ -4393,6 +4612,8 @@ const detailSqlConditionKey = computed(() => {
 });
 
 function canCopyPreparedDetailSqlCondition(): boolean {
+  const detail = activeCellDetail.value;
+  if (detail && isLargeValuePreview(getRowItem(detail.rowId), detail.colIndex)) return false;
   return detailSqlConditionCopy.value.ready && detailSqlConditionCopy.value.key === detailSqlConditionKey.value;
 }
 
@@ -4574,7 +4795,10 @@ function toggleCellDetailMetadataCollapsed() {
   settingsStore.updateEditorSettings({ cellDetailMetadataCollapsed: !cellDetailMetadataCollapsed.value });
 }
 
-function startDetailEdit() {
+async function startDetailEdit() {
+  const initialDetail = activeCellDetail.value;
+  if (!initialDetail || !initialDetail.isEditable) return;
+  if (!(await hydrateLargeValueCell(initialDetail.rowId, initialDetail.colIndex))) return;
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
   warnFormattedJsonEditIfNeeded(detail);
@@ -4691,6 +4915,10 @@ function setDetailNull() {
 
 function applyColumnSort(column: string, columnIndex: number, direction: "asc" | "desc" | null, mode: DataGridSortMode = "database") {
   if (getIsResizing()) return;
+  if (mode === "local" && direction && props.result.large_value_cells?.some((cell) => cell.column_index === columnIndex)) {
+    toast(t("grid.largeValueLocalSortUnavailable"), 5000);
+    return;
+  }
   if (mode === "database" && infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   } else {
@@ -4727,6 +4955,9 @@ function applyContextSort(direction: "asc" | "desc" | null, mode: DataGridSortMo
 
 async function contextFilterCondition(mode: FilterMode): Promise<string | null> {
   if (!contextColumn.value) return null;
+  if (mode !== "is-null" && mode !== "is-not-null" && contextCell.value) {
+    if (!(await hydrateLargeValueCell(contextCell.value.rowId, contextCell.value.col))) return null;
+  }
   return (
     (await buildDataGridContextFilterCondition({
       databaseType: resolvedDatabaseType.value,
@@ -4846,6 +5077,7 @@ async function applyWhereFilter() {
 
 const CELL_FORMAT_CACHE_LIMIT = 20_000;
 const CELL_FORMAT_CACHE_PRUNE_COUNT = 5_000;
+const CELL_FORMAT_CACHE_STRING_KEY_MAX_LENGTH = 512;
 
 const resolvedColumnFormatters = computed(() => props.result.columns.map((_, columnIndex) => columnFormatter(columnIndex)));
 const columnFormatterSignatures = computed(() => resolvedColumnFormatters.value.map(formatterSignature));
@@ -4910,6 +5142,13 @@ function formatCellCached(value: CellValue, columnIndex?: number): string {
       objectCellFormatCache.set(objectValue, new Map([[cacheColumn, display]]));
     }
     return display;
+  }
+
+  // Avoid retaining a second copy of large text values in Map keys. Long
+  // values are truncated for display anyway, so formatting them on demand is
+  // cheaper than keeping the full source string in the primitive cache.
+  if (typeof value === "string" && value.length > CELL_FORMAT_CACHE_STRING_KEY_MAX_LENGTH) {
+    return formatCell(value, columnIndex);
   }
 
   const key = primitiveCellFormatKey(value, columnIndex);
@@ -5461,7 +5700,7 @@ function onCanvasContext(event: MouseEvent) {
   onCellContext(item.id, item.displayIndex, actualColIdx, hit.visibleColIdx, event);
 }
 
-function onCanvasDblClick(event: MouseEvent) {
+async function onCanvasDblClick(event: MouseEvent) {
   const hit = canvasHitTest(event);
   if (!hit) return;
   if (hit.rowNumber) {
@@ -5474,7 +5713,7 @@ function onCanvasDblClick(event: MouseEvent) {
   if (!item || actualColIdx === undefined) return;
   if (showReadonlyCellDetailsOnDblClick(item, item.displayIndex, hit.visibleColIdx, actualColIdx)) return;
   if (booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && canEditCellItem(item, actualColIdx)) return;
-  startCellEdit(item.id, actualColIdx, canvasCellContentOverflows(item, actualColIdx, hit.visibleColIdx));
+  await startCellEdit(item.id, actualColIdx, canvasCellContentOverflows(item, actualColIdx, hit.visibleColIdx));
 }
 
 function canvasCellContentOverflows(item: RowItem, actualColIdx: number, visibleColIdx: number): boolean {
@@ -5772,6 +6011,7 @@ onMounted(() => {
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
   dataGridRuntimeScope.dispose();
+  clearCellFormatCache();
   pauseCanvasGridWork();
   canvasRuntime.dispose();
   gridScrollbarsRuntime.dispose();
@@ -5881,6 +6121,7 @@ const {
   getRowItem: (rowId: number) => visibleDisplayItems.value.find((item) => item.id === rowId),
   selectedRowIds,
   hasRowSelection,
+  resolveSourceValues: resolveLargeValueCells,
   fullExportResult: props.fullExportResult,
   queryResultExportRequest: props.queryResultExportRequest,
   hasCompleteLocalResult,
@@ -6057,6 +6298,8 @@ function showCellDetails(rowIndex: number, colIndex: number) {
   detailCell.value = { rowIndex, col: colIndex };
   activeCellDetailTab.value = defaultCellDetailTab();
   showCellDetail.value = true;
+  const item = displayItemAt(rowIndex);
+  if (item && isLargeValuePreview(item, colIndex)) void hydrateLargeValueCell(item.id, colIndex);
 }
 
 function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
@@ -6069,6 +6312,8 @@ function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, 
 function openCellDetailDialog(rowIndex: number, columnIndex: number) {
   cellDetailDialogTarget.value = { rowIndex, col: columnIndex };
   cellDetailDialogOpen.value = true;
+  const item = displayItemAt(rowIndex);
+  if (item && isLargeValuePreview(item, columnIndex)) void hydrateLargeValueCell(item.id, columnIndex);
 }
 
 function openColumnDetailDialog(columnIndex: number) {
@@ -6173,14 +6418,14 @@ function showTransposeCellDetails(rowIndex: number, actualColIdx: number) {
   gridRef.value?.focus({ preventScroll: true });
 }
 
-function onTransposeCellDblClick(rowIndex: number, actualColIdx: number, displayText: string, event: MouseEvent) {
+async function onTransposeCellDblClick(rowIndex: number, actualColIdx: number, displayText: string, event: MouseEvent) {
   const item = displayItemAt(rowIndex);
   if (!item) return;
   if (!canEditCellItem(item, actualColIdx)) {
     showTransposeCellDetails(rowIndex, actualColIdx);
     return;
   }
-  startDomCellEdit(item.id, actualColIdx, displayText, event);
+  await startDomCellEdit(item.id, actualColIdx, displayText, event);
 }
 
 function onTransposeCellContext(rowIndex: number, actualColIdx: number, event: MouseEvent) {
@@ -6505,10 +6750,10 @@ function generateSelectionMenuItems(disabled: boolean): ContextMenuItem[] {
   ];
 }
 
-function cutSelection() {
+async function cutSelection() {
   if (!props.editable || !selectedRange.value) return;
-  void copyWithExtractor("tsv");
   const range = selectedRange.value;
+  if (!(await copyWithExtractor("tsv"))) return;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
   beginBatch();
   try {
@@ -6757,7 +7002,7 @@ function editSelectedCell(): boolean {
   const item = displayItemAt(position.rowIndex);
   const actualColIndex = actualColumnIndex(position.colIndex);
   if (!item || !canEditCellItem(item, actualColIndex)) return false;
-  startEdit(item.id, actualColIndex);
+  void startCellEdit(item.id, actualColIndex, false);
   return true;
 }
 
@@ -6775,10 +7020,10 @@ function copyCurrentRow(): boolean {
   const rowIds = selectedOrCurrentRowIds().filter((rowId) => !getRowItem(rowId)?.isDraft);
   if (rowIds.length === 0) return false;
   if (rowIds.length === 1) {
-    cloneRow(rowIds[0]);
+    void cloneRow(rowIds[0]);
     return true;
   }
-  cloneRows(rowIds);
+  void cloneRows(rowIds);
   return true;
 }
 
@@ -6820,7 +7065,7 @@ async function commitEditFromCellBlur() {
     await commitEditFromBlur({ promoteDraft: false });
     nextTick(() => {
       const item = getRowItem(target.rowId);
-      if (item && canEditCellItem(item, target.col)) startEdit(target.rowId, target.col);
+      if (item && canEditCellItem(item, target.col)) void startCellEdit(target.rowId, target.col, false);
     });
     return;
   }
@@ -7019,7 +7264,7 @@ async function onGridKeydown(event: KeyboardEvent) {
   if (clipboardShortcut(event, "x")) {
     if (!props.editable || !selectedRange.value) return;
     event.preventDefault();
-    cutSelection();
+    await cutSelection();
     return;
   }
   if (clipboardShortcut(event, "v")) {
@@ -7032,24 +7277,28 @@ async function onGridKeydown(event: KeyboardEvent) {
   }
 }
 
-function copyDetailValue() {
+async function copyDetailValue() {
+  const initialDetail = activeCellDetail.value;
+  if (!initialDetail || !(await hydrateLargeValueCell(initialDetail.rowId, initialDetail.colIndex))) return;
   const detail = activeCellDetail.value;
   if (!detail) return;
   const text = detail.value === null ? "" : displayCellValue(detail.value);
   copyText(text);
 }
 
-function copyDetailFormattedJson() {
+async function copyDetailFormattedJson() {
+  const initialDetail = activeCellDetail.value;
+  if (!initialDetail || !(await hydrateLargeValueCell(initialDetail.rowId, initialDetail.colIndex))) return;
   const detail = activeCellDetail.value;
   if (!detail?.formattedJson) return;
   copyText(detail.formattedJson);
 }
 
-function copyDetailCurrentValue() {
+async function copyDetailCurrentValue() {
   if (sideDetailJsonView.value && activeCellDetail.value?.formattedJson) {
-    copyDetailFormattedJson();
+    await copyDetailFormattedJson();
   } else {
-    copyDetailValue();
+    await copyDetailValue();
   }
 }
 
@@ -7059,7 +7308,9 @@ function copyDetailColumnName() {
 }
 
 function canDownloadDetailBinaryValue(detail: DataGridCellDetail | null): boolean {
-  return !!detail && canDownloadBinaryCellValue(detail.value, detail.type);
+  if (!detail) return false;
+  const item = getRowItem(detail.rowId);
+  return (isLargeValuePreview(item, detail.colIndex) && isBinaryCellColumnType(detail.type)) || canDownloadBinaryCellValue(detail.value, detail.type);
 }
 
 function canImportDetailBinaryValue(detail: DataGridCellDetail | null): boolean {
@@ -7106,10 +7357,13 @@ function downloadCellBinaryValue(rowIndex: number, columnIndex: number, mode: Bi
 async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) {
   if (!detail || !canDownloadDetailBinaryValue(detail)) return;
   try {
-    const payload = binaryCellDownloadPayload(detail.value, mode, detail.type);
+    if (!(await hydrateLargeValueCell(detail.rowId, detail.colIndex))) return;
+    const resolvedDetail = cellDetailFor(detail.rowNumber - 1, detail.colIndex);
+    if (!resolvedDetail) return;
+    const payload = binaryCellDownloadPayload(resolvedDetail.value, mode, resolvedDetail.type);
     const fileName = binaryCellDownloadFileName({
-      column: detail.column,
-      rowNumber: detail.rowNumber,
+      column: resolvedDetail.column,
+      rowNumber: resolvedDetail.rowNumber,
       mode,
       extension: payload.extension,
     });
@@ -7160,35 +7414,102 @@ async function openDialogCellInSidePanel() {
   showCellDetails(detail.rowNumber - 1, detail.colIndex);
   cellDetailDialogOpen.value = false;
   await nextTick();
-  if (detail.isEditable) startDetailEdit();
+  if (detail.isEditable) await startDetailEdit();
 }
 
-function copyRowDetailJson() {
-  const detail = rowDetail.value;
-  if (!detail) return;
-  copyText(dataGridRowDetailJson(detail));
+async function resolvedRowDetailForCopy() {
+  if (rowDetailDialogRowId.value === null) return null;
+  const item = getRowItem(rowDetailDialogRowId.value);
+  if (!item) return null;
+  const resolved = await resolveLargeValueCells([item.id], visibleColumnIndexes.value);
+  const data = [...item.data];
+  for (const [columnIndex, value] of resolved.get(item.id) ?? []) data[columnIndex] = value;
+  return buildDataGridRowDetail({
+    rowIndex: item.displayIndex,
+    rowId: item.id,
+    row: data,
+    columns: props.result.columns,
+    columnIndexes: visibleColumnIndexes.value,
+    typeByColumn: columnTypeMap.value,
+    resultColumnTypes: props.result.column_types,
+    commentByColumn: columnCommentMap.value,
+    displayValue: (value, index) => formatCellCached(value, index),
+    isEditableColumn: (columnIndex) => canEditGridCellDetail({ canEditCell: canEditCellItem(item, columnIndex), isDraft: !!item.isDraft }),
+  });
 }
 
-function copyRowDetailTsv() {
-  const detail = rowDetail.value;
-  if (!detail) return;
-  copyText(dataGridRowDetailTsv(detail));
+async function resolvedColumnDetailForCopy() {
+  if (columnDetailDialogColumnIndex.value === null) return null;
+  const columnIndex = columnDetailDialogColumnIndex.value;
+  const items = displayItems.value.filter((item) => !item.isDraft);
+  const resolved = await resolveLargeValueCells(
+    items.map((item) => item.id),
+    [columnIndex],
+  );
+  return buildDataGridColumnDetail({
+    rows: items.map((item) => {
+      const row = [...item.data];
+      if (resolved.get(item.id)?.has(columnIndex)) row[columnIndex] = resolved.get(item.id)!.get(columnIndex) ?? null;
+      return {
+        rowIndex: item.displayIndex,
+        rowId: item.id,
+        row,
+        isEditable: canEditGridCellDetail({ canEditCell: canEditCellItem(item, columnIndex), isDraft: !!item.isDraft }),
+      };
+    }),
+    columns: props.result.columns,
+    columnIndex,
+    typeByColumn: columnTypeMap.value,
+    resultColumnTypes: props.result.column_types,
+    commentByColumn: columnCommentMap.value,
+    displayValue: (value, index) => formatCellCached(value, index),
+  });
 }
 
-function copyRowDetailFieldValue(field: DataGridCellDetail) {
-  copyText(field.value === null ? "" : displayCellValue(field.value));
+async function copyRowDetailJson() {
+  try {
+    const detail = await resolvedRowDetailForCopy();
+    if (!detail) return;
+    copyText(dataGridRowDetailJson(detail));
+  } catch (error) {
+    reportLargeValueLoadError(error);
+  }
 }
 
-function copyColumnDetailJson() {
-  const detail = columnDetail.value;
-  if (!detail) return;
-  copyText(dataGridColumnDetailJson(detail));
+async function copyRowDetailTsv() {
+  try {
+    const detail = await resolvedRowDetailForCopy();
+    if (!detail) return;
+    copyText(dataGridRowDetailTsv(detail));
+  } catch (error) {
+    reportLargeValueLoadError(error);
+  }
 }
 
-function copyColumnDetailTsv() {
-  const detail = columnDetail.value;
-  if (!detail) return;
-  copyText(dataGridColumnDetailTsv(detail));
+async function copyRowDetailFieldValue(field: DataGridCellDetail) {
+  if (!(await hydrateLargeValueCell(field.rowId, field.colIndex))) return;
+  const resolved = cellDetailFor(field.rowNumber - 1, field.colIndex);
+  if (resolved) copyText(resolved.value === null ? "" : displayCellValue(resolved.value));
+}
+
+async function copyColumnDetailJson() {
+  try {
+    const detail = await resolvedColumnDetailForCopy();
+    if (!detail) return;
+    copyText(dataGridColumnDetailJson(detail));
+  } catch (error) {
+    reportLargeValueLoadError(error);
+  }
+}
+
+async function copyColumnDetailTsv() {
+  try {
+    const detail = await resolvedColumnDetailForCopy();
+    if (!detail) return;
+    copyText(dataGridColumnDetailTsv(detail));
+  } catch (error) {
+    reportLargeValueLoadError(error);
+  }
 }
 
 function copyColumnDetailColumnName() {
@@ -7197,8 +7518,10 @@ function copyColumnDetailColumnName() {
   copyText(detail.column);
 }
 
-function copyColumnDetailFieldValue(field: DataGridCellDetail) {
-  copyText(field.value === null ? "" : displayCellValue(field.value));
+async function copyColumnDetailFieldValue(field: DataGridCellDetail) {
+  if (!(await hydrateLargeValueCell(field.rowId, field.colIndex))) return;
+  const resolved = cellDetailFor(field.rowNumber - 1, field.colIndex);
+  if (resolved) copyText(resolved.value === null ? "" : displayCellValue(resolved.value));
 }
 
 const transposeRecordWidths = ref<number[]>([]);
@@ -8337,7 +8660,7 @@ async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) 
   const association = cellForeignKeyAssociation(actualColIdx);
   const item = displayItems.value[rowIndex];
   if (!association || !item || !props.connectionId) return;
-  const cells = foreignKeyAssociationCells({
+  let cells = foreignKeyAssociationCells({
     association,
     context: props.context,
     resultColumns: props.result.columns,
@@ -8346,6 +8669,15 @@ async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) 
   });
   if (!cells) return;
   try {
+    const resolved = await resolveLargeValueCells(
+      [item.id],
+      cells.map((cell) => cell.columnIndex),
+    );
+    const resolvedRow = resolved.get(item.id);
+    if (resolvedRow) {
+      cells = cells.map((cell) => (resolvedRow.has(cell.columnIndex) ? { ...cell, value: resolvedRow.get(cell.columnIndex) ?? null } : cell));
+      if (cells.some((cell) => cell.value === null)) throw new Error(t("grid.largeValueRowUnavailable"));
+    }
     const conditions = await Promise.all(
       cells.map(({ foreignKey, value }) =>
         buildColumnValueFilterCondition({
@@ -9003,7 +9335,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       labels: rowLabels,
       icons: { clone: CopyPlus, restore: Undo2, delete: Trash2 },
       actions: {
-        clone: () => (isMultiRow.value ? cloneRows(affectedRowIds()) : row && cloneRow(row.id)),
+        clone: () => void (isMultiRow.value ? cloneRows(affectedRowIds()) : row && cloneRow(row.id)),
         restore: () => (isMultiRow.value ? restoreRows(affectedRowIds()) : row && restoreRow(row.id)),
         delete: () => (isMultiRow.value ? requestDeleteRows(deletableRowIds(affectedRowIds())) : row && requestDeleteRow(row.id)),
       },

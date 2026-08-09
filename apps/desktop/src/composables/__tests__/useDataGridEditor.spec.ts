@@ -243,4 +243,13 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
       ["Grace", null, null],
     ]);
   });
+
+  it("uses resolved full values instead of preview values when cloning", () => {
+    const editor = createEditor();
+    editor.newRows.value = [["Ada", "preview...", "Lovelace"]];
+
+    editor.cloneRow(-1, new Map([[1, "full payload"]]));
+
+    expect(editor.newRows.value[1]).toEqual(["Ada", "full payload", "Lovelace"]);
+  });
 });

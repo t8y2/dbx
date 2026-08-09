@@ -29,6 +29,7 @@ import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
+import ExtensionDetailsDialog from "@/components/objects/ExtensionDetailsDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -44,7 +45,7 @@ import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActio
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
-import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
@@ -79,6 +80,8 @@ const sidebarDangerDialogConfirming = ref(false);
 const sidebarTreeItemDialogController = ref<Record<string, any> | null>(null);
 const sidebarInstallExtensionTarget = ref<TreeNode | null>(null);
 const sidebarInstallExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
+const sidebarExtensionDetailsTarget = ref<TreeNode | null>(null);
+const sidebarExtensionDetailsDialogRef = ref<InstanceType<typeof ExtensionDetailsDialog> | null>(null);
 const sidebarTreeRuntimeHostRef = ref<SidebarTreeRuntimeHostInstance | null>(null);
 const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
@@ -92,6 +95,8 @@ const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
 const sidebarVisibleDatabasesOpen = ref(false);
 const sidebarVisibleSchemasTarget = ref<TreeNode | null>(null);
 const sidebarVisibleSchemasOpen = ref(false);
+const sidebarVisibleNacosNamespacesTarget = ref<TreeNode | null>(null);
+const sidebarVisibleNacosNamespacesOpen = ref(false);
 const sidebarTableNameFilterTarget = ref<TreeNode | null>(null);
 const sidebarTableNameFilterOpen = ref(false);
 const tableNameFilterIncludeDraft = ref("");
@@ -1284,6 +1289,12 @@ async function openSidebarInstallExtension(node: TreeNode) {
   sidebarInstallExtensionDialogRef.value?.show();
 }
 
+async function openSidebarExtensionDetails(node: TreeNode) {
+  sidebarExtensionDetailsTarget.value = createSidebarActionTarget(node);
+  await nextTick();
+  sidebarExtensionDetailsDialogRef.value?.show();
+}
+
 function beginSidebarAction(): number {
   sidebarActionGeneration += 1;
   sidebarDdlOpen.value = false;
@@ -1291,12 +1302,14 @@ function beginSidebarAction(): number {
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
   sidebarVisibleSchemasOpen.value = false;
+  sidebarVisibleNacosNamespacesOpen.value = false;
   sidebarTableNameFilterOpen.value = false;
   sidebarDdlTarget.value = null;
   sidebarObjectSourceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarVisibleNacosNamespacesTarget.value = null;
   sidebarTableNameFilterTarget.value = null;
   return sidebarActionGeneration;
 }
@@ -1380,6 +1393,13 @@ function openSidebarVisibleSchemas(node: TreeNode) {
   beginSidebarAction();
   sidebarVisibleSchemasTarget.value = createSidebarActionTarget({ ...node, database });
   sidebarVisibleSchemasOpen.value = true;
+}
+
+function openSidebarVisibleNacosNamespaces(node: TreeNode) {
+  if (node.type !== "connection" || !node.connectionId || store.getConfig(node.connectionId)?.db_type !== "nacos") return;
+  beginSidebarAction();
+  sidebarVisibleNacosNamespacesTarget.value = createSidebarActionTarget(node);
+  sidebarVisibleNacosNamespacesOpen.value = true;
 }
 
 function tableNameFilterScopeForNode(node: TreeNode): string | null {
@@ -1482,6 +1502,10 @@ watch(sidebarVisibleDatabasesOpen, (open) => {
 
 watch(sidebarVisibleSchemasOpen, (open) => {
   if (!open) sidebarVisibleSchemasTarget.value = null;
+});
+
+watch(sidebarVisibleNacosNamespacesOpen, (open) => {
+  if (!open) sidebarVisibleNacosNamespacesTarget.value = null;
 });
 
 watch(sidebarTableNameFilterOpen, (open) => {
@@ -1707,6 +1731,7 @@ onUnmounted(() => {
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarVisibleNacosNamespacesTarget.value = null;
   sidebarTreeItemDialogController.value = null;
   sidebarDangerDialogRequest.value = null;
   resetSidebarTreeDialogState();
@@ -1746,11 +1771,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"
+      @open-visible-nacos-namespaces="openSidebarVisibleNacosNamespaces"
       @open-table-name-filters="openSidebarTableNameFilters"
       @request-group-rename="startRenamingCreatedGroup"
       @open-danger-dialog="openSidebarDangerDialog"
       @open-dialog-controller="updateSidebarTreeItemDialogController"
       @open-install-extension="openSidebarInstallExtension"
+      @open-extension-details="openSidebarExtensionDetails"
     />
     <div class="connection-tree-search sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
@@ -1986,6 +2013,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :connection-name="sidebarVisibleSchemasTarget.label"
       :database="sidebarVisibleSchemasTarget.database"
     />
+
+    <SidebarVisibleNacosNamespacesDialog v-if="sidebarVisibleNacosNamespacesTarget?.connectionId" v-model:open="sidebarVisibleNacosNamespacesOpen" :connection-id="sidebarVisibleNacosNamespacesTarget.connectionId" :connection-name="sidebarVisibleNacosNamespacesTarget.label" />
     <Dialog v-model:open="sidebarTableNameFilterOpen">
       <DialogContent class="max-w-xl">
         <DialogHeader class="space-y-2">
@@ -2056,6 +2085,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
     </SidebarDangerConfirmDialog>
     <SidebarTreeItemDialogs v-if="sidebarTreeItemDialogController" :key="sidebarTreeItemDialogController.node?.id" :controller="sidebarTreeItemDialogController" @closed="sidebarTreeItemDialogController = null" />
     <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" @changed="refreshSidebarActionTarget" />
+    <ExtensionDetailsDialog v-if="sidebarExtensionDetailsTarget" ref="sidebarExtensionDetailsDialogRef" :node="sidebarExtensionDetailsTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
     </div>

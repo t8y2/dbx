@@ -386,7 +386,24 @@ pub async fn mongo_aggregate_documents_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support aggregate".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "pipeline": pipeline_json,
+                "limit": max_rows.unwrap_or(100),
+                "options": options_json,
+            });
+            match client.mongo_aggregate_documents(params).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_unknown_agent_method_error(&error, "aggregate_documents") => Err(
+                    "MongoDB Legacy Agent does not support aggregate; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                ),
+                Err(error) => Err(error),
+            }
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

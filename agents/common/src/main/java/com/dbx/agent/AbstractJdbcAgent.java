@@ -278,6 +278,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return poolRegistry != null;
     }
 
+    final synchronized boolean hasActivePooledLeases() {
+        return poolRegistry != null && poolIdentity != null && poolRegistry.hasActiveLeases(poolIdentity);
+    }
+
     final synchronized boolean quarantinePooledConnection() {
         pooledConnectionPoisoned = true;
         return requestActive && pooledLease != null && pooledLease.quarantine();

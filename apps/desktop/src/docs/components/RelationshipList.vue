@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { qualifiedTableKey } from "../docsKeys";
+import type { Translate } from "../docsWarnings";
 import type { FieldRef, Relationship } from "../types";
 
 const props = defineProps<{
@@ -8,6 +9,7 @@ const props = defineProps<{
   relationships: Relationship[];
   schema: string | null;
   table: string;
+  translate: Translate;
 }>();
 
 const emit = defineEmits<{
@@ -50,8 +52,8 @@ const incoming = computed(() => props.relationships.filter((relationship) => isC
 <template>
   <div class="grid gap-4 sm:grid-cols-2">
     <section>
-      <h4 class="mb-1.5 text-xs font-medium text-muted-foreground">References ({{ outgoing.length }})</h4>
-      <p v-if="outgoing.length === 0" class="text-xs text-muted-foreground">This table references no other table.</p>
+      <h4 class="mb-1.5 text-xs font-medium text-muted-foreground">{{ translate("docs.references") }} ({{ outgoing.length }})</h4>
+      <p v-if="outgoing.length === 0" class="text-xs text-muted-foreground">{{ translate("docs.noOutgoingRelationships") }}</p>
       <ul v-else class="flex flex-col gap-1">
         <li v-for="relationship in outgoing" :key="relationship.id" class="text-xs">
           <button type="button" class="w-full rounded border border-border bg-background px-2 py-1.5 text-left transition-colors hover:bg-muted/40" @click="emit('select', keyOf(relationship.to))">
@@ -67,8 +69,8 @@ const incoming = computed(() => props.relationships.filter((relationship) => isC
     </section>
 
     <section>
-      <h4 class="mb-1.5 text-xs font-medium text-muted-foreground">Referenced by ({{ incoming.length }})</h4>
-      <p v-if="incoming.length === 0" class="text-xs text-muted-foreground">No table references this one.</p>
+      <h4 class="mb-1.5 text-xs font-medium text-muted-foreground">{{ translate("docs.referencedBy") }} ({{ incoming.length }})</h4>
+      <p v-if="incoming.length === 0" class="text-xs text-muted-foreground">{{ translate("docs.noIncomingRelationships") }}</p>
       <ul v-else class="flex flex-col gap-1">
         <li v-for="relationship in incoming" :key="relationship.id" class="text-xs">
           <button type="button" class="w-full rounded border border-border bg-background px-2 py-1.5 text-left transition-colors hover:bg-muted/40" @click="emit('select', keyOf(relationship.from))">

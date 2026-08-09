@@ -5469,6 +5469,8 @@ mod tests {
                 pi_agent_cli_env: std::collections::HashMap::new(),
                 opencode_cli_path: None,
                 opencode_cli_env: std::collections::HashMap::new(),
+                cursor_cli_path: None,
+                cursor_cli_env: std::collections::HashMap::new(),
             },
         }
     }
@@ -5527,6 +5529,33 @@ mod tests {
         assert_eq!(loaded[0].config.opencode_cli_path.as_deref(), Some("/opt/homebrew/bin/opencode"));
         assert_eq!(
             loaded[0].config.opencode_cli_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn cursor_cli_ai_config_roundtrip() {
+        let db = temp_db_path("cursor-cli-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("cursor-cli", true);
+        cfg.config.provider = AiProvider::CursorCli;
+        cfg.config.api_key.clear();
+        cfg.config.endpoint.clear();
+        cfg.config.model = "composer-2.5".to_string();
+        cfg.config.cursor_cli_path = Some("~/.local/bin/agent".to_string());
+        cfg.config.cursor_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::CursorCli));
+        assert_eq!(loaded[0].config.model, "composer-2.5");
+        assert_eq!(loaded[0].config.cursor_cli_path.as_deref(), Some("~/.local/bin/agent"));
+        assert_eq!(
+            loaded[0].config.cursor_cli_env.get("HTTPS_PROXY").map(String::as_str),
             Some("http://127.0.0.1:7890")
         );
 

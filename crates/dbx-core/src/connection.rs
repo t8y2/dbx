@@ -2722,6 +2722,26 @@ impl AppState {
             return Ok(mqc);
         }
 
+        if mqc.system_kind == crate::mq::types::MqSystemKind::Kafka {
+            if let Some((bootstrap_host, bootstrap_port)) = kafka_single_loopback_bootstrap_endpoint(&mqc.extra) {
+                let transport_layers = self.resolved_transport_layers(config).await?;
+                if matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_))) {
+                    let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_local_port(
+                        connection_id,
+                        &transport_layers,
+                        &bootstrap_host,
+                        bootstrap_port,
+                        Some(bootstrap_port),
+                        &self.tunnels,
+                        &self.proxy_tunnels,
+                        &self.http_tunnels,
+                    )
+                    .await?;
+                    return Ok(mqc.with_connect_override("127.0.0.1", local_port));
+                }
+            }
+        }
+
         let (host, port) = self.connection_host_port(connection_id, config).await?;
         Ok(mqc.with_connect_override(&host, port))
     }
@@ -4396,6 +4416,30 @@ fn parse_mq_admin_host_port(config: &ConnectionConfig) -> Option<(String, u16)> 
     Some((host, port))
 }
 
+#[cfg(any(feature = "mq-admin", test))]
+fn kafka_single_loopback_bootstrap_endpoint(extra: &serde_json::Value) -> Option<(String, u16)> {
+    let value = extra.get("bootstrapServers").or_else(|| extra.get("bootstrap_servers"))?.as_str()?.trim();
+    let mut endpoints = value
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '，' | '；'))
+        .filter(|endpoint| !endpoint.is_empty());
+    let endpoint = endpoints.next()?;
+    if endpoints.next().is_some() {
+        return None;
+    }
+    let address = endpoint.rsplit_once("://").map_or(endpoint, |(_, address)| address);
+    let url = reqwest::Url::parse(&format!("kafka://{address}")).ok()?;
+    if url.host_str()? != "127.0.0.1"
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    Some(("127.0.0.1".to_string(), url.port()?))
+}
+
 fn parse_nacos_server_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
     let value = config
         .external_config
@@ -4726,10 +4770,10 @@ fn uses_agent_connection_pool(db_type: &DatabaseType) -> bool {
 }
 
 fn should_validate_existing_pool_before_reuse(db_type: DatabaseType) -> bool {
-    // PostgreSQL uses deadpool's Fast recycling and the query executor's
-    // ReconnectAndRetry path. An eager SELECT 1 here would add a network
-    // round-trip before every query without improving recovery behavior.
-    !matches!(db_type, DatabaseType::Postgres | DatabaseType::Etcd)
+    // PostgreSQL and Agent-backed databases validate connections when they are
+    // checked out for actual work. An eager probe here would add a database
+    // round-trip before every request and can compete with active Agent leases.
+    db_type != DatabaseType::Postgres && !matches!(db_type, agent_connection_pool_database_type!())
 }
 
 fn agent_pool_identity(pool: &PoolKind) -> Option<Arc<db::agent_driver::PooledAgentClient>> {
@@ -4961,12 +5005,12 @@ mod tests {
         agent_connect_timeout, connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
         database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        metadata_connection_config, mysql_metadata_fallback_url, mysql_pool_setup_queries,
-        oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, mysql_metadata_fallback_url,
+        mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries,
+        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
+        sqlserver_uses_legacy_driver, task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
         GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -5324,6 +5368,8 @@ mod tests {
     fn drivers_with_internal_recovery_skip_eager_pool_validation() {
         assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Postgres));
         assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Etcd));
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Dameng));
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Oracle));
         assert!(super::should_validate_existing_pool_before_reuse(DatabaseType::Mysql));
     }
 
@@ -7629,6 +7675,34 @@ for line in sys.stdin:
         }));
 
         assert_eq!(connection_remote_endpoint(&config), ("broker.internal".to_string(), 8443));
+    }
+
+    #[test]
+    fn kafka_loopback_bootstrap_endpoint_requires_one_ipv4_loopback_server() {
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrapServers": "127.0.0.1:9093"
+            })),
+            Some(("127.0.0.1".to_string(), 9093))
+        );
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrap_servers": "PLAINTEXT://127.0.0.1:19093"
+            })),
+            Some(("127.0.0.1".to_string(), 19093))
+        );
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrapServers": "127.0.0.1:9093,127.0.0.1:9094"
+            })),
+            None
+        );
+        assert_eq!(
+            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
+                "bootstrapServers": "broker.internal:9093"
+            })),
+            None
+        );
     }
 
     #[cfg(feature = "mq-admin")]

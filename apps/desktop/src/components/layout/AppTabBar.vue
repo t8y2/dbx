@@ -47,7 +47,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
-  queryStore.reorderTab(draggedId, targetId, position);
+  return queryStore.reorderTab(draggedId, targetId, position);
 });
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
@@ -538,7 +538,7 @@ function tabMenuIcon(tab: QueryTab) {
 }
 
 function handleTabClick(tab: QueryTab) {
-  if (tabDrag.state.wasDragged) return;
+  if (tabDrag.state.suppressClick) return;
   activateTab(tab.id);
 }
 

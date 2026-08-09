@@ -94,6 +94,7 @@ struct Flags {
     file: Option<PathBuf>,
     out: Option<PathBuf>,
     notes: Option<PathBuf>,
+    lang: Option<String>,
     allow_writes: bool,
     allow_dangerous: bool,
     help: bool,
@@ -244,6 +245,9 @@ async fn run_with_backend(backend: &dyn DbxBackend, flags: Flags) -> Result<Stri
     }
     if args.first().is_some_and(|arg| arg == "dbml") {
         return run_dbml(backend, &flags).await;
+    }
+    if args.first().is_some_and(|arg| arg == "docs") {
+        return run_docs(backend, &flags).await;
     }
     if args.first().is_some_and(|arg| arg == "open") {
         ensure_arg_count(args, 3, "dbx open")?;
@@ -498,6 +502,61 @@ async fn run_dbml(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cli
     }
 }
 
+async fn run_docs(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, CliError> {
+    let args = &flags.args;
+    let connection_name = required(args.get(1), "Connection name is required.")?;
+    let connection = find_connection(backend, connection_name).await?;
+    let database = selected_database(&connection, flags.database.as_deref());
+
+    let options = DocsSnapshotOptions {
+        schemas: flags.schema.clone().into_iter().collect(),
+        tables: flags.tables.clone(),
+        project_name: Some(connection.name.clone()),
+    };
+
+    let mut snapshot = backend.collect_docs_snapshot(&connection, &database, options).await.map_err(command_error)?;
+
+    // Unlike run_dbml, the AnnotationFile is needed AFTER it has been applied:
+    // the merge resolves groups into TableGroups and drops the hue the viewer
+    // colours with, so the raw file has to travel too.
+    //
+    // AnnotationFile does not derive Default and `format_version` must be 1,
+    // so the empty value is constructed explicitly rather than defaulted.
+    let mut annotations = dbx_core::docs::annotations::AnnotationFile {
+        format_version: 1,
+        project: None,
+        groups: Vec::new(),
+        tables: std::collections::BTreeMap::new(),
+    };
+    if let Some(path) = flags.notes.as_ref() {
+        require_notes_file(path)?;
+        if let Some(loaded) = dbx_core::docs::annotations::load_annotations(path)
+            .map_err(|error| CliError::new("NOTES_INVALID", error))?
+        {
+            dbx_core::docs::annotations::apply_annotations(&mut snapshot, &loaded, connection.db_type);
+            annotations = loaded;
+        }
+    }
+
+    for warning in &snapshot.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    let lang = flags.lang.as_deref().unwrap_or("en");
+    let html = dbx_core::docs::to_standalone_html(&snapshot, &annotations, lang)
+        .map_err(|error| CliError::new("EXPORT_FAILED", error))?;
+
+    match flags.out.as_ref() {
+        Some(path) => {
+            std::fs::write(path, &html).map_err(|error| {
+                CliError::new("WRITE_FAILED", format!("Failed to write {}: {error}", path.display()))
+            })?;
+            Ok(format!("Wrote {} bytes to {}", html.len(), path.display()))
+        }
+        None => Ok(html),
+    }
+}
+
 async fn find_connection(backend: &dyn DbxBackend, name: &str) -> Result<ConnectionConfig, CliError> {
     backend
         .load_connections()
@@ -525,6 +584,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         file: None,
         out: None,
         notes: None,
+        lang: None,
         allow_writes: false,
         allow_dangerous: false,
         help: false,
@@ -571,6 +631,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             "--file" => flags.file = Some(PathBuf::from(option_value(argv, &mut index, "--file")?)),
             "--out" => flags.out = Some(PathBuf::from(option_value(argv, &mut index, "--out")?)),
             "--notes" => flags.notes = Some(PathBuf::from(option_value(argv, &mut index, "--notes")?)),
+            "--lang" => flags.lang = Some(option_value(argv, &mut index, "--lang")?),
             "--allow-writes" => flags.allow_writes = true,
             "--allow-dangerous-sql" => flags.allow_dangerous = true,
             value if value.starts_with('-') => {
@@ -914,7 +975,7 @@ fn csv_cell(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
+    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]\n  dbx docs <connection> [--out path] [--notes path] [--lang code] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
 }
 
 #[cfg(test)]
@@ -1250,5 +1311,22 @@ mod tests {
     #[test]
     fn dbml_appears_in_the_usage_text() {
         assert!(usage().contains("dbx dbml <connection>"), "got: {}", usage());
+    }
+
+    #[test]
+    fn parses_the_lang_flag() {
+        let flags = parse_flags(&args(&["docs", "local", "--lang", "zh-CN"])).expect("parse");
+        assert_eq!(flags.args, args(&["docs", "local"]));
+        assert_eq!(flags.lang.as_deref(), Some("zh-CN"));
+    }
+
+    #[test]
+    fn lang_requires_a_value() {
+        parse_flags(&args(&["docs", "local", "--lang"])).expect_err("should fail");
+    }
+
+    #[test]
+    fn docs_appears_in_the_usage_text() {
+        assert!(usage().contains("dbx docs <connection>"), "got: {}", usage());
     }
 }

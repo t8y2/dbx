@@ -381,6 +381,7 @@ async fn main() {
         .route("/docs/annotations/load", post(routes::docs::load_annotations))
         .route("/docs/annotations/apply", post(routes::docs::apply_annotations))
         .route("/docs/annotations/save", post(routes::docs::save_annotations))
+        .route("/docs/export", post(routes::docs::export_html))
         .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))

@@ -63,4 +63,12 @@ describe("Nacos connection dialog layout", () => {
     expect(source).toContain("api.nacosListNamespaces(draftId)");
     expect(source).toContain("showVisibleNacosNamespacesDialog");
   });
+
+  it("uses namespaces when scoping Nacos production safeguards", () => {
+    expect(source).toContain('form.value.db_type === "nacos"');
+    expect(source).toContain("production.allNamespaces");
+    expect(source).toContain("production.namespacePickerTitle");
+    expect(source).toContain("api.nacosListNamespaces(connectionId)");
+    expect(source).toContain("nacosNamespaceIdentity(name)");
+  });
 });

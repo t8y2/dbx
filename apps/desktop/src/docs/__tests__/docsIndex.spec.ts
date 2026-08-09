@@ -45,6 +45,14 @@ describe("groupBySchema", () => {
     expect(sections).toHaveLength(1);
     expect(sections[0].tables[0].name).toBe("orders");
   });
+
+  it("tags every section with the schema fallback key", () => {
+    // The render sites fall back to `translate(section.fallbackKey)` when
+    // `label` is empty — schema sections must carry docs.noSchema, not the
+    // sibling docs.noGroup key groupByTableGroup uses.
+    const sections = groupBySchema(snapshot([table("public", "orders")]));
+    expect(sections[0].fallbackKey).toBe("docs.noSchema");
+  });
 });
 
 describe("groupByTableGroup", () => {
@@ -62,11 +70,18 @@ describe("groupByTableGroup", () => {
     expect(sections[0].note).toBe("Checkout.");
   });
 
-  it("collects ungrouped tables into a trailing (no group) section", () => {
+  it("collects ungrouped tables into a trailing, unlabelled section", () => {
     const sections = groupByTableGroup(snapshot([table("core", "orders", "order-mgmt"), table("core", "users", null)], groups));
 
     const last = sections[sections.length - 1];
     expect(last.key).toBe("");
+    // Empty, not a hardcoded "(no group)": the render sites translate this via
+    // `translate(section.fallbackKey)` when `label` is falsy. A non-empty
+    // English literal here would bypass that fallback and render untranslated
+    // in every non-English locale — this guarded a real defect, not a
+    // hypothetical one.
+    expect(last.label).toBe("");
+    expect(last.fallbackKey).toBe("docs.noGroup");
     expect(last.hue).toBeNull();
     expect(last.tables.map((t) => t.name)).toEqual(["users"]);
   });

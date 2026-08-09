@@ -13,9 +13,11 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.client.AggregateIterable;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.CollationStrength;
@@ -34,6 +36,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
@@ -206,6 +209,69 @@ class MongoAgentTest {
         JsonObject error = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
         assertEquals("Not connected", error.get("message").getAsString());
         assertFalse(error.get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void aggregateMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"aggregate_documents\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"pipeline\":\"[]\"}}"
+        );
+
+        JsonObject error = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
+        assertEquals("Not connected", error.get("message").getAsString());
+        assertFalse(error.get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void aggregateReadsOneBoundedCursorWithoutCounting() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingAggregateMongoClient(
+            calls,
+            List.of(
+                new Document("name", "first"),
+                new Document("name", "second"),
+                new Document("name", "third")
+            )
+        );
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"aggregate_documents\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\","
+                + "\"pipeline\":\"[{\\\"$match\\\":{\\\"status\\\":\\\"open\\\"}}]\","
+                + "\"limit\":2,"
+                + "\"options\":\"{\\\"allowDiskUse\\\":true,\\\"cursor\\\":{\\\"batchSize\\\":1},"
+                + "\\\"maxTimeMS\\\":500}\"}}",
+            client
+        );
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertFalse(json.has("error"), json.toString());
+        JsonObject result = json.getAsJsonObject("result");
+        assertEquals(3, result.get("total").getAsInt());
+        assertEquals(2, result.getAsJsonArray("documents").size());
+        assertEquals(2, result.getAsJsonArray("extended_documents").size());
+        assertEquals("first", result.getAsJsonArray("documents").get(0).getAsJsonObject().get("name").getAsString());
+        assertEquals(1, calls.stream().filter(call -> call.startsWith("aggregate:")).count());
+        assertTrue(calls.contains("aggregate:1:open"));
+        assertTrue(calls.contains("allowDiskUse:true"));
+        assertTrue(calls.contains("batchSize:1"));
+        assertTrue(calls.contains("maxTime:500:MILLISECONDS"));
+        assertTrue(calls.contains("close"));
+        assertFalse(calls.stream().anyMatch(call -> call.contains("count")));
+    }
+
+    @Test
+    void aggregateExplainCommandPreservesPipelineAndOptions() {
+        List<Document> pipeline = List.of(new Document("$match", new Document("status", "open")));
+        Document options = new Document("explain", true).append("allowDiskUse", true);
+
+        Document command = MongoAgent.buildAggregateCommand("orders", pipeline, options);
+
+        assertEquals("orders", command.getString("aggregate"));
+        assertEquals(pipeline, command.get("pipeline"));
+        assertEquals(true, command.getBoolean("explain"));
+        assertEquals(true, command.getBoolean("allowDiskUse"));
+        assertFalse(command.containsKey("cursor"));
     }
 
     @Test
@@ -1069,6 +1135,88 @@ class MongoAgentTest {
             (proxy, method, args) -> {
                 if ("find".equals(method.getName())) {
                     calls.add("find:" + ((Document) args[0]).toJson());
+                    return iterable;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("getCollection".equals(method.getName())) {
+                    return collection;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    return database;
+                }
+                if ("close".equals(method.getName())) {
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingAggregateMongoClient(List<String> calls, List<Document> resultDocuments) {
+        int[] index = {0};
+        MongoCursor<Document> cursor = (MongoCursor<Document>) Proxy.newProxyInstance(
+            MongoCursor.class.getClassLoader(),
+            new Class<?>[] {MongoCursor.class},
+            (proxy, method, args) -> {
+                return switch (method.getName()) {
+                    case "hasNext" -> index[0] < resultDocuments.size();
+                    case "next" -> resultDocuments.get(index[0]++);
+                    case "close" -> {
+                        calls.add("close");
+                        yield null;
+                    }
+                    default -> throw new UnsupportedOperationException(method.getName());
+                };
+            }
+        );
+
+        AggregateIterable<Document>[] iterableRef = new AggregateIterable[1];
+        AggregateIterable<Document> iterable = (AggregateIterable<Document>) Proxy.newProxyInstance(
+            AggregateIterable.class.getClassLoader(),
+            new Class<?>[] {AggregateIterable.class},
+            (proxy, method, args) -> {
+                return switch (method.getName()) {
+                    case "allowDiskUse" -> {
+                        calls.add("allowDiskUse:" + args[0]);
+                        yield iterableRef[0];
+                    }
+                    case "batchSize" -> {
+                        calls.add("batchSize:" + args[0]);
+                        yield iterableRef[0];
+                    }
+                    case "maxTime" -> {
+                        calls.add("maxTime:" + args[0] + ":" + ((TimeUnit) args[1]).name());
+                        yield iterableRef[0];
+                    }
+                    case "iterator" -> cursor;
+                    default -> throw new UnsupportedOperationException(method.getName());
+                };
+            }
+        );
+        iterableRef[0] = iterable;
+
+        MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("aggregate".equals(method.getName())) {
+                    List<Document> pipeline = (List<Document>) args[0];
+                    Document match = pipeline.get(0).get("$match", Document.class);
+                    calls.add("aggregate:" + pipeline.size() + ":" + match.getString("status"));
                     return iterable;
                 }
                 throw new UnsupportedOperationException(method.getName());

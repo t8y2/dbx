@@ -84,6 +84,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         connection_id: connection_id.clone(),
         database: database.clone(),
         schema: None,
+        catalog: None,
         sql: sql.clone(),
         query_base_sql: sql,
         setup_sql: Vec::new(),

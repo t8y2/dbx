@@ -137,6 +137,7 @@ describe("settings search", () => {
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
+      { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
       { titleKey: "settings.clickTableNavigationTarget", category: "editor", targetId: "editor" },
       { titleKey: "settings.sqlFormatterKeywordCase", category: "formatter", targetId: "formatter" },

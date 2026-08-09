@@ -12,9 +12,11 @@ import com.mongodb.ConnectionString;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
+import com.mongodb.client.AggregateIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
 import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.CollationAlternate;
 import com.mongodb.client.model.CollationCaseFirst;
@@ -55,6 +57,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -462,6 +465,207 @@ public final class MongoAgent {
         return bsonToExtendedJson(result);
     }
 
+    private static Object aggregateDocuments(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        List<Document> pipeline = aggregatePipeline(params);
+        Document options = aggregateOptions(params);
+
+        if (aggregateExplain(options)) {
+            Document plan = c.getDatabase(database).runCommand(buildAggregateCommand(collection, pipeline, options));
+            List<Map<String, Object>> documents = new ArrayList<>();
+            List<JsonObject> extendedDocuments = new ArrayList<>();
+            documents.add(bsonToJson(plan));
+            extendedDocuments.add(bsonToExtendedJson(plan));
+            return documentQueryResultWithExtended(documents, extendedDocuments, 1);
+        }
+
+        int maxRows = aggregateMaxRows(params);
+        AggregateIterable<Document> iterable = c.getDatabase(database).getCollection(collection).aggregate(pipeline);
+        iterable = applyAggregateOptions(iterable, options);
+        int fetchLimit = maxRows == Integer.MAX_VALUE ? Integer.MAX_VALUE : maxRows + 1;
+        List<Map<String, Object>> documents = new ArrayList<>();
+        List<JsonObject> extendedDocuments = new ArrayList<>();
+        try (MongoCursor<Document> cursor = iterable.iterator()) {
+            while (documents.size() < fetchLimit && cursor.hasNext()) {
+                Document document = cursor.next();
+                documents.add(bsonToJson(document));
+                extendedDocuments.add(bsonToExtendedJson(document));
+            }
+        }
+        long total = documents.size();
+        if (documents.size() > maxRows) {
+            documents.subList(maxRows, documents.size()).clear();
+            extendedDocuments.subList(maxRows, extendedDocuments.size()).clear();
+        }
+        return documentQueryResultWithExtended(documents, extendedDocuments, total);
+    }
+
+    static List<Document> aggregatePipeline(JsonObject params) {
+        String source = stringOrNull(params, "pipeline");
+        if (source == null || source.isBlank()) {
+            throw new IllegalArgumentException("MongoDB aggregate pipeline is required");
+        }
+        JsonElement parsed = JsonParser.parseString(source);
+        if (!parsed.isJsonArray()) {
+            throw new IllegalArgumentException("MongoDB aggregate pipeline must be a JSON array");
+        }
+        List<Document> pipeline = new ArrayList<>();
+        for (JsonElement stage : parsed.getAsJsonArray()) {
+            if (!stage.isJsonObject()) {
+                throw new IllegalArgumentException("Each MongoDB aggregate pipeline stage must be an object");
+            }
+            pipeline.add(Document.parse(stage.toString()));
+        }
+        return pipeline;
+    }
+
+    static Document aggregateOptions(JsonObject params) {
+        Document options = documentOrNull(params, "options");
+        return options == null ? new Document() : options;
+    }
+
+    static boolean aggregateExplain(Document options) {
+        Object explain = options.get("explain");
+        if (explain == null) {
+            return false;
+        }
+        if (!(explain instanceof Boolean)) {
+            throw new IllegalArgumentException("MongoDB aggregate option explain must be a boolean");
+        }
+        return (Boolean) explain;
+    }
+
+    static Document buildAggregateCommand(String collection, List<Document> pipeline, Document options) {
+        validateAggregateOptions(options);
+        Document command = new Document("aggregate", collection).append("pipeline", pipeline);
+        for (Map.Entry<String, Object> entry : options.entrySet()) {
+            command.append(entry.getKey(), entry.getValue());
+        }
+        if (!aggregateExplain(options) && !command.containsKey("cursor")) {
+            command.append("cursor", new Document());
+        }
+        return command;
+    }
+
+    private static AggregateIterable<Document> applyAggregateOptions(
+        AggregateIterable<Document> iterable,
+        Document options
+    ) {
+        validateAggregateOptions(options);
+        if (options.containsKey("allowDiskUse")) {
+            iterable = iterable.allowDiskUse(aggregateBoolean(options, "allowDiskUse"));
+        }
+        if (options.containsKey("cursor")) {
+            Object rawCursor = options.get("cursor");
+            if (!(rawCursor instanceof Document cursor)) {
+                throw new IllegalArgumentException("MongoDB aggregate option cursor must be an object");
+            }
+            for (String key : cursor.keySet()) {
+                if (!"batchSize".equals(key)) {
+                    throw new IllegalArgumentException("Unsupported MongoDB aggregate cursor option: " + key);
+                }
+            }
+            if (cursor.containsKey("batchSize")) {
+                iterable = iterable.batchSize(aggregateNonNegativeInt(cursor, "batchSize"));
+            }
+        }
+        if (options.containsKey("maxTimeMS")) {
+            iterable = iterable.maxTime(aggregateNonNegativeLong(options, "maxTimeMS"), TimeUnit.MILLISECONDS);
+        }
+        if (options.containsKey("maxAwaitTimeMS")) {
+            iterable = iterable.maxAwaitTime(
+                aggregateNonNegativeLong(options, "maxAwaitTimeMS"),
+                TimeUnit.MILLISECONDS
+            );
+        }
+        if (options.containsKey("bypassDocumentValidation")) {
+            iterable = iterable.bypassDocumentValidation(aggregateBoolean(options, "bypassDocumentValidation"));
+        }
+        if (options.containsKey("collation")) {
+            Object rawCollation = options.get("collation");
+            if (!(rawCollation instanceof Document collation)) {
+                throw new IllegalArgumentException("MongoDB aggregate option collation must be an object");
+            }
+            iterable = iterable.collation(collationOrNull(collation));
+        }
+        if (options.containsKey("comment")) {
+            Object comment = options.get("comment");
+            if (!(comment instanceof String)) {
+                throw new IllegalArgumentException("MongoDB aggregate option comment must be a string");
+            }
+            iterable = iterable.comment((String) comment);
+        }
+        if (options.containsKey("hint")) {
+            Object hint = options.get("hint");
+            if (!(hint instanceof Document)) {
+                throw new IllegalArgumentException("MongoDB Legacy aggregate option hint must be an object");
+            }
+            iterable = iterable.hint((Document) hint);
+        }
+        if (options.containsKey("useCursor")) {
+            iterable = iterable.useCursor(aggregateBoolean(options, "useCursor"));
+        }
+        return iterable;
+    }
+
+    private static void validateAggregateOptions(Document options) {
+        Set<String> supported = Set.of(
+            "explain",
+            "allowDiskUse",
+            "cursor",
+            "maxTimeMS",
+            "maxAwaitTimeMS",
+            "bypassDocumentValidation",
+            "collation",
+            "comment",
+            "hint",
+            "useCursor"
+        );
+        for (String key : options.keySet()) {
+            if (!supported.contains(key)) {
+                throw new IllegalArgumentException("Unsupported MongoDB Legacy aggregate option: " + key);
+            }
+        }
+    }
+
+    private static int aggregateMaxRows(JsonObject params) {
+        long value = params.has("limit") ? params.get("limit").getAsLong() : 100;
+        if (value < 0 || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("MongoDB aggregate limit must be between 0 and " + Integer.MAX_VALUE);
+        }
+        return (int) value;
+    }
+
+    private static boolean aggregateBoolean(Document options, String key) {
+        Object value = options.get(key);
+        if (!(value instanceof Boolean)) {
+            throw new IllegalArgumentException("MongoDB aggregate option " + key + " must be a boolean");
+        }
+        return (Boolean) value;
+    }
+
+    private static int aggregateNonNegativeInt(Document options, String key) {
+        long value = aggregateNonNegativeLong(options, key);
+        if (value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("MongoDB aggregate option " + key + " is too large");
+        }
+        return (int) value;
+    }
+
+    private static long aggregateNonNegativeLong(Document options, String key) {
+        Object value = options.get(key);
+        if (!(value instanceof Number number) || number.doubleValue() != Math.rint(number.doubleValue())) {
+            throw new IllegalArgumentException("MongoDB aggregate option " + key + " must be a non-negative integer");
+        }
+        long result = number.longValue();
+        if (result < 0) {
+            throw new IllegalArgumentException("MongoDB aggregate option " + key + " must be a non-negative integer");
+        }
+        return result;
+    }
+
     static Document buildFindExplainCommand(JsonObject params) {
         String collection = params.get("collection").getAsString();
         Document find = new Document("find", collection);
@@ -678,6 +882,16 @@ public final class MongoAgent {
         if (!total.exact()) {
             result.put("total_is_exact", false);
         }
+        return result;
+    }
+
+    private static Map<String, Object> documentQueryResultWithExtended(
+        List<Map<String, Object>> documents,
+        List<JsonObject> extendedDocuments,
+        long total
+    ) {
+        Map<String, Object> result = documentQueryResult(documents, new CollectionTotal(total, true));
+        result.put("extended_documents", extendedDocuments);
         return result;
     }
 
@@ -1343,6 +1557,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS -> findDocuments(params);
             case AgentProtocol.MONGO_METHOD_FIND_ONE -> findOne(params);
             case AgentProtocol.MONGO_METHOD_EXPLAIN_FIND -> explainFind(params);
+            case AgentProtocol.MONGO_METHOD_AGGREGATE_DOCUMENTS -> aggregateDocuments(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON -> findDocumentsExtendedJson(params);
             case AgentProtocol.MONGO_METHOD_COUNT_DOCUMENTS -> countDocuments(params);
             case AgentProtocol.MONGO_METHOD_SERVER_VERSION -> serverVersion(params);

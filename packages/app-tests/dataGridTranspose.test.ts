@@ -10,6 +10,7 @@ import {
   nextTransposeState,
   nextTransposeStateForRecordCount,
   transposeAnchorRowIndex,
+  transposeEndAlignmentSpacerWidth,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   visibleTransposeRecordWindow,
@@ -301,7 +302,7 @@ test("caps the transpose field column width for long field names", () => {
   assert.equal(transposeFieldWidth(["a_very_long_metric_column_name"]), 220);
 });
 
-test("aligns the selected transpose record at the start of the scrollable records", () => {
+test("start alignment places the selected transpose record at its exact offset", () => {
   assert.equal(
     transposeScrollLeftForRecord({
       recordIndex: 55,
@@ -309,7 +310,34 @@ test("aligns the selected transpose record at the start of the scrollable record
       viewportWidth: 1200,
       pinnedWidth: 104,
       recordWidth: 168,
+      currentScrollLeft: 0,
+      alignment: "start",
     }),
     9240,
+  );
+});
+
+test("start alignment uses trailing space to place the final variable-width record at the left edge", () => {
+  const recordOffsets = [0, 500, 596, 692];
+  const endSpacerWidth = transposeEndAlignmentSpacerWidth({
+    viewportWidth: 300,
+    pinnedWidth: 100,
+    lastRecordWidth: 96,
+  });
+
+  assert.equal(endSpacerWidth, 104);
+  assert.equal(
+    transposeScrollLeftForRecord({
+      recordIndex: 2,
+      totalRecords: 3,
+      viewportWidth: 300,
+      pinnedWidth: 100,
+      recordWidth: 230,
+      recordOffsets,
+      currentScrollLeft: 0,
+      alignment: "start",
+      endSpacerWidth,
+    }),
+    596,
   );
 });

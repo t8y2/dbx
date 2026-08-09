@@ -189,6 +189,15 @@
   --dbx-window-top-border: rgb(0 0 0 / 0.35);
   --dbx-viewport-height: 100vh;
 }
+/*
+ * `@custom-variant dark` and the `@theme inline` block that maps the raw
+ * tokens onto Tailwind's `--color-*` namespace both live in tokens.css now:
+ * they are plumbing for those tokens, and the standalone documentation export
+ * imports tokens.css without this file. Utilities like `bg-background` come
+ * from that block, so an entry point with the raw properties and no `@theme`
+ * emits none of them.
+ */
+@import "./tokens.css";
 
 :root[data-corner-style="large"] {
   --dbx-radius-default: 6px;

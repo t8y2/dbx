@@ -2,6 +2,7 @@ import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/datab
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { canEditTableStructure } from "@/lib/table/tableStructureCapabilities";
 import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { supportsRegisteredConnectionScopedQueryExecution, supportsRegisteredQueryTargetDatabaseListing, usesRegisteredConnectionOnlyQueryTarget } from "@/lib/database/sqlExecutionTargetRegistry";
 
 export function isSchemaAware(dbType?: DatabaseType): boolean {
   return !!dbType && SCHEMA_AWARE_TYPES.has(dbType);
@@ -79,6 +80,40 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
 
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
   return dbType !== "nacos" && dbType !== "hbase";
+}
+
+/**
+ * Whether the current product surface exposes a query execution path for the
+ * database type. This is intentionally distinct from sqlFileExecution:
+ * document/vector/key-value editors can execute commands from a query tab
+ * even when importing a SQL file is not supported.
+ */
+export function supportsQueryExecution(dbType?: DatabaseType): boolean {
+  return supportsDatabaseFeature(dbType, "queryExecution");
+}
+
+export function supportsConnectionScopedQueryExecution(dbType?: DatabaseType): boolean {
+  return supportsRegisteredConnectionScopedQueryExecution(dbType);
+}
+
+/**
+ * Query surfaces whose target is the connection itself and which do not expose
+ * a database namespace to select. Keep this separate from
+ * supportsConnectionScopedQueryExecution: document/vector stores may execute
+ * without a selected database while still exposing database-like namespaces
+ * (for example indexes or collections) for browsing and target selection.
+ */
+export function usesConnectionOnlyQueryTarget(dbType?: DatabaseType): boolean {
+  return usesRegisteredConnectionOnlyQueryTarget(dbType);
+}
+
+/**
+ * Database-like namespaces exposed by connection-scoped document/vector
+ * query surfaces. This is the extension point for drivers whose query target
+ * is still selected from a database/index list rather than from SQL metadata.
+ */
+export function supportsQueryTargetDatabaseListing(dbType?: DatabaseType): boolean {
+  return supportsRegisteredQueryTargetDatabaseListing(dbType);
 }
 
 export function usesFetchFirst(dbType?: DatabaseType): boolean {

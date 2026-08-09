@@ -2,11 +2,36 @@ import { describe, expect, it } from "vitest";
 import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget } from "@/lib/database/databaseNamespaceCreation";
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
-import { isSchemaAware, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTableImport, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import {
+  isSchemaAware,
+  supportsConnectionScopedQueryExecution,
+  supportsDatabaseNameCompletion,
+  supportsDatabaseSchemaQualifier,
+  supportsQueryTargetDatabaseListing,
+  supportsSqlInListPaste,
+  supportsTableImport,
+  supportsTransaction,
+  usesConnectionOnlyQueryTarget,
+} from "@/lib/database/databaseFeatureSupport";
 
 describe("schema awareness", () => {
   it("keeps SQLite database aliases separate from schema-capable databases", () => {
     expect(isSchemaAware("sqlite")).toBe(false);
+  });
+});
+
+describe("connection-scoped query targets", () => {
+  it("keeps connection-only target types separate from unregistered namespace targets", () => {
+    expect(usesConnectionOnlyQueryTarget("etcd")).toBe(true);
+    expect(usesConnectionOnlyQueryTarget("zookeeper")).toBe(true);
+    expect(usesConnectionOnlyQueryTarget("elasticsearch")).toBe(true);
+    expect(supportsConnectionScopedQueryExecution("elasticsearch")).toBe(true);
+    expect(supportsQueryTargetDatabaseListing("elasticsearch")).toBe(false);
+    expect(usesConnectionOnlyQueryTarget("qdrant")).toBe(true);
+    expect(usesConnectionOnlyQueryTarget("milvus")).toBe(true);
+    expect(usesConnectionOnlyQueryTarget("weaviate")).toBe(true);
+    expect(usesConnectionOnlyQueryTarget("chromadb")).toBe(true);
+    expect(supportsQueryTargetDatabaseListing("etcd")).toBe(false);
   });
 });
 

@@ -20,6 +20,7 @@ const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/s
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
@@ -89,6 +90,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
+const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const dialogs = useDialogSources();
 const productionConfirmationDetails = computed(() => {
   const request = productionSafetyStore.pending;
@@ -98,6 +100,15 @@ const productionConfirmationDetails = computed(() => {
     database: request.productionDatabases?.join(", ") || request.database || "-",
     source: request.source || "-",
   });
+});
+const multiDbDangerDetails = computed(() => {
+  const request = sqlExecutionDangerStore.pending;
+  if (!request) return "";
+  return [request.targetLabel || request.connectionName, request.database].filter(Boolean).join("\n");
+});
+const multiDbDangerMessage = computed(() => {
+  const request = sqlExecutionDangerStore.pending;
+  return request?.kind === "redis" ? t("dangerDialog.redisCommandMessage") : t("dangerDialog.message");
 });
 
 const editConfig = computed(() => {
@@ -164,6 +175,19 @@ watch(
     :close-on-confirm="false"
     @update:open="(open) => !open && productionSafetyStore.cancel()"
     @confirm="productionSafetyStore.confirm()"
+  />
+  <DangerConfirmDialog
+    v-if="sqlExecutionDangerStore.pending"
+    :open="true"
+    :title="t('multiDbExecute.dangerTitle')"
+    :message="multiDbDangerMessage"
+    :details-text="multiDbDangerDetails"
+    :sql="sqlExecutionDangerStore.pending.sql"
+    :confirm-label="t('multiDbExecute.dangerConfirm')"
+    :show-suppress-toggle="false"
+    :close-on-confirm="false"
+    @update:open="(open) => !open && sqlExecutionDangerStore.cancel()"
+    @confirm="sqlExecutionDangerStore.confirm()"
   />
   <SqlParameterDialog
     v-if="showSqlParameterDialog"

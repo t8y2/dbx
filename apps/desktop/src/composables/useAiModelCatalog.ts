@@ -58,6 +58,7 @@ function configSignature(config: AiConfigItem): string {
     claudeCodeCliPath: config.claudeCodeCliPath ?? null,
     piAgentCliPath: config.piAgentCliPath ?? null,
     opencodeCliPath: config.opencodeCliPath ?? null,
+    cursorCliPath: config.cursorCliPath ?? null,
     connectionFingerprint: fingerprint(
       JSON.stringify({
         apiKey: config.apiKey,
@@ -67,6 +68,7 @@ function configSignature(config: AiConfigItem): string {
         claudeCodeCliEnv: sortedRecord(config.claudeCodeCliEnv),
         piAgentCliEnv: sortedRecord(config.piAgentCliEnv),
         opencodeCliEnv: sortedRecord(config.opencodeCliEnv),
+        cursorCliEnv: sortedRecord(config.cursorCliEnv),
       }),
     ),
   });

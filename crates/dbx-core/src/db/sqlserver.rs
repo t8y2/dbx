@@ -3220,12 +3220,12 @@ mod tests {
         sqlserver_dml_output_returns_rows, sqlserver_done_trace_event, sqlserver_filter_definition_error,
         sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
         sqlserver_legacy_probe_with_nonce, sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql,
-        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
-        sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
-        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
-        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_probe_explicit_alias,
+        sqlserver_query_messages, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
+        sqlserver_supports_session_database_switch, sqlserver_table_comment_sql, sqlserver_triggers_sql,
+        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
+        SqlServerProbeOutputNameOverride, SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent,
+        SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,

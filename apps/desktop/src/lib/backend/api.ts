@@ -184,6 +184,7 @@ export const collectDocsSnapshot = forward("collectDocsSnapshot");
 export const loadDocsAnnotations = forward("loadDocsAnnotations");
 export const applyDocsAnnotations = forward("applyDocsAnnotations");
 export const saveDocsAnnotations = forward("saveDocsAnnotations");
+export const exportDocsHtml = forward("exportDocsHtml");
 
 // Query
 export const executeQuery = forward("executeQuery");
@@ -770,9 +771,12 @@ export type {
 // MQTT
 export const mqttGetBrokerInfo = forward("mqttGetBrokerInfo");
 export const mqttSubscribe = forward("mqttSubscribe");
+export const mqttSaveTopicConfig = forward("mqttSaveTopicConfig");
+export const mqttDeleteTopicConfig = forward("mqttDeleteTopicConfig");
 export const mqttUnsubscribe = forward("mqttUnsubscribe");
 export const mqttPublish = forward("mqttPublish");
 export const mqttListTopics = forward("mqttListTopics");
+export const mqttListSavedTopicConfigs = forward("mqttListSavedTopicConfigs");
 export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");

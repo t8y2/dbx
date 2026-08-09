@@ -860,6 +860,21 @@ export async function saveDocsAnnotations(connectionId: string, annotations: Ann
   return post("/api/docs/annotations/save", { connectionId, annotations });
 }
 
+export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot, annotations: AnnotationFile, lang: string): Promise<void> {
+  const result = await post<{ content: string }>("/api/docs/export", { snapshot, annotations, lang });
+  // No `downloadTextFile` here: it prepends a BOM, which the Tauri command's
+  // `std::fs::write(&file_path, html)` does not. The two callers must produce
+  // byte-identical output for the same inputs.
+  const fileName = filePath.split(/[\\/]/).pop() || "docs.html";
+  const blob = new Blob([result.content], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------

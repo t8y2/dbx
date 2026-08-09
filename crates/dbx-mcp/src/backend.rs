@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
-    agent_tools::{self, AgentSqlPermissions},
+    agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
     connection::AppState,
     db::{redis_driver::RedisCommandResult, ColumnInfo, IndexInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
@@ -587,6 +587,7 @@ impl DbxBackend for WebBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
+        let explicit_cell_window = QueryCellWindow::explicit_from_arguments(&arguments);
         let result = async {
             if tool_name != "execute_query" {
                 return Err(format!("Unsupported DBX Web agent tool: {tool_name}"));
@@ -630,7 +631,10 @@ impl DbxBackend for WebBackend {
             let response = self.request(reqwest::Method::POST, "/api/query/execute", Some(body)).await?;
             let query_result: dbx_core::db::QueryResult =
                 response.json().await.map_err(|error| format!("Invalid query response: {error}"))?;
-            Ok(format_query_result(&query_result, max_rows))
+            match explicit_cell_window {
+                Some(window) => format_query_result_as_text(&query_result, max_rows, window),
+                None => Ok(format_query_result(&query_result, max_rows)),
+            }
         }
         .await;
         ToolResult {

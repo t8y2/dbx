@@ -1,0 +1,210 @@
+/*
+ * Design tokens, shared by the application shell and the standalone
+ * documentation export.
+ *
+ * These live apart from globals.css because the export's Tailwind entry
+ * cannot import globals.css: its `@source` scans the whole application and
+ * `@source` is additive, so the export would emit every utility in DBX. The
+ * export still needs these tokens, and duplicating them is how the values
+ * drift.
+ *
+ * Order matters: `.dark` must stay declared after `:root`.
+ *
+ * Scope: this file carries only the base light (`:root`) and dark (`.dark`)
+ * token sets, in rgb. It deliberately does NOT carry the alternate
+ * installable app themes (`html.theme-soft`, `.theme-graphite`, etc., still
+ * in globals.css), the `@supports (color: oklch(...))` progressive
+ * enhancement that re-declares these same tokens in oklch for wide-gamut
+ * displays (also still in globals.css, after the tokens.css import), or the
+ * `:root[data-corner-style]` radius variants. None of those apply to a
+ * static file:// export with no theme picker and no live preference to
+ * express — pulling them in here would just be duplication with nothing to
+ * show for it.
+ *
+ * The `@theme inline` block below is part of the same plumbing and has to
+ * travel with the raw properties. Tailwind generates `bg-background`,
+ * `border-border` and `fill-card` from the `--color-*` entries here, NOT from
+ * the `--background`/`--border` properties themselves — an entry point that
+ * imports only the raw tokens defines every custom property and emits none of
+ * the utilities that read them, which renders as a completely unstyled page
+ * while every build and test stays green.
+ *
+ * `@custom-variant dark` travels with it for the same reason: Tailwind's stock
+ * `dark:` variant keys off `prefers-color-scheme`, so without this the app's
+ * (and the export's) `.dark` class would flip the token values while every
+ * `dark:` utility kept following the OS.
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  /* Aliases for legacy MQ panel styles (used across components/mq/*). */
+  --color-error: var(--destructive);
+  --color-error-bg: color-mix(in srgb, var(--destructive) 10%, transparent);
+  --color-error-alpha: var(--color-error-bg);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-success-alpha: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-alpha: var(--warning-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-info-alpha: var(--info-bg);
+  --color-hover: var(--accent);
+  --color-background-secondary: var(--muted);
+  --color-text: var(--foreground);
+  --color-text-secondary: var(--muted-foreground);
+  --color-text-tertiary: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
+  --color-border-light: color-mix(in srgb, var(--border) 60%, transparent);
+  --color-primary-alpha: color-mix(in srgb, var(--primary) 12%, transparent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: var(--dbx-radius-sm);
+  --radius-md: var(--dbx-radius-md);
+  --radius-lg: var(--dbx-radius-lg);
+  --radius-xl: var(--dbx-radius-xl);
+}
+
+:root {
+  --background: rgb(255 255 255);
+  --foreground: rgb(10 10 10);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(10 10 10);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(10 10 10);
+  --primary: rgb(23 23 23);
+  --primary-foreground: rgb(250 250 250);
+  --secondary: rgb(245 245 245);
+  --secondary-foreground: rgb(23 23 23);
+  --muted: rgb(245 245 245);
+  --muted-foreground: rgb(115 115 115);
+  --accent: rgb(245 245 245);
+  --accent-foreground: rgb(23 23 23);
+  --destructive: rgb(231 0 11);
+  --destructive-rgb: 231, 0, 11;
+  --border: rgb(229 229 229);
+  --input: rgb(229 229 229);
+  --ring: rgb(161 161 161);
+  --chart-1: rgb(212 212 212);
+  --chart-2: rgb(115 115 115);
+  --chart-3: rgb(82 82 82);
+  --chart-4: rgb(64 64 64);
+  --chart-5: rgb(38 38 38);
+  --radius: var(--dbx-radius-md);
+  --dbx-radius-default: 4px;
+  --dbx-radius-sm: 4px;
+  --dbx-radius-md: 4px;
+  --dbx-radius-lg: 6px;
+  --dbx-radius-xl: 6px;
+  --dbx-radius-fixed-4: 4px;
+  --dbx-radius-fixed-5: 5px;
+  --dbx-radius-fixed-6: 6px;
+  --sidebar: rgb(250 250 250);
+  --sidebar-foreground: rgb(10 10 10);
+  --sidebar-primary: rgb(23 23 23);
+  --sidebar-primary-foreground: rgb(250 250 250);
+  --sidebar-accent: rgb(245 245 245);
+  --sidebar-accent-foreground: rgb(23 23 23);
+  --sidebar-border: rgb(229 229 229);
+  --sidebar-ring: rgb(161 161 161);
+  --success: rgb(22 163 74);
+  --success-foreground: rgb(240 253 244);
+  --success-bg: color-mix(in srgb, var(--success) 12%, transparent);
+  --warning: rgb(217 119 6);
+  --warning-foreground: rgb(255 251 235);
+  --warning-bg: color-mix(in srgb, var(--warning) 14%, transparent);
+  --info: rgb(37 99 235);
+  --info-foreground: rgb(239 246 255);
+  --info-bg: color-mix(in srgb, var(--info) 12%, transparent);
+  --dbx-chrome: rgb(245 245 245);
+  --dbx-chrome-muted: rgb(240 240 240);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(250 250 250);
+  --dbx-gutter: rgb(243 243 243);
+  --dbx-sidebar-header: rgb(250 250 250);
+  --dbx-window-top-border: rgb(0 0 0 / 0.35);
+  --dbx-viewport-height: 100vh;
+}
+
+.dark {
+  --background: rgb(19 20 22);
+  --foreground: rgb(215 215 219);
+  --card: rgb(27 27 30);
+  --card-foreground: rgb(215 215 219);
+  --popover: rgb(30 30 32);
+  --popover-foreground: rgb(221 221 226);
+  --primary: rgb(208 208 214);
+  --primary-foreground: rgb(19 20 22);
+  --secondary: rgb(42 42 45);
+  --secondary-foreground: rgb(215 215 219);
+  --muted: rgb(42 42 45);
+  --muted-foreground: rgb(151 152 157);
+  --accent: rgb(46 47 51);
+  --accent-foreground: rgb(221 221 226);
+  --destructive: rgb(243 98 95);
+  --destructive-rgb: 243, 98, 95;
+  --border: rgb(110 110 114 / 0.28);
+  --input: rgb(110 110 114 / 0.34);
+  --ring: rgb(133 134 139);
+  --chart-1: rgb(212 212 212);
+  --chart-2: rgb(115 115 115);
+  --chart-3: rgb(82 82 82);
+  --chart-4: rgb(64 64 64);
+  --chart-5: rgb(38 38 38);
+  --sidebar: rgb(25 25 28);
+  --sidebar-foreground: rgb(208 208 213);
+  --sidebar-primary: rgb(208 208 214);
+  --sidebar-primary-foreground: rgb(19 20 22);
+  --sidebar-accent: rgb(44 44 48);
+  --sidebar-accent-foreground: rgb(221 221 226);
+  --sidebar-border: rgb(110 110 114 / 0.28);
+  --sidebar-ring: rgb(133 134 139);
+  --success: rgb(74 222 128);
+  --success-foreground: rgb(20 30 24);
+  --success-bg: color-mix(in srgb, var(--success) 16%, transparent);
+  --warning: rgb(251 191 36);
+  --warning-foreground: rgb(40 32 12);
+  --warning-bg: color-mix(in srgb, var(--warning) 16%, transparent);
+  --info: rgb(96 165 250);
+  --info-foreground: rgb(18 28 46);
+  --info-bg: color-mix(in srgb, var(--info) 16%, transparent);
+  --dbx-chrome: rgb(27 27 30);
+  --dbx-chrome-muted: rgb(32 32 36);
+  --dbx-content: rgb(19 20 22);
+  --dbx-editor-toolbar: rgb(25 25 28);
+  --dbx-gutter: rgb(23 23 25);
+  --dbx-sidebar-header: rgb(25 25 28);
+  --dbx-window-top-border: rgb(255 255 255 / 0.18);
+}

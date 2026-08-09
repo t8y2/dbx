@@ -13,6 +13,8 @@ import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
@@ -25,6 +27,7 @@ import { useFileDrop } from "@/composables/useFileDrop";
 import { usePanelResize } from "@/composables/usePanelResize";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSqlExecution } from "@/composables/useSqlExecution";
+import MultiDbExecuteDialog from "@/components/editor/MultiDbExecuteDialog.vue";
 import { useDialogSources } from "@/composables/useDialogSources";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
@@ -57,7 +60,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
-import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, ObjectSourceKind, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
@@ -87,6 +90,7 @@ import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
 import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
 import { assessProductionSql } from "@/lib/database/productionSafety";
+import { normalizeSqlExecutionTarget, sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
 import { countAvailableAgentDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
@@ -253,6 +257,9 @@ const queryEditorObjectSourceTarget = ref<{
   relationName?: string;
 } | null>(null);
 const showSaveSqlDialog = ref(false);
+const showMultiDbExecuteDialog = ref(false);
+const multiExecuteSql = ref("");
+const multiExecuteSourceTabId = ref("");
 const saveSqlName = ref("");
 const ROOT_SAVED_SQL_FOLDER = "__root__";
 const { selection: saveSqlFolderId, pending: saveSqlFolderCreationPending, reset: resetSaveSqlFolderSelection, invalidate: invalidateSaveSqlFolderSelection, select: selectSaveSqlFolder } = useSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
@@ -343,6 +350,8 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot) {
 const blockDangerousRedisCommands = ref(true);
 const databaseRequiredSignal = ref(0);
 const databaseRequiredTabId = ref<string | null>(null);
+const sqlExecutionDangerStore = useSqlExecutionDangerStore();
+const productionSafetyStore = useProductionSafetyStore();
 
 function promptActiveDatabaseSelection() {
   const tab = activeTab.value;
@@ -369,6 +378,8 @@ const {
   sqlParameterDatabaseType,
   sqlParameterEnabledSyntaxes,
   onSqlParametersConfirm,
+  prepareMultiExecute,
+  executeTargetSql,
   explainMode,
 } = useSqlExecution({
   activeTab,
@@ -378,6 +389,7 @@ const {
   activeOutputView,
   blockDangerousRedisCommands,
   onMissingDatabase: promptActiveDatabaseSelection,
+  requestDangerConfirmation: (request) => sqlExecutionDangerStore.requestConfirmation(request),
 });
 
 function requestActiveEditorExecute() {
@@ -388,6 +400,72 @@ function requestActiveEditorExecute() {
 function requestActiveEditorExecuteInNewResultTab() {
   if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
   void tryExecuteInNewResultTab();
+}
+
+const multiExecuteDatabaseType = ref<DatabaseType>();
+const multiExecuteInitialTargets = ref<Array<{ connectionId: string; catalog?: string; database: string; schema?: string }>>([]);
+const multiExecuteLaunchId = ref(0);
+// Launch-time input only. MultiDbExecuteDialog copies this into its immutable
+// batch context before the first target starts; execution never reads this ref.
+const multiExecuteSourceOffset = ref<number>();
+
+function multiExecuteTargetLabel(target: { connectionId: string; catalog?: string; database: string; schema?: string }): string {
+  const connection = connectionStore.getConfig(target.connectionId);
+  return [connection?.name || target.connectionId, target.catalog, target.database, target.schema].filter((value) => value !== undefined && value !== "").join(" / ");
+}
+
+async function executeMultiDbTarget(input: { target: { connectionId: string; catalog?: string; database: string; schema?: string }; sourceTabId: string; sql: string; scopeId: string; context: { sourceOffset?: number }; isCancellationRequested: () => boolean }) {
+  const tab = queryStore.tabs.find((candidate) => candidate.id === input.sourceTabId);
+  const connection = connectionStore.getConfig(input.target.connectionId);
+  if (!tab || !connection) return { status: "failed" as const, errorMessage: t("multiDbExecute.targetMissingConnection") };
+  return executeTargetSql({
+    tab,
+    connection,
+    sql: input.sql,
+    executionTarget: input.target,
+    resultRun: {
+      batchId: input.scopeId,
+      title: multiExecuteTargetLabel(input.target),
+      target: input.target,
+    },
+    sourceOffset: input.context.sourceOffset,
+    blockDangerousRedisCommands: blockDangerousRedisCommands.value,
+    targetLabel: multiExecuteTargetLabel(input.target),
+    scopeId: input.scopeId,
+    isCancellationRequested: input.isCancellationRequested,
+    targetContext: sqlExecutionTargetCapabilities(connection)?.provider.toExecutionContext(input.target, connection),
+  });
+}
+
+async function cancelMultiDbTarget(_sourceTabId: string, scopeId?: string): Promise<void> {
+  if (scopeId) await queryStore.cancelMultiDbExecutionScope(scopeId);
+}
+
+function cancelPendingMultiDbTarget(scopeId: string): void {
+  sqlExecutionDangerStore.cancelScope(scopeId);
+  productionSafetyStore.cancelScope(scopeId);
+}
+
+async function requestMultiDbExecute() {
+  const tab = activeTab.value;
+  if (!tab || !activeConnection.value || showMultiDbExecuteDialog.value) return;
+  const sourceTabId = tab.id;
+  const sourceConnection = connectionStore.getConfig(tab.connectionId) ?? activeConnection.value;
+  const sourceTarget = normalizeSqlExecutionTarget(sourceConnection, {
+    connectionId: tab.connectionId,
+    ...(tab.catalog ? { catalog: tab.catalog } : {}),
+    database: tab.database,
+    ...(tab.schema ? { schema: tab.schema } : {}),
+  });
+  await prepareMultiExecute(async (sql, sourceOffset) => {
+    multiExecuteSql.value = sql;
+    multiExecuteSourceOffset.value = sourceOffset;
+    multiExecuteLaunchId.value += 1;
+    multiExecuteSourceTabId.value = sourceTabId;
+    multiExecuteDatabaseType.value = effectiveDatabaseTypeForConnection(sourceConnection);
+    multiExecuteInitialTargets.value = [sourceTarget];
+    showMultiDbExecuteDialog.value = true;
+  });
 }
 
 const dialogs = useDialogSources();
@@ -2494,6 +2572,7 @@ onUnmounted(() => {
                   @rollback="activeTab && queryStore.rollbackTransaction(activeTab.id)"
                   @dismiss-txn-rolled-back="activeTab && (activeTab.txnAutoRolledBack = false)"
                   @execute="requestActiveEditorExecute()"
+                  @multi-execute="requestMultiDbExecute()"
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"
                   @format-sql="formatActiveSql"
@@ -2684,6 +2763,18 @@ onUnmounted(() => {
           @open-lineage-target="openLineageTarget"
           @open-database-search-target="openDatabaseSearchTarget"
           @open-diagram-target="openDiagramTarget"
+        />
+        <MultiDbExecuteDialog
+          v-model:open="showMultiDbExecuteDialog"
+          :sql="multiExecuteSql"
+          :source-tab-id="multiExecuteSourceTabId"
+          :database-type="multiExecuteDatabaseType"
+          :initial-targets="multiExecuteInitialTargets"
+          :launch-id="multiExecuteLaunchId"
+          :execute-target="executeMultiDbTarget"
+          :cancel-target="cancelMultiDbTarget"
+          :cancel-pending="cancelPendingMultiDbTarget"
+          :source-offset="multiExecuteSourceOffset"
         />
         <UpdateDialog
           v-if="showUpdateDialog"

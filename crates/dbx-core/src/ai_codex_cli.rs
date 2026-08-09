@@ -1040,6 +1040,8 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
         }
     }
 

@@ -96,6 +96,7 @@ export interface UseDataGridEditorOptions {
   orderByInput: Ref<string>;
   rowStatusFilter: Ref<RowStatusFilter>;
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
+  confirmDangerousRowDeletion?: ComputedRef<boolean>;
   initialEditColumn?: ComputedRef<number>;
   getRowItem: (rowId: number) => RowItem | undefined;
   pageSize: Ref<number>;
@@ -202,6 +203,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     orderByInput,
     rowStatusFilter,
     dataGridQuickEntryEnabled = computed(() => false),
+    confirmDangerousRowDeletion = computed(() => true),
     initialEditColumn,
     getRowItem,
     pageSize,
@@ -1200,11 +1202,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const pendingDeleteRowIds = ref<number[]>([]);
 
   function requestDeleteRow(rowId: number) {
+    if (!confirmDangerousRowDeletion.value) {
+      applyDeleteRow(rowId);
+      return;
+    }
     pendingDeleteRowId.value = rowId;
     showDeleteRowConfirm.value = true;
   }
 
   function requestDeleteRows(rowIds: number[]) {
+    if (!confirmDangerousRowDeletion.value) {
+      applyDeleteRows(rowIds);
+      return;
+    }
     pendingDeleteRowIds.value = rowIds;
     showDeleteRowConfirm.value = true;
   }

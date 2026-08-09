@@ -1,14 +1,14 @@
 import type { ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "open-source" | "toggle" | "none";
-export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-saved-sql" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "toggle" | "none";
+export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
 const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket"]);
-const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mq-tenant", "etcd-root", "etcd-dashboard", "etcd-access-control", "zookeeper-root", "mongo-gridfs", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index", "user-admin"]);
+const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mq-tenant", "mqtt-topic", "etcd-root", "etcd-dashboard", "etcd-access-control", "zookeeper-root", "mongo-gridfs", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index", "user-admin"]);
 const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
 const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
@@ -36,6 +36,7 @@ export function isDocumentBrowserTreeNode(type: TreeNodeType): boolean {
 
 export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single"): TreeNodeRowAction {
   if (activation === "double") return "none";
+  if (type === "extension") return "open-extension-details";
   if (dataNodeTypes.has(type)) return "open-data";
   if (sourceNodeTypes.has(type)) return "open-source";
   if (toggleLeafNodeTypes.has(type)) return "toggle";
@@ -55,6 +56,7 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
   // sequence. Only double-click activation needs a second-stage table action.
   if (type === "table") return activation === "double" ? "activate-data" : "none";
   if (activation === "double") {
+    if (type === "extension") return "open-extension-details";
     if (dataNodeTypes.has(type)) return "open-data";
     if (sourceNodeTypes.has(type)) return "open-source";
     if (savedSqlNodeTypes.has(type)) return "open-saved-sql";

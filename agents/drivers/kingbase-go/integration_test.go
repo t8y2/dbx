@@ -100,6 +100,10 @@ func TestKingbaseIntegration(t *testing.T) {
 	if err != nil || !strings.Contains(fmt.Sprint(source["source"]), function) {
 		t.Fatalf("get function source failed: source=%v err=%v", source, err)
 	}
+	viewSource, err := server.getObjectSource("public", view, "VIEW")
+	if err != nil || !strings.Contains(fmt.Sprint(viewSource["source"]), parent) {
+		t.Fatalf("get view source failed: source=%v err=%v", viewSource, err)
+	}
 
 	transactionParams := map[string]json.RawMessage{
 		"schema":     rawJSON("public"),

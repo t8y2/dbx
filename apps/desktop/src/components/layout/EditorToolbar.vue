@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2 } from "@lucide/vue";
+import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -16,6 +16,7 @@ import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDa
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
 import { useConnectionGroupLabel } from "@/composables/useConnectionGroupLabel";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
+import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -46,6 +47,7 @@ const emit = defineEmits<{
   openSql: [];
   importResultArchive: [];
   pasteSqlInCondition: [];
+  multiExecute: [];
   changeConnection: [connectionId: string];
   changeCatalog: [catalog: string | undefined, database: string];
   changeDatabase: [database: string];
@@ -146,6 +148,12 @@ const executeButtonClass = computed(() => {
 });
 
 const isTransactionActive = computed(() => !!props.txnSessionId);
+const canMultiExecute = computed(() => {
+  if (!supportsQueryExecution(props.activeConnection?.db_type)) return false;
+  if (props.activeTab.isExecuting || props.activeTab.isExplaining || props.activeTab.isCancelling) return false;
+  if (props.autoCommit === false || isTransactionActive.value) return false;
+  return !!props.executableSql.trim();
+});
 
 const showSchemaSelector = computed(() => {
   const connection = props.activeConnection;
@@ -398,6 +406,14 @@ async function changeCatalog(selectedCatalog: string) {
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.exPasteSqlInCondition") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-primary hover:bg-primary/10" :disabled="!canMultiExecute" :aria-label="t('toolbar.multiDbExecute')" @click="emit('multiExecute')">
+            <CirclePlay class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.multiDbExecute") }}</TooltipContent>
       </Tooltip>
     </div>
     <span class="flex-1 min-w-0" />

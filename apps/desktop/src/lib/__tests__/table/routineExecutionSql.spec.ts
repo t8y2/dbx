@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildProcedureExecutionSqlFromValues } from "@/lib/table/routineExecutionSql";
-import { routineParametersFromResult, routineParametersQuery } from "@/lib/table/routineParameters";
+import { routineParametersFromResult, routineParametersQuery, supportsRoutineParameterMetadata, xuguRoutineMetadataFromDefinition } from "@/lib/table/routineParameters";
 import type { QueryResult } from "@/types/database";
 
 function queryResult(columns: string[], rows: unknown[][]): QueryResult {
@@ -151,5 +151,130 @@ describe("SQL Server routine execution SQL", () => {
     expect(metadataSql).toContain("p.max_length AS max_length");
     expect(metadataSql).toContain("p.precision AS precision");
     expect(metadataSql).toContain("p.scale AS scale");
+  });
+});
+
+describe("XuguDB routine parameter metadata", () => {
+  it("parses modes, nested types, defaults, comments, and quoted identifiers", () => {
+    const metadata = xuguRoutineMetadataFromDefinition(`
+CREATE OR REPLACE PROCEDURE "AppSchema"."MixedCaseProcedure" (
+  "p_required" IN INTEGER,
+  p_text VARCHAR(50) DEFAULT 'a,b -- literal',
+  p_amount IN /* mode separator */ OUT NUMERIC(12, 3) := -1.250,
+  p_result OUT VARCHAR(100),
+  p_comment IN VARCHAR(40) DEFAULT '/* literal */'
+) AS
+BEGIN
+  NULL;
+END;`);
+
+    expect(metadata.kind).toBe("PROCEDURE");
+    expect(metadata.returnType).toBeUndefined();
+    expect(metadata.parameters).toEqual([
+      { name: "p_required", dataType: "INTEGER", mode: "IN", ordinal: 1, hasDefault: false, defaultValue: undefined },
+      { name: "p_text", dataType: "VARCHAR(50)", mode: "IN", ordinal: 2, hasDefault: true, defaultValue: "'a,b -- literal'" },
+      { name: "p_amount", dataType: "NUMERIC(12, 3)", mode: "INOUT", ordinal: 3, hasDefault: true, defaultValue: "-1.250" },
+      { name: "p_result", dataType: "VARCHAR(100)", mode: "OUT", ordinal: 4, hasDefault: false, defaultValue: undefined },
+      { name: "p_comment", dataType: "VARCHAR(40)", mode: "IN", ordinal: 5, hasDefault: true, defaultValue: "'/* literal */'" },
+    ]);
+  });
+
+  it("parses function parameters and its return type", () => {
+    const metadata = xuguRoutineMetadataFromDefinition(`
+CREATE OR REPLACE FUNCTION calculate_total(
+  p_amount IN NUMERIC(10,2),
+  p_rate NUMERIC(5,2) DEFAULT 0.10
+) RETURN NUMERIC(12,3)
+AS
+BEGIN
+  RETURN p_amount * p_rate;
+END;`);
+
+    expect(metadata).toEqual({
+      kind: "FUNCTION",
+      returnType: "NUMERIC(12,3)",
+      parameters: [
+        { name: "p_amount", dataType: "NUMERIC(10,2)", mode: "IN", ordinal: 1, hasDefault: false, defaultValue: undefined },
+        { name: "p_rate", dataType: "NUMERIC(5,2)", mode: "IN", ordinal: 2, hasDefault: true, defaultValue: "0.10" },
+      ],
+    });
+  });
+
+  it("handles routines without parentheses and fails closed for malformed headers", () => {
+    expect(xuguRoutineMetadataFromDefinition("CREATE FUNCTION ping RETURN INTEGER AS BEGIN RETURN 1; END;")).toEqual({ kind: "FUNCTION", parameters: [], returnType: "INTEGER" });
+    expect(xuguRoutineMetadataFromDefinition("CREATE PROCEDURE broken(p_value IN INTEGER AS BEGIN NULL; END;")).toEqual({ kind: "PROCEDURE", parameters: [] });
+    expect(xuguRoutineMetadataFromDefinition("CREATE FUNCTION broken(p_value INTEGER) AS BEGIN RETURN p_value; END;")).toEqual({
+      kind: "FUNCTION",
+      parameters: [{ name: "p_value", dataType: "INTEGER", mode: "IN", ordinal: 1, hasDefault: false, defaultValue: undefined }],
+      returnType: undefined,
+    });
+    expect(xuguRoutineMetadataFromDefinition("CREATE PROCEDURE broken(p_value VARCHAR DEFAULT 'unterminated) AS BEGIN NULL; END;")).toEqual({ parameters: [] });
+    expect(xuguRoutineMetadataFromDefinition("CREATE PROCEDURE broken(/* unterminated")).toEqual({ parameters: [] });
+    expect(xuguRoutineMetadataFromDefinition("SELECT 'PROCEDURE fake(p INT)' FROM dual")).toEqual({ parameters: [] });
+  });
+
+  it("supports INOUT spelling, escaped names, and equals defaults", () => {
+    expect(xuguRoutineMetadataFromDefinition('CREATE PROCEDURE p("p""name" INOUT DECIMAL(9,2) = COALESCE(-1, 0)) AS BEGIN NULL; END;').parameters).toEqual([
+      {
+        name: 'p"name',
+        dataType: "DECIMAL(9,2)",
+        mode: "INOUT",
+        ordinal: 1,
+        hasDefault: true,
+        defaultValue: "COALESCE(-1, 0)",
+      },
+    ]);
+  });
+
+  it("enables source-backed metadata without generating an ALL_ARGUMENTS query", () => {
+    expect(supportsRoutineParameterMetadata("xugu")).toBe(true);
+    expect(routineParametersQuery({ database: "sample", databaseType: "xugu", schema: "app", routineName: "save_value" })).toBeNull();
+  });
+});
+
+describe("XuguDB procedure execution SQL", () => {
+  it("supplies OUT arguments and preserves INOUT input values", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "xugu",
+      schema: "AppSchema",
+      routineName: "adjust_amount",
+      parameters: [
+        { name: "p_input", dataType: "INTEGER", mode: "IN", ordinal: 1, value: "5" },
+        { name: "p_amount", dataType: "NUMERIC(12,3)", mode: "INOUT", ordinal: 2, value: "2.500" },
+        { name: "p_status", dataType: "VARCHAR(20)", mode: "OUT", ordinal: 3, value: "ignored" },
+      ],
+    });
+
+    expect(sql).toBe('CALL "AppSchema"."adjust_amount"(5, 2.500, NULL);');
+  });
+
+  it("uses named notation when a middle default is omitted", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "xugu",
+      schema: "AppSchema",
+      routineName: "save_value",
+      parameters: [
+        { name: "p_required", dataType: "INTEGER", mode: "IN", ordinal: 1, value: "1" },
+        { name: "p_label", dataType: "VARCHAR(20)", mode: "IN", ordinal: 2, value: "unused", hasDefault: true, useDefault: true },
+        { name: "p_amount", dataType: "NUMERIC(12,3)", mode: "INOUT", ordinal: 3, value: "2.500" },
+        { name: "p_result", dataType: "VARCHAR(20)", mode: "OUT", ordinal: 4, value: "" },
+      ],
+    });
+
+    expect(sql).toBe('CALL "AppSchema"."save_value"("p_required" => 1, "p_amount" => 2.500, "p_result" => NULL);');
+  });
+
+  it("omits trailing defaults positionally and escapes string values", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "xugu",
+      schema: "AppSchema",
+      routineName: "save_label",
+      parameters: [
+        { name: "p_label", dataType: "VARCHAR(30)", mode: "IN", ordinal: 1, value: "O'Reilly" },
+        { name: "p_enabled", dataType: "BOOLEAN", mode: "IN", ordinal: 2, value: "true", hasDefault: true, useDefault: true },
+      ],
+    });
+
+    expect(sql).toBe("CALL \"AppSchema\".\"save_label\"('O''Reilly');");
   });
 });

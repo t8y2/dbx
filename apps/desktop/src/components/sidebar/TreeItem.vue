@@ -423,14 +423,14 @@ const detailTooltip = computed(() => {
           .map((h) => h.trim())
           .filter(Boolean)
       : [];
-    const visibleFilterSummary = connectionCanConfigureSidebarVisibleDatabases(config.db_type) ? connectionStore.getSidebarVisibleFilterSummary(node.connectionId) : null;
+    const visibleFilterSummary = connectionCanConfigureSidebarVisibleDatabases(config.db_type) || config.db_type === "nacos" ? connectionStore.getSidebarVisibleFilterSummary(node.connectionId) : null;
     const visibleFilterRow: DetailTooltipRow | null =
       visibleFilterSummary?.selected != null && visibleFilterSummary.total != null
         ? {
-            label: t(visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailLabel" : "visibleDatabases.detailLabel"),
+            label: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailLabel" : "visibleDatabases.detailLabel"),
             value: `${visibleFilterSummary.selected}/${visibleFilterSummary.total}`,
             action: () => treeRuntime.openPrimaryVisibleFilter(node),
-            actionLabel: t(visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailActionLabel" : "visibleDatabases.detailActionLabel", { connection: config.name }),
+            actionLabel: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailActionLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailActionLabel" : "visibleDatabases.detailActionLabel", { connection: config.name }),
           }
         : null;
     const rows: DetailTooltipRow[] = [

@@ -403,6 +403,7 @@ let buildSqlSemanticHighlightExtension: (() => import("@codemirror/state").Exten
 let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snippetCompletion;
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
+let codeMirrorSelectedCompletion: typeof import("@codemirror/autocomplete").selectedCompletion | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
 let codeMirrorCloseCompletion: typeof import("@codemirror/autocomplete").closeCompletion | null = null;
 let codeMirrorInsertCompletionText: typeof import("@codemirror/autocomplete").insertCompletionText | null = null;
@@ -1618,6 +1619,31 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   if (codeMirrorNextSnippetField?.(view)) return true;
   if (completionStatus) return waitForCompletionTab(view);
   return false;
+}
+
+function acceptSqlServerCompletionOnSpace(view: EditorViewType): boolean {
+  if (props.databaseType !== "sqlserver" || codeMirrorCompletionStatus?.(view.state) !== "active") return false;
+  const completionType = codeMirrorSelectedCompletion?.(view.state)?.type;
+  if (completionType !== "keyword" && completionType !== "table" && completionType !== "column") return false;
+  if (!(codeMirrorAcceptCompletion?.(view) ?? false)) return false;
+
+  const selection = view.state.selection.main;
+  if (!selection.empty) return true;
+  const cursor = selection.head;
+  const previousCharacter = cursor > 0 ? view.state.sliceDoc(cursor - 1, cursor) : "";
+  if (/\s/.test(previousCharacter)) return true;
+
+  const nextCharacter = view.state.sliceDoc(cursor, cursor + 1);
+  if (/\s/.test(nextCharacter)) {
+    view.dispatch({ selection: { anchor: cursor + 1 }, scrollIntoView: true });
+  } else {
+    view.dispatch({
+      changes: { from: cursor, insert: " " },
+      selection: { anchor: cursor + 1 },
+      scrollIntoView: true,
+    });
+  }
+  return true;
 }
 
 function clearPendingCompletionTab() {
@@ -3930,7 +3956,7 @@ onMounted(async () => {
     { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, closeHoverTooltips, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, scrollPastEnd, ViewPlugin },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
-    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion },
+    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion, selectedCompletion },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree },
     { searchKeymap },
@@ -3964,6 +3990,7 @@ onMounted(async () => {
   setSqlDiagnosticsEffect = StateEffect.define<SqlSemanticDiagnostic[]>();
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
+  codeMirrorSelectedCompletion = selectedCompletion;
   codeMirrorCloseCompletion = closeCompletion;
   codeMirrorStartCompletion = startCompletion;
   codeMirrorInsertCompletionText = insertCompletionText;
@@ -4443,6 +4470,7 @@ onMounted(async () => {
       Prec.highest(
         keymap.of([
           { key: "'", run: handleSqlSingleQuote },
+          { key: "Space", run: acceptSqlServerCompletionOnSpace },
           { key: "Tab", run: handleTab },
           {
             key: "Escape",

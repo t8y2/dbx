@@ -494,6 +494,7 @@ export interface EditorSettings {
   queryResultMaxRowsEnabled: boolean;
   queryResultMaxRows: number;
   infiniteScroll: boolean;
+  /** Preserved for downgrade compatibility; current clients use queryResultMaxRows. */
   infiniteScrollMaxRows: number;
   regexMaxMatchCount: number;
   autoCalculateTotalRows: boolean;

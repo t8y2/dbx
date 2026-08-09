@@ -41,7 +41,6 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "queryResultMaxRowsEnabled",
   "queryResultMaxRows",
   "infiniteScroll",
-  "infiniteScrollMaxRows",
   "regexMaxMatchCount",
   "autoCalculateTotalRows",
   "tableColumnTemplateFields",

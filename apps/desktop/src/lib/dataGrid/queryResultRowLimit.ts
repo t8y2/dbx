@@ -12,6 +12,10 @@ export function effectiveQueryResultMaxRows(enabled: boolean | undefined, value:
   return enabled !== false ? normalizeQueryResultMaxRows(value) : undefined;
 }
 
+export function continuousQueryResultMaxRows(enabled: boolean | undefined, value: unknown): number {
+  return effectiveQueryResultMaxRows(enabled, value) ?? MAX_QUERY_RESULT_MAX_ROWS;
+}
+
 export function agentProtocolQueryResultMaxRows(maxRows: number | undefined): number {
   return maxRows ?? MAX_QUERY_RESULT_MAX_ROWS;
 }

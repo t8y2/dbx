@@ -27,7 +27,8 @@ const mocks = vi.hoisted(() => ({
   updateRedisDbKeyStats: vi.fn(),
   redisScanPageSize: 100,
   infiniteScroll: false,
-  infiniteScrollMaxRows: 5000,
+  queryResultMaxRowsEnabled: true,
+  queryResultMaxRows: 5000,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -66,7 +67,8 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
     editorSettings: {
       infiniteScroll: mocks.infiniteScroll,
-      infiniteScrollMaxRows: mocks.infiniteScrollMaxRows,
+      queryResultMaxRowsEnabled: mocks.queryResultMaxRowsEnabled,
+      queryResultMaxRows: mocks.queryResultMaxRows,
     },
   }),
 }));
@@ -358,7 +360,8 @@ function resetApiMocks() {
   vi.clearAllMocks();
   mocks.redisScanPageSize = 100;
   mocks.infiniteScroll = false;
-  mocks.infiniteScrollMaxRows = 5000;
+  mocks.queryResultMaxRowsEnabled = true;
+  mocks.queryResultMaxRows = 5000;
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
   mocks.redisGetValue.mockImplementation((_connectionId: string, _db: number, keyRaw: string) => Promise.resolve(redisValue(keyRaw)));
   mocks.redisSetString.mockResolvedValue(undefined);

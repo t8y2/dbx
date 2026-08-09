@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_QUERY_RESULT_MAX_ROWS, agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, normalizeQueryResultMaxRows, queryResultLimitReached } from "../queryResultRowLimit";
+import { MAX_QUERY_RESULT_MAX_ROWS, agentProtocolQueryResultMaxRows, capQueryResultTotal, continuousQueryResultMaxRows, effectiveQueryResultMaxRows, limitQueryPagination, normalizeQueryResultMaxRows, queryResultLimitReached } from "../queryResultRowLimit";
 
 describe("query result row limits", () => {
   it("preserves the legacy 100,000-row default", () => {
@@ -10,6 +10,8 @@ describe("query result row limits", () => {
   it("uses the Java signed-int boundary for unlimited Agent execution", () => {
     expect(effectiveQueryResultMaxRows(false, 100_000)).toBeUndefined();
     expect(agentProtocolQueryResultMaxRows(undefined)).toBe(MAX_QUERY_RESULT_MAX_ROWS);
+    expect(continuousQueryResultMaxRows(false, 100_000)).toBe(MAX_QUERY_RESULT_MAX_ROWS);
+    expect(continuousQueryResultMaxRows(true, 250_000)).toBe(250_000);
     expect(normalizeQueryResultMaxRows(MAX_QUERY_RESULT_MAX_ROWS + 1)).toBe(MAX_QUERY_RESULT_MAX_ROWS);
   });
 

@@ -198,7 +198,7 @@ test("infinite pagination fetches and appends only the next table segment", asyn
     const connectionStore = useConnectionStore();
     const queryStore = useQueryStore();
     const settingsStore = useSettingsStore();
-    settingsStore.updateEditorSettings({ infiniteScroll: true, infiniteScrollMaxRows: 5000 });
+    settingsStore.updateEditorSettings({ infiniteScroll: true, queryResultMaxRowsEnabled: true, queryResultMaxRows: 5000 });
     connectionStore.addEphemeralConnection(conn("mysql-1"));
     const tabId = queryStore.createTab("mysql-1", "app", "orders", "data");
     queryStore.setTableMeta(tabId, { tableName: "orders", tableType: "TABLE", columns: [], primaryKeys: [] });

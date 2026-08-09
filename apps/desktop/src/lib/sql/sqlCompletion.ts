@@ -1421,7 +1421,7 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
-      this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect));
+      this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, this.databaseType, this.input.keywordCase));
       this.items.push(...buildTableItems(context, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType, this.input.currentSchema, this.input.keywordCase));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table"));
@@ -2919,9 +2919,18 @@ function buildTableItems(
     .slice(0, MAX_TABLE_COMPLETION_ITEMS);
 }
 
-function buildForeignKeyRelatedTableItems(context: SqlCompletionContext, tables: SqlCompletionTable[], foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem[] {
+function buildForeignKeyRelatedTableItems(
+  context: SqlCompletionContext,
+  tables: SqlCompletionTable[],
+  foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>,
+  dialect?: "mysql" | "postgres" | "sqlserver",
+  autoAliasTables = false,
+  databaseType?: DatabaseType,
+  keywordCase?: SqlKeywordCase,
+): SqlCompletionItem[] {
   if (!foreignKeysByTable || context.referencedTables.length === 0) return [];
   const candidates = new Map<string, { table: SqlCompletionTable; detail: string }>();
+  const existingAliases = new Set(context.referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   for (const ref of context.referencedTables) {
     for (const [ownerKey, foreignKeys] of foreignKeysByTable.entries()) {
       const owner = foreignKeyOwnerFromKey(ownerKey);
@@ -2942,13 +2951,17 @@ function buildForeignKeyRelatedTableItems(context: SqlCompletionContext, tables:
   }
 
   return [...candidates.values()]
-    .map(({ table, detail }) => ({
-      label: table.name,
-      type: "table" as const,
-      detail,
-      apply: quoteSqlIdentifier(table.name, dialect),
-      boost: computeBoost(table.name, context.prefix) + 3600,
-    }))
+    .map(({ table, detail }) => {
+      const applyName = quoteSqlIdentifier(table.name, dialect);
+      const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
+      return {
+        label: table.name,
+        type: "table" as const,
+        detail,
+        apply: formatTableAliasApply(applyName, alias, databaseType, keywordCase),
+        boost: computeBoost(table.name, context.prefix) + 3600,
+      };
+    })
     .sort(compareCompletionItems);
 }
 

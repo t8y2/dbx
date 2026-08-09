@@ -847,7 +847,7 @@ test("suggests columns from referenced tables in select list", () => {
     columnsByTable,
   });
 
-  assert.equal(items[0]?.label, "name");
+  assert.equal(items[0]?.label, "u.name");
   assert.equal(items[0]?.type, "column");
 });
 
@@ -2598,7 +2598,7 @@ test("filters data type keywords out of SELECT context", () => {
 
 // --- Qualified column names for duplicates ---
 
-test("uses row-source aliases when multiple tables share column names", () => {
+test("uses row-source aliases for all columns across multiple tables", () => {
   const sql = "select  from public.users u join public.orders o on u.id = o.user_id";
   const items = buildSqlCompletionItems(sql, "select ".length, {
     tables,
@@ -2613,13 +2613,10 @@ test("uses row-source aliases when multiple tables share column names", () => {
     columns.some((item) => item.label === "o.id" && item.apply === "o.id"),
     "should show o.id",
   );
+  assert.ok(columns.some((item) => item.label === "u.name" && item.apply === "u.name"), "unique name should use its row-source alias");
   assert.ok(
-    columns.some((item) => item.label === "name"),
-    "unique name should remain unqualified",
-  );
-  assert.ok(
-    columns.some((item) => item.label === "user_id"),
-    "unique user_id should remain unqualified",
+    columns.some((item) => item.label === "o.user_id" && item.apply === "o.user_id"),
+    "unique user_id should use its row-source alias",
   );
 });
 

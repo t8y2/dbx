@@ -306,7 +306,12 @@ pub struct AiChatSelectionState {
 
 impl Default for AiChatSelectionState {
     fn default() -> Self {
-        Self { version: default_ai_chat_selection_version(), active: None, effort_preferences: Vec::new() }
+        Self {
+            version: default_ai_chat_selection_version(),
+            active: None,
+            effort_preferences: Vec::new(),
+            default_mode: None,
+        }
     }
 }
 
@@ -3919,10 +3924,10 @@ mod tests {
         responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
         set_chat_completion_token_limit, stream, stream_claude, stream_claude_with_tools, stream_data_payload,
         stream_error, stream_openai_with_tools, stream_with_tools, test_connection_core, uses_anthropic_messages_api,
-        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiActiveModelSelection, AiApiStyle,
-        AiAssistantMode, AiAuthMethod, AiCapabilitySource, AiChatSelectionState, AiCompletionRequest, AiConfig,
-        AiEffortCapability, AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel,
-        StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAssistantMode,
+        AiAuthMethod, AiCapabilitySource, AiChatSelectionState, AiCompletionRequest, AiConfig, AiEffortCapability,
+        AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
+        StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     #[test]

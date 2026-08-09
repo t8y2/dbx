@@ -45,7 +45,7 @@ import {
   shouldChainSqlCompletionAfterAccept,
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
-import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSource } from "@/lib/sql/semantic/completion";
+import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearch/elasticsearchCompletion";
@@ -304,6 +304,7 @@ const completionTranslations = computed(() => ({
   numericLiteral: t("editor.completion.numericLiteral"),
   booleanValue: t("editor.completion.booleanValue"),
   starExpansionColumns: t("editor.completion.starExpansionColumns"),
+  tableAlias: t("editor.completion.tableAlias"),
   functionDescriptions: Object.fromEntries(SQL_FUNCTION_NAMES.map((name) => [name, t(`editor.completion.functionDescriptions.${name}`)])) as Record<string, string>,
 }));
 const MAX_COMPLETION_TABLES = 200;
@@ -323,7 +324,7 @@ const contextObjectTarget = ref<SqlObjectNavigationTarget | null>(null);
 interface SelectStarExpansionTarget {
   from: number;
   to: number;
-  reference: SqlCompletionReferencedTable;
+  references: SqlCompletionReferencedTable[];
   context: SqlCompletionContext;
   qualifierSql?: string;
   statementSql: string;
@@ -810,6 +811,20 @@ function closePicker() {
   view.value?.focus();
 }
 
+function insertLineBelow(currentView: EditorViewType): boolean {
+  if (props.readOnly) return false;
+  const line = currentView.state.doc.lineAt(currentView.state.selection.main.head);
+  const indentation = line.text.match(/^\s*/)?.[0] ?? "";
+  const insertion = `\n${indentation}`;
+  const cursor = line.to + insertion.length;
+  currentView.dispatch({
+    changes: { from: line.to, to: line.to, insert: insertion },
+    selection: { anchor: cursor },
+    userEvent: "input.insertLineBelow",
+  });
+  return true;
+}
+
 function syncContextMenuState(currentView: EditorViewType, starPosition?: number) {
   selectedSql.value = selectedSqlFromView(currentView);
   executableSql.value = executableSqlFromView(currentView);
@@ -860,23 +875,25 @@ function selectStarExpansionTargetForView(currentView: EditorViewType, position?
   }
   if (!isSelectProjection) return null;
 
-  const source = sqlSemanticSelectStarTableSource(model);
-  if (!source) return null;
+  const sources = sqlSemanticSelectStarTableSources(model);
+  if (sources.length === 0) return null;
 
-  const sourceTarget = queryTableCandidateAtSqlPosition({
-    connectionId: props.connectionId,
-    database: props.database,
-    schema: props.schema,
-    databaseType: props.databaseType,
-    sql,
-    position: source.qualifiedName?.span.start ?? source.sourceSpan.start,
+  const references = sources.map((source): SqlCompletionReferencedTable => {
+    const identifierParts = source.qualifiedName?.parts ?? [];
+    return {
+      // Use the semantic metadata target instead of reparsing the table token at
+      // its source span. The latter can resolve the alias token in aliased
+      // sources, causing column metadata requests for `tv` instead of
+      // `tVillage`.
+      name: source.metadataTarget?.table ?? source.name,
+      nameQuoted: !!identifierParts[identifierParts.length - 1]?.quote,
+      database: source.metadataTarget?.database,
+      schema: source.metadataTarget?.schema ?? source.qualifierParts[source.qualifierParts.length - 1],
+      schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+      alias: source.alias,
+      aliasSql: source.aliasSpan ? sql.slice(source.aliasSpan.start, source.aliasSpan.end) : source.alias,
+    };
   });
-  const reference: SqlCompletionReferencedTable = {
-    name: sourceTarget?.tableName ?? source.metadataTarget?.table ?? source.name,
-    database: sourceTarget?.database ?? source.metadataTarget?.database,
-    schema: sourceTarget?.schema ?? source.metadataTarget?.schema,
-    alias: source.alias,
-  };
   const legacyContext = getSqlCompletionContext(sql, cursor, sqlCompletionDialectOptions());
   const context = sqlCompletionContextFromSemantic(model, legacyContext);
   if (context.statementKind !== "select" || !context.onStar) return null;
@@ -884,11 +901,11 @@ function selectStarExpansionTargetForView(currentView: EditorViewType, position?
   return {
     from: intent.replacementRange.start,
     to: intent.replacementRange.end,
-    reference,
-    context: { ...context, referencedTables: [reference] },
+    references,
+    context: { ...context, referencedTables: references },
     qualifierSql: sqlSemanticSelectStarQualifierSql(model),
     statementSql: model.statement.text,
-    allowResultColumnsFallback: model.rowSources.length === 1 && sqlSemanticSelectStarIsOnlyProjection(model),
+    allowResultColumnsFallback: references.length === 1 && model.rowSources.length === 1 && sqlSemanticSelectStarIsOnlyProjection(model),
   };
 }
 
@@ -1536,7 +1553,6 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         {
           key: "Enter",
           run: codeMirrorInsertNewlineKeepIndent ?? undefined,
-          shift: codeMirrorInsertNewlineKeepIndent ?? undefined,
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
@@ -1558,6 +1574,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         }),
         ...binding(shortcuts.indentMore, (view) => codeMirrorIndentMore?.(view) ?? false),
         ...binding(shortcuts.indentLess, (view) => codeMirrorIndentLess?.(view) ?? false),
+        ...binding(shortcuts.insertLineBelow, insertLineBelow),
         ...binding(shortcuts.duplicateLine, (view) => codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.deleteLine, (view) => codeMirrorDeleteLine?.(view) ?? false),
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorMoveLineUp?.(view) ?? false),
@@ -1854,13 +1871,19 @@ function allowsOnDemandQualifiedTableCompletion(prefix: string): boolean {
 function completionMetadataTarget(table: { name: string; catalog?: string | null; database?: string | null; schema?: string | null }, scope?: CompletionMetadataScope): { database: string; schema?: string; catalog?: string } | null {
   const currentDatabase = scope?.database ?? props.database;
   if (currentDatabase == null) return null;
+  // SQL Server metadata queries require a schema even when the SQL uses an
+  // unqualified table name. The query editor commonly has no schema selected
+  // when the user is working from a database-level tab, so use the same
+  // default as the table/DDL metadata paths instead of returning no columns.
+  const selectedSchema = table.schema ?? scope?.schema ?? props.schema;
+  const effectiveSchema = selectedSchema ?? (props.databaseType === "sqlserver" ? metadataSchemaForConnection(connectionStore.getConfig(props.connectionId ?? ""), currentDatabase, undefined) : undefined);
   if (supportsDatabaseSchemaQualifierCompletion() && table.database) {
-    return { database: table.database, schema: table.schema ?? undefined, catalog: table.catalog ?? props.catalog };
+    return { database: table.database, schema: effectiveSchema, catalog: table.catalog ?? props.catalog };
   }
-  if (supportsDatabaseQualifierCompletion() && table.schema) {
-    return { database: table.schema, catalog: table.catalog ?? props.catalog };
+  if (supportsDatabaseQualifierCompletion() && effectiveSchema) {
+    return { database: effectiveSchema, catalog: table.catalog ?? props.catalog };
   }
-  return { database: currentDatabase, schema: table.schema ?? scope?.schema ?? props.schema, catalog: table.catalog ?? props.catalog };
+  return { database: currentDatabase, schema: effectiveSchema, catalog: table.catalog ?? props.catalog };
 }
 
 function isVirtualCompletionTableReference(table: { name: string; database?: string | null; schema?: string | null }): boolean {
@@ -1912,15 +1935,68 @@ async function ensureColumnsForTable(table: { name: string; database?: string | 
     loadedColumnsByTable.add(cacheKey.toLowerCase());
     return true;
   }
-  const columns = await listCompletionColumnsForEditor(props.connectionId, target.database, table.name, target.schema, target.catalog, reference);
-  cachedColumnsByTable.set(cacheKey, columns);
-  loadedColumnsByTable.add(cacheKey.toLowerCase());
+  let columns = await listCompletionColumnsForEditor(props.connectionId, target.database, table.name, target.schema, target.catalog, reference);
+
+  // A schema-aware connection can legitimately return an empty result when
+  // the editor has no selected schema. Resolve the physical table from the
+  // local/remote table cache and retry with its schema before reporting that
+  // star expansion is unavailable. This is especially important for aliased
+  // sources because the alias itself must never be sent as the table name.
+  if (columns.length === 0 && !table.schema && !target.schema && !supportsDatabaseQualifierCompletion()) {
+    const schemaCandidates: string[] = [];
+    const seenSchemas = new Set<string>();
+    const addSchema = (schema?: string | null) => {
+      const normalized = schema?.trim();
+      if (!normalized) return;
+      const key = normalized.toLowerCase();
+      if (seenSchemas.has(key)) return;
+      seenSchemas.add(key);
+      schemaCandidates.push(normalized);
+    };
+
+    if (props.databaseType === "sqlserver") {
+      addSchema(metadataSchemaForConnection(connectionStore.getConfig(props.connectionId), target.database, undefined));
+    }
+
+    const localTables = connectionStore.lookupLocalCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, undefined, target.catalog);
+    localTables.forEach((candidate) => {
+      if (candidate.name.toLowerCase() === table.name.toLowerCase()) addSchema(candidate.schema);
+    });
+    if (schemaCandidates.length === 0 && !usesLocalOnlyCompletionMetadata()) {
+      const remoteTables = await connectionStore.listCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, undefined, false, undefined, target.catalog);
+      remoteTables.forEach((candidate) => {
+        if (candidate.name.toLowerCase() === table.name.toLowerCase()) addSchema(candidate.schema);
+      });
+    }
+
+    for (const schema of schemaCandidates) {
+      const schemaTarget = completionMetadataTarget({ ...table, schema });
+      if (!schemaTarget) continue;
+      const retryColumns = await listCompletionColumnsForEditor(props.connectionId, schemaTarget.database, table.name, schemaTarget.schema, schemaTarget.catalog, reference);
+      if (retryColumns.length > 0) {
+        columns = retryColumns;
+        break;
+      }
+    }
+  }
+  // Do not memoize an empty response as a successful load. Empty results are
+  // commonly caused by a temporarily unresolved schema; keeping that value
+  // would prevent the next expansion attempt from retrying after metadata has
+  // become available.
+  if (columns.length > 0) {
+    cachedColumnsByTable.set(cacheKey, columns);
+    loadedColumnsByTable.add(cacheKey.toLowerCase());
+  } else {
+    cachedColumnsByTable.delete(cacheKey);
+    loadedColumnsByTable.delete(cacheKey.toLowerCase());
+  }
   return true;
 }
 
 function resultColumnsForSelectStar(target: SelectStarExpansionTarget, sql: string): SqlCompletionColumn[] {
   if (
     !target.allowResultColumnsFallback ||
+    target.references.length !== 1 ||
     !selectStarResultColumnsMatch({
       currentSql: sql,
       targetFrom: target.from,
@@ -1935,7 +2011,7 @@ function resultColumnsForSelectStar(target: SelectStarExpansionTarget, sql: stri
   return (props.resultColumns ?? [])
     .map((name) => name.trim())
     .filter(Boolean)
-    .map((name) => ({ name, table: target.reference.name, schema: target.reference.schema }));
+    .map((name) => ({ name, table: target.references[0]!.name, schema: target.references[0]!.schema }));
 }
 
 async function expandSelectStar(target = selectStarExpansionTarget.value) {
@@ -1945,19 +2021,25 @@ async function expandSelectStar(target = selectStarExpansionTarget.value) {
 
   const originalDocument = currentView.state.doc.toString();
   try {
-    await ensureColumnsForTable(target.reference, target.reference);
+    await Promise.all(target.references.map((reference) => ensureColumnsForTable(reference, reference)));
   } catch (error) {
     console.warn("expandSelectStar: failed to load columns", error);
-  }
-
-  if (view.value !== currentView || currentView.state.doc.toString() !== originalDocument || currentView.state.sliceDoc(target.from, target.to) !== "*") return;
-  const columns = cachedColumnsByTable.get(completionCacheKey(target.reference));
-  const expansionColumns = columns?.length ? columns : resultColumnsForSelectStar(target, originalDocument);
-  if (expansionColumns.length === 0) {
     toast(t("editor.contextMenu.expandSelectStarUnavailable"), 3000);
     return;
   }
-  const expansion = buildSelectStarExpansion(target.context, new Map([[completionCacheKey(target.reference), expansionColumns]]), props.dialect, target.qualifierSql, props.databaseType);
+
+  if (view.value !== currentView || currentView.state.doc.toString() !== originalDocument || currentView.state.sliceDoc(target.from, target.to) !== "*") return;
+  const columnsByReference = new Map<string, SqlCompletionColumn[]>();
+  for (const reference of target.references) {
+    const columns = cachedColumnsByTable.get(completionCacheKey(reference));
+    const expansionColumns = columns?.length ? columns : target.references.length === 1 ? resultColumnsForSelectStar(target, originalDocument) : [];
+    if (expansionColumns.length === 0) {
+      toast(t("editor.contextMenu.expandSelectStarUnavailable"), 3000);
+      return;
+    }
+    columnsByReference.set(completionCacheKey(reference), expansionColumns);
+  }
+  const expansion = buildSelectStarExpansion(target.context, columnsByReference, props.dialect, target.qualifierSql, props.databaseType);
   if (!expansion) {
     toast(t("editor.contextMenu.expandSelectStarUnavailable"), 3000);
     return;

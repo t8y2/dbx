@@ -89,6 +89,33 @@ describe("sqlFormatter", () => {
     await expect(formatSqlText(`< 10 AND score > 2`, "postgres")).resolves.toBe(`< 10\nAND score > 2`);
   });
 
+  it("keeps logical conditions on one line when configured", async () => {
+    const formatted = await formatSqlText("SELECT * FROM t WHERE a = 1 AND b = 2", "mysql", { logicalOperatorNewline: "none" });
+
+    expect(formatted).toContain("a = 1 AND b = 2");
+    expect(formatted).not.toMatch(/\n\s*AND\b/i);
+  });
+
+  it("can keep FROM and the first table on the same line", async () => {
+    const formatted = await formatSqlText("SELECT * FROM tVillage AS tv INNER JOIN tLand AS tl ON tv.villageId = tl.villageId AND 1 = 1", "sqlserver", {
+      fromClauseLayout: "sameLine",
+      logicalOperatorNewline: "none",
+      useTabs: true,
+      tabWidth: 4,
+    });
+
+    expect(formatted).toContain("FROM\ttVillage AS tv");
+    expect(formatted).toContain("ON tv.villageId = tl.villageId AND 1 = 1");
+  });
+
+  it("keeps derived tables multiline with FROM same-line layout", async () => {
+    const formatted = await formatSqlText("SELECT * FROM (SELECT * FROM tVillage) AS tv", "sqlserver", { fromClauseLayout: "sameLine" });
+
+    expect(formatted).toContain("FROM\n");
+    expect(formatted).toContain("\n    SELECT");
+    expect(formatted).toContain("FROM  tVillage");
+  });
+
   it("keeps display formatting lossless for XML/JSON-looking input", async () => {
     const xml = `<root><item id="1">value</item></root>`;
     const json = `{"a":1}`;

@@ -50,6 +50,15 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("expandSelectStar", DEFAULT_SHORTCUT_SETTINGS.expandSelectStar, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
+  it("uses Shift+Enter for inserting a complete line below", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "insertLineBelow");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Shift+Enter" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.insertLineBelow).toBe("Shift+Enter");
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.insertLineBelow)).toBe("Shift-Enter");
+    expect(findShortcutConflict("insertLineBelow", DEFAULT_SHORTCUT_SETTINGS.insertLineBelow, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("resolves the close-other-tabs default per platform and heals cross-platform synced defaults", () => {
     // 本测试环境（darwin）：默认应为 macOS 组合
     expect(DEFAULT_SHORTCUT_SETTINGS.closeOtherTabs).toBe(closeOtherTabsDefaultShortcut());

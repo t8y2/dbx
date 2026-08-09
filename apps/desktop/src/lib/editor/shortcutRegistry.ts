@@ -10,6 +10,7 @@ export type ShortcutActionId =
   | "acceptCompletion"
   | "indentMore"
   | "indentLess"
+  | "insertLineBelow"
   | "duplicateLine"
   | "deleteLine"
   | "moveLineUp"
@@ -139,6 +140,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutIndentLess",
     scope: "editor",
     defaultShortcut: "Shift+Tab",
+  },
+  {
+    id: "insertLineBelow",
+    labelKey: "settings.shortcutInsertLineBelow",
+    scope: "editor",
+    defaultShortcut: "Shift+Enter",
   },
   {
     id: "duplicateLine",

@@ -1182,6 +1182,7 @@ export interface SqlCompletionColumn {
   name: string;
   table: string;
   sourceAlias?: string;
+  sourceQualifierSql?: string;
   schema?: string;
   dataType?: string;
   isNullable?: boolean;
@@ -1199,7 +1200,7 @@ export interface SqlCompletionForeignKey {
 export interface SqlCompletionItem {
   label: string;
   filterText?: string;
-  type: "keyword" | "table" | "column" | "snippet" | "function" | "schema";
+  type: "keyword" | "table" | "column" | "snippet" | "function" | "schema" | "variable" | "text";
   detail?: string;
   info?: string;
   apply?: string;
@@ -1221,6 +1222,7 @@ export interface SqlCompletionReferencedTable {
   schema?: string;
   schemaQuoted?: boolean;
   alias?: string;
+  aliasSql?: string;
   columns?: string[];
   columnAliases?: string[];
 }
@@ -1290,6 +1292,7 @@ export interface SqlCompletionTranslations {
   numericLiteral: string;
   booleanValue: string;
   starExpansionColumns: string;
+  tableAlias: string;
   functionDescriptions: Record<string, string>;
 }
 
@@ -1389,6 +1392,10 @@ class SqlCompletionProvider {
       this.items.push(...buildPreferredKeywordItems(context.prefix, context.preferredKeywords, this.input.keywordCase));
     }
 
+    if (!pendingJoinKeyword && context.suggestColumns && !context.qualifier && !context.insertTable && context.prefix) {
+      this.items.push(...buildReferencedAliasItems(context, this.t));
+    }
+
     if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions && context.prioritizeSelectAliases) {
       this.items.push(...buildSelectAliasItems(context));
     }
@@ -1451,8 +1458,8 @@ class SqlCompletionProvider {
         // Alias snippets reuse the prefix as a label while applying alias SQL, so they are not exact name matches.
         const isAliasSnippet = item.type === "snippet" && item.apply === formatAliasCompletionApply(item.label, this.databaseType, this.input.keywordCase);
         const isExactLabelMatch = !isAliasSnippet && item.label.toLowerCase() === context.prefix.toLowerCase();
-        const isExactSnippetPrefixMatch = item.type === "snippet" && item.filterText?.toLowerCase() === context.prefix.toLowerCase();
-        if (isExactLabelMatch || isExactSnippetPrefixMatch) {
+        const isExactFilterTextMatch = item.filterText?.toLowerCase() === context.prefix.toLowerCase();
+        if (isExactLabelMatch || isExactFilterTextMatch) {
           item.exactMatch = true;
           item.boost += EXACT_LABEL_MATCH_BOOST;
         }
@@ -3178,8 +3185,11 @@ function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordC
 }
 
 function selectStarExpansionColumns(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] {
-  const columns = context.qualifier ? referencedTablesForSelectAllColumns(context).flatMap((ref) => columnsForSelectAllReferencedTable(ref, columnsByTable)) : [...columnsByTable.values()].flat();
-  return uniqueColumnsByName(columns);
+  const references = referencedTablesForSelectAllColumns(context);
+  if (context.qualifier || references.length > 1) {
+    return references.flatMap((reference) => uniqueColumnsByName(columnsForSelectAllReferencedTable(reference, columnsByTable)));
+  }
+  return uniqueColumnsByName([...columnsByTable.values()].flat());
 }
 
 export function selectStarResultColumnsMatch(options: { currentSql: string; targetFrom: number; targetTo: number; statementSql: string; sourceStatement?: string; sourceFrom?: number; sourceTo?: number }): boolean {
@@ -3198,7 +3208,17 @@ export function buildSelectStarExpansion(context: SqlCompletionContext, columnsB
   const columns = selectStarExpansionColumns(context, columnsByTable);
   if (columns.length === 0) return null;
   // `alias.*` replaces only the `*`, so the first column must continue the already typed `alias.`.
-  return qualifierSql ? buildSelectAllColumnExpansion(columns, qualifierSql, true, dialect, databaseType) : columns.map((column) => quoteSelectStarColumnIdentifier(column.name, dialect, databaseType)).join(", ");
+  if (qualifierSql) return buildSelectAllColumnExpansion(columns, qualifierSql, true, dialect, databaseType);
+
+  const references = referencedTablesForSelectAllColumns(context);
+  if (references.length <= 1) return columns.map((column) => quoteSelectStarColumnIdentifier(column.name, dialect, databaseType)).join(", ");
+
+  return references
+    .flatMap((reference) => {
+      const qualifier = reference.aliasSql ?? (reference.alias ? quoteSqlIdentifier(reference.alias, dialect) : quoteSqlIdentifier(reference.name, dialect));
+      return uniqueColumnsByName(columnsForSelectAllReferencedTable(reference, columnsByTable)).map((column) => `${qualifier}.${quoteSelectStarColumnIdentifier(column.name, dialect, databaseType)}`);
+    })
+    .join(", ");
 }
 
 function buildStarExpansionItem(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem | null {
@@ -3415,6 +3435,27 @@ function buildComparisonValueItems(context: SqlCompletionContext, columnsByTable
   return items;
 }
 
+function buildReferencedAliasItems(context: SqlCompletionContext, t?: SqlCompletionTranslations): SqlCompletionItem[] {
+  const seen = new Set<string>();
+  const items: SqlCompletionItem[] = [];
+  for (const reference of context.referencedTables) {
+    const alias = reference.alias?.trim();
+    if (!alias || !matchesIdentifierSearch(alias, context.prefix)) continue;
+    const key = normalizeIdentifierPart(alias);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tableName = reference.schema ? `${reference.schema}.${reference.name}` : reference.name;
+    items.push({
+      label: alias,
+      type: "text",
+      detail: `${t?.tableAlias ?? "Table alias"} · ${tableName}`,
+      apply: reference.aliasSql ?? alias,
+      boost: 20_000 + identifierMatchScore(alias, context.prefix) - items.length,
+    });
+  }
+  return items;
+}
+
 function buildAliasItems(context: SqlCompletionContext, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
   const items: SqlCompletionItem[] = [];
   const existingAliases = new Set(context.referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
@@ -3608,23 +3649,28 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   // Count name frequencies to detect duplicates across tables
   const nameCount = new Map<string, number>();
   for (const c of relevantCols) {
-    nameCount.set(c.name, (nameCount.get(c.name) || 0) + 1);
+    const nameKey = normalizeIdentifierPart(c.name);
+    nameCount.set(nameKey, (nameCount.get(nameKey) || 0) + 1);
   }
 
-  // Deduplicate — for dupes, qualify with table name
+  // Multi-source queries always insert a qualified column. Duplicate names remain
+  // separate choices so the user can select the intended row source.
+  const qualifyAllColumns = !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
   const seen = new Set<string>();
   const uniqueColumns: Array<SqlCompletionColumn & { key: string; displayLabel: string }> = [];
   for (const c of relevantCols) {
-    const count = nameCount.get(c.name) || 0;
-    if (count > 1) {
-      const qualifier = c.sourceAlias ?? c.table;
+    const count = nameCount.get(normalizeIdentifierPart(c.name)) || 0;
+    if (count > 1 || qualifyAllColumns) {
+      const qualifier = c.sourceQualifierSql ?? c.sourceAlias ?? c.table;
       const qualifiedKey = `${qualifier}.${c.name}`;
-      if (seen.has(qualifiedKey)) continue;
-      seen.add(qualifiedKey);
+      const normalizedQualifiedKey = normalizeCompletionKey(qualifiedKey);
+      if (seen.has(normalizedQualifiedKey)) continue;
+      seen.add(normalizedQualifiedKey);
       uniqueColumns.push({ ...c, key: c.key, displayLabel: `${qualifier}.${c.name}` });
     } else {
-      if (seen.has(c.name)) continue;
-      seen.add(c.name);
+      const nameKey = normalizeIdentifierPart(c.name);
+      if (seen.has(nameKey)) continue;
+      seen.add(nameKey);
       uniqueColumns.push({ ...c, key: c.key, displayLabel: c.name });
     }
   }
@@ -3642,6 +3688,7 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       const matchScore = Math.max(identifierMatchScore(column.name, context.prefix), identifierMatchScore(column.displayLabel, context.prefix));
       return {
         label: column.displayLabel,
+        filterText: column.displayLabel === column.name ? undefined : column.name,
         type: "column" as const,
         detail: buildColumnDetail(column),
         info: buildColumnInfo(column),
@@ -3656,7 +3703,7 @@ function completionColumnsForReferencedTable<T extends SqlCompletionColumn & { k
   const matched = columns.filter((column) => columnMatchesReferencedTable(column, table));
   const aliasedColumns = applyReferencedColumnAliases(table, matched);
   if (!table.alias) return aliasedColumns;
-  return aliasedColumns.map((column) => ({ ...column, sourceAlias: table.alias }));
+  return aliasedColumns.map((column) => ({ ...column, sourceAlias: table.alias, sourceQualifierSql: table.aliasSql }));
 }
 
 function applyReferencedColumnAliases<T extends SqlCompletionColumn>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
@@ -3716,7 +3763,8 @@ function buildColumnApply(column: SqlCompletionColumn & { displayLabel: string }
   if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
     return quoteSqlIdentifier(column.name, dialect);
   }
-  return `${quoteSqlIdentifier(column.sourceAlias ?? column.table, dialect)}.${quoteSqlIdentifier(column.name, dialect)}`;
+  const qualifier = column.sourceQualifierSql ?? quoteSqlIdentifier(column.sourceAlias ?? column.table, dialect);
+  return `${qualifier}.${quoteSqlIdentifier(column.name, dialect)}`;
 }
 
 function isKeyColumn(name: string): boolean {
@@ -4449,6 +4497,7 @@ function dedupeAndSort(items: SqlCompletionItem[]): SqlCompletionItem[] {
 }
 
 function compareCompletionItems(left: SqlCompletionItem, right: SqlCompletionItem): number {
+  if ((left.type === "variable") !== (right.type === "variable")) return left.type === "variable" ? -1 : 1;
   if (!left.exactMatch !== !right.exactMatch) return left.exactMatch ? -1 : 1;
   const leftBonus = getHistoryBoost(left.label, left.type);
   const rightBonus = getHistoryBoost(right.label, right.type);
@@ -4463,6 +4512,10 @@ function getTypePriorityBoost(type: SqlCompletionItem["type"]): number {
       return 160;
     case "schema":
       return 120;
+    case "variable":
+      return 220;
+    case "text":
+      return 220;
     case "function":
       return 90;
     case "snippet":

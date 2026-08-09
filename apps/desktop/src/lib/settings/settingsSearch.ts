@@ -133,6 +133,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "formatter-tab-width", category: "formatter", titleKey: "settings.sqlFormatterTabWidth", targetId: "formatter" },
   { id: "formatter-indent-style", category: "formatter", titleKey: "settings.sqlFormatterIndentStyle", targetId: "formatter" },
   { id: "formatter-logical-operator-newline", category: "formatter", titleKey: "settings.sqlFormatterLogicalOperatorNewline", targetId: "formatter" },
+  { id: "formatter-from-clause-layout", category: "formatter", titleKey: "settings.sqlFormatterFromClauseLayout", targetId: "formatter" },
   { id: "formatter-expression-width", category: "formatter", titleKey: "settings.sqlFormatterExpressionWidth", targetId: "formatter" },
   { id: "formatter-lines-between-queries", category: "formatter", titleKey: "settings.sqlFormatterLinesBetweenQueries", targetId: "formatter" },
   { id: "formatter-dense-operators", category: "formatter", titleKey: "settings.sqlFormatterDenseOperators", targetId: "formatter" },

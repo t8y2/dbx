@@ -1,4 +1,4 @@
-import { DEFAULT_SQL_FORMATTER_SETTINGS, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
@@ -86,10 +86,12 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   }
 
   const { format } = await import("sql-formatter");
-  const options = sqlFormatterOptions(settings);
+  const normalizedSettings = normalizeSqlFormatterSettings(settings);
+  const options = sqlFormatterOptions(normalizedSettings);
   const language = formatterLanguage(dialect);
   try {
-    return format(sql, { language, ...options });
+    const formatted = format(sql, { language, ...options });
+    return applySqlFormatterLayout(formatted, normalizedSettings);
   } catch (err) {
     // The generic "sql" dialect can't parse many real-world constructs (PostgreSQL
     // `::` casts, GaussDB/openGauss materialized-view DDL, T-SQL specifics, ...).
@@ -97,13 +99,48 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     // that tolerates most of these, before surfacing the failure.
     if (language !== "postgresql") {
       try {
-        return format(sql, { language: "postgresql", ...options });
+        const formatted = format(sql, { language: "postgresql", ...options });
+        return applySqlFormatterLayout(formatted, normalizedSettings);
       } catch {
         // fall through to the original error below
       }
     }
     throw err;
   }
+}
+
+function keepLogicalOperatorsOnSameLine(sql: string): string {
+  return sql.replace(/\n[ \t]*(AND|OR|XOR)\b/gi, " $1").replace(/\b(AND|OR|XOR)[ \t]*\n[ \t]*/gi, "$1 ");
+}
+
+function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
+  const lines = sql.split("\n");
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const clauseMatch = lines[index].match(/^(\s*)FROM\s*$/i);
+    if (!clauseMatch) continue;
+
+    const sourceLine = lines[index + 1];
+    const sourceMatch = sourceLine.match(/^(\s+)(\S.*)$/);
+    if (!sourceMatch) continue;
+    const source = sourceMatch[2];
+    // Keep derived tables and leading comments multiline; merging these would
+    // make nested SQL and comment boundaries substantially harder to read.
+    if (source.startsWith("(") || source.startsWith("/*") || source.startsWith("--")) continue;
+
+    const clauseIndent = clauseMatch[1];
+    const sourceIndent = sourceMatch[1];
+    const separator = sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
+    lines[index] = `${lines[index]}${separator || " "}${source}`;
+    lines.splice(index + 1, 1);
+    index -= 1;
+  }
+  return lines.join("\n");
+}
+
+function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings): string {
+  let formatted = settings.logicalOperatorNewline === "none" ? keepLogicalOperatorsOnSameLine(sql) : sql;
+  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
+  return formatted;
 }
 
 function isSqlFormatterParseError(error: unknown): boolean {

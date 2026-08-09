@@ -1998,6 +1998,7 @@ defineExpose({ focusSearch });
       :total-row-count-is-exact="totalIsExact"
       :inexact-total-row-count-mode="documentStoreProvider.kind === 'mongodb' ? 'estimated' : 'at-least'"
       :pagination-total-row-count="pageTotal"
+      :load-all-rows-enabled="false"
       :count-total-rows="countExactDocumentTotal"
       :full-export-result="documentStoreProvider.kind === 'mongodb' ? exportAllMongoDocuments : undefined"
       @sort="onSort"

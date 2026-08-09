@@ -19,6 +19,8 @@ const props = withDefaults(
     loading: boolean;
     infiniteScrollEnabled: boolean;
     infiniteScrollAllLoaded: boolean;
+    loadAllRowsActive: boolean;
+    loadAllRowsEnabled: boolean;
     canLoadAllRows: boolean;
     pageSize: number;
     pageSizeMenuItems: LightDropdownItem[];
@@ -28,7 +30,7 @@ const props = withDefaults(
     canGoNextPage: boolean;
     canJumpLastPage: boolean;
   }>(),
-  { paginationEnabled: true, canLoadAllRows: false },
+  { paginationEnabled: true, loadAllRowsActive: false, loadAllRowsEnabled: true, canLoadAllRows: false },
 );
 
 const customPageSizeInput = defineModel<string>("customPageSizeInput", { default: "" });
@@ -94,18 +96,10 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       </div>
     </div>
     <Loader2 v-if="loading" class="w-3 h-3 animate-spin text-muted-foreground" />
-    <template v-if="paginationEnabled && infiniteScrollEnabled">
+    <template v-if="paginationEnabled && (infiniteScrollEnabled || loadAllRowsActive)">
       <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>
-      <Tooltip>
-        <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canLoadAllRows" :aria-label="t('grid.loadAllAndGoToLastRow')" @click="emit('loadAllRows')">
-            <ChevronsDown class="h-3 w-3" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom">{{ t("grid.loadAllAndGoToLastRow") }}</TooltipContent>
-      </Tooltip>
     </template>
-    <template v-if="paginationEnabled && !infiniteScrollEnabled">
+    <template v-if="paginationEnabled && !infiniteScrollEnabled && !loadAllRowsActive">
       <LightDropdown
         :model-value="String(pageSize)"
         :items="pageSizeMenuItems"
@@ -153,6 +147,14 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canGoNextPage" @click="emit('nextPage')"><ChevronRight class="h-3 w-3" /></Button>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canJumpLastPage" @click="emit('lastPage')"><ChevronsRight class="h-3 w-3" /></Button>
     </template>
+    <Tooltip v-if="paginationEnabled && loadAllRowsEnabled">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canLoadAllRows" :aria-label="t('grid.loadAllAndGoToLastRow')" @click="emit('loadAllRows')">
+          <ChevronsDown class="h-3 w-3" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{{ t("grid.loadAllAndGoToLastRow") }}</TooltipContent>
+    </Tooltip>
     <DataGridExportMenu :items="exportMenuItems" :label="t('grid.export')" :on-select="(value) => emit('selectExport', value)" />
   </div>
 </template>

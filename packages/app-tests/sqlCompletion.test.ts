@@ -2291,7 +2291,7 @@ test("suggests INSERT columns for a SQL Server three-part target", () => {
     dialect: "sqlserver",
   });
 
-  assert.equal(items.find((item) => item.type === "snippet" && item.label === "orders.*")?.apply, "target_marker");
+  assert.equal(items.find((item) => item.type === "snippet" && item.label === "orders.*")?.apply, "target_marker) VALUES (${1:value})");
 });
 
 test("detects MySQL backtick-qualified INSERT INTO column list context", () => {
@@ -2339,7 +2339,7 @@ test("suggests all target columns for INSERT INTO column list", () => {
 
   const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
   assert.ok(allColumns);
-  assert.equal(allColumns.apply, "id, name, email");
+  assert.equal(allColumns.apply, "id, name, email) VALUES (${1:value}, ${2:value}, ${3:value})");
 });
 
 test("keeps INSERT INTO all-column expansion available after a column prefix", () => {
@@ -2350,7 +2350,7 @@ test("keeps INSERT INTO all-column expansion available after a column prefix", (
 
   const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
   assert.ok(allColumns);
-  assert.equal(allColumns.apply, "id, name, email");
+  assert.equal(allColumns.apply, "id, name, email) VALUES (${1:value}, ${2:value}, ${3:value})");
 });
 
 test("quotes PostgreSQL identifiers in INSERT INTO all-column expansion", () => {
@@ -2364,7 +2364,7 @@ test("quotes PostgreSQL identifiers in INSERT INTO all-column expansion", () => 
 
   const allColumns = items.find((item) => item.type === "snippet" && item.label === "OrderLines.*");
   assert.ok(allColumns);
-  assert.equal(allColumns.apply, 'article, "OrderId", "User", "has""quote"');
+  assert.equal(allColumns.apply, 'article, "OrderId", "User", "has""quote") VALUES (${1:value}, ${2:value}, ${3:value}, ${4:value})');
 });
 
 test("suggests all target columns for schema-qualified INSERT INTO column lists", () => {
@@ -2386,7 +2386,7 @@ test("suggests all target columns for schema-qualified INSERT INTO column lists"
 
   const allColumns = items.find((item) => item.type === "snippet" && item.label === "Users.*");
   assert.ok(allColumns);
-  assert.equal(allColumns.apply, "Id, DisplayName");
+  assert.equal(allColumns.apply, "Id, DisplayName) VALUES (${1:value}, ${2:value})");
 });
 
 test("scopes INSERT INTO all-column expansion to the database-qualified MySQL target", () => {
@@ -2400,7 +2400,7 @@ test("scopes INSERT INTO all-column expansion to the database-qualified MySQL ta
 
   const allColumns = items.find((item) => item.type === "snippet" && item.label === "orders.*");
   assert.ok(allColumns);
-  assert.equal(allColumns.apply, "id, number, status");
+  assert.equal(allColumns.apply, "id, number, status) VALUES (${1:value}, ${2:value}, ${3:value})");
 });
 
 test("suggests all target columns for MySQL backtick-qualified INSERT INTO", () => {
@@ -2414,7 +2414,7 @@ test("suggests all target columns for MySQL backtick-qualified INSERT INTO", () 
 
   const allColumns = items.find((item) => item.type === "snippet" && item.label === "orders.*");
   assert.ok(allColumns);
-  assert.equal(allColumns.apply, "id, number, status");
+  assert.equal(allColumns.apply, "id, number, status) VALUES (${1:value}, ${2:value}, ${3:value})");
 });
 
 // --- Column data type in detail ---

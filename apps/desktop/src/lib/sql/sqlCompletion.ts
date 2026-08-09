@@ -1412,7 +1412,7 @@ class SqlCompletionProvider {
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
       this.items.push(...buildColumnItems(context, this.input.columnsByTable, this.dialect));
       this.items.push(...buildSelectAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect));
-      this.items.push(...buildInsertAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect));
+      this.items.push(...buildInsertAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect, this.input.keywordCase));
     }
 
     const emptyTableNameCompletion = !context.prefix && (context.suggestTables || context.exclusiveTableSuggestions);
@@ -3252,7 +3252,7 @@ function buildSelectAllColumnItems(context: SqlCompletionContext, columnsByTable
   return items;
 }
 
-function buildInsertAllColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem[] {
+function buildInsertAllColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, dialect?: "mysql" | "postgres" | "sqlserver", keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
   if (!context.insertTable) return [];
   const columns = uniqueColumnsByName(columnsForInsertTarget(context, columnsByTable));
   if (columns.length === 0) return [];
@@ -3260,13 +3260,17 @@ function buildInsertAllColumnItems(context: SqlCompletionContext, columnsByTable
   const label = `${context.insertTable}.*`;
   if (!selectAllColumnItemMatchesPrefix(label, { name: context.insertTable, schema: context.insertSchema }, columns, context.prefix)) return [];
 
-  const expansion = columns.map((column) => quoteSqlIdentifier(column.name, dialect)).join(", ");
+  const columnList = columns.map((column) => quoteSqlIdentifier(column.name, dialect)).join(", ");
+  const valuesKeyword = applySqlKeywordCase("VALUES", keywordCase);
+  const valueList = columns.map((_, index) => `\${${index + 1}:value}`).join(", ");
+  const expansion = `${columnList}) ${valuesKeyword} (${valueList})`;
+  const preview = `${columnList}) ${valuesKeyword} (${columns.map(() => "value").join(", ")})`;
   const countText = (t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(columns.length));
   return [
     {
       label,
       type: "snippet" as const,
-      detail: `${countText}: ${expansion.length > 60 ? expansion.slice(0, 57) + "..." : expansion}`,
+      detail: `${countText}: ${preview.length > 60 ? preview.slice(0, 57) + "..." : preview}`,
       apply: expansion,
       boost: 2450 + selectAllColumnItemPrefixBoost(label, { name: context.insertTable, schema: context.insertSchema }, columns, context.prefix),
     },

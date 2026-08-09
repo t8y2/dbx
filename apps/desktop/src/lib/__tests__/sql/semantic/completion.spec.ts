@@ -417,7 +417,17 @@ WHERE a.id = b.fk_kpi_set_score_id`,
     const { context, items } = semanticCompletion("INSERT INTO users (|", { columnsByTable });
 
     expect(context.insertTable).toBe("users");
-    expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name, email");
+    const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+    expect(allColumns?.apply).toBe("id, name, email) VALUES (${1:value}, ${2:value}, ${3:value})");
+    expect(allColumns?.detail).toBe("3 columns: id, name, email) VALUES (value, value, value)");
+  });
+
+  it("uses the configured keyword case for INSERT all-column snippets", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("insert into users (|", { columnsByTable, keywordCase: "lower" });
+
+    expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name) values (${1:value}, ${2:value})");
   });
 
   it("keeps partial INSERT INTO targets in table completion context", () => {

@@ -426,6 +426,8 @@ export default withEnglishFallback({
     redisKeySeparator: "キー名前空間セパレーター",
     etcdEndpoints: "エンドポイント",
     etcdEndpointsHint: "1行に1つのエンドポイント。空白の場合、上のホストとポートを使用します。",
+    etcdGrpcMaxInbound: "gRPC 受信上限（MiB）",
+    etcdGrpcMaxInboundHint: "etcd 応答1件の最大サイズです。既定値は32 MiB、上限は256 MiBです。",
     etcdCaCertPlaceholder: "/path/to/ca.crt",
     etcdCaCertBrowse: "CA証明書を選択",
     etcdClientAuth: "クライアント認証",

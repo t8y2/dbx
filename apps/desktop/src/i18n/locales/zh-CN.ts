@@ -448,6 +448,8 @@ export default withEnglishFallback({
     redisKeySeparator: "键名分隔符（可选）",
     etcdEndpoints: "Endpoints",
     etcdEndpointsHint: "每行一个 endpoint。留空时使用上面的 host 和端口。",
+    etcdGrpcMaxInbound: "gRPC 接收上限（MiB）",
+    etcdGrpcMaxInboundHint: "单条 etcd 响应的最大大小。默认 32 MiB，最高 256 MiB。",
     etcdCaCertPlaceholder: "/path/to/ca.crt",
     etcdCaCertBrowse: "选择 CA 证书",
     etcdClientAuth: "客户端认证",

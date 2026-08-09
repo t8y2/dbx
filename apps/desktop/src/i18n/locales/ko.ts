@@ -441,6 +441,8 @@ export default withEnglishFallback({
     redisKeySeparator: "키 네임스페이스 구분자",
     etcdEndpoints: "엔드포인트",
     etcdEndpointsHint: "한 줄에 하나의 엔드포인트. 비워두면 위의 호스트와 포트를 사용합니다.",
+    etcdGrpcMaxInbound: "gRPC 수신 제한 (MiB)",
+    etcdGrpcMaxInboundHint: "단일 etcd 응답의 최대 크기입니다. 기본값은 32 MiB이며 최대 256 MiB입니다.",
     etcdCaCertPlaceholder: "/path/to/ca.crt",
     etcdCaCertBrowse: "CA 인증서 선택",
     etcdClientAuth: "클라이언트 인증",

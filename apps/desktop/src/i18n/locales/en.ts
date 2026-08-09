@@ -447,6 +447,8 @@ export default {
     redisKeySeparator: "Key Namespace Separator",
     etcdEndpoints: "Endpoints",
     etcdEndpointsHint: "One endpoint per line. Leave blank to use the host and port above.",
+    etcdGrpcMaxInbound: "gRPC receive limit (MiB)",
+    etcdGrpcMaxInboundHint: "Maximum size of one etcd response. Defaults to 32 MiB and is capped at 256 MiB.",
     etcdCaCertPlaceholder: "/path/to/ca.crt",
     etcdCaCertBrowse: "Choose CA certificate",
     etcdClientAuth: "Client Auth",

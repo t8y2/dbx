@@ -427,6 +427,8 @@ export default withEnglishFallback({
     redisKeySeparator: "Separador de namespace de chave",
     etcdEndpoints: "Endpoints",
     etcdEndpointsHint: "Um endpoint por linha. Deixe em branco para usar o host e porta acima.",
+    etcdGrpcMaxInbound: "Limite de recebimento gRPC (MiB)",
+    etcdGrpcMaxInboundHint: "Tamanho máximo de uma resposta do etcd. O padrão é 32 MiB e o limite é 256 MiB.",
     etcdCaCertPlaceholder: "/caminho/para/ca.crt",
     etcdCaCertBrowse: "Escolher certificado CA",
     etcdClientAuth: "Autenticação do Cliente",

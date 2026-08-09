@@ -87,6 +87,10 @@ public final class EtcdAgent {
     private static final Gson GSON = new Gson();
     private static final int DEFAULT_LIMIT = 100;
     private static final int RPC_TIMEOUT_SECONDS = 30;
+    static final int DEFAULT_GRPC_MAX_INBOUND_MESSAGE_SIZE = 32 * 1024 * 1024;
+    static final int MIN_GRPC_MAX_INBOUND_MESSAGE_SIZE = 1024 * 1024;
+    static final int MAX_GRPC_MAX_INBOUND_MESSAGE_SIZE = 256 * 1024 * 1024;
+    private static final String GRPC_MAX_INBOUND_MESSAGE_SIZE_KEY = "grpc_max_inbound_message_size";
     private static final int PRESERVE_LEASE_MAX_ATTEMPTS = 3;
     private static final long HISTORY_DEFAULT_REVISION_WINDOW = 10_000L;
     private static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
@@ -167,7 +171,8 @@ public final class EtcdAgent {
         List<String> endpoints = endpoints(connection);
         ClientBuilder builder = Client.builder()
             .endpoints(endpoints.toArray(String[]::new))
-            .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds(connection)));
+            .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds(connection)))
+            .maxInboundMessageSize(grpcMaxInboundMessageSize(connection));
         String username = stringOrEmpty(connection, "username");
         String password = stringOrEmpty(connection, "password");
         if (!username.isBlank()) {
@@ -182,6 +187,19 @@ public final class EtcdAgent {
 
     static int connectTimeoutSeconds(JsonObject connection) {
         return Math.min(300, Math.max(1, intOrDefault(connection, "connect_timeout_secs", RPC_TIMEOUT_SECONDS)));
+    }
+
+    static int grpcMaxInboundMessageSize(JsonObject connection) {
+        int configured = intOrDefault(
+            connection,
+            GRPC_MAX_INBOUND_MESSAGE_SIZE_KEY,
+            intUrlParamOrDefault(
+                stringOrEmpty(connection, "url_params"),
+                GRPC_MAX_INBOUND_MESSAGE_SIZE_KEY,
+                DEFAULT_GRPC_MAX_INBOUND_MESSAGE_SIZE
+            )
+        );
+        return Math.min(MAX_GRPC_MAX_INBOUND_MESSAGE_SIZE, Math.max(MIN_GRPC_MAX_INBOUND_MESSAGE_SIZE, configured));
     }
 
     private static Map<String, Object> validateConnectedClient() throws Exception {
@@ -1628,6 +1646,26 @@ public final class EtcdAgent {
     private static int intOrDefault(JsonObject object, String key, int fallback) {
         JsonElement element = object.get(key);
         return element == null || element.isJsonNull() ? fallback : element.getAsInt();
+    }
+
+    private static int intUrlParamOrDefault(String params, String key, int fallback) {
+        if (params == null || params.isBlank()) {
+            return fallback;
+        }
+        for (String entry : params.replaceFirst("^\\?", "").split("&")) {
+            int separator = entry.indexOf('=');
+            String entryKey = separator < 0 ? entry : entry.substring(0, separator);
+            if (!key.equals(entryKey)) {
+                continue;
+            }
+            String value = separator < 0 ? "" : entry.substring(separator + 1);
+            try {
+                return Integer.parseInt(value);
+            } catch (NumberFormatException ignored) {
+                return fallback;
+            }
+        }
+        return fallback;
     }
 
     private static boolean boolOrDefault(JsonObject object, String key, boolean fallback) {

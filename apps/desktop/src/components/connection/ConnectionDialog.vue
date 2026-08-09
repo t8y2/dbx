@@ -153,6 +153,10 @@ const DREMIO_ARROW_FLIGHT_SQL_JDBC_DRIVER_CLASS = "org.apache.arrow.driver.jdbc.
 const DREMIO_LEGACY_JDBC_URL = "jdbc:dremio:direct=127.0.0.1:31010";
 const DREMIO_LEGACY_JDBC_DRIVER_CLASS = "com.dremio.jdbc.Driver";
 const DEFAULT_SSH_USER = "root";
+const ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB = 32;
+const ETCD_GRPC_MAX_INBOUND_MIN_MIB = 1;
+const ETCD_GRPC_MAX_INBOUND_MAX_MIB = 256;
+const ETCD_GRPC_MAX_INBOUND_PARAM = "grpc_max_inbound_message_size";
 const NACOS_CONNECTION_PROFILES: ReadonlyArray<{ value: NacosConnectionProfile; title: string }> = [
   { value: "v2", title: "Nacos 2.x" },
   { value: "v3", title: "Nacos 3.x" },
@@ -3015,6 +3019,18 @@ const etcdEndpointsLines = computed({
   get: () => form.value.etcd_endpoints || "",
   set: (value: string) => {
     form.value.etcd_endpoints = normalizeEndpointLines(value);
+  },
+});
+const etcdGrpcMaxInboundMessageSizeMiB = computed({
+  get: () => {
+    const configuredBytes = Number(getUrlParam(form.value.url_params, ETCD_GRPC_MAX_INBOUND_PARAM));
+    if (!Number.isFinite(configuredBytes) || configuredBytes <= 0) return ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB;
+    return Math.min(ETCD_GRPC_MAX_INBOUND_MAX_MIB, Math.max(ETCD_GRPC_MAX_INBOUND_MIN_MIB, Math.round(configuredBytes / (1024 * 1024))));
+  },
+  set: (value: number) => {
+    const configuredMiB = Number(value);
+    const normalizedMiB = Number.isFinite(configuredMiB) ? Math.min(ETCD_GRPC_MAX_INBOUND_MAX_MIB, Math.max(ETCD_GRPC_MAX_INBOUND_MIN_MIB, Math.round(configuredMiB))) : ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB;
+    form.value.url_params = setUrlParam(form.value.url_params, ETCD_GRPC_MAX_INBOUND_PARAM, String(normalizedMiB * 1024 * 1024));
   },
 });
 const zookeeperConnectString = computed({
@@ -7444,6 +7460,13 @@ function openExternalUrl(url: string) {
                       <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
                       <Input v-model.number="form.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.connect_timeout_inherit === true" />
                     </div>
+                  </div>
+                </div>
+                <div v-if="form.db_type === 'etcd'" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.etcdGrpcMaxInbound") }}</Label>
+                  <div class="col-span-3 space-y-1">
+                    <Input v-model.number="etcdGrpcMaxInboundMessageSizeMiB" type="number" :min="ETCD_GRPC_MAX_INBOUND_MIN_MIB" :max="ETCD_GRPC_MAX_INBOUND_MAX_MIB" step="1" />
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                   </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">

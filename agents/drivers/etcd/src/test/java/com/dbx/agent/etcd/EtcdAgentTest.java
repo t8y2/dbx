@@ -90,6 +90,41 @@ final class EtcdAgentTest {
     }
 
     @Test
+    void grpcInboundLimitDefaultsTo32MiBAndUsesSafeBounds() {
+        Assertions.assertEquals(
+            32 * 1024 * 1024,
+            EtcdAgent.grpcMaxInboundMessageSize(new JsonObject())
+        );
+        Assertions.assertEquals(
+            64 * 1024 * 1024,
+            EtcdAgent.grpcMaxInboundMessageSize(
+                JsonParser.parseString("{\"grpc_max_inbound_message_size\":67108864}").getAsJsonObject()
+            )
+        );
+        Assertions.assertEquals(
+            1024 * 1024,
+            EtcdAgent.grpcMaxInboundMessageSize(
+                JsonParser.parseString("{\"grpc_max_inbound_message_size\":0}").getAsJsonObject()
+            )
+        );
+        Assertions.assertEquals(
+            256 * 1024 * 1024,
+            EtcdAgent.grpcMaxInboundMessageSize(
+                JsonParser.parseString("{\"grpc_max_inbound_message_size\":536870912}").getAsJsonObject()
+            )
+        );
+    }
+
+    @Test
+    void grpcInboundLimitCanBeConfiguredThroughConnectionUrlParams() {
+        JsonObject connection = JsonParser.parseString(
+            "{\"url_params\":\"foo=bar&grpc_max_inbound_message_size=50331648\"}"
+        ).getAsJsonObject();
+
+        Assertions.assertEquals(48 * 1024 * 1024, EtcdAgent.grpcMaxInboundMessageSize(connection));
+    }
+
+    @Test
     void validateConnectionRequiresAnActiveSession() {
         String response = EtcdAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"validate_connection\",\"params\":{}}"

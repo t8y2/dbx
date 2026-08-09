@@ -427,6 +427,8 @@ export default withEnglishFallback({
     redisKeySeparator: "鍵名分隔符（可選）",
     etcdEndpoints: "端點",
     etcdEndpointsHint: "每行一個端點。留空則使用上方的主機和連接埠。",
+    etcdGrpcMaxInbound: "gRPC 接收上限（MiB）",
+    etcdGrpcMaxInboundHint: "單筆 etcd 回應的最大大小。預設 32 MiB，最高 256 MiB。",
     etcdCaCertPlaceholder: "/path/to/ca.crt",
     etcdCaCertBrowse: "選擇 CA 憑證",
     etcdClientAuth: "用戶端認證",

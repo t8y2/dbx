@@ -5592,6 +5592,30 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <!-- Default AI Mode (list mode, global) -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
+                <Separator />
+                <div>
+                  <h3 class="text-sm font-medium">
+                    {{ t("ai.defaultAiMode") }}
+                  </h3>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("ai.defaultAiModeDescription") }}
+                  </p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="flex items-center gap-1 rounded-md border p-0.5">
+                    <button type="button" class="rounded-sm px-2.5 py-1 text-xs" :class="settingsStore.defaultAiMode === 'ask' ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground'" @click="settingsStore.setDefaultAiMode('ask')">
+                      {{ t("ai.modes.ask") }}
+                    </button>
+                    <button type="button" class="rounded-sm px-2.5 py-1 text-xs" :class="settingsStore.defaultAiMode === 'agent' ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground'" @click="settingsStore.setDefaultAiMode('agent')">
+                      {{ t("ai.modes.agent") }}
+                    </button>
+                  </div>
+                  <div class="flex-1"></div>
+                </div>
+              </div>
+
               <!-- Max Retries (list mode, global) -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-3">
                 <Separator />

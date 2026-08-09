@@ -2288,6 +2288,8 @@ export default withEnglishFallback({
     maxAgentTurnsDescription: "单次 API Agent 运行的最大工具调用回合数，超过后会暂停并提示继续。CLI 供应商使用各自的运行限制。",
     maxAgentTurnsRange: "{min}–{max}，默认 {default}",
     maxAgentTurnsSaved: "Agent 回合上限已保存",
+    defaultAiMode: "默认 AI 模式",
+    defaultAiModeDescription: "新建 AI 对话时使用的模式。切换当前对话的模式不会修改此设置。",
     promptTemplates: "场景 Prompt 模板",
     promptTemplatesDescription: "在 AI 助手中选择一个或多个模板，注入场景化的约定规范。",
     promptTemplateNew: "新建模板",

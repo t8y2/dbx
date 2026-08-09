@@ -163,6 +163,7 @@ describe("settings search", () => {
       { titleKey: "settings.exportRowLimitEnabled", category: "data", targetId: "data" },
       { titleKey: "settings.exportRowLimit", category: "data", targetId: "data" },
       { titleKey: "settings.queryExportKeysetOptimizationEnabled", category: "data", targetId: "data" },
+      { titleKey: "ai.defaultAiMode", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxAgentTurns", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxRetriesGlobal", category: "ai", targetId: "ai" },
       { titleKey: "ai.globalInstructions", category: "ai", targetId: "ai" },

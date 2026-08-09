@@ -2148,6 +2148,8 @@ export default withEnglishFallback({
     maxAgentTurnsDescription: "API 에이전트 실행 중 일시 중지하고 계속할지 묻기 전의 최대 도구 호출 턴 수입니다. CLI 공급자는 자체 실행 제한을 사용합니다.",
     maxAgentTurnsRange: "{min}–{max}, 기본 {default}",
     maxAgentTurnsSaved: "에이전트 턴 제한을 저장했습니다",
+    defaultAiMode: "기본 AI 모드",
+    defaultAiModeDescription: "새 AI 대화를 시작할 때 사용되는 모드입니다. 현재 대화에서 모드를 전환해도 이 설정은 변경되지 않습니다.",
     promptTemplates: "시나리오 프롬프트 템플릿",
     promptTemplatesDescription: "AI 어시스턴트에서 하나 이상의 템플릿을 선택하여 시나리오별 규칙을 주입합니다.",
     promptTemplateNew: "새 템플릿",

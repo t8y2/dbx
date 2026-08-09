@@ -3907,7 +3907,9 @@ mod tests {
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
         McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
     };
-    use crate::ai::{AiActiveModelSelection, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference};
+    use crate::ai::{
+        AiActiveModelSelection, AiAssistantMode, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference,
+    };
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
@@ -5266,6 +5268,7 @@ mod tests {
                 model_id: "model-1".to_string(),
                 selection: AiEffortSelection::Enum("high".to_string()),
             }],
+            default_mode: Some(AiAssistantMode::Agent),
         };
 
         storage.save_ai_chat_selection(&selection).await.unwrap();

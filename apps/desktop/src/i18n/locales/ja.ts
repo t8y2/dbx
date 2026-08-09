@@ -2188,6 +2188,8 @@ export default withEnglishFallback({
     maxAgentTurnsDescription: "1回のAPIエージェント実行あたりの最大ツール呼び出しターン数。超過すると一時停止し、続行を求めます。CLIプロバイダーは独自の実行制限を使用します。",
     maxAgentTurnsRange: "{min}–{max}、デフォルト {default}",
     maxAgentTurnsSaved: "エージェントターン上限を保存しました",
+    defaultAiMode: "既定の AI モード",
+    defaultAiModeDescription: "新しい AI 会話を開始するときに使用されるモードです。現在の会話でモードを切り替えてもこの設定は変更されません。",
     promptTemplates: "シナリオプロンプトテンプレート",
     promptTemplatesDescription: "AIアシスタントで1つ以上のテンプレートを選択し、シナリオ固有の規約を注入します。",
     promptTemplateNew: "新規テンプレート",

@@ -2288,6 +2288,8 @@ export default {
     maxAgentTurnsDescription: "Maximum tool-call turns per API agent run before it pauses and asks you to continue. CLI providers use their own run limits.",
     maxAgentTurnsRange: "{min}–{max}, default {default}",
     maxAgentTurnsSaved: "Agent turn limit saved",
+    defaultAiMode: "Default AI Mode",
+    defaultAiModeDescription: "Mode used when starting a new AI conversation. Switching mode in the current conversation does not change this setting.",
     promptTemplates: "Scenario Prompt Templates",
     promptTemplatesDescription: "Select one or more templates in the AI assistant to inject scenario-specific conventions.",
     promptTemplateNew: "New Template",

@@ -1,4 +1,5 @@
 import type { AiConfig } from "@/stores/settingsStore";
+import type { AiAssistantMode } from "@/types/ai";
 import { uuid } from "@/lib/common/utils";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, QueryTab } from "@/types/database";
 import type { PromptTemplate } from "@/types/promptTemplate";
@@ -36,7 +37,7 @@ function dbLabel(dbType: DatabaseType): string {
 }
 
 export type AiAction = "general" | "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData" | "query" | "exploreSchema" | "executeAndExplain";
-export type AiAssistantMode = "ask" | "agent";
+export type { AiAssistantMode } from "@/types/ai";
 
 /** Actions shown in the Ask mode menu: SQL-producing, never auto-run. */
 export const ASK_ACTIONS: AiAction[] = ["general", "generate", "explain", "optimize", "fix", "convert", "sampleData"];

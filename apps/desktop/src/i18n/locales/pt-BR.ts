@@ -2156,6 +2156,8 @@ export default withEnglishFallback({
     maxAgentTurnsDescription: "Máximo de turnos de ferramentas por execução do agente de API antes de pausar e pedir para continuar. Provedores CLI usam seus próprios limites.",
     maxAgentTurnsRange: "{min}–{max}, padrão {default}",
     maxAgentTurnsSaved: "Limite de turnos do agente salvo",
+    defaultAiMode: "Modo de IA padrão",
+    defaultAiModeDescription: "Modo usado ao iniciar uma nova conversa de IA. Alterar o modo na conversa atual não altera esta configuração.",
     promptTemplates: "Modelos de prompt por cenário",
     promptTemplatesDescription: "Selecione um ou mais modelos no assistente de IA para injetar convenções específicas do cenário.",
     promptTemplateNew: "Novo modelo",

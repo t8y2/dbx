@@ -1,0 +1,14 @@
+{
+  "database": "consul",
+  "name": "Consul",
+  "version": "2.0.2",
+  "displayVersion": "2.0.2",
+  "image": "docker.cnb.cool/znb/images/consul:2.0.2",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 8500,
+  "connection": { "host": "127.0.0.1", "port": 10900, "authentication": "none", "database": "dbx", "grpcPort": 10901, "dnsPort": 10902 },
+  "hostPorts": { "DB_PORT": 10900, "CONSUL_GRPC_PORT": 10901, "CONSUL_DNS_PORT": 10902 },
+  "shell": ["consul", "members", "-http-addr=http://127.0.0.1:8500"],
+  "smoke": { "steps": [{ "name": "write a Consul KV smoke value", "command": ["consul", "kv", "put", "-http-addr=http://127.0.0.1:8500", "dbx/smoke", "DBX smoke"], "expect": "Success! Data written" }, { "name": "read the Consul KV smoke value", "command": ["consul", "kv", "get", "-http-addr=http://127.0.0.1:8500", "dbx/smoke"], "expect": "DBX smoke" }] }
+}

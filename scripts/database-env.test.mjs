@@ -4,19 +4,20 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { DEFAULT_RECIPES_ROOT, allPortMappingsDefaultToLoopback, architectureWarning, assertResetConfirmed, discoverMakeTargets, discoverRecipes, expandSmokeCommand, expectedContainerName, formatTable, parseDatabaseSelection, platformForArchitecture, recipeSelector, resolveRecipe, serviceHasNamedVolume, validateRecipe, validateRenderedCompose } from './database-env.mjs';
+import { DEFAULT_RECIPES_ROOT, allPortMappingsDefaultToLoopback, architectureWarning, assertResetConfirmed, databaseListRows, dbxConnectionDeepLink, defaultHostPortMappings, discoverMakeTargets, discoverRecipes, expandSmokeCommand, expectedContainerName, formatBorderedTable, formatTable, parseDatabaseSelection, platformForArchitecture, recipeSelector, resolveRecipe, serviceHasNamedVolume, validateHostPortAllocation, validateRecipe, validateRenderedCompose } from './database-env.mjs';
 
 const bashAvailable = spawnSync('bash', ['--version'], { stdio: 'ignore' }).status === 0;
 const zshAvailable = spawnSync('zsh', ['--version'], { stdio: 'ignore' }).status === 0;
 const dockerComposeAvailable = spawnSync('docker', ['compose', 'version'], { stdio: 'ignore' }).status === 0;
 
 function fixture(database, version) {
+  const hostPort = { mysql: 10100, postgresql: 10300, redis: 10500 }[database] ?? 10100;
   const root = mkdtempSync(join(tmpdir(), 'dbx-db-env-'));
   const directory = join(root, database, version);
   mkdirSync(join(directory, 'init'), { recursive: true });
   writeFileSync(join(directory, 'init', '001-smoke.txt'), 'fixture initialization');
-  writeFileSync(join(directory, 'recipe.json'), JSON.stringify({ database, version, displayVersion: version, name: database, image: 'test:1', platforms: ['linux/amd64'], service: 'database', defaultPort: 1234, connection: { host: '127.0.0.1', port: 1235, password: '123456', database: database === 'redis' ? 0 : 'dbx' }, smoke: { steps: [{ name: 'smoke', command: ['true'], expect: 'true' }] }, shell: ['true'] }));
-  writeFileSync(join(directory, 'compose.yaml'), `services:\n  database:\n    image: test:1\n    platform: linux/amd64\n    container_name: dbx-${database}-${version}\n    ports:\n      - "\${DB_BIND_ADDRESS:-127.0.0.1}:\${DB_PORT:-1235}:1234"\n    volumes:\n      - data:/var/lib/database\n    healthcheck:\n      test: ["CMD", "true"]\nvolumes:\n  data:\n`);
+  writeFileSync(join(directory, 'recipe.json'), JSON.stringify({ database, version, displayVersion: version, name: database, image: 'test:1', platforms: ['linux/amd64'], service: 'database', defaultPort: 1234, connection: { host: '127.0.0.1', port: hostPort, password: '123456', database: database === 'redis' ? 0 : 'dbx' }, hostPorts: { DB_PORT: hostPort }, smoke: { steps: [{ name: 'smoke', command: ['true'], expect: 'true' }] }, shell: ['true'] }));
+  writeFileSync(join(directory, 'compose.yaml'), `services:\n  database:\n    image: test:1\n    platform: linux/amd64\n    container_name: dbx-${database}-${version}\n    ports:\n      - "\${DB_BIND_ADDRESS:-127.0.0.1}:\${DB_PORT:-${hostPort}}:1234"\n    volumes:\n      - data:/var/lib/database\n    healthcheck:\n      test: ["CMD", "true"]\nvolumes:\n  data:\n`);
   return root;
 }
 
@@ -57,6 +58,35 @@ test('formats lists as left-aligned tables with dynamic column widths', () => {
       + 'etcd        3.7      etcd:v3.7.0\n'
       + 'clickhouse  24.8     clickhouse-server:24.8.14.39',
   );
+});
+
+test('formats bordered tables with header and group separators', () => {
+  assert.equal(
+    formatBorderedTable(
+      ['DATABASE', 'VERSION'],
+      [['MySQL', '5.7'], ['', '8.4'], ['PostgreSQL', '17.4']],
+      true,
+    ),
+    '+------------+---------+\n'
+      + '| DATABASE   | VERSION |\n'
+      + '+------------+---------+\n'
+      + '| MySQL      | 5.7     |\n'
+      + '|            | 8.4     |\n'
+      + '+------------+---------+\n'
+      + '| PostgreSQL | 17.4    |\n'
+      + '+------------+---------+',
+  );
+});
+
+test('groups database versions and shows every container-to-host port mapping', () => {
+  const rows = databaseListRows(discoverRecipes());
+  const mysql57 = rows.find((row) => row[1] === '5.7');
+  const mysql84 = rows.find((row) => row[1] === '8.4');
+  const consul = rows.find((row) => row[0] === 'Consul');
+
+  assert.deepEqual(mysql57.slice(0, 3), ['MySQL', '5.7', '3306 -> 10100']);
+  assert.deepEqual(mysql84.slice(0, 3), ['', '8.4', '3306 -> 10101']);
+  assert.equal(consul[2], '8500 -> 10900, 8502 -> 10901, 8600/tcp -> 10902, 8600/udp -> 10902');
 });
 
 test('discovers all public Make targets for shell completion', () => {
@@ -140,6 +170,8 @@ test('uses the approved CNB mirror images and matching recipe versions', () => {
   );
   assert.deepEqual(recipes, {
     'clickhouse@24.8': { version: '24.8.14.39', image: 'docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39', platforms: ['linux/amd64', 'linux/arm64'] },
+    'consul@2.0.2': { version: '2.0.2', image: 'docker.cnb.cool/znb/images/consul:2.0.2', platforms: ['linux/amd64', 'linux/arm64'] },
+    'elasticsearch@6.8': { version: '6.8', image: 'docker.cnb.cool/znb/images/elasticsearch:6.8', platforms: ['linux/amd64', 'linux/arm64'] },
     'etcd@3.7': { version: '3.7.0', image: 'docker.cnb.cool/znb/images/etcd:v3.7.0', platforms: ['linux/amd64', 'linux/arm64'] },
     'kafka@4.3': { version: '4.3.1', image: 'docker.cnb.cool/znb/images/kafka:4.3.1', platforms: ['linux/amd64', 'linux/arm64'] },
     'mariadb@10.11': { version: '10.11.11', image: 'docker.cnb.cool/znb/images/mariadb:10.11.11', platforms: ['linux/amd64', 'linux/arm64'] },
@@ -148,7 +180,7 @@ test('uses the approved CNB mirror images and matching recipe versions', () => {
     'mysql@5.7': { version: '5.7.44', image: 'docker.cnb.cool/znb/images/mysql:5.7.44', platforms: ['linux/amd64', 'linux/arm64'] },
     'mysql@8.4': { version: '8.4.6', image: 'docker.cnb.cool/znb/images/mysql:8.4.6', platforms: ['linux/amd64', 'linux/arm64'] },
     'nacos@2.5': { version: '2.5.2', image: 'docker.cnb.cool/znb/images/nacos-server:v2.5.2', platforms: ['linux/amd64', 'linux/arm64'] },
-    'nacos@3.2': { version: '3.2.2', image: 'docker.cnb.cool/znb/images/nacos-server:v3.2.2', platforms: ['linux/amd64', 'linux/arm64'] },
+    'nacos@3.2': { version: '3.2.3', image: 'docker.cnb.cool/znb/images/nacos-server:v3.2.3', platforms: ['linux/amd64', 'linux/arm64'] },
     'postgresql@14.23': { version: '14.23', image: 'docker.cnb.cool/znb/images/postgres:14.23', platforms: ['linux/amd64', 'linux/arm64'] },
     'postgresql@17.4': { version: '17.4', image: 'docker.cnb.cool/znb/images/postgres:17.4', platforms: ['linux/amd64', 'linux/arm64'] },
     'pulsar@4.2': { version: '4.2.3', image: 'docker.cnb.cool/znb/images/pulsar:4.2.3', platforms: ['linux/amd64', 'linux/arm64'] },
@@ -181,8 +213,8 @@ test('configures r-nacos with its admin account and console port', () => {
   const recipe = discoverRecipes().find((item) => recipeSelector(item) === 'rnacos@0.8');
   assert.equal(recipe.connection.username, 'admin');
   assert.equal(recipe.connection.password, '123456');
-  assert.equal(recipe.connection.grpcPort, 9849);
-  assert.equal(recipe.connection.consolePort, 10849);
+  assert.equal(recipe.connection.grpcPort, 11101);
+  assert.equal(recipe.connection.consolePort, 11102);
 
   const compose = readFileSync(join(recipe.directory, 'compose.yaml'), 'utf8');
   assert.match(compose, /RNACOS_CONSOLE_PORT/);
@@ -255,6 +287,46 @@ test('smoke commands use password and port overrides without invoking a shell', 
     expandSmokeCommand(['client', '--password=${DB_PASSWORD}', '--port=${DB_PORT}'], recipe, { DB_PASSWORD: 'override', DB_PORT: '13306' }),
     ['client', '--password=override', '--port=13306'],
   );
+});
+
+test('generates DBX deep links from effective recipe connection values', () => {
+  const recipe = discoverRecipes().find((item) => recipeSelector(item) === 'postgresql@17.4');
+  assert.ok(recipe);
+
+  const link = dbxConnectionDeepLink(recipe, { DB_PORT: '15433', DB_PASSWORD: 'p@ss & word' });
+  assert.ok(link);
+  const params = new URL(link).searchParams;
+  assert.equal(params.get('type'), 'postgres');
+  assert.equal(params.get('name'), 'PostgreSQL 17.4 (local)');
+  assert.equal(params.get('host'), '127.0.0.1');
+  assert.equal(params.get('port'), '15433');
+  assert.equal(params.get('user'), 'postgres');
+  assert.equal(params.get('password'), 'p@ss & word');
+  assert.equal(params.get('database'), 'dbx');
+});
+
+test('prints a DBX deep link only for compatible connection types', () => {
+  const repoRoot = join(DEFAULT_RECIPES_ROOT, '..', '..');
+  const postgres = spawnSync(process.execPath, ['scripts/database-env.mjs', 'info', 'postgresql', '17.4'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(postgres.status, 0, postgres.stderr);
+  assert.match(postgres.stdout, /DBX connection link: dbx:\/\/connection\/new\?type=postgres&/);
+
+  const elasticsearch = spawnSync(process.execPath, ['scripts/database-env.mjs', 'info', 'elasticsearch', '6.8'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(elasticsearch.status, 0, elasticsearch.stderr);
+  assert.match(elasticsearch.stdout, /DBX connection link: dbx:\/\/connection\/new\?type=elasticsearch&/);
+
+  const consul = spawnSync(process.execPath, ['scripts/database-env.mjs', 'info', 'consul', '2.0.2'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(consul.status, 0, consul.stderr);
+  assert.match(consul.stdout, /DBX connection link: unavailable \(DBX has no compatible Consul connection type\)/);
 });
 
 test('MongoDB commands pass reserved-character passwords as a distinct argument', () => {
@@ -355,10 +427,35 @@ test('allows recipes that explicitly declare no authentication', () => {
   assert.deepEqual(validateRecipe(recipe), []);
 });
 
-test('requires every recipe port to be one greater than its database default port', () => {
+test('requires the primary connection port to match the allocated DB_PORT', () => {
   const [recipe] = discoverRecipes(fixture('postgresql', '17.4'));
-  recipe.connection.port = 5432;
-  assert.match(validateRecipe(recipe).join('; '), /connection.port must be defaultPort \+ 1/);
+  recipe.connection.port = 10301;
+  assert.match(validateRecipe(recipe).join('; '), /connection.port must match hostPorts.DB_PORT/);
+});
+
+test('requires Compose port defaults to match the declared host-port allocation', () => {
+  const [recipe] = discoverRecipes(fixture('postgresql', '17.4'));
+  const composePath = join(recipe.directory, 'compose.yaml');
+  writeFileSync(composePath, readFileSync(composePath, 'utf8').replace('DB_PORT:-10300', 'DB_PORT:-10301'));
+  assert.match(validateRecipe(recipe).join('; '), /compose.yaml port defaults must match recipe hostPorts/);
+});
+
+test('allocates unique default host ports across checked-in recipes', () => {
+  const recipes = discoverRecipes();
+  assert.deepEqual(validateHostPortAllocation(recipes), []);
+  const duplicate = structuredClone(recipes[0]);
+  duplicate.hostPorts = { DB_PORT: recipes[1].hostPorts.DB_PORT };
+  assert.match(validateHostPortAllocation([recipes[1], duplicate]).join('; '), /host port .* is allocated to both/);
+});
+
+test('parses every declared default host-port mapping, including shared UDP and TCP DNS', () => {
+  const consul = discoverRecipes().find((recipe) => recipeSelector(recipe) === 'consul@2.0.2');
+  assert.ok(consul);
+  const mappings = defaultHostPortMappings(readFileSync(join(consul.directory, 'compose.yaml'), 'utf8'));
+  assert.deepEqual(mappings.filter((mapping) => mapping.environment === 'CONSUL_DNS_PORT'), [
+    { environment: 'CONSUL_DNS_PORT', hostPort: 10902, containerPort: 8600, protocol: 'tcp' },
+    { environment: 'CONSUL_DNS_PORT', hostPort: 10902, containerPort: 8600, protocol: 'udp' },
+  ]);
 });
 
 test('reports missing smoke structures without throwing a TypeError', () => {

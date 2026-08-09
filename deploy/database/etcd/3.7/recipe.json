@@ -7,7 +7,8 @@
   "platforms": ["linux/amd64", "linux/arm64"],
   "service": "database",
   "defaultPort": 2379,
-  "connection": { "host": "127.0.0.1", "port": 2380, "username": "root", "password": "123456", "database": "dbx", "peerPort": 2381 },
+  "connection": { "host": "127.0.0.1", "port": 10700, "username": "root", "password": "123456", "database": "dbx", "peerPort": 10701 },
+  "hostPorts": { "DB_PORT": 10700, "ETCD_PEER_PORT": 10701 },
   "bootstrap": {
     "check": { "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--user", "root:${DB_PASSWORD}", "auth", "status"], "expect": "Authentication Status: true" },
     "steps": [

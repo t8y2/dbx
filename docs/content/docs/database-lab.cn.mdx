@@ -9,63 +9,77 @@ description: 为 DBX 开发与验证启动可重复创建的本地数据库实�
 
 ## 可用配方
 
-| 数据库 | 版本目录 | Docker Hub 官方镜像 | Compose 使用的 CNB 镜像 | 默认宿主端口 | 容器名 |
+| 数据库 | 版本目录 | 官方上游镜像 | Compose 使用的 CNB 镜像 | 默认宿主端口 | 容器名 |
 | --- | --- | --- | --- | ---: | --- |
-| ClickHouse | `clickhouse/24.8` | `clickhouse/clickhouse-server:24.8.14.39` | `docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39` | `8124` | `dbx-clickhouse-24.8` |
-| etcd | `etcd/3.7` | `gcr.io/etcd-development/etcd:v3.7.0` | `docker.cnb.cool/znb/images/etcd:v3.7.0` | `2380` | `dbx-etcd-3.7` |
-| Kafka | `kafka/4.3` | `apache/kafka:4.3.1` | `docker.cnb.cool/znb/images/kafka:4.3.1` | `9093` | `dbx-kafka-4.3` |
-| MariaDB | `mariadb/10.11` | `mariadb:10.11.11` | `docker.cnb.cool/znb/images/mariadb:10.11.11` | `3307` | `dbx-mariadb-10.11` |
-| MongoDB | `mongodb/5.0` | `mongo:5.0.5` | `docker.cnb.cool/znb/images/mongo:5.0.5` | `27018` | `dbx-mongodb-5.0` |
-| MongoDB | `mongodb/8.2` | `mongo:8.2.3-noble` | `docker.cnb.cool/znb/images/mongo:8.2.3-noble` | `27018` | `dbx-mongodb-8.2` |
-| MySQL | `mysql/5.7` | `mysql:5.7.44` | `docker.cnb.cool/znb/images/mysql:5.7.44` | `3307` | `dbx-mysql-5.7` |
-| MySQL | `mysql/8.4` | `mysql:8.4.6` | `docker.cnb.cool/znb/images/mysql:8.4.6` | `3307` | `dbx-mysql-8.4` |
-| Nacos | `nacos/2.5` | `nacos/nacos-server:v2.5.2` | `docker.cnb.cool/znb/images/nacos-server:v2.5.2` | `8849` | `dbx-nacos-2.5` |
-| Nacos | `nacos/3.2` | `nacos/nacos-server:v3.2.2` | `docker.cnb.cool/znb/images/nacos-server:v3.2.2` | `8849` | `dbx-nacos-3.2` |
-| PostgreSQL | `postgresql/14.23` | `postgres:14.23` | `docker.cnb.cool/znb/images/postgres:14.23` | `5433` | `dbx-postgresql-14.23` |
-| PostgreSQL | `postgresql/17.4` | `postgres:17.4` | `docker.cnb.cool/znb/images/postgres:17.4` | `5433` | `dbx-postgresql-17.4` |
-| Pulsar | `pulsar/4.2` | `apachepulsar/pulsar:4.2.3` | `docker.cnb.cool/znb/images/pulsar:4.2.3` | `6651` | `dbx-pulsar-4.2` |
-| Qdrant | `qdrant/1.8` | `qdrant/qdrant:v1.8.3` | `docker.cnb.cool/znb/images/qdrant:v1.8.3` | `6334` | `dbx-qdrant-1.8` |
-| Redis | `redis/3.0.7` | `redis:3.0.7-alpine` | `docker.cnb.cool/znb/images/redis:3.0.7-alpine` | `6380` | `dbx-redis-3.0.7` |
-| Redis | `redis/7.4` | `redis:7.4.9-alpine` | `docker.cnb.cool/znb/images/redis:7.4.9-alpine` | `6380` | `dbx-redis-7.4` |
-| r-nacos | `rnacos/0.8` | `qingpan/rnacos:v0.8.5` | `docker.cnb.cool/znb/images/rnacos:v0.8.5` | `8849` | `dbx-rnacos-0.8` |
-| ZooKeeper | `zookeeper/3.9` | `zookeeper:3.9.5` | `docker.cnb.cool/znb/images/zookeeper:3.9.5` | `2182` | `dbx-zookeeper-3.9` |
+| ClickHouse | `clickhouse/24.8` | `clickhouse/clickhouse-server:24.8.14.39` | `docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39` | `10600` | `dbx-clickhouse-24.8` |
+| Consul | `consul/2.0.2` | `hashicorp/consul:2.0.2` | `docker.cnb.cool/znb/images/consul:2.0.2` | `10900` | `dbx-consul-2.0.2` |
+| Elasticsearch | `elasticsearch/6.8` | `docker.elastic.co/elasticsearch/elasticsearch:6.8` | `docker.cnb.cool/znb/images/elasticsearch:6.8` | `11500` | `dbx-elasticsearch-6.8` |
+| etcd | `etcd/3.7` | `gcr.io/etcd-development/etcd:v3.7.0` | `docker.cnb.cool/znb/images/etcd:v3.7.0` | `10700` | `dbx-etcd-3.7` |
+| Kafka | `kafka/4.3` | `apache/kafka:4.3.1` | `docker.cnb.cool/znb/images/kafka:4.3.1` | `11300` | `dbx-kafka-4.3` |
+| MariaDB | `mariadb/10.11` | `mariadb:10.11.11` | `docker.cnb.cool/znb/images/mariadb:10.11.11` | `10200` | `dbx-mariadb-10.11` |
+| MongoDB | `mongodb/5.0` | `mongo:5.0.5` | `docker.cnb.cool/znb/images/mongo:5.0.5` | `10400` | `dbx-mongodb-5.0` |
+| MongoDB | `mongodb/8.2` | `mongo:8.2.3-noble` | `docker.cnb.cool/znb/images/mongo:8.2.3-noble` | `10401` | `dbx-mongodb-8.2` |
+| MySQL | `mysql/5.7` | `mysql:5.7.44` | `docker.cnb.cool/znb/images/mysql:5.7.44` | `10100` | `dbx-mysql-5.7` |
+| MySQL | `mysql/8.4` | `mysql:8.4.6` | `docker.cnb.cool/znb/images/mysql:8.4.6` | `10101` | `dbx-mysql-8.4` |
+| Nacos | `nacos/2.5` | `nacos/nacos-server:v2.5.2` | `docker.cnb.cool/znb/images/nacos-server:v2.5.2` | `11000` | `dbx-nacos-2.5` |
+| Nacos | `nacos/3.2` | `nacos/nacos-server:v3.2.3` | `docker.cnb.cool/znb/images/nacos-server:v3.2.3` | `11003` | `dbx-nacos-3.2` |
+| PostgreSQL | `postgresql/14.23` | `postgres:14.23` | `docker.cnb.cool/znb/images/postgres:14.23` | `10300` | `dbx-postgresql-14.23` |
+| PostgreSQL | `postgresql/17.4` | `postgres:17.4` | `docker.cnb.cool/znb/images/postgres:17.4` | `10301` | `dbx-postgresql-17.4` |
+| Pulsar | `pulsar/4.2` | `apachepulsar/pulsar:4.2.3` | `docker.cnb.cool/znb/images/pulsar:4.2.3` | `11400` | `dbx-pulsar-4.2` |
+| Qdrant | `qdrant/1.8` | `qdrant/qdrant:v1.8.3` | `docker.cnb.cool/znb/images/qdrant:v1.8.3` | `11200` | `dbx-qdrant-1.8` |
+| Redis | `redis/3.0.7` | `redis:3.0.7-alpine` | `docker.cnb.cool/znb/images/redis:3.0.7-alpine` | `10500` | `dbx-redis-3.0.7` |
+| Redis | `redis/7.4` | `redis:7.4.9-alpine` | `docker.cnb.cool/znb/images/redis:7.4.9-alpine` | `10501` | `dbx-redis-7.4` |
+| r-nacos | `rnacos/0.8` | `qingpan/rnacos:v0.8.5` | `docker.cnb.cool/znb/images/rnacos:v0.8.5` | `11100` | `dbx-rnacos-0.8` |
+| ZooKeeper | `zookeeper/3.9` | `zookeeper:3.9.5` | `docker.cnb.cool/znb/images/zookeeper:3.9.5` | `10800` | `dbx-zookeeper-3.9` |
 
-所有网络数据库的默认宿主端口都比标准端口大 `1`，并且该约定由配方校验器强制检查。默认密码统一为 `123456`，默认数据库名为 `dbx`。Redis 不支持命名数据库，因此使用 DB 0，并以 `dbx:` 作为冒烟键前缀。Compose 默认使用 CNB 镜像列；Docker Hub 列保留官方上游地址，便于核对来源或直接拉取。Redis 3.0.7 仅支持 amd64；在 arm64 主机上启动时会单独提醒，Docker 将使用模拟运行。其余配方均支持 amd64 和 arm64。
+每个产品使用专属的 `101xx` 至 `115xx` 宿主端口段，校验器会验证全部声明的默认映射位于正确范围且全局唯一。默认密码统一为 `123456`，默认数据库名为 `dbx`。Redis 不支持命名数据库，因此使用 DB 0，并以 `dbx:` 作为冒烟键前缀。Compose 默认使用 CNB 镜像列；官方上游镜像列保留原始镜像地址，便于核对来源或直接拉取。Redis 3.0.7 仅支持 amd64；在 arm64 主机上启动时会单独提醒，Docker 将使用模拟运行。其余配方均支持 amd64 和 arm64。
 
-Nacos 使用管理员用户名 `nacos`、密码 `123456` 和默认 `public` 命名空间。V3 配方额外在 `http://127.0.0.1:8010` 暴露 Web 控制台；V2 控制台使用主端口 `8849`。如需并行运行两个 Nacos 版本，请为其中一个版本设置 `NACOS_CONSOLE_PORT`、`NACOS_GRPC_PORT` 和 `NACOS_RAFT_PORT`。
-
-```bash
-DB_PORT=8818 NACOS_CONSOLE_PORT=8010 NACOS_GRPC_PORT=9818 NACOS_RAFT_PORT=9819 make db DB=nacos@3.2
-```
-
-r-nacos 使用管理员账号 `admin` 和密码 `123456`。DBX 配方的 HTTP、gRPC 和 Web 控制台宿主端口默认分别为 `8849`、`9849`、`10849`；上游单机 Compose 使用 `8848:8848`、`9848:9848`、`10848:10848`。若需避开本机端口冲突，可使用以下自定义宿主端口映射（不是上游默认值）：
+Nacos 使用管理员用户名 `nacos`、密码 `123456` 和默认 `public` 命名空间。V2 的 HTTP、gRPC 和 Raft 宿主端口为 `11000`、`11001`、`11002`；V3 的 HTTP、Web 控制台、gRPC 和 Raft 宿主端口为 `11003`、`11004`、`11005`、`11006`。两个版本默认即可并行运行。
 
 ```bash
-DB_PORT=3848 RNACOS_GRPC_PORT=3748 RNACOS_CONSOLE_PORT=3048 make db DB=rnacos@0.8
+DB_PORT=11030 NACOS_CONSOLE_PORT=11031 NACOS_GRPC_PORT=11032 NACOS_RAFT_PORT=11033 make db DB=nacos@3.2
 ```
 
-etcd 会创建密码为 `123456` 的 `root` 用户、授予 root 角色并开启认证。默认客户端和 peer 主机端口为 `2380`、`2381`。如需使用上游 Docker 命令中的端口，可执行：
+r-nacos 使用管理员账号 `admin` 和密码 `123456`。DBX 配方的 HTTP、gRPC 和 Web 控制台宿主端口默认分别为 `11100`、`11101`、`11102`；上游单机 Compose 使用 `8848:8848`、`9848:9848`、`10848:10848`。
+
+```bash
+DB_PORT=11130 RNACOS_GRPC_PORT=11131 RNACOS_CONSOLE_PORT=11132 make db DB=rnacos@0.8
+```
+
+etcd 会创建密码为 `123456` 的 `root` 用户、授予 root 角色并开启认证。默认客户端和 peer 主机端口为 `10700`、`10701`。如需使用上游 Docker 命令中的端口，可执行：
 
 ```bash
 DB_PORT=2379 ETCD_PEER_PORT=2380 make db DB=etcd@3.7
 ```
 
-Qdrant 将 `123456` 作为管理员 API Key。在 DBX 中请将用户名留空，并把 API Key 填入密码字段，驱动会通过 HTTP 请求头 `api-key` 发送。HTTP 和 gRPC 默认主机端口分别为 `6334`、`6335`。如需使用上游 Docker 命令中的端口，可执行：
+Qdrant 将 `123456` 作为管理员 API Key。在 DBX 中请将用户名留空，并把 API Key 填入密码字段，驱动会通过 HTTP 请求头 `api-key` 发送。HTTP 和 gRPC 默认主机端口分别为 `11200`、`11201`。如需使用上游 Docker 命令中的端口，可执行：
 
 ```bash
 DB_PORT=6333 QDRANT_GRPC_PORT=6334 make db DB=qdrant@1.8
 ```
 
-ZooKeeper 使用 Digest 凭据 `root` / `123456` 保护 `/dbx` 节点。默认主机端口为 `2182`；设置 `DB_PORT=2181` 即可匹配上游 Docker 命令。ZooKeeper 的 Digest ACL 模型保护单个节点，并不提供全局登录开关。
+ZooKeeper 使用 Digest 凭据 `root` / `123456` 保护 `/dbx` 节点。默认主机端口为 `10800`；设置 `DB_PORT=2181` 即可匹配上游 Docker 命令。ZooKeeper 的 Digest ACL 模型保护单个节点，并不提供全局登录开关。
 
 Kafka 和 Pulsar 均为刻意保持未认证的单节点开发配方：Kafka 使用 PLAINTEXT，Pulsar 使用 standalone，因此不要将它们暴露到远程网络。Kafka 如需使用常用端口，可执行 `DB_PORT=9092 make db DB=kafka@4.3`；Pulsar 使用常用端口可执行 `DB_PORT=6650 PULSAR_WEB_PORT=8080 make db DB=pulsar@4.2`。
 
 Redis 3.0.7 和 Redis 7.4.9 用于覆盖兼容性的两个端点。Redis 3 早于 ACL、RESP3、Streams 及许多现代命令，Redis 7 则覆盖当前协议与命令集。对这个实验室而言，同时保留 6.2 和 7.4 所提供的兼容性覆盖更小。
 
-同一数据库的不同版本默认会共用宿主机端口。通常一次启动一个版本；需要并行对比时，为其中一个版本指定其他端口：
+Consul 为单节点开发模式，使用 `agent -dev -client=0.0.0.0 -ui` 启动，不启用 ACL。HTTP API 与 UI、gRPC 和 DNS 的默认宿主端口分别为 `10900`、`10901` 和 `10902`；DNS 同时开放 TCP 和 UDP。以下命令可使用本地常用端口 `8500`、`8502` 和 `8600`：
 
 ```bash
-DB_PORT=13307 make db DB=mysql@5.7
+DB_PORT=8500 CONSUL_GRPC_PORT=8502 CONSUL_DNS_PORT=8600 make db DB=consul@2.0.2
+```
+
+Elasticsearch 6.8 以未认证的单节点开发集群运行，并禁用机器学习功能。HTTP API 和 transport 默认宿主端口为 `11500`、`11501`；以下命令可使用上游端口 `9200`、`9300`：
+
+```bash
+DB_PORT=9200 ELASTICSEARCH_TRANSPORT_PORT=9300 make db DB=elasticsearch@6.8
+```
+
+所有已提交配方都有唯一的默认宿主端口分配，因此版本和产品可默认并行运行。仅在本地规范需要不同端口时使用 `DB_PORT`：
+
+```bash
+DB_PORT=10150 make db DB=mysql@5.7
 make db DB=mysql@8.4
 ```
 
@@ -79,15 +93,17 @@ make db-list
 make db DB=postgresql@17.4
 make db-verify DB=postgresql@17.4
 make db DB=rnacos@0.8
+make db DB=consul@2.0.2
+make db DB=elasticsearch@6.8
 ```
 
-不带参数执行 `make db` 会输出当前全部支持的、可直接复制启动的命令，以及可选参数。传入 `DB=product@version` 后，`db` 会等待 Compose 健康检查通过并输出 DBX 连接字段。`db-verify` 还会在数据库容器中执行配方中的冒烟命令，并校验预期输出；提交数据库相关修复前推荐执行此命令。
+不带参数执行 `make db` 会输出当前全部支持的、可直接复制启动的命令，以及可选参数。传入 `DB=product@version` 后，`db` 会等待 Compose 健康检查通过并输出 DBX 连接字段；对于 DBX 已支持的连接类型，还会输出预填完成的 `dbx://connection/new` 深链。复制该链接到浏览器或终端执行 `open '<链接>'`，即可打开桌面端的新建连接窗口。使用前请先安装并启动一次 DBX 桌面端以注册 `dbx://` 协议。深链可能包含密码，因此不要将其写入共享终端历史、日志或工单。尚未具备 DBX 连接类型的配方会明确显示深链不可用，例如 Consul、Nacos、Kafka、Pulsar 和 r-nacos。`db-verify` 还会在数据库容器中执行配方中的冒烟命令，并校验预期输出；提交数据库相关修复前推荐执行此命令。
 
 ## 命令和变量
 
 | Make 目标 | 用途 |
 | --- | --- |
-| `make db-list` | 列出数据库版本、镜像和支持的平台 |
+| `make db-list` | 列出数据库版本、容器到宿主机端口映射、镜像和支持的平台 |
 | `make db DB=product@version` | 创建、等待环境就绪并输出连接字段 |
 | `make db-verify DB=product@version` | 启动并运行冒烟检查 |
 | `make db-down DB=product@version` | 停止环境但保留数据卷 |

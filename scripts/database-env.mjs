@@ -10,6 +10,35 @@ export const DEFAULT_RECIPES_ROOT = join(REPO_ROOT, 'deploy', 'database');
 const DEFAULT_MAKEFILE_PATH = join(REPO_ROOT, 'Makefile');
 const DEFAULT_PASSWORD = '123456';
 const DEFAULT_DATABASE = 'dbx';
+const DEFAULT_HOST_PORT_RANGES = {
+  mysql: [10100, 10199],
+  mariadb: [10200, 10299],
+  postgresql: [10300, 10399],
+  mongodb: [10400, 10499],
+  redis: [10500, 10599],
+  clickhouse: [10600, 10699],
+  etcd: [10700, 10799],
+  zookeeper: [10800, 10899],
+  consul: [10900, 10999],
+  nacos: [11000, 11099],
+  rnacos: [11100, 11199],
+  qdrant: [11200, 11299],
+  kafka: [11300, 11399],
+  pulsar: [11400, 11499],
+  elasticsearch: [11500, 11599],
+};
+const DBX_DEEP_LINK_TYPES = {
+  clickhouse: 'clickhouse',
+  elasticsearch: 'elasticsearch',
+  etcd: 'etcd',
+  mariadb: 'mariadb',
+  mongodb: 'mongodb',
+  mysql: 'mysql',
+  postgresql: 'postgres',
+  qdrant: 'qdrant',
+  redis: 'redis',
+  zookeeper: 'zookeeper',
+};
 
 export function discoverRecipes(root = DEFAULT_RECIPES_ROOT) {
   if (!existsSync(root)) return [];
@@ -43,6 +72,22 @@ export function formatTable(headers, rows) {
   }).join('  ');
 
   return [headers, ...rows].map(renderRow).join('\n');
+}
+
+export function formatBorderedTable(headers, rows, groupByFirstColumn = false) {
+  const widths = headers.map((header, index) => Math.max(
+    header.length,
+    ...rows.map((row) => String(row[index] ?? '').length),
+  ));
+  const border = `+${widths.map((width) => '-'.repeat(width + 2)).join('+')}+`;
+  const renderRow = (row) => `| ${row.map((value, index) => String(value ?? '').padEnd(widths[index])).join(' | ')} |`;
+  const body = [];
+  for (const [index, row] of rows.entries()) {
+    body.push(renderRow(row));
+    if (groupByFirstColumn && index < rows.length - 1 && rows[index + 1][0] !== '') body.push(border);
+  }
+
+  return [border, renderRow(headers), border, ...body, border].join('\n');
 }
 
 export function discoverMakeTargets(makefilePath = DEFAULT_MAKEFILE_PATH) {
@@ -119,18 +164,95 @@ export function expectedContainerName(recipe) {
   return `dbx-${recipe.database}-${recipe.displayVersion}`.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-');
 }
 
+export function defaultHostPortMappings(compose) {
+  const mappings = [];
+  const pattern = /^\s*-\s*["']?\$\{DB_BIND_ADDRESS:-127\.0\.0\.1\}:\$\{([A-Z][A-Z0-9_]*):-([0-9]+)\}:([0-9]+)(?:\/(tcp|udp))?["']?\s*$/;
+  for (const line of compose.split(/\r?\n/)) {
+    const match = line.match(pattern);
+    if (!match) continue;
+    mappings.push({ environment: match[1], hostPort: Number(match[2]), containerPort: Number(match[3]), protocol: match[4] || 'tcp' });
+  }
+  return mappings;
+}
+
+export function recipePortMappings(recipe) {
+  const composePath = join(recipe.directory, 'compose.yaml');
+  if (!existsSync(composePath)) return '';
+  const mappings = defaultHostPortMappings(readFileSync(composePath, 'utf8')).sort((left, right) => (
+    left.hostPort - right.hostPort
+    || left.containerPort - right.containerPort
+    || left.protocol.localeCompare(right.protocol)
+  ));
+  return mappings.map((mapping) => {
+    const sharesPortWithAnotherProtocol = mappings.some((candidate) => (
+      candidate !== mapping
+      && candidate.containerPort === mapping.containerPort
+      && candidate.hostPort === mapping.hostPort
+      && candidate.protocol !== mapping.protocol
+    ));
+    const sourcePort = sharesPortWithAnotherProtocol
+      ? `${mapping.containerPort}/${mapping.protocol}`
+      : mapping.containerPort;
+    return `${sourcePort} -> ${mapping.hostPort}`;
+  }).join(', ');
+}
+
+export function databaseListRows(recipes) {
+  let previousDatabase = null;
+  return recipes.map((recipe) => {
+    const database = recipe.database === previousDatabase ? '' : recipe.name;
+    previousDatabase = recipe.database;
+    return [database, recipe.displayVersion, recipePortMappings(recipe), recipe.image, recipe.platforms.join(',')];
+  });
+}
+
+function validateHostPorts(recipe) {
+  const errors = [];
+  const hostPorts = recipe.hostPorts;
+  if (!hostPorts || typeof hostPorts !== 'object' || Array.isArray(hostPorts)) return ['hostPorts must be a non-empty object'];
+  const entries = Object.entries(hostPorts);
+  if (entries.length === 0) return ['hostPorts must be a non-empty object'];
+  const [start, end] = DEFAULT_HOST_PORT_RANGES[recipe.database] ?? [];
+  if (!start) {
+    errors.push(`database ${recipe.database} has no allocated default host port range`);
+  }
+  for (const [environment, port] of entries) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(environment)) errors.push(`hostPorts key ${environment} must be an environment variable name`);
+    if (!Number.isInteger(port) || port < start || port > end) {
+      errors.push(`hostPorts.${environment} must be an integer in the ${start}-${end} range`);
+    }
+  }
+  if (new Set(entries.map(([, port]) => port)).size !== entries.length) errors.push('hostPorts must not reuse a port within a recipe');
+  if (recipe.connection?.port !== hostPorts.DB_PORT) errors.push('connection.port must match hostPorts.DB_PORT');
+  return errors;
+}
+
+export function validateHostPortAllocation(recipes) {
+  const errors = [];
+  const owners = new Map();
+  for (const recipe of recipes) {
+    for (const [environment, port] of Object.entries(recipe.hostPorts ?? {})) {
+      if (!Number.isInteger(port)) continue;
+      const owner = `${recipeSelector(recipe)} (${environment})`;
+      const existing = owners.get(port);
+      if (existing) errors.push(`host port ${port} is allocated to both ${existing} and ${owner}`);
+      else owners.set(port, owner);
+    }
+  }
+  return errors;
+}
+
 export function validateRecipe(recipe) {
   const errors = [];
-  for (const field of ['database', 'version', 'displayVersion', 'service', 'connection', 'smoke', 'shell', 'defaultPort']) {
+  for (const field of ['database', 'version', 'displayVersion', 'service', 'connection', 'hostPorts', 'smoke', 'shell', 'defaultPort']) {
     if (recipe[field] === undefined) errors.push(`missing ${field}`);
   }
   if (!recipe.image || !/^[^\s]+:[^\s]+$/.test(recipe.image)) errors.push('image must be a pinned image reference');
   if (recipe.connection?.host !== '127.0.0.1') errors.push('connection.host must be 127.0.0.1');
   if (!Number.isInteger(recipe.defaultPort) || recipe.defaultPort < 1 || recipe.defaultPort > 65534) {
     errors.push('defaultPort must be an integer between 1 and 65534');
-  } else if (recipe.connection?.port !== recipe.defaultPort + 1) {
-    errors.push('connection.port must be defaultPort + 1');
   }
+  errors.push(...validateHostPorts(recipe));
   if (recipe.connection?.authentication === 'none') {
     if (recipe.connection.password !== undefined) errors.push('unauthenticated recipes must not declare connection.password');
   } else if (recipe.connection?.password !== DEFAULT_PASSWORD) errors.push(`connection.password must be ${DEFAULT_PASSWORD}`);
@@ -162,8 +284,18 @@ export function validateRecipe(recipe) {
       errors.push('compose.yaml ports must default every mapping to 127.0.0.1 via DB_BIND_ADDRESS');
     }
     if (!serviceHasNamedVolume(compose, recipe.service)) errors.push('target service must mount a named volume');
-    if (!compose.includes(`\${DB_PORT:-${recipe.connection?.port}}:${recipe.defaultPort}`)) {
-      errors.push('compose.yaml must default DB_PORT to connection.port and target defaultPort');
+    const portMappings = defaultHostPortMappings(compose);
+    const mappedPorts = new Map();
+    for (const mapping of portMappings) {
+      const previousPort = mappedPorts.get(mapping.environment);
+      if (previousPort !== undefined && previousPort !== mapping.hostPort) {
+        errors.push(`compose.yaml uses conflicting defaults for ${mapping.environment}`);
+      }
+      mappedPorts.set(mapping.environment, mapping.hostPort);
+    }
+    const configuredPorts = Object.entries(recipe.hostPorts ?? {});
+    if (mappedPorts.size !== configuredPorts.length || configuredPorts.some(([environment, port]) => mappedPorts.get(environment) !== port)) {
+      errors.push('compose.yaml port defaults must match recipe hostPorts');
     }
   }
   const initDirectory = join(recipe.directory, 'init');
@@ -289,6 +421,24 @@ export function expandSmokeCommand(command, recipe, environment = process.env) {
   return command.map((value) => value.replace(/\$\{(DB_PASSWORD|DB_PORT)\}/g, (_, name) => values[name]));
 }
 
+export function dbxConnectionDeepLink(recipe, environment = process.env) {
+  const type = DBX_DEEP_LINK_TYPES[recipe.database];
+  if (!type) return null;
+
+  const { connection } = recipe;
+  const params = new URLSearchParams({
+    type,
+    name: `${recipe.name} ${recipe.version} (local)`,
+    host: connection.host,
+    port: environment.DB_PORT || String(connection.port),
+    database: String(connection.database),
+  });
+  if (connection.username) params.set('user', connection.username);
+  if (connection.password) params.set('password', environment.DB_PASSWORD || connection.password);
+  if (connection.urlParams) params.set('url_params', connection.urlParams);
+  return `dbx://connection/new?${params}`;
+}
+
 function ensureBootstrap(recipe) {
   if (!recipe.bootstrap) return;
   // Keep one-shot setup synchronous after Compose health checks so --wait cannot return before credentials exist.
@@ -310,6 +460,9 @@ function printConnection(recipe) {
   if (process.env.DB_PASSWORD) connection.password = process.env.DB_PASSWORD;
   console.log(`${recipe.name} (${recipe.version})`);
   for (const [key, value] of Object.entries(connection)) console.log(`${key}: ${value}`);
+  const deepLink = dbxConnectionDeepLink(recipe);
+  if (deepLink) console.log(`DBX connection link: ${deepLink}`);
+  else console.log(`DBX connection link: unavailable (DBX has no compatible ${recipe.name} connection type)`);
   if (recipe.notes) console.log(`notes: ${recipe.notes}`);
   const warning = architectureWarning(recipe);
   if (warning) console.warn(`warning: ${warning}`);
@@ -317,6 +470,11 @@ function printConnection(recipe) {
 
 function checkRecipes(recipes) {
   let failed = false;
+  const allocationErrors = validateHostPortAllocation(recipes);
+  if (allocationErrors.length > 0) {
+    failed = true;
+    for (const error of allocationErrors) console.error(`FAIL host port allocation: ${error}`);
+  }
   for (const recipe of recipes) {
     const errors = validateRecipe(recipe);
     if (errors.length) {
@@ -368,9 +526,10 @@ export function main(argv = process.argv.slice(2)) {
   const recipes = discoverRecipes();
 
   if (command === 'list') {
-    console.log(formatTable(
-      ['DATABASE', 'VERSION', 'IMAGE', 'PLATFORMS'],
-      recipes.map((recipe) => [recipe.database, recipe.displayVersion, recipe.image, recipe.platforms.join(',')]),
+    console.log(formatBorderedTable(
+      ['DATABASE', 'VERSION', 'PORTS (CONTAINER -> HOST)', 'IMAGE', 'PLATFORMS'],
+      databaseListRows(recipes),
+      true,
     ));
     return;
   }

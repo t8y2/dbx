@@ -11,6 +11,12 @@ function actionAtCursor(input: string, databaseType?: string): IntentionAction |
   return actions[0] ?? null;
 }
 
+/** 用 | 标记光标位置，返回所有 actions */
+function actionsAtCursor(input: string, databaseType?: string): IntentionAction[] {
+  const { sql, cursor } = sqlFixtureCursor(input);
+  return analyzeIntentionActions({ sql, cursor, databaseType: databaseType as never });
+}
+
 // ==================== Tests ====================
 
 describe("sqlIntentionActions - qualify/unqualify identifier", () => {
@@ -21,7 +27,7 @@ describe("sqlIntentionActions - qualify/unqualify identifier", () => {
       const action = actionAtCursor("SELECT `su`.`user_id|` FROM sys_user AS su", "mysql");
       expect(action).not.toBeNull();
       expect(action!.kind).toBe("unqualify_identifier");
-      expect(action!.replacement).toBe("user_id");
+      expect(action!.replacement).toBe("`user_id`");
     });
 
     it("MySQL 反引号限定: `su`.`user_id` 光标在 user_id 上 → span 覆盖完整限定标识符", () => {
@@ -37,7 +43,7 @@ describe("sqlIntentionActions - qualify/unqualify identifier", () => {
       const action = actionAtCursor('SELECT "su"."user_id|" FROM sys_user AS su', "postgres");
       expect(action).not.toBeNull();
       expect(action!.kind).toBe("unqualify_identifier");
-      expect(action!.replacement).toBe("user_id");
+      expect(action!.replacement).toBe('"user_id"');
     });
 
     it("无引号限定: su.user_id 光标在 user_id 上 → 提供取消限定", () => {
@@ -129,16 +135,23 @@ describe("sqlIntentionActions - qualify/unqualify identifier", () => {
       expect(action!.replacement).toContain("su");
     });
 
-    it("双表 JOIN 中未限定列（两个限定符都引用）→ 不提供限定（歧义）", () => {
-      // user_id 同时被 su 和 sup 引用 → 无法确定属于哪个表
-      const action = actionAtCursor("SELECT user_id| FROM sys_user su JOIN sys_user_post sup ON su.user_id = sup.user_id");
-      expect(action).toBeNull();
+    it("双表 JOIN 中未限定列（两个限定符都引用）→ 提供所有候选表限定选项", () => {
+      // user_id 同时被 su 和 sup 引用 → 歧义，但提供所有候选让用户选择
+      const actions = actionsAtCursor("SELECT user_id| FROM sys_user su JOIN sys_user_post sup ON su.user_id = sup.user_id");
+      expect(actions.length).toBe(2);
+      expect(actions[0].kind).toBe("qualify_identifier");
+      expect(actions[1].kind).toBe("qualify_identifier");
+      const labels = actions.map((a) => a.label).sort();
+      expect(labels).toEqual(["su.user_id", "sup.user_id"]);
     });
 
-    it("双表 JOIN 中未限定列（未在任何限定符中引用）→ 不提供限定", () => {
-      // unique_col 未在 SQL 中被任何限定符引用 → 无法确定属于哪个表
-      const action = actionAtCursor("SELECT unique_col| FROM sys_user su JOIN sys_user_post sup ON su.user_id = sup.user_id");
-      expect(action).toBeNull();
+    it("双表 JOIN 中未限定列（未在任何限定符中引用）→ 提供所有候选表限定选项", () => {
+      // unique_col 未在 SQL 中被任何限定符引用 → 无法自动推断，提供所有候选让用户选择
+      const actions = actionsAtCursor("SELECT unique_col| FROM sys_user su JOIN sys_user_post sup ON su.user_id = sup.user_id");
+      expect(actions.length).toBe(2);
+      expect(actions[0].kind).toBe("qualify_identifier");
+      const labels = actions.map((a) => a.label).sort();
+      expect(labels).toEqual(["su.unique_col", "sup.unique_col"]);
     });
   });
 
@@ -187,6 +200,79 @@ describe("sqlIntentionActions - qualify/unqualify identifier", () => {
       expect(action).not.toBeNull();
       expect(action!.kind).toBe("unqualify_identifier");
       expect(action!.replacement).toBe("name");
+    });
+  });
+
+  // ---- 引号标识符保留（PR Review 阻塞项 2）----
+
+  describe("引号标识符保留", () => {
+    it("MySQL 反引号保留字 qualify → 保留引号", () => {
+      const action = actionAtCursor("SELECT `order`| FROM users u", "mysql");
+      expect(action).not.toBeNull();
+      expect(action!.kind).toBe("qualify_identifier");
+      expect(action!.replacement).toBe("`u`.`order`");
+    });
+
+    it("MySQL 反引号空格列名 qualify → 保留引号", () => {
+      const action = actionAtCursor("SELECT `user id`| FROM users u", "mysql");
+      expect(action).not.toBeNull();
+      expect(action!.kind).toBe("qualify_identifier");
+      expect(action!.replacement).toBe("`u`.`user id`");
+    });
+
+    it("PG 双引号大小写敏感列名 qualify → 保留引号", () => {
+      const action = actionAtCursor('SELECT "UserName"| FROM users u', "postgres");
+      expect(action).not.toBeNull();
+      expect(action!.kind).toBe("qualify_identifier");
+      expect(action!.replacement).toBe('"u"."UserName"');
+    });
+
+    it("MySQL 反引号保留字 unqualify → 保留引号", () => {
+      const action = actionAtCursor("SELECT `u`.`order`| FROM users u", "mysql");
+      expect(action).not.toBeNull();
+      expect(action!.kind).toBe("unqualify_identifier");
+      expect(action!.replacement).toBe("`order`");
+    });
+
+    it("PG 双引号大小写敏感列名 unqualify → 保留引号", () => {
+      const action = actionAtCursor('SELECT "u"."UserName"| FROM users u', "postgres");
+      expect(action).not.toBeNull();
+      expect(action!.kind).toBe("unqualify_identifier");
+      expect(action!.replacement).toBe('"UserName"');
+    });
+  });
+
+  // ---- schema.table.column 三段式标识符（PR Review 阻塞项 3）----
+
+  describe("schema.table.column 三段式标识符", () => {
+    it("三段式 unqualify → 替换为裸列名（保留引号）", () => {
+      const action = actionAtCursor("SELECT dbo.users.user_id| FROM dbo.users", "sqlserver");
+      expect(action).not.toBeNull();
+      expect(action!.kind).toBe("unqualify_identifier");
+      expect(action!.replacement).toBe("[user_id]");
+    });
+
+    it("三段式同名列歧义检测 → 不提供 unqualify", () => {
+      // dbo.users.user_id 和 dbo.orders.user_id 都是 3 段式
+      const sql = "SELECT dbo.users.user_id| FROM dbo.users JOIN dbo.orders ON dbo.users.user_id = dbo.orders.user_id";
+      const action = actionAtCursor(sql, "sqlserver");
+      expect(action).toBeNull();
+    });
+  });
+
+  // ---- 引号标识符歧义检测（PR Review 阻塞项 3）----
+
+  describe("引号标识符歧义检测", () => {
+    it("MySQL 反引号同名列歧义 → 不提供 unqualify", () => {
+      const sql = "SELECT `su`.`user_id`| FROM sys_user `su` JOIN sys_user_post `sup` ON `su`.`user_id` = `sup`.`user_id`";
+      const action = actionAtCursor(sql, "mysql");
+      expect(action).toBeNull();
+    });
+
+    it("PG 双引号同名列歧义 → 不提供 unqualify", () => {
+      const sql = 'SELECT "su"."user_id"| FROM sys_user "su" JOIN sys_user_post "sup" ON "su"."user_id" = "sup"."user_id"';
+      const action = actionAtCursor(sql, "postgres");
+      expect(action).toBeNull();
     });
   });
 });

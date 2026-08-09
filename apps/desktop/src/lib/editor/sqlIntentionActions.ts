@@ -1,7 +1,8 @@
 import type { DatabaseType } from "@/types/database";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
-import type { SqlSemanticModel, SqlSemanticRowSource, SqlSemanticCursorIntent, SqlSemanticScope } from "@/lib/sql/semantic/types";
+import type { SqlSemanticModel, SqlSemanticRowSource, SqlSemanticCursorIntent, SqlSemanticScope, SqlSemanticToken } from "@/lib/sql/semantic/types";
+import { unquoteSqlSemanticIdentifier, tokenIsIdentifier } from "@/lib/sql/semantic/tokens";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { supportsColumnNameQuoting } from "@/lib/dataGrid/dataGridColumnNameCopy";
 
@@ -13,6 +14,8 @@ export interface IntentionAction {
   replacement: string;
   /** batch_qualify_identifiers 专用：每个标识符的独立替换 */
   replacements?: Array<{ span: { start: number; end: number }; replacement: string }>;
+  /** 自定义标签（多表限定场景显示 "Qualify with su" 等） */
+  label?: string;
 }
 
 export interface IntentionActionContext {
@@ -253,9 +256,10 @@ function buildBatchQualifyActions(ctx: IntentionActionContext): IntentionAction[
       qualifier = singleQualifier!;
     }
 
+    const quotedColumn = quote ? quoteTableIdentifier(databaseType, token.text) : token.text;
     replacements.push({
       span: { start: offset + token.start, end: offset + token.end },
-      replacement: `${qualifier}.${token.text}`,
+      replacement: `${qualifier}.${quotedColumn}`,
     });
   }
 
@@ -455,16 +459,36 @@ function collectTableAliasNames(model: SqlSemanticModel): Set<string> {
 }
 
 /**
+ * 将 token 标准化为小写无引号文本，用于跨引号风格的统一比较。
+ */
+function normalizeIdentifierToken(token: SqlSemanticToken): string {
+  return unquoteSqlSemanticIdentifier(token).toLowerCase();
+}
+
+/**
+ * 提取 qualifier 的完整文本（处理 schema.table.column 三段式标识符）。
+ * 当 tokens[i] 前面还有 `schema.` 时，返回 `schema.table`，否则返回 `table`。
+ */
+function extractQualifier(tokens: readonly SqlSemanticToken[], i: number): string {
+  // 检查是否为 3-part: schema.table.column → qualifier = schema.table
+  if (i >= 2 && tokens[i - 1]?.text === "." && tokenIsIdentifier(tokens[i - 2])) {
+    return `${normalizeIdentifierToken(tokens[i - 2])}.${normalizeIdentifierToken(tokens[i])}`;
+  }
+  return normalizeIdentifierToken(tokens[i]);
+}
+
+/**
  * 扫描 SQL 中的 `qualifier.column` 模式，收集引用指定列名的不同限定符。
+ * 支持 2-part (table.column) 和 3-part (schema.table.column) 标识符。
  */
 function collectColumnQualifiers(model: SqlSemanticModel, columnName: string): Set<string> {
   const target = columnName.toLowerCase();
   const qualifiers = new Set<string>();
   const tokens = model.tokens;
   for (let i = 0; i < tokens.length - 2; i++) {
-    if ((tokens[i].kind === "word" || tokens[i].kind === "quoted_identifier") && tokens[i + 1]?.text === "." && (tokens[i + 2].kind === "word" || tokens[i + 2].kind === "quoted_identifier")) {
-      if (tokens[i + 2].normalized === target) {
-        qualifiers.add(tokens[i].normalized);
+    if (tokenIsIdentifier(tokens[i]) && tokens[i + 1]?.text === "." && tokenIsIdentifier(tokens[i + 2])) {
+      if (normalizeIdentifierToken(tokens[i + 2]) === target) {
+        qualifiers.add(extractQualifier(tokens, i));
       }
     }
   }
@@ -473,14 +497,15 @@ function collectColumnQualifiers(model: SqlSemanticModel, columnName: string): S
 
 /**
  * 一次性构建 `column → qualifiers` 映射，避免批量场景中 N 次重复扫描全量 token。
+ * 支持 2-part (table.column) 和 3-part (schema.table.column) 标识符。
  */
 function buildColumnQualifierMap(model: SqlSemanticModel): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>();
   const tokens = model.tokens;
   for (let i = 0; i < tokens.length - 2; i++) {
-    if ((tokens[i].kind === "word" || tokens[i].kind === "quoted_identifier") && tokens[i + 1]?.text === "." && (tokens[i + 2].kind === "word" || tokens[i + 2].kind === "quoted_identifier")) {
-      const col = tokens[i + 2].normalized;
-      const qual = tokens[i].normalized;
+    if (tokenIsIdentifier(tokens[i]) && tokens[i + 1]?.text === "." && tokenIsIdentifier(tokens[i + 2])) {
+      const col = normalizeIdentifierToken(tokens[i + 2]);
+      const qual = extractQualifier(tokens, i);
       let set = map.get(col);
       if (!set) {
         set = new Set();
@@ -517,7 +542,36 @@ function isColumnAmbiguous(model: SqlSemanticModel, columnName: string): boolean
 
 // ==================== Qualify / Unqualify Identifier ====================
 
-function buildQualifierActions(model: SqlSemanticModel, cursorIntent: SqlSemanticCursorIntent, sql: string, databaseType?: DatabaseType): IntentionAction[] {
+/**
+ * 查找光标所在位置对应的完整标识符 token。
+ * trailingIdentifier 为自动补全设计，replacementRange 只到光标位置。
+ * 意图操作需要完整 token 的范围和文本。
+ */
+function findFullIdentifierToken(model: SqlSemanticModel, range: { start: number; end: number }): { prefix: string; replacementRange: { start: number; end: number } } | null {
+  for (const token of model.tokens) {
+    if (tokenIsIdentifier(token) && token.span.start === range.start && token.span.end > range.end) {
+      return {
+        prefix: unquoteSqlSemanticIdentifier(token),
+        replacementRange: { start: token.span.start, end: token.span.end },
+      };
+    }
+  }
+  return null;
+}
+
+function buildQualifierActions(model: SqlSemanticModel, cursorIntentIn: SqlSemanticCursorIntent, sql: string, databaseType?: DatabaseType): IntentionAction[] {
+  let cursorIntent = cursorIntentIn;
+
+  // 修复：当光标在标识符中间时，trailingIdentifier 返回的 replacementRange 只到光标位置。
+  // 扩展到完整 token 的范围和文本。
+  const fullToken = findFullIdentifierToken(model, cursorIntent.replacementRange);
+  if (fullToken) {
+    cursorIntent = {
+      ...cursorIntent,
+      prefix: fullToken.prefix,
+      replacementRange: fullToken.replacementRange,
+    };
+  }
   // 组合 qualifierParts + prefix 形成完整标识符分段
   // qualifierParts 仅含限定符（表别名），prefix 含列名
   let parts = cursorIntent.qualifierParts;
@@ -590,28 +644,49 @@ function buildQualifierActions(model: SqlSemanticModel, cursorIntent: SqlSemanti
         }
       }
     }
+    const quote = supportsColumnNameQuoting(databaseType);
+    const quotedColumn = quote ? quoteTableIdentifier(databaseType, lastPart) : lastPart;
     actions.push({
       kind: "unqualify_identifier",
       span,
-      replacement: lastPart,
+      replacement: quotedColumn,
     });
     return actions;
   }
 
   // 未限定 → 提供限定
   const target = resolveNavigationTarget(model, cursorIntent);
-  if (!target) return [];
+  if (target) {
+    const quote = supportsColumnNameQuoting(databaseType);
+    const qualifier = quote ? quoteTableIdentifier(databaseType, target.alias ?? target.name) : (target.alias ?? target.name);
+    const quotedColumn = quote ? quoteTableIdentifier(databaseType, lastPart) : lastPart;
+    actions.push({
+      kind: "qualify_identifier" as const,
+      span: cursorIntent.replacementRange,
+      replacement: `${qualifier}.${quotedColumn}`,
+    });
+    return actions;
+  }
 
-  // P1-3: 多表 JOIN 时，如果 targetSourceId 不明确则不提供限定
-  // resolveNavigationTarget 已在降级逻辑中处理：多表时返回 null
-
-  const quote = supportsColumnNameQuoting(databaseType);
-  const qualifier = quote ? quoteTableIdentifier(databaseType, target.alias ?? target.name) : (target.alias ?? target.name);
-  actions.push({
-    kind: "qualify_identifier" as const,
-    span: cursorIntent.replacementRange,
-    replacement: `${qualifier}.${lastPart}`,
-  });
+  // 多表场景：无法自动推断所属表时，提供所有候选表的限定选项
+  const scope = findScopeContainingCursor(model, cursorIntent.replacementRange.start);
+  if (scope) {
+    const tableSources = scope.rowSources.filter((rs) => rs.kind === "table" || rs.kind === "cte");
+    if (tableSources.length > 1) {
+      const quote = supportsColumnNameQuoting(databaseType);
+      const quotedColumn = quote ? quoteTableIdentifier(databaseType, lastPart) : lastPart;
+      for (const source of tableSources) {
+        const qualifierName = source.alias ?? source.name;
+        const qualifier = quote ? quoteTableIdentifier(databaseType, qualifierName) : qualifierName;
+        actions.push({
+          kind: "qualify_identifier" as const,
+          span: cursorIntent.replacementRange,
+          replacement: `${qualifier}.${quotedColumn}`,
+          label: `${qualifierName}.${lastPart}`,
+        });
+      }
+    }
+  }
 
   return actions;
 }
@@ -648,14 +723,24 @@ function splitQualifiedIdentifier(text: string, databaseType?: DatabaseType): st
 
 /**
  * 查找包含光标位置的最内层 scope。
+ *
+ * 注意：clauseSpans 中每个子句的 end 只到下一个 token 的 start（非常窄），
+ * 无法覆盖整个子句范围。因此优先使用 scope 的 statement span 判断光标归属，
+ * 仅在 statement span 不可用时回退到 clauseSpans。
  */
 function findScopeContainingCursor(model: SqlSemanticModel, cursor: number) {
   let best: SqlSemanticScope | undefined;
   for (const s of model.scopes) {
     if (s.rowSources.length === 0) continue;
+    // 优先使用 statement span（覆盖整条语句，cursor 必在其中）
+    if (cursor >= s.span.start && cursor <= s.span.end) {
+      best = s; // 取最后一个匹配的（最内层）
+      continue;
+    }
+    // 回退：检查 clauseSpans
     const spans = [s.clauseSpans.select, s.clauseSpans.from, s.clauseSpans.where, s.clauseSpans.having, s.clauseSpans.groupBy, s.clauseSpans.orderBy, s.clauseSpans.limit].filter(Boolean) as { start: number; end: number }[];
     if (spans.some((sp) => cursor >= sp.start && cursor <= sp.end)) {
-      best = s; // 取最后一个匹配的（最内层）
+      best = s;
     }
   }
   return best;
@@ -691,7 +776,19 @@ function resolveNavigationTarget(model: SqlSemanticModel, cursorIntent: SqlSeman
       const qualifiers = qualifierMap?.get(cursorIntent.prefix.toLowerCase()) ?? collectColumnQualifiers(model, cursorIntent.prefix);
       if (qualifiers.size === 1) {
         const qualifier = [...qualifiers][0];
-        const source = tableSources.find((rs) => rs.alias?.toLowerCase() === qualifier || rs.name.toLowerCase() === qualifier);
+        // 支持 schema.table 形式的限定符匹配
+        const source = tableSources.find((rs) => {
+          const alias = rs.alias?.toLowerCase();
+          const name = rs.name.toLowerCase();
+          if (alias === qualifier || name === qualifier) return true;
+          // 3-part: qualifier = "schema.table", match against metadataTarget
+          const dotIdx = qualifier.indexOf(".");
+          if (dotIdx > 0) {
+            const qualTable = qualifier.slice(dotIdx + 1);
+            return alias === qualTable || name === qualTable;
+          }
+          return false;
+        });
         if (source) return { name: source.name, alias: source.alias };
       }
     }

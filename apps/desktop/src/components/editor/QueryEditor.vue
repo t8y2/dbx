@@ -371,7 +371,7 @@ function applyDelimitedListResult(result: string) {
 
 interface IntentionPopupState {
   visible: boolean;
-  actions: Array<{ kind: string; span: { start: number; end: number }; replacement: string }>;
+  actions: Array<{ kind: string; span: { start: number; end: number }; replacement: string; label?: string }>;
   position: { x: number; y: number };
   selectedIndex: number;
 }
@@ -1669,7 +1669,8 @@ function handleSqlIntentionActions(currentView: EditorViewType): boolean {
     };
     document.addEventListener("keydown", onIntentionPopupKey);
     return true;
-  } catch {
+  } catch (err) {
+    console.error("[SQL Intention] error:", err);
     return false;
   }
 }
@@ -5432,9 +5433,9 @@ defineExpose({
     <Teleport to="body">
       <div v-if="intentionPopup?.visible" class="intention-popup-overlay" @click.self="closeIntentionPopup">
         <div class="intention-popup" :style="{ left: intentionPopup.position.x + 'px', top: intentionPopup.position.y + 'px' }">
-          <div v-for="(action, i) in intentionPopup.actions" :key="action.kind" class="intention-popup-item" :class="{ 'intention-popup-item--active': i === intentionPopup.selectedIndex }" @click="executeIntentionAction(action)" @mouseenter="intentionPopup.selectedIndex = i">
+          <div v-for="(action, i) in intentionPopup.actions" :key="i" class="intention-popup-item" :class="{ 'intention-popup-item--active': i === intentionPopup.selectedIndex }" @click="executeIntentionAction(action)" @mouseenter="intentionPopup.selectedIndex = i">
             <span class="intention-popup-item__icon">💡</span>
-            <span class="intention-popup-item__label">{{ getIntentionActionLabel(action.kind) }}</span>
+            <span class="intention-popup-item__label">{{ action.label || getIntentionActionLabel(action.kind) }}</span>
           </div>
         </div>
       </div>

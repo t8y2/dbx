@@ -96,6 +96,42 @@ describe("sqlFormatter", () => {
     expect(formatted).not.toMatch(/\n\s*AND\b/i);
   });
 
+  it("does not collapse AND/OR line breaks inside block comments (regression: comment reformatting)", async () => {
+    // sql-formatter preserves newlines inside /* ... */ verbatim, so the
+    // keepLogicalOperatorsOnSameLine post-pass used to fold the comment's
+    // internal `AND`/`OR` onto one line along with the real clause `AND`.
+    // The comment body must stay multi-line; only the clause-level AND gets
+    // pulled back onto the previous (comment-closing) line instead of sitting
+    // alone on its own line.
+    const sql = "SELECT * FROM t WHERE 1 = 1 /* note:\nAND is a keyword here\nOR also */ AND b = 2";
+
+    for (const dialect of ["mysql", "postgres", "generic"] as const) {
+      const formatted = await formatSqlText(sql, dialect, { logicalOperatorNewline: "none" });
+
+      // 注释内部多行结构必须保留
+      expect(formatted).toContain("/* note:");
+      expect(formatted).toContain("AND is a keyword here");
+      expect(formatted).toContain("OR also */");
+      // 注释内部 AND/OR 仍各自独占一行（前面是换行）
+      expect(formatted).toMatch(/note:\n\s*AND is a keyword here/);
+      expect(formatted).toMatch(/keyword here\n\s*OR also/);
+      // 真正子句间的 AND 换行应被折叠：AND b = 2 不再独占行首
+      expect(formatted).toContain("*/ AND b = 2");
+      expect(formatted).not.toMatch(/\n\s*AND b = 2/);
+    }
+  });
+
+  it("does not collapse AND/OR inside single-quoted string literals", async () => {
+    // 字符串字面量内的 AND/OR 也不应被当作逻辑算子折叠。这里用一个含换行的
+    // 字符串（虽然 sql-formatter 通常会把字符串单行化，但遮罩应防御性覆盖）。
+    const sql = "SELECT 'a\nAND b\nOR c' AS s WHERE x = 1 AND y = 2";
+
+    const formatted = await formatSqlText(sql, "postgres", { logicalOperatorNewline: "none" });
+
+    expect(formatted).toContain("'a\nAND b\nOR c'");
+    expect(formatted).toContain("x = 1 AND y = 2");
+  });
+
   it("can keep FROM and the first table on the same line", async () => {
     const formatted = await formatSqlText("SELECT * FROM tVillage AS tv INNER JOIN tLand AS tl ON tv.villageId = tl.villageId AND 1 = 1", "sqlserver", {
       fromClauseLayout: "sameLine",

@@ -7,6 +7,10 @@ use crate::types::DatabaseInfo;
 use super::mysql::{get_conn_with_timeout, quote_identifier, MySqlPool};
 
 const ENABLE_BRANCH_DATABASES_SQL: &str = "SET @@dolt_show_branch_databases = 1";
+// 与设置对称地复位 session 变量：连接从池中取出后是单条会被复用的 session 连接，
+// 若不在归还前复位，后续无关的 SHOW DATABASES（其他元数据路径复用同一条连接时）
+// 会意外看到 branch 数据库。复位是 best-effort，失败不应让 list_databases 整体失败。
+const DISABLE_BRANCH_DATABASES_SQL: &str = "SET @@dolt_show_branch_databases = 0";
 const SHOW_DATABASES_SQL: &str = "SHOW DATABASES";
 
 pub fn is_config(config: &ConnectionConfig) -> bool {
@@ -23,7 +27,13 @@ pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, Strin
         log::debug!("Dolt branch database system variable is unavailable; falling back to dolt_branches: {error}");
         return list_databases_from_branches(&mut conn).await;
     }
-    Ok(database_infos(query_database_names(&mut conn).await?))
+    let databases = query_database_names(&mut conn).await?;
+    // 主路径成功读完 SHOW DATABASES 后，归还连接前复位 session 变量，
+    // 避免该连接被复用于无关元数据查询时仍残留 branch 数据库可见性。
+    if let Err(error) = conn.query_drop(DISABLE_BRANCH_DATABASES_SQL).await {
+        log::warn!("Failed to reset Dolt branch database session variable before returning connection: {error}");
+    }
+    Ok(database_infos(databases))
 }
 
 async fn list_databases_from_branches(conn: &mut mysql_async::Conn) -> Result<Vec<DatabaseInfo>, String> {
@@ -37,8 +47,16 @@ async fn list_databases_from_branches(conn: &mut mysql_async::Conn) -> Result<Ve
         let branches: Vec<String> = match conn.query(list_branches_sql(&database)).await {
             Ok(branches) => branches,
             Err(error) => {
-                log::debug!("Dolt branch discovery skipped database `{database}`: {error}");
-                continue;
+                // fallback 进入这里说明实例不支持 dolt_show_branch_databases 系统变量。
+                // 首个非系统库的 dolt_branches 查询报错即可判定该实例并非 Dolt
+                // （可能是同一实例上混用的纯 MySQL 库），逐库试探只会对每个普通库
+                // 产生一次无效报错噪音。首次失败即整体降级为纯 SHOW DATABASES 结果，
+                // 不再继续试探剩余库。注意区分「查询报错（非 Dolt）」与「查询成功但为空
+                // （是 Dolt 但无 branch）」：只有前者触发降级，后者继续遍历后续库。
+                log::debug!(
+                    "Dolt branch discovery failed on `{database}`, treating instance as non-Dolt and falling back to plain SHOW DATABASES: {error}"
+                );
+                return Ok(database_infos(names));
             }
         };
         for branch in branches {

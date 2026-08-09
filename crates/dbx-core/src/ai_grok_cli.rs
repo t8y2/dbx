@@ -240,12 +240,31 @@ pub fn grok_cli_env(config: &AiConfig) -> Result<Vec<(String, String)>, String> 
     Ok(env.into_iter().collect())
 }
 
+/// Grok MCP tool names are `server__tool` (no `mcp__` prefix). Permission rules
+/// must use `MCPTool(server__tool)` form — `mcp__server__tool` never matches.
+fn grok_mcp_permission_rules(options: &GrokRunOptions) -> Vec<String> {
+    let mut rules = vec!["MCPTool(dbx__*)".to_string()];
+    for tool in dbx_mcp_enabled_tools(options.agent_mode) {
+        rules.push(format!("MCPTool(dbx__{tool})"));
+    }
+    rules
+}
+
 fn grok_mcp_config_toml(options: &GrokRunOptions) -> String {
     let mcp_command =
         options.mcp_server_command.as_ref().map(|command| command.program.as_str()).unwrap_or("dbx-mcp-server");
+    let permission_rules = grok_mcp_permission_rules(options);
+    let permission_rule_refs = permission_rules.iter().map(String::as_str).collect::<Vec<_>>();
     let mut lines = vec![
         "[cli]".to_string(),
         "auto_update = false".to_string(),
+        String::new(),
+        // Headless automation: auto-approve tools; deny/allow rules still apply.
+        "[ui]".to_string(),
+        "permission_mode = \"always-approve\"".to_string(),
+        String::new(),
+        "[permission]".to_string(),
+        format!("allow = {}", toml_string_array(&permission_rule_refs)),
         String::new(),
         "[mcp_servers.dbx]".to_string(),
         format!("command = {}", toml_string(mcp_command)),
@@ -271,13 +290,15 @@ fn grok_mcp_config_toml(options: &GrokRunOptions) -> String {
 }
 
 pub fn build_grok_command(config: &AiConfig, prompt_file: &Path, options: &GrokRunOptions) -> GrokCommandSpec {
+    // Align with Grok Build headless docs (`--prompt-file`, `streaming-json`,
+    // `--always-approve`, `--effort`). Prompt is written to a temp file so long
+    // DBX system+conversation prompts stay under OS argv limits.
     let mut args = vec![
         "--prompt-file".to_string(),
         prompt_file.to_string_lossy().to_string(),
         "--output-format".to_string(),
-        "streaming-messages-json".to_string(),
-        "--permission-mode".to_string(),
-        "dontAsk".to_string(),
+        "streaming-json".to_string(),
+        "--always-approve".to_string(),
         "--disable-web-search".to_string(),
         "--no-subagents".to_string(),
         "--no-plan".to_string(),
@@ -286,12 +307,10 @@ pub fn build_grok_command(config: &AiConfig, prompt_file: &Path, options: &GrokR
         "--verbatim".to_string(),
     ];
 
-    // Ensure MCP tools can run without interactive approval.
-    for tool in dbx_mcp_enabled_tools(options.agent_mode) {
+    // Grok permission rules: `MCPTool(server__tool)`, not Claude-style `mcp__server__tool`.
+    for rule in grok_mcp_permission_rules(options) {
         args.push("--allow".to_string());
-        args.push(format!("mcp__dbx__{tool}"));
-        args.push("--allow".to_string());
-        args.push(tool.to_string());
+        args.push(rule);
     }
 
     let model = config.model.trim();
@@ -309,7 +328,8 @@ pub fn build_grok_command(config: &AiConfig, prompt_file: &Path, options: &GrokR
             crate::ai::AiReasoningLevel::Xhigh | crate::ai::AiReasoningLevel::Max => Some("high".to_string()),
         });
     if let Some(effort) = effort {
-        args.push("--reasoning-effort".to_string());
+        // `--effort` is the documented alias of `--reasoning-effort`.
+        args.push("--effort".to_string());
         args.push(effort);
     }
 
@@ -496,8 +516,8 @@ pub async fn run_grok_agent(
             env_remove: Vec::new(),
             current_dir: Some(isolated_home.path.clone()),
             stdin: None,
-            // Grok's streaming-messages-json matches the Claude Code Messages wire format.
-            dialect: CliAgentJsonlDialect::ClaudeCodePrint,
+            // Grok headless `streaming-json`: text/thought/tool_call/tool_call_update/end/error.
+            dialect: CliAgentJsonlDialect::GrokStreamingJson,
             classify_spawn_error: classify_grok_spawn_error,
             classify_run_error: classify_grok_run_error,
         },
@@ -542,6 +562,10 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
             grok_cli_path: None,
             grok_cli_env: Default::default(),
         }
@@ -588,19 +612,24 @@ mod tests {
         let command = build_grok_command(&config, &prompt, &run_options());
         assert_eq!(command.program, "grok");
         assert!(command.args.windows(2).any(|pair| pair == ["--prompt-file", "/tmp/dbx-prompt.txt"]));
-        assert!(command.args.windows(2).any(|pair| pair == ["--output-format", "streaming-messages-json"]));
+        assert!(command.args.windows(2).any(|pair| pair == ["--output-format", "streaming-json"]));
+        assert!(command.args.iter().any(|arg| arg == "--always-approve"));
         assert!(command.args.windows(2).any(|pair| pair == ["--model", "grok-4.5"]));
         assert!(command.args.iter().any(|arg| arg == "--disable-web-search"));
+        // Grok permission rule form — not Claude-style mcp__server__tool.
+        assert!(command.args.windows(2).any(|pair| pair == ["--allow", "MCPTool(dbx__*)"]));
+        assert!(command.args.windows(2).any(|pair| pair == ["--allow", "MCPTool(dbx__dbx_list_tables)"]));
+        assert!(!command.args.iter().any(|arg| arg.contains("mcp__dbx__")));
     }
 
     #[test]
-    fn builds_reasoning_effort_flag_from_runtime_effort() {
+    fn builds_effort_flag_from_runtime_effort() {
         let mut config = base_config();
         config.model = "grok-4.5".to_string();
         config.runtime_effort = Some(AiEffortSelection::Enum("medium".to_string()));
         let prompt = PathBuf::from("/tmp/dbx-prompt.txt");
         let command = build_grok_command(&config, &prompt, &run_options());
-        assert!(command.args.windows(2).any(|pair| pair == ["--reasoning-effort", "medium"]));
+        assert!(command.args.windows(2).any(|pair| pair == ["--effort", "medium"]));
     }
 
     #[test]
@@ -628,6 +657,8 @@ mod tests {
         assert!(toml.contains("args = [\"--stdio\"]"));
         assert!(toml.contains("DBX_MCP_SCOPE_CONNECTION_ID = \"conn-1\""));
         assert!(toml.contains("DBX_MCP_ALLOW_WRITES = \"0\""));
+        assert!(toml.contains("permission_mode = \"always-approve\""));
+        assert!(toml.contains("MCPTool(dbx__*)"));
     }
 
     #[test]

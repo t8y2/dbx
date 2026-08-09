@@ -230,10 +230,10 @@ flatpak install flatpark com.dbxio.dbx
 通过[星火应用商店](https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx)一键安装，后续可直接在商店客户端中获取更新。
 
   <a href="https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx" target="_blank"  rel="noopener noreferrer">
-  <img src="http://spk-json.spark-app.store/install-from-spark-store.png" width="200"/>
+  <img src="https://spk-json.spark-app.store/install-from-spark-store.png" width="200"/>
   </a>
 
-银河麒麟 V10、统信 UOS 等系统推荐选择 **APM 版本**，以减少发行版依赖差异导致的安装或启动问题。APM 在兼容环境中运行 DBX；如果为 Agent/JDBC 驱动选择宿主机 Java，需要在路径前添加 `/host`，例如将 `/usr/bin/java` 填写为 `/host/usr/bin/java`。
+银河麒麟 V10、统信 UOS 等系统推荐选择 **APM（AmberPM）版本**，以减少发行版依赖差异导致的安装或启动问题。APM 在兼容环境中运行 DBX；如果为 Agent/JDBC 驱动选择宿主机 Java，需要在路径前添加 `/host`，例如将 `/usr/bin/java` 填写为 `/host/usr/bin/java`。
 
 ## 自托管 (Docker)
 

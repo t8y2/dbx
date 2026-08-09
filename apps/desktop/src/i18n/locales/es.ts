@@ -4998,6 +4998,7 @@ export default withEnglishFallback({
     queryResultMaxRows: "Máximo de filas del resultado",
     queryResultMaxRowsEnabled: "Limitar filas del resultado",
     queryResultMaxRowsDescription: "Limita el total de filas devueltas por consultas, datos de tablas y procedimientos almacenados.",
+    queryResultMaxRowsTooSmall: "Debe ser al menos el tamaño de página de consulta ({pageSize}).",
     queryResultMaxRowsUnlimitedDescription: "Sin límite total de filas. Los resultados grandes pueden usar mucha memoria.",
     showColumnCommentsInHeader: "Mostrar comentarios bajo los nombres",
     showColumnCommentsInHeaderDescription: "Muestra los comentarios de columnas directamente debajo del nombre de la columna.",

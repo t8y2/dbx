@@ -5035,6 +5035,7 @@ export default withEnglishFallback({
     queryResultMaxRows: "クエリ結果の最大行数",
     queryResultMaxRowsEnabled: "クエリ結果の行数を制限",
     queryResultMaxRowsDescription: "クエリ、テーブルデータ、ストアドプロシージャが返す合計行数を制限します。",
+    queryResultMaxRowsTooSmall: "クエリのページ行数（{pageSize}）以上にしてください。",
     queryResultMaxRowsUnlimitedDescription: "合計行数を制限しません。大きな結果は大量のメモリを使用する可能性があります。",
     showColumnCommentsInHeader: "列名の下にコメントを表示",
     showColumnCommentsInHeaderDescription: "グリッド列名の直下にテーブル列コメントを表示します。",

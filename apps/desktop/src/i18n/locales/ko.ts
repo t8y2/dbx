@@ -4751,6 +4751,7 @@ export default withEnglishFallback({
     queryResultMaxRows: "쿼리 결과 최대 행 수",
     queryResultMaxRowsEnabled: "쿼리 결과 행 수 제한",
     queryResultMaxRowsDescription: "쿼리, 테이블 데이터 및 저장 프로시저가 반환하는 총 행 수를 제한합니다.",
+    queryResultMaxRowsTooSmall: "쿼리 페이지 크기({pageSize}) 이상이어야 합니다.",
     queryResultMaxRowsUnlimitedDescription: "총 행 수를 제한하지 않습니다. 큰 결과는 많은 메모리를 사용할 수 있습니다.",
     showColumnCommentsInHeader: "이름 아래에 컬럼 주석 표시",
     showColumnCommentsInHeaderDescription: "그리드 컬럼 이름 바로 아래에 테이블 컬럼 주석을 표시합니다.",

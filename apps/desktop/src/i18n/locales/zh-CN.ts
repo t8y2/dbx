@@ -5235,6 +5235,7 @@ export default withEnglishFallback({
     queryResultMaxRows: "查询结果最大行数",
     queryResultMaxRowsEnabled: "限制查询结果行数",
     queryResultMaxRowsDescription: "限制查询、表数据和存储过程返回的总行数。",
+    queryResultMaxRowsTooSmall: "不能小于查询结果默认每页行数（{pageSize}）。",
     queryResultMaxRowsUnlimitedDescription: "不限制返回总行数，大结果集可能占用较多内存。",
     showColumnCommentsInHeader: "在字段名下方显示注释",
     showColumnCommentsInHeaderDescription: "把表字段注释直接显示在结果表头字段名下方。",

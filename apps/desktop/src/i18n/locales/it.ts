@@ -4998,6 +4998,7 @@ export default withEnglishFallback({
     queryResultMaxRows: "Numero massimo di righe del risultato",
     queryResultMaxRowsEnabled: "Limita le righe del risultato",
     queryResultMaxRowsDescription: "Limita il totale delle righe restituite da query, dati tabella e stored procedure.",
+    queryResultMaxRowsTooSmall: "Deve essere almeno pari alle righe per pagina della query ({pageSize}).",
     queryResultMaxRowsUnlimitedDescription: "Nessun limite totale di righe. I risultati grandi possono usare molta memoria.",
     showColumnCommentsInHeader: "Mostra i commenti delle colonne sotto i nomi",
     showColumnCommentsInHeaderDescription: "Visualizza i commenti delle colonne della tabella direttamente sotto i nomi delle colonne nella griglia.",

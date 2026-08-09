@@ -5000,6 +5000,7 @@ export default withEnglishFallback({
     queryResultMaxRows: "Máximo de linhas do resultado",
     queryResultMaxRowsEnabled: "Limitar linhas do resultado",
     queryResultMaxRowsDescription: "Limita o total de linhas retornadas por consultas, dados de tabelas e procedimentos armazenados.",
+    queryResultMaxRowsTooSmall: "Deve ser pelo menos o tamanho da página da consulta ({pageSize}).",
     queryResultMaxRowsUnlimitedDescription: "Sem limite total de linhas. Resultados grandes podem usar muita memória.",
     showColumnCommentsInHeader: "Mostrar comentários de coluna sob os nomes",
     showColumnCommentsInHeaderDescription: "Exibir comentários de colunas da tabela diretamente abaixo dos nomes das colunas da grade.",

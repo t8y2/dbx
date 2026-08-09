@@ -5238,6 +5238,7 @@ export default {
     queryResultMaxRows: "Maximum query result rows",
     queryResultMaxRowsEnabled: "Limit query result rows",
     queryResultMaxRowsDescription: "Caps the total rows returned by queries, table data, and stored procedures.",
+    queryResultMaxRowsTooSmall: "Must be at least the query page size ({pageSize}).",
     queryResultMaxRowsUnlimitedDescription: "No total row limit. Large results can use substantial memory.",
     showColumnCommentsInHeader: "Show column comments under names",
     showColumnCommentsInHeaderDescription: "Display table column comments directly below grid column names.",

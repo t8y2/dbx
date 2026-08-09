@@ -549,6 +549,9 @@ async function loadKeys() {
 }
 
 async function loadMore() {
+  // 与 loadKeys 对称：组件被 keep-alive 包裹且停用后，挂起的 rAF 仍可能触发本函数，
+  // 守卫掉停用态避免对隐藏组件跑一次冗余 SCAN。
+  if (!redisBrowserIsActive) return;
   if (!hasMore.value || loadingMore.value) return;
   const requestId = searchRequestId;
   const operationId = ++loadMoreOperationId;
@@ -1387,6 +1390,10 @@ function pauseRedisBrowserBackgroundWork() {
   // keys that were never rendered.
   const discardIncompleteFetchAll = isFetchingAll.value;
   redisBrowserIsActive = false;
+  // 与 onUnmounted 对称：组件被 keep-alive 包裹，停用时（onDeactivated）若不取消挂起的 rAF，
+  // 帧回调仍会在隐藏组件上触发并调用 loadMore() 跑一次冗余 SCAN，故在此一并取消并置 0。
+  if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
+  redisInfiniteScrollFrame = 0;
   invalidateScanRequests();
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;

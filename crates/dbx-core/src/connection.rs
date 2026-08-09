@@ -4726,10 +4726,10 @@ fn uses_agent_connection_pool(db_type: &DatabaseType) -> bool {
 }
 
 fn should_validate_existing_pool_before_reuse(db_type: DatabaseType) -> bool {
-    // PostgreSQL uses deadpool's Fast recycling and the query executor's
-    // ReconnectAndRetry path. An eager SELECT 1 here would add a network
-    // round-trip before every query without improving recovery behavior.
-    !matches!(db_type, DatabaseType::Postgres | DatabaseType::Etcd)
+    // PostgreSQL and Agent-backed databases validate connections when they are
+    // checked out for actual work. An eager probe here would add a database
+    // round-trip before every request and can compete with active Agent leases.
+    db_type != DatabaseType::Postgres && !matches!(db_type, agent_connection_pool_database_type!())
 }
 
 fn agent_pool_identity(pool: &PoolKind) -> Option<Arc<db::agent_driver::PooledAgentClient>> {
@@ -5324,6 +5324,8 @@ mod tests {
     fn drivers_with_internal_recovery_skip_eager_pool_validation() {
         assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Postgres));
         assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Etcd));
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Dameng));
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Oracle));
         assert!(super::should_validate_existing_pool_before_reuse(DatabaseType::Mysql));
     }
 

@@ -18,6 +18,17 @@ pub enum MongoCommand {
         skip: u64,
         limit: i64,
     },
+    #[serde(rename = "findExplain")]
+    FindExplain {
+        collection: String,
+        filter: String,
+        projection: Option<String>,
+        sort: Option<String>,
+        collation: Option<String>,
+        skip: u64,
+        limit: i64,
+        verbosity: String,
+    },
     #[serde(rename = "findOne")]
     FindOne { collection: String, filter: String, projection: Option<String>, options: Option<String> },
     #[serde(rename = "countDocuments")]
@@ -350,7 +361,9 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
         let mut collation = None;
         let mut skip = 0;
         let mut limit = 100;
-        for (name, call_args) in chained_calls(&tail)? {
+        let calls = chained_calls(&tail)?;
+        let call_count = calls.len();
+        for (index, (name, call_args)) in calls.into_iter().enumerate() {
             match name.as_str() {
                 "sort" => sort = Some(normalized_json(call_args.first().map(String::as_str).unwrap_or("{}"))?),
                 "collation" => {
@@ -363,6 +376,21 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
                 "limit" => limit = parse_integer(&call_args, "limit")?,
                 "count" if call_args.is_empty() => {
                     return Ok(MongoCommand::Count { collection, filter, accurate: false });
+                }
+                "explain" => {
+                    if index + 1 != call_count {
+                        return Err("MongoDB explain() must be the final find() chain operation.".to_string());
+                    }
+                    return Ok(MongoCommand::FindExplain {
+                        collection,
+                        filter,
+                        projection,
+                        sort,
+                        collation,
+                        skip,
+                        limit,
+                        verbosity: parse_explain_verbosity(&call_args)?,
+                    });
                 }
                 _ => return Err(format!("Unsupported MongoDB find() chain: {name}()")),
             }
@@ -656,6 +684,20 @@ fn parse_string_arg(arg: &str) -> Result<String, String> {
     value.as_str().map(ToOwned::to_owned).ok_or_else(|| "MongoDB argument must be a string.".to_string())
 }
 
+fn parse_explain_verbosity(args: &[String]) -> Result<String, String> {
+    if args.len() > 1 {
+        return Err("MongoDB explain() accepts at most one verbosity string.".to_string());
+    }
+    let verbosity = match args.first() {
+        Some(value) => parse_string_arg(value)?,
+        None => "queryPlanner".to_string(),
+    };
+    match verbosity.as_str() {
+        "queryPlanner" | "executionStats" | "allPlansExecution" => Ok(verbosity),
+        _ => Err("MongoDB explain() verbosity must be queryPlanner, executionStats, or allPlansExecution.".to_string()),
+    }
+}
+
 fn normalized_json(input: &str) -> Result<String, String> {
     let transformed = transform_shell_constructors(input.trim())?;
     let value: Value =
@@ -858,6 +900,41 @@ mod tests {
                 limit: 20,
             }
         );
+    }
+
+    #[test]
+    fn parses_find_explain_with_query_options_and_verbosity() {
+        let command = parse(
+            r#"db.im_msg.find({active: true}, {email: 1}).sort({email: 1}).collation({locale: "en", strength: 1}).skip(2).limit(5).explain("executionStats")"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(command).unwrap(),
+            serde_json::json!({
+                "kind": "findExplain",
+                "collection": "im_msg",
+                "filter": "{\"active\":true}",
+                "projection": "{\"email\":1}",
+                "sort": "{\"email\":1}",
+                "collation": "{\"locale\":\"en\",\"strength\":1}",
+                "skip": 2,
+                "limit": 5,
+                "verbosity": "executionStats"
+            })
+        );
+    }
+
+    #[test]
+    fn find_explain_defaults_and_validates_verbosity() {
+        let default = serde_json::to_value(parse("db.items.find({}).explain()").unwrap()).unwrap();
+        assert_eq!(default["verbosity"], "queryPlanner");
+
+        let all_plans = serde_json::to_value(parse("db.items.find({}).explain('allPlansExecution')").unwrap()).unwrap();
+        assert_eq!(all_plans["verbosity"], "allPlansExecution");
+
+        assert!(parse("db.items.find({}).explain('invalid')").unwrap_err().contains("verbosity"));
+        assert!(parse("db.items.find({}).explain('executionStats').limit(1)").unwrap_err().contains("final"));
     }
 
     #[test]

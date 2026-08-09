@@ -527,12 +527,22 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
         }
     }
 
     #[test]
     fn rejects_local_cli_providers_single() {
-        for provider in [AiProvider::CodexCli, AiProvider::ClaudeCodeCli, AiProvider::PiAgentCli] {
+        for provider in [
+            AiProvider::CodexCli,
+            AiProvider::ClaudeCodeCli,
+            AiProvider::PiAgentCli,
+            AiProvider::OpenCodeCli,
+            AiProvider::CursorCli,
+        ] {
             let config = make_config(provider);
             assert!(reject_web_unsupported_ai_provider(&config).is_err());
         }
@@ -614,6 +624,10 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
         };
 
         let body = super::AiTestConnectionRequest { config };

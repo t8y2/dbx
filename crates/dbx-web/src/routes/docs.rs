@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::Json;
 use dbx_core::docs::{CollectOptions, SchemaSnapshot};
 use dbx_core::models::connection::ConnectionConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::state::WebState;
@@ -111,4 +111,27 @@ pub async fn save_annotations(
     let path = notes_path_for(&state, &config);
     dbx_core::docs::annotations::save_annotations(&path, &request.annotations).map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocsExportRequest {
+    pub snapshot: SchemaSnapshot,
+    pub annotations: dbx_core::docs::annotations::AnnotationFile,
+    pub lang: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocsExportResponse {
+    pub content: String,
+}
+
+/// Returns the rendered HTML as a string rather than writing a file: the
+/// browser has no filesystem to write to, so `http.ts` downloads this content
+/// as a blob instead of the Tauri command's `std::fs::write`.
+pub async fn export_html(Json(request): Json<DocsExportRequest>) -> Result<Json<DocsExportResponse>, AppError> {
+    let content = dbx_core::docs::to_standalone_html(&request.snapshot, &request.annotations, &request.lang)
+        .map_err(AppError::from)?;
+    Ok(Json(DocsExportResponse { content }))
 }

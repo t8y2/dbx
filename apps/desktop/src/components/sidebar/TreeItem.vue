@@ -423,14 +423,14 @@ const detailTooltip = computed(() => {
           .map((h) => h.trim())
           .filter(Boolean)
       : [];
-    const visibleFilterSummary = connectionCanConfigureSidebarVisibleDatabases(config.db_type) ? connectionStore.getSidebarVisibleFilterSummary(node.connectionId) : null;
+    const visibleFilterSummary = connectionCanConfigureSidebarVisibleDatabases(config.db_type) || config.db_type === "nacos" ? connectionStore.getSidebarVisibleFilterSummary(node.connectionId) : null;
     const visibleFilterRow: DetailTooltipRow | null =
       visibleFilterSummary?.selected != null && visibleFilterSummary.total != null
         ? {
-            label: t(visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailLabel" : "visibleDatabases.detailLabel"),
+            label: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailLabel" : "visibleDatabases.detailLabel"),
             value: `${visibleFilterSummary.selected}/${visibleFilterSummary.total}`,
             action: () => treeRuntime.openPrimaryVisibleFilter(node),
-            actionLabel: t(visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailActionLabel" : "visibleDatabases.detailActionLabel", { connection: config.name }),
+            actionLabel: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailActionLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailActionLabel" : "visibleDatabases.detailActionLabel", { connection: config.name }),
           }
         : null;
     const rows: DetailTooltipRow[] = [
@@ -707,7 +707,7 @@ const rowStyle = computed(() => {
     paddingLeft: paddingLeft.value,
     paddingRight: trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
-    "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.18 : 0.12),
+    "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
     "--tree-connection-active-focus-bg": hexToRgba(color, 0.22),
   };
@@ -1120,7 +1120,7 @@ function onKeydown(event: KeyboardEvent) {
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
-        class="group flex items-center gap-2 py-1 px-2 cursor-pointer relative outline-none"
+        class="group flex cursor-default items-center gap-2 py-1 px-2 relative outline-none"
         style="contain: layout style"
         :class="[
           rowWidthClass,
@@ -1130,7 +1130,7 @@ function onKeydown(event: KeyboardEvent) {
             'opacity-50': dragVisual.dragging,
             'tree-item-connection-tint': connectionColor,
             'hover:bg-accent': node.type !== 'connection',
-            'hover:bg-secondary/60': node.type === 'connection',
+            'hover:bg-sidebar-accent': node.type === 'connection',
             rounded: !selectionVisual.rowSelected,
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,

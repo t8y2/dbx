@@ -6,6 +6,7 @@ import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
 
 export type DocumentStoreKind = "mongodb" | "elasticsearch";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "is-null" | "is-not-null";
+export type DocumentFilterValueType = "auto" | "string" | "number" | "boolean" | "object-id" | "date" | "int32" | "int64" | "decimal128" | "json";
 export type ElasticsearchBoolClause = "filter" | "must" | "should" | "must_not";
 export type ElasticsearchQueryType = "term" | "terms" | "match" | "match_phrase" | "wildcard" | "range_gt" | "range_gte" | "range_lt" | "range_lte" | "exists";
 
@@ -15,6 +16,7 @@ export type DocumentFilterRule = {
   mode: DocumentFilterMode;
   rawValue: string;
   conjunction: "AND" | "OR";
+  valueType?: DocumentFilterValueType;
   elasticsearchClause?: ElasticsearchBoolClause;
   elasticsearchQueryType?: ElasticsearchQueryType;
 };
@@ -60,6 +62,19 @@ export const documentFilterModeOptions: Array<{ value: DocumentFilterMode; label
   { value: "less-than-or-equal", labelKey: "grid.filterBuilderLessThanOrEqual" },
   { value: "is-null", labelKey: "grid.filterBuilderIsNull" },
   { value: "is-not-null", labelKey: "grid.filterBuilderIsNotNull" },
+];
+
+export const documentFilterValueTypeOptions: Array<{ value: DocumentFilterValueType; labelKey: string }> = [
+  { value: "auto", labelKey: "grid.filterBuilderValueTypeAuto" },
+  { value: "string", labelKey: "grid.filterBuilderValueTypeString" },
+  { value: "number", labelKey: "grid.filterBuilderValueTypeNumber" },
+  { value: "boolean", labelKey: "grid.filterBuilderValueTypeBoolean" },
+  { value: "object-id", labelKey: "grid.filterBuilderValueTypeObjectId" },
+  { value: "date", labelKey: "grid.filterBuilderValueTypeDate" },
+  { value: "int32", labelKey: "grid.filterBuilderValueTypeInt32" },
+  { value: "int64", labelKey: "grid.filterBuilderValueTypeInt64" },
+  { value: "decimal128", labelKey: "grid.filterBuilderValueTypeDecimal128" },
+  { value: "json", labelKey: "grid.filterBuilderValueTypeJson" },
 ];
 
 export const elasticsearchBoolClauseOptions: ElasticsearchBoolClause[] = ["filter", "must", "should", "must_not"];
@@ -126,6 +141,7 @@ export function defaultDocumentFilterRule(id: string, fieldName = ""): DocumentF
     mode: "equals",
     rawValue: "",
     conjunction: "AND",
+    valueType: "auto",
     elasticsearchClause: "filter",
     elasticsearchQueryType: "term",
   };
@@ -221,9 +237,10 @@ export function documentFieldPathTreeFromDocuments(documents: readonly Record<st
   if (documents.length === 0) return [];
   const rootNodes: DocumentFieldPathAccumulatorNode[] = [];
   const rootByKey = new Map<string, DocumentFieldPathAccumulatorNode>();
-  ensureDocumentFieldPathNode(rootNodes, rootByKey, "_id", "_id", "scalar");
+  const idNode = ensureDocumentFieldPathNode(rootNodes, rootByKey, "_id", "_id", "scalar");
 
   for (const doc of documents) {
+    if (idNode.sampleValue === undefined && doc._id !== undefined) idNode.sampleValue = doc._id;
     for (const [key, value] of Object.entries(doc)) {
       if (key === "_id") continue;
       collectDocumentFieldPathNode(rootNodes, rootByKey, key, value);
@@ -419,12 +436,13 @@ export function elasticsearchStructuredFilter(query: Record<string, unknown> | n
 type DocumentFilterParseOptions = {
   kind?: DocumentStoreKind;
   sampleValue?: unknown;
+  valueType?: DocumentFilterValueType;
 };
 
 export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: DocumentFilterParseOptions = {}): Record<string, unknown> | null {
   if (!rule.fieldName) return null;
   if (documentFilterModeNeedsValue(rule.mode) && !rule.rawValue.trim()) return null;
-  const value = documentFilterModeNeedsValue(rule.mode) ? parseDocumentFilterValue(rule.rawValue, options) : null;
+  const value = documentFilterModeNeedsValue(rule.mode) ? parseDocumentFilterValue(rule.rawValue, { ...options, valueType: rule.valueType }) : null;
   const textValue = documentFilterModeNeedsValue(rule.mode) ? String(parseDocumentFilterValue(rule.rawValue)) : "";
   switch (rule.mode) {
     case "equals":
@@ -647,41 +665,93 @@ export function formatDocumentQueryInput(input: string, kind?: DocumentStoreKind
 function parseDocumentFilterValue(raw: string, options: DocumentFilterParseOptions = {}): unknown {
   const trimmed = raw.trim();
   if (!trimmed) return "";
+  if (options.kind === "mongodb") {
+    const valueType = options.valueType ?? "auto";
+    if (valueType !== "auto") return parseMongoFilterValueAs(trimmed, valueType, options);
+    const inferredType = inferMongoFilterValueType(options.sampleValue);
+    if (inferredType) return parseMongoFilterValueAs(trimmed, inferredType, options);
+  }
   try {
     return parseJsonPreservingLargeIntegers(trimmed, options);
   } catch {
-    return mongoTypedFilterValue(trimmed, options);
+    return trimmed;
   }
 }
 
-function mongoTypedFilterValue(raw: string, options: DocumentFilterParseOptions): unknown {
-  if (options.kind !== "mongodb") return raw;
-  const sampleValue = mongoTypedFilterSample(options.sampleValue);
-  if (!sampleValue) return raw;
-  if (typeof sampleValue.$oid === "string") return { $oid: raw };
-  if ("$date" in sampleValue) return { $date: raw };
-  if (typeof sampleValue.$numberLong === "string" && /^-?\d+$/.test(raw)) return { $numberLong: raw };
-  return raw;
+function parseMongoFilterValueAs(raw: string, valueType: Exclude<DocumentFilterValueType, "auto">, options: DocumentFilterParseOptions): unknown {
+  const text = unquoteMongoFilterString(raw);
+  switch (valueType) {
+    case "string":
+      return text;
+    case "number": {
+      const value = Number(text);
+      if (!Number.isFinite(value)) throw invalidMongoFilterValue(valueType, raw);
+      return value;
+    }
+    case "boolean":
+      if (text.toLowerCase() === "true") return true;
+      if (text.toLowerCase() === "false") return false;
+      throw invalidMongoFilterValue(valueType, raw);
+    case "object-id":
+      if (!/^[0-9a-f]{24}$/i.test(text)) throw invalidMongoFilterValue(valueType, raw);
+      return { $oid: text };
+    case "date":
+      if (/^-?\d+$/.test(text)) return { $date: { $numberLong: text } };
+      if (Number.isNaN(Date.parse(text))) throw invalidMongoFilterValue(valueType, raw);
+      return { $date: text };
+    case "int32": {
+      if (!/^-?\d+$/.test(text)) throw invalidMongoFilterValue(valueType, raw);
+      const value = BigInt(text);
+      if (value < -2147483648n || value > 2147483647n) throw invalidMongoFilterValue(valueType, raw);
+      return { $numberInt: text };
+    }
+    case "int64": {
+      if (!/^-?\d+$/.test(text)) throw invalidMongoFilterValue(valueType, raw);
+      const value = BigInt(text);
+      if (value < MIN_BSON_INT64 || value > MAX_BSON_INT64) throw invalidMongoFilterValue(valueType, raw);
+      return { $numberLong: text };
+    }
+    case "decimal128":
+      if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) throw invalidMongoFilterValue(valueType, raw);
+      return { $numberDecimal: text };
+    case "json":
+      try {
+        return parseJsonPreservingLargeIntegers(raw, options);
+      } catch {
+        throw invalidMongoFilterValue(valueType, raw);
+      }
+  }
 }
 
-function mongoTypedFilterSample(sampleValue: unknown): Record<string, unknown> | null {
-  if (isPlainRecord(sampleValue)) return sampleValue;
-  if (!Array.isArray(sampleValue)) return null;
-
-  const samples = sampleValue.filter((value) => value !== null && value !== undefined);
-  if (!samples.length || samples.some((value) => !isPlainRecord(value))) return null;
-  const records = samples as Record<string, unknown>[];
-  const sampleKind = mongoTypedFilterSampleKind(records[0]);
-  // Mixed arrays are ambiguous, so infer a BSON type only from homogeneous scalar wrappers.
-  if (!sampleKind || records.some((value) => mongoTypedFilterSampleKind(value) !== sampleKind)) return null;
-  return records[0];
+function unquoteMongoFilterString(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "string" ? parsed : raw;
+  } catch {
+    return raw;
+  }
 }
 
-function mongoTypedFilterSampleKind(sampleValue: Record<string, unknown>): "$oid" | "$date" | "$numberLong" | null {
-  if (typeof sampleValue.$oid === "string") return "$oid";
-  if ("$date" in sampleValue) return "$date";
-  if (typeof sampleValue.$numberLong === "string") return "$numberLong";
-  return null;
+function invalidMongoFilterValue(valueType: DocumentFilterValueType, raw: string): Error {
+  return new Error(`Invalid MongoDB ${valueType} filter value: ${raw}`);
+}
+
+function inferMongoFilterValueType(sampleValue: unknown): Exclude<DocumentFilterValueType, "auto"> | null {
+  if (typeof sampleValue === "string") return "string";
+  if (typeof sampleValue === "number") return "number";
+  if (typeof sampleValue === "boolean") return "boolean";
+  if (Array.isArray(sampleValue)) {
+    const inferred = sampleValue.map(inferMongoFilterValueType).filter((value): value is Exclude<DocumentFilterValueType, "auto"> => !!value);
+    return inferred.length > 0 && inferred.every((value) => value === inferred[0]) ? inferred[0] : null;
+  }
+  if (!isPlainRecord(sampleValue)) return null;
+  if (typeof sampleValue.$oid === "string") return "object-id";
+  if ("$date" in sampleValue) return "date";
+  if (typeof sampleValue.$numberInt === "string") return "int32";
+  if (typeof sampleValue.$numberLong === "string") return "int64";
+  if (typeof sampleValue.$numberDecimal === "string") return "decimal128";
+  if (typeof sampleValue.$numberDouble === "string") return "number";
+  return "json";
 }
 
 export function elasticsearchSearchBodyFromDocumentQuery(options: Pick<DocumentStoreQueryPreviewOptions, "filterJson" | "sortJson" | "skip" | "limit">): Record<string, unknown> {

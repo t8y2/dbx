@@ -5,6 +5,21 @@ export interface IndexSection {
   /** Schema name, group id, or "" for the ungrouped bucket. */
   key: string;
   label: string;
+  /**
+   * Locale key to show in place of `label` when it's empty — "docs.noSchema"
+   * from groupBySchema, "docs.noGroup" from groupByTableGroup. This module
+   * stays translator-free (it is pure, tested without Vue, and every other
+   * pure module in src/docs/ follows the same rule), so it hands back a KEY
+   * rather than calling translate() itself; the render site decides how.
+   *
+   * Carrying the key on the section — rather than each render site inferring
+   * it from a `mode` prop — means a fallback can never silently pick the
+   * wrong word for the section it labels: WikiIndex.vue doesn't even receive
+   * `mode`, so a mode-based guess there would either require threading a prop
+   * that has no other use, or duplicate this same schema/group decision at a
+   * second call site to keep in sync with this one.
+   */
+  fallbackKey: "docs.noSchema" | "docs.noGroup";
   /** Group hue, or null for schema sections and the ungrouped bucket. */
   hue: number | null;
   note: string | null;
@@ -32,6 +47,7 @@ export function groupBySchema(snapshot: SchemaSnapshot): IndexSection[] {
     .map(([key, tables]) => ({
       key,
       label: key,
+      fallbackKey: "docs.noSchema" as const,
       hue: null,
       note: null,
       tables: [...tables].sort(byName),
@@ -52,6 +68,7 @@ export function groupByTableGroup(snapshot: SchemaSnapshot): IndexSection[] {
     sections.push({
       key: group.id,
       label: group.name,
+      fallbackKey: "docs.noGroup",
       hue: group.hue,
       note: group.note,
       tables,
@@ -63,7 +80,10 @@ export function groupByTableGroup(snapshot: SchemaSnapshot): IndexSection[] {
   const ungrouped = snapshot.tables.filter((table) => table.groupId === null || !known.has(table.groupId)).sort(byName);
 
   if (ungrouped.length > 0) {
-    sections.push({ key: "", label: "(no group)", hue: null, note: null, tables: ungrouped });
+    // Empty, not "(no group)": the render sites already fall back to a
+    // translated label when `label` is empty (see IndexSection.fallbackKey).
+    // A non-empty English literal here would bypass that fallback entirely.
+    sections.push({ key: "", label: "", fallbackKey: "docs.noGroup", hue: null, note: null, tables: ungrouped });
   }
 
   return sections;

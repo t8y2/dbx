@@ -121,4 +121,14 @@ describe("NacosAdminConsole config workbench layout", () => {
     expect(source).toContain('t("nacos.serviceSettings")');
     expect(source).toContain('t("nacos.registerInstance")');
   });
+
+  it("gates every Nacos mutation behind the shared production confirmation", () => {
+    expect(source).toContain('import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";');
+    expect(source).toContain("async function confirmNacosMutation");
+    expect(source).toContain('<ProductionContextBadge v-if="nacosProductionContext.active" compact />');
+    expect(source.match(/await confirmNacosMutation\(/g)?.length).toBeGreaterThanOrEqual(9);
+    for (const apiCall of ["nacosApplyConfigImport", "nacosApplyConfigTransfer", "nacosRollbackConfig", "nacosPublishConfig", "nacosDeleteConfig", "nacosUpdateInstance", "nacosCreateService", "nacosDeleteService", "nacosRegisterInstance", "nacosDeregisterInstance"]) {
+      expect(source).toContain(apiCall);
+    }
+  });
 });

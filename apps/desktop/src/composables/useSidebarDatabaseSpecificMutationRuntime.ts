@@ -23,6 +23,7 @@ import {
 } from "@/lib/sidebar/mongoCollectionMutation";
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
+import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import {
   sidebarDangerTarget,
@@ -280,10 +281,19 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const node = sidebarFormTarget.value ?? activeNode.value;
     const namespaceName = createNacosNamespaceName.value.trim();
     if (!node.connectionId || !namespaceName || createNacosNamespaceLoading.value) return;
+    const namespaceId = createNacosNamespaceId.value.trim();
+    const confirmed = await executeWithProductionContextGuard({
+      connection: connectionStore.getConfig(node.connectionId),
+      database: namespaceId || undefined,
+      reviewText: t("nacos.createNamespace"),
+      source: t("production.sourceSidebar"),
+      execute: async () => true,
+    });
+    if (confirmed !== true) return;
     createNacosNamespaceLoading.value = true;
     try {
       await api.nacosCreateNamespace(node.connectionId, {
-        namespaceId: createNacosNamespaceId.value.trim() || undefined,
+        namespaceId: namespaceId || undefined,
         namespaceName,
         namespaceDesc: createNacosNamespaceDesc.value.trim() || namespaceName,
       });
@@ -311,6 +321,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const namespaceId = node.nacosNamespace?.trim() || "";
     const namespaceName = editNacosNamespaceName.value.trim();
     if (!node.connectionId || !namespaceId || !namespaceName || editNacosNamespaceLoading.value) return;
+    const confirmed = await executeWithProductionContextGuard({
+      connection: connectionStore.getConfig(node.connectionId),
+      database: namespaceId,
+      reviewText: t("nacos.editNamespace"),
+      source: t("production.sourceSidebar"),
+      execute: async () => true,
+    });
+    if (confirmed !== true) return;
     editNacosNamespaceLoading.value = true;
     try {
       await api.nacosUpdateNamespace(node.connectionId, {

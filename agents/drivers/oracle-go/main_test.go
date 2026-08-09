@@ -560,6 +560,154 @@ func TestGetTableDDLFallbackPreservesQuotedColumnNames(t *testing.T) {
 	}
 }
 
+func TestGetTableDDLAppendsIndexesTriggersAndComments(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	const tableDDL = `CREATE TABLE "HR"."ORDERS" ("ID" NUMBER DEFAULT 42, PRIMARY KEY ("ID"))`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"TABLE", table, schema},
+			rows:          [][]driver.Value{{tableDDL}},
+		},
+		{
+			queryContains: "FROM ALL_INDEXES",
+			args:          []driver.Value{schema, table, schema, table},
+			rows:          [][]driver.Value{{`CREATE INDEX "HR"."IDX_ORDERS_STATUS" ON "HR"."ORDERS" ("STATUS")`}},
+		},
+		{
+			queryContains: "FROM ALL_TRIGGERS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{`CREATE OR REPLACE TRIGGER "HR"."TRG_ORDERS" BEFORE INSERT ON "HR"."ORDERS" BEGIN NULL; END;`}},
+		},
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{"Owner's orders"}},
+		},
+		{
+			queryContains: "FROM ALL_COL_COMMENTS",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"COLUMN_NAME", "COMMENTS"},
+			rows:          [][]driver.Value{{"STATUS", "Order's state"}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, table, "TABLE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		tableDDL,
+		`CREATE INDEX "HR"."IDX_ORDERS_STATUS"`,
+		`CREATE OR REPLACE TRIGGER "HR"."TRG_ORDERS"`,
+		`COMMENT ON TABLE "HR"."ORDERS" IS 'Owner''s orders';`,
+		`COMMENT ON COLUMN "HR"."ORDERS"."STATUS" IS 'Order''s state';`,
+	} {
+		if !strings.Contains(got, fragment) {
+			t.Fatalf("getTableDDL() missing %q:\n%s", fragment, got)
+		}
+	}
+	if !strings.Contains(got, tableDDL+";\n\nCREATE INDEX") {
+		t.Fatalf("base table DDL should be terminated before dependent DDL:\n%s", got)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableCommentPreservesQuotedObjectName(t *testing.T) {
+	const schema = "HR"
+	const table = "OrderDetails"
+	const comment = "Quoted table comment"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, table},
+			rows:          [][]driver.Value{{comment}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableComment(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != comment {
+		t.Fatalf("getTableComment() = %#v, want %q", got, comment)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetTableCommentFallsBackToUppercase(t *testing.T) {
+	const schema = "HR"
+	const comment = "Orders comment"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, "orders"},
+			rows:          nil,
+		},
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, "ORDERS"},
+			rows:          [][]driver.Value{{comment}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableComment(schema, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != comment {
+		t.Fatalf("getTableComment() = %#v, want %q", got, comment)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListForeignKeysIncludesReferencedSchemaAndDeleteRule(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "COLUMN_NAME", "REF_SCHEMA", "REF_TABLE", "REF_COLUMN", "DELETE_RULE"},
+			rows:          [][]driver.Value{{"FK_ORDERS_CUSTOMER", "CUSTOMER_ID", "CRM", "CUSTOMERS", "ID", "CASCADE"}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.listForeignKeys(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []foreignKeyInfo{{
+		Name:      "FK_ORDERS_CUSTOMER",
+		Column:    "CUSTOMER_ID",
+		RefSchema: "CRM",
+		RefTable:  "CUSTOMERS",
+		RefColumn: "ID",
+		OnDelete:  "CASCADE",
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listForeignKeys() = %#v, want %#v", got, want)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
 func TestIsQuerySQLSkipsLeadingComments(t *testing.T) {
 	tests := []string{
 		"-- 测试\nSELECT * FROM (SELECT * FROM \"DBX_TEST\".\"ORDERS_10K\") WHERE ROWNUM <= 100",

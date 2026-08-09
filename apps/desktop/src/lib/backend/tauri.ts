@@ -1681,6 +1681,10 @@ export async function saveDocsAnnotations(connectionId: string, annotations: Ann
   return invoke("docs_save_annotations", { connectionId, annotations });
 }
 
+export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot, annotations: AnnotationFile, lang: string): Promise<void> {
+  return invoke("docs_export_html", { filePath, snapshot, annotations, lang });
+}
+
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
   return invoke("save_connections", { configs });
 }

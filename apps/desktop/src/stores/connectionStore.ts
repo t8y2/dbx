@@ -109,7 +109,7 @@ import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel }
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
-import { filterNacosNamespacesForSidebar } from "@/lib/nacos/nacosNamespaceVisibility";
+import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -123,8 +123,9 @@ import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
 import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/mqConsoleDefaults";
 import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
-import { connectionHasConfiguredSidebarVisibleFilter, sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
+import { connectionHasConfiguredSidebarVisibleFilter, nacosVisibleNamespaceSummary, sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
+import { isTdengineStableTableType } from "@/lib/table/tableEditing";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -1602,7 +1603,13 @@ export const useConnectionStore = defineStore("connection", () => {
       name: table.name,
       schema,
       type: sqlObjectNavigationTypeFromTableType(table.table_type),
+      ...completionStableTableType(table.table_type),
     }));
+  }
+
+  function completionStableTableType(tableType: string | null | undefined): Partial<Pick<SqlCompletionTable, "tableType">> {
+    if (!tableType || !isTdengineStableTableType(tableType)) return {};
+    return { tableType: tableType.trim() };
   }
 
   function sameSidebarObjectName(left: string | undefined, right: string | undefined): boolean {
@@ -2590,6 +2597,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function getSidebarVisibleFilterSummary(connectionId: string) {
     const config = getConfig(connectionId);
+    if (config?.db_type === "nacos") return nacosVisibleNamespaceSummary(config, primaryVisibleObjectNames.value[connectionId]);
     return config ? sidebarVisibleFilterSummary(config, primaryVisibleObjectNames.value[connectionId]) : null;
   }
 
@@ -3493,7 +3501,7 @@ export const useConnectionStore = defineStore("connection", () => {
       load = reclaimTreeNodeLoad(load, node);
       if (useCachedChildren(node, options, load)) return;
 
-      const namespaces = await api.nacosListNamespaces(connectionId);
+      const namespaces = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId));
       const visibleNamespaces = filterNacosNamespacesForSidebar(namespaces, getConfig(connectionId)?.visible_databases);
       const sorted = [...visibleNamespaces].sort((left, right) => {
         const leftLabel = left.namespaceShowName || left.namespace || "public";
@@ -3502,6 +3510,10 @@ export const useConnectionStore = defineStore("connection", () => {
       });
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      recordPrimaryVisibleObjectNames(
+        connectionId,
+        namespaces.map((namespace) => namespace.namespace),
+      );
       setChildren(
         targetNode,
         sorted.map((namespace) => {
@@ -5537,6 +5549,7 @@ export const useConnectionStore = defineStore("connection", () => {
           name: candidate.name,
           schema: candidate.schema ?? undefined,
           type: sqlObjectNavigationTypeFromTableType(candidate.data_type || candidate.kind),
+          ...completionStableTableType(candidate.data_type),
         };
         if (!withOracleMetadata) return table;
         return {
@@ -6017,6 +6030,7 @@ export const useConnectionStore = defineStore("connection", () => {
                   catalog,
                   schema,
                   type: sqlObjectNavigationTypeFromTableType(table.table_type),
+                  ...completionStableTableType(table.table_type),
                 }));
               } else {
                 results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
@@ -6037,6 +6051,7 @@ export const useConnectionStore = defineStore("connection", () => {
                     catalog,
                     schema,
                     type: sqlObjectNavigationTypeFromTableType(table.table_type),
+                    ...completionStableTableType(table.table_type),
                   }));
                 } catch {
                   results = [];
@@ -6059,6 +6074,7 @@ export const useConnectionStore = defineStore("connection", () => {
               catalog,
               schema,
               type: sqlObjectNavigationTypeFromTableType(table.table_type),
+              ...completionStableTableType(table.table_type),
             }));
           } else {
             completionTablesCache.value[cacheKey] = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
@@ -6077,6 +6093,7 @@ export const useConnectionStore = defineStore("connection", () => {
           name: table.name,
           catalog,
           type: sqlObjectNavigationTypeFromTableType(table.table_type),
+          ...completionStableTableType(table.table_type),
         }));
         completionTablesCache.value[cacheKey] = limit ? completionTablesCache.value[cacheKey].slice(0, limit) : completionTablesCache.value[cacheKey];
         indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey], catalog);

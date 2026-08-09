@@ -1142,6 +1142,55 @@ class JdbcConnectionPoolingTest {
     }
 
     @Test
+    void validationSkipsBusySharedPoolWithoutWaiting() throws Exception {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("busy_validation");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 1)) {
+            openSession(server, requestIds, "cursor-owner");
+            openSession(server, requestIds, "validation-session");
+
+            JsonObject pageParams = sessionParams("cursor-owner");
+            pageParams.addProperty("sql", "SELECT X FROM SYSTEM_RANGE(1, 3)");
+            pageParams.addProperty("pageSize", 1);
+            JsonObject firstPage = result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_EXECUTE_QUERY_PAGE,
+                pageParams
+            ));
+            assertTrue(firstPage.get("has_more").getAsBoolean());
+            String querySessionId = firstPage.get("session_id").getAsString();
+
+            long startedAtNanos = System.nanoTime();
+            JsonObject validation = result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_VALIDATE_SESSION,
+                sessionParams("validation-session")
+            ));
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+            assertTrue(elapsedMillis < 200L, () -> "busy validation took " + elapsedMillis + "ms");
+            assertTrue(validation.get("ok").getAsBoolean());
+            assertEquals(1, physicalOpens.get());
+
+            JsonObject closeParams = sessionParams("cursor-owner");
+            closeParams.addProperty("sessionId", querySessionId);
+            assertTrue(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_CLOSE_QUERY_SESSION,
+                closeParams
+            ).get("result").getAsBoolean());
+            assertEquals(
+                2,
+                query(server, requestIds, "validation-session", "SELECT 2", null)
+                    .getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt()
+            );
+        }
+    }
+
+    @Test
     void maintenanceExpiresAbandonedCursorAndReturnsItsConnection() throws Exception {
         AtomicInteger physicalOpens = new AtomicInteger();
         AtomicInteger requestIds = new AtomicInteger();

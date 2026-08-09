@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Network } from "@lucide/vue";
+import { Download, Network } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import DocsApp from "@/docs/DocsApp.vue";
@@ -9,8 +9,13 @@ import { emptyAnnotations, removeGroup, setColumnNote, setProjectNote, setTableG
 import type { AnnotationFile, DocsEdit, SchemaSnapshot } from "@/docs/types";
 import type { Translate } from "@/docs/docsWarnings";
 import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { createAutosave } from "./docsAutosave";
+
+// The languages `to_standalone_html` accepts. Kept in sync manually — this
+// component lives outside `src/docs/` and cannot import from dbx-core.
+const EXPORT_LANGUAGES = ["en", "es", "it", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"];
 
 const props = defineProps<{
   prefillConnectionId?: string;
@@ -23,7 +28,7 @@ const open = defineModel<boolean>("open", { default: false });
 // This component lives OUTSIDE src/docs/, so it may and must use useI18n():
 // it is what supplies the `translate` prop that the viewer components need,
 // since they are banned from importing vue-i18n themselves.
-const { t } = useI18n();
+const { t, locale } = useI18n();
 
 // `Translate` is one narrow signature; vue-i18n's `t` is heavily overloaded and
 // does not assign to it directly, so bridge it explicitly.
@@ -69,6 +74,9 @@ const statusLabel = computed(() => {
 });
 
 const canOpenDiagram = computed(() => (props.prefillConnectionId ?? "") !== "" && (props.prefillDatabase ?? "") !== "");
+
+const exporting = ref(false);
+const exportError = ref<string | null>(null);
 
 async function load(): Promise<void> {
   const connectionId = props.prefillConnectionId;
@@ -153,6 +161,32 @@ function openDiagram(): void {
   connectionStore.diagramSource = { connectionId, database, schema: props.prefillSchema };
 }
 
+async function exportHtml(): Promise<void> {
+  if (!snapshot.value) return;
+  exporting.value = true;
+  exportError.value = null;
+  try {
+    let outputPath = `${snapshot.value.project.name}-docs.html`;
+    if (isTauriRuntime()) {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const chosen = await save({ defaultPath: outputPath, filters: [{ name: "HTML", extensions: ["html"] }] });
+      if (!chosen) return; // the user cancelled; not an error
+      outputPath = chosen as string;
+    }
+    // `to_standalone_html` rejects any language outside its fixed list; the
+    // app's locale is otherwise a superset risk, so fall back rather than
+    // surface that rejection to the user.
+    const lang = EXPORT_LANGUAGES.includes(locale.value) ? locale.value : "en";
+    await api.exportDocsHtml(outputPath, snapshot.value, annotations.value, lang);
+  } catch (error) {
+    // Never swallowed: a failed export that reports success is the worst
+    // outcome here, exactly as with a failed autosave.
+    exportError.value = t("docs.exportFailed", { error: String(error) });
+  } finally {
+    exporting.value = false;
+  }
+}
+
 watch(
   open,
   (isOpen, wasOpen) => {
@@ -179,9 +213,14 @@ watch(
           <span v-if="statusLabel" class="text-xs font-normal" :class="status.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'">
             {{ statusLabel }}
           </span>
+          <span v-if="exportError" class="text-xs font-normal text-destructive">{{ exportError }}</span>
           <Button v-if="canOpenDiagram" variant="outline" size="sm" class="ml-auto" @click="openDiagram()">
             <Network class="w-4 h-4" />
             {{ t("docs.openDiagram") }}
+          </Button>
+          <Button v-if="snapshot" variant="outline" size="sm" :disabled="exporting" @click="exportHtml()">
+            <Download class="w-4 h-4" />
+            {{ exporting ? t("docs.exporting") : t("docs.exportHtml") }}
           </Button>
         </DialogTitle>
       </DialogHeader>

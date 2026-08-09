@@ -59,6 +59,7 @@ describe("Nacos namespace creation cache invalidation", () => {
       connectionStore: {
         treeNodes: [],
         loadNacosNamespaces: mocks.loadNacosNamespaces,
+        getConfig: () => undefined,
       } as any,
     });
 
@@ -81,6 +82,7 @@ describe("Nacos namespace creation cache invalidation", () => {
       connectionStore: {
         treeNodes: [],
         loadNacosNamespaces: mocks.loadNacosNamespaces,
+        getConfig: () => undefined,
       } as any,
     });
 

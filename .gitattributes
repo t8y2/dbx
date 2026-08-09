@@ -1,6 +1,14 @@
-# Keep formatter-sensitive source files consistent across platforms.
+# Keep formatter-sensitive source files consistent across platforms. The three
+# apps/desktop rules below the .vue line exist for
+# docs_export_bundle_is_current, which hashes raw bytes: every extension it
+# manifests (.css, tsconfig.json, and the one .ts outside src/ —
+# vite.docs-export.config.ts) needs an explicit eol=lf, or a CRLF checkout
+# fails the guard for files the contributor never touched.
 apps/desktop/src/**/*.ts text eol=lf
 apps/desktop/src/**/*.vue text eol=lf
+apps/desktop/**/*.css text eol=lf
+apps/desktop/tsconfig.json text eol=lf
+apps/desktop/*.ts text eol=lf
 src-tauri/windows/nsis/**/*.nsi text eol=lf
 
 # Keep tests available for review and CI without counting them as shipped code
@@ -12,3 +20,13 @@ apps/desktop/src/**/*.test.ts linguist-vendored
 packages/**/tests/** linguist-vendored
 packages/**/*.spec.ts linguist-vendored
 packages/**/*.test.ts linguist-vendored
+
+# Build output, committed because the Rust crate embeds it. Minified and large,
+# so it would drown every diff and review it appears in — `-diff` makes git
+# report "Binary files differ" instead. The manifest stays diffable on purpose:
+# it is how a reviewer sees which sources moved. `-text` disables any
+# eol conversion on checkout: docs_export_bundle_is_current hashes these two
+# files' raw bytes, and an autocrlf checkout would otherwise change those
+# bytes and fail the guard for a contributor who touched neither file.
+crates/dbx-core/assets/docs-export.js -text -diff linguist-generated
+crates/dbx-core/assets/docs-export.css -text -diff linguist-generated

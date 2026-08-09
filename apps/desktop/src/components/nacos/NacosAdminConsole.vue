@@ -6,6 +6,7 @@ import type { EditorView } from "@codemirror/view";
 import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, Clipboard, Download, FileClock, FileInput, FileText, Loader2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -49,6 +50,8 @@ import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
+import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import type {
   NacosBatchPreview,
   NacosBatchReport,
@@ -237,6 +240,7 @@ let configListResizeObserver: ResizeObserver | null = null;
 const { gridTemplateColumns: configListGridTemplate, minWidth: configListMinWidth, resizingColumnIndex: configListResizingColumnIndex, onResizeStart: onConfigListColumnResizeStart } = useNacosConfigListColumnResize(configListViewportWidth);
 
 const namespace = computed(() => props.namespace ?? connectionInfo.value?.namespace ?? "");
+const nacosProductionContext = computed(() => productionContextForDatabase(connectionStore.getConfig(props.connectionId), namespace.value));
 const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
   connectionStore.connections
     .filter((connection) => connection.db_type === "nacos" && !connection.read_only)
@@ -246,6 +250,17 @@ const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
     }),
 );
 const supportsConfigHistory = computed(() => connectionInfo.value?.capabilities.supportsConfigHistory !== false);
+
+async function confirmNacosMutation(reviewText: string, targetConnectionId = props.connectionId, targetNamespace = namespace.value): Promise<boolean> {
+  const confirmed = await executeWithProductionContextGuard({
+    connection: connectionStore.getConfig(targetConnectionId),
+    database: targetNamespace,
+    reviewText,
+    source: t("production.sourceAdmin"),
+    execute: async () => true,
+  });
+  return confirmed === true;
+}
 function operationCapability(capability: NacosOperationCapability | boolean | undefined, legacySupported = true): NacosOperationCapability {
   if (typeof capability === "boolean") return { supported: capability, reason: capability ? undefined : "notVerified" };
   return capability ?? { supported: legacySupported, reason: legacySupported ? undefined : "notVerified" };
@@ -1189,6 +1204,10 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
 async function applyBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; policy: NacosConflictPolicy }) {
   if (batchLoading.value || batchReport.value || !batchPreview.value) return;
   if (payload.policy === "OVERWRITE" && !window.confirm(t("nacos.overwriteConfirm"))) return;
+  const targetConnectionId = batchMode.value === "import" ? props.connectionId : payload.targetConnectionId;
+  const targetNamespace = batchMode.value === "import" ? namespace.value : payload.targetNamespace;
+  const operation = batchMode.value === "import" ? t("nacos.batchImport") : t("nacos.copyToNamespace");
+  if (!(await confirmNacosMutation(operation, targetConnectionId, targetNamespace))) return;
   batchLoading.value = true;
   batchError.value = "";
   try {
@@ -1383,6 +1402,7 @@ function requestRollbackHistory(item: NacosConfigHistoryItem) {
 
 async function rollbackConfigHistory() {
   if (!pendingHistoryRollback.value || props.readOnly) return;
+  if (!(await confirmNacosMutation(t("nacos.historyRollback"), props.connectionId, pendingHistoryRollback.value.namespace || namespace.value))) return;
   rollingBackHistory.value = true;
   try {
     await api.nacosRollbackConfig(props.connectionId, historyKeyFor(pendingHistoryRollback.value));
@@ -1441,6 +1461,7 @@ async function saveConfig() {
     return;
   }
   const pageAtRequest = configPageNo.value;
+  if (!(await confirmNacosMutation(t("nacos.publish"), snapshot.connectionId, snapshot.targetKey.namespace || namespace.value))) return;
   savingConfig.value = true;
   configError.value = "";
   configSaveNotice.value = "";
@@ -1514,6 +1535,7 @@ async function deleteConfig() {
     )
   )
     return;
+  if (!(await confirmNacosMutation(t("nacos.delete"), snapshot.connectionId, snapshot.key.namespace || namespace.value))) return;
   const editorSessionId = configEditorSessionId;
   pendingDeleteConfig.value = null;
   deletingConfig.value = true;
@@ -1859,6 +1881,7 @@ async function reconcileInstancePresence(ref: NacosInstanceRef, shouldExist: boo
 async function updateInstance(instance: NacosInstanceInfo, patch: NacosInstancePatch) {
   if (!selectedService.value || props.readOnly || !supportsInstanceUpdate.value) return;
   const ref = instanceRef(instance);
+  if (!(await confirmNacosMutation(t("nacos.confirmInstanceTitle"), props.connectionId, ref.namespace || namespace.value))) return;
   const key = instanceIdentity(instance);
   const updateId = ++instanceUpdateSequence;
   const operationToken = beginInstanceOperation(key);
@@ -1940,6 +1963,8 @@ async function submitServiceEditor() {
       protectThreshold: threshold,
       selector: parseOptionalJsonObject(serviceEditor.value.selector, t("nacos.selectorLabel")),
     };
+    const operation = isCreating ? t("nacos.createNacosService") : t("nacos.editNacosService");
+    if (!(await confirmNacosMutation(operation, props.connectionId, req.namespace || namespace.value))) return;
     const mutationId = ++serviceMutationSequence;
     if (isCreating) await api.nacosCreateService(props.connectionId, req);
     else await api.nacosUpdateService(props.connectionId, req);
@@ -2006,6 +2031,7 @@ async function reconcileServiceDeletion(service: NacosServiceInfo, mutationId: n
 }
 
 async function deleteService(service: NacosServiceInfo) {
+  if (!(await confirmNacosMutation(t("nacos.deleteNacosService"), props.connectionId, namespace.value))) return;
   deletingService.value = true;
   try {
     const mutationId = ++serviceMutationSequence;
@@ -2047,6 +2073,7 @@ async function submitInstanceRegistration() {
       weight,
       metadata: parseJsonObject(registerInstance.value.metadata, t("nacos.metadataLabel")),
     };
+    if (!(await confirmNacosMutation(t("nacos.registerInstance"), props.connectionId, registration.namespace || namespace.value))) return;
     const updateId = ++instanceUpdateSequence;
     await api.nacosRegisterInstance(props.connectionId, registration);
     const ref: NacosInstanceRef = { ...registration, ephemeral: false };
@@ -2077,10 +2104,11 @@ async function submitInstanceRegistration() {
 
 async function deregisterInstance(instance: NacosInstanceInfo) {
   if (!selectedService.value) return;
+  const ref = instanceRef(instance);
+  if (!(await confirmNacosMutation(t("nacos.deregisterNacosInstance"), props.connectionId, ref.namespace || namespace.value))) return;
   const key = instanceIdentity(instance);
   const operationToken = beginInstanceOperation(key);
   try {
-    const ref = instanceRef(instance);
     const updateId = ++instanceUpdateSequence;
     await api.nacosDeregisterInstance(props.connectionId, ref);
     pendingInstanceDeregister.value = null;
@@ -2211,6 +2239,7 @@ onBeforeUnmount(() => {
         <Badge v-if="connectionInfo?.serverVersion" variant="secondary">{{ connectionInfo.serverVersion }}</Badge>
         <Badge variant="outline">{{ namespaceLabel }}</Badge>
         <Badge v-if="namespaceIdLabel" variant="outline" class="max-w-72 truncate font-mono">{{ namespaceIdLabel }}</Badge>
+        <ProductionContextBadge v-if="nacosProductionContext.active" compact />
         <Badge v-if="readOnly" variant="outline">{{ t("nacos.readOnly") }}</Badge>
       </div>
       <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">

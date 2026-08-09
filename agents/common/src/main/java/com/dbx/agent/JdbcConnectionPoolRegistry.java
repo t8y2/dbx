@@ -125,6 +125,11 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         return physicalConnectionBudget.activeCount();
     }
 
+    boolean hasActiveLeases(String identity) {
+        PoolEntry entry = pools.get(digest(identity));
+        return entry != null && entry.hasActiveLeases();
+    }
+
     private PoolEntry createPoolEntry(String key, ConnectionFactory connectionFactory) {
         try {
             ConnectionFactoryDataSource factoryDataSource = new ConnectionFactoryDataSource(
@@ -693,6 +698,10 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
 
         private synchronized boolean isRetired() {
             return retired;
+        }
+
+        private synchronized boolean hasActiveLeases() {
+            return activeLeases > 0;
         }
 
         private void retireAfterCheckoutFailure(OperationDeadline deadline) {

@@ -245,7 +245,21 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_type: true,
             ..base
         },
-        Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Yashandb | DatabaseType::Xugu) => {
+        Some(DatabaseType::Oracle) => TableStructureCapabilities {
+            dialect: StructureDialect::Oracle,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            index_type: true,
+            foreign_key: true,
+            ..base
+        },
+        Some(DatabaseType::OceanbaseOracle | DatabaseType::Yashandb | DatabaseType::Xugu) => {
             TableStructureCapabilities {
                 dialect: StructureDialect::Oracle,
                 add_column: true,

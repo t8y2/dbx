@@ -478,13 +478,15 @@ function tabColorStyle(tab: QueryTab) {
 
   if (isClassic) {
     return {
-      backgroundColor: hexToRgba(color, isActive ? 0.16 : 0.07),
+      "--app-tab-background": hexToRgba(color, isActive ? 0.16 : 0.07),
+      "--app-tab-hover-background": hexToRgba(color, 0.14),
       boxShadow: isActive ? `inset 0 -2px 0 ${color}` : undefined,
     };
   }
 
   return {
-    backgroundColor: hexToRgba(color, isActive ? 0.16 : 0.09),
+    "--app-tab-background": hexToRgba(color, isActive ? 0.16 : 0.09),
+    "--app-tab-hover-background": hexToRgba(color, 0.16),
     borderColor: isActive ? hexToRgba(color, 0.72) : hexToRgba(color, 0.18),
   };
 }
@@ -644,7 +646,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -722,7 +724,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-settings-page-tab
-                class="app-tab-pill group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-36 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
@@ -749,7 +751,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-driver-store-tab
-                class="app-tab-pill group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-38 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
@@ -840,7 +842,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -1056,6 +1058,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 /* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
 .app-tab-scroll.classic-wrap > div {
   height: 2rem;
+}
+
+.app-tab-pill {
+  background-color: var(--app-tab-background);
+}
+
+.app-tab-pill[data-active-tab="false"]:hover {
+  background-color: var(--app-tab-hover-background, color-mix(in oklch, var(--foreground) 8%, transparent));
 }
 
 .dirty-tab-marker {

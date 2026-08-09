@@ -1717,7 +1717,7 @@
         "objectBrowser": true,
         "objectSource": false,
         "schemaSearch": true,
-        "diagram": false,
+        "diagram": true,
         "tableDataEdit": false,
         "tableStructureEdit": true,
         "tableImport": false,

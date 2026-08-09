@@ -65,7 +65,7 @@ import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } f
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { normalizeNacosEndpoint, normalizeNacosMetricsUrl } from "@/lib/nacos/nacosAdmin";
-import { normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
+import { nacosNamespaceIdentity, normalizeNacosNamespaceSelection, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
   ArrowLeft,
   ArrowDown,
@@ -641,6 +641,73 @@ const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
 const selectedDbCategory = ref<DbCategoryKey>("sql");
 const configTab = ref<ConfigTab>("connection");
+
+// 对话框拖动功能
+const dragOffset = ref({ x: 0, y: 0 });
+const isDraggingDialog = ref(false);
+const dragStartPos = ref({ x: 0, y: 0 });
+const dragStartOffset = ref({ x: 0, y: 0 });
+const activePointerId = ref<number | null>(null);
+
+// 计算对话框的定位样式（通过 transform 实现拖动）
+const dialogContentStyle = computed(() => {
+  if (isDraggingDialog.value || dragOffset.value.x !== 0 || dragOffset.value.y !== 0) {
+    return {
+      transform: `translate(${dragOffset.value.x}px, ${dragOffset.value.y}px)`,
+      transition: isDraggingDialog.value ? "none" : "transform 0.15s ease-out",
+    };
+  }
+  return {};
+});
+
+// 开始拖动（在 DialogHeader 上按下鼠标/触摸）
+function onDialogHeaderPointerDown(e: PointerEvent) {
+  if (e.button !== undefined && e.button !== 0) return;
+  isDraggingDialog.value = true;
+  activePointerId.value = e.pointerId;
+  dragStartPos.value = { x: e.clientX, y: e.clientY };
+  dragStartOffset.value = { ...dragOffset.value };
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+}
+
+// 拖动中
+function onDialogHeaderPointerMove(e: PointerEvent) {
+  if (!isDraggingDialog.value || e.pointerId !== activePointerId.value) return;
+  const dx = e.clientX - dragStartPos.value.x;
+  const dy = e.clientY - dragStartPos.value.y;
+  dragOffset.value = {
+    x: dragStartOffset.value.x + dx,
+    y: dragStartOffset.value.y + dy,
+  };
+}
+
+// 结束拖动
+function onDialogHeaderPointerEnd(e: PointerEvent) {
+  if (!isDraggingDialog.value || e.pointerId !== activePointerId.value) return;
+  isDraggingDialog.value = false;
+  activePointerId.value = null;
+  try {
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+  } catch {
+    // 忽略 release 失败的错误
+  }
+}
+
+// 重置拖动位置
+function resetDialogDragOffset() {
+  dragOffset.value = { x: 0, y: 0 };
+  isDraggingDialog.value = false;
+  activePointerId.value = null;
+}
+
+// 监听对话框 open 状态，重置位置
+watch(open, (isOpen) => {
+  if (isOpen) {
+    nextTick(() => resetDialogDragOffset());
+  } else {
+    resetDialogDragOffset();
+  }
+});
 watch([() => form.value.note, configTab, dialogStep, open], () => {
   void nextTick(resizeNoteTextarea);
 });
@@ -3001,6 +3068,20 @@ const filteredProductionDatabaseNames = computed(() => {
 });
 const productionDatabaseSelectedCount = computed(() => productionDatabaseSelection.value.size);
 const productionDatabaseCanSave = computed(() => productionDatabaseNames.value.length > 0 && productionDatabaseSelection.value.size > 0);
+const usesNacosProductionNamespaces = computed(() => form.value.db_type === "nacos");
+const productionDisabledDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceDisabledDescription" : "production.disabledDescription"));
+const productionConnectionDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceConnectionDescription" : "production.connectionDescription"));
+const productionScopeAllLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.allNamespaces" : "production.allDatabases"));
+const productionScopeSelectedLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.selectedNamespaces" : "production.selectedDatabases"));
+const productionScopeResourceLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaces" : "production.databases"));
+const productionScopeDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceDescription" : "production.databaseDescription"));
+const productionScopePickerLabelKey = computed(() => (usesNacosProductionNamespaces.value ? "production.selectNamespaces" : "production.selectDatabases"));
+const productionPickerTitleKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespacePickerTitle" : "production.databasePickerTitle"));
+const productionPickerDescriptionKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespacePickerDescription" : "production.databasePickerDescription"));
+const productionPickerSearchPlaceholderKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceSearchPlaceholder" : "production.databaseSearchPlaceholder"));
+const productionPickerSelectionRequiredKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceSelectionRequired" : "production.databaseSelectionRequired"));
+const productionPickerLoadFailedKey = computed(() => (usesNacosProductionNamespaces.value ? "production.namespaceLoadFailed" : "production.databaseLoadFailed"));
+const productionPickerEmptyKey = computed(() => (usesNacosProductionNamespaces.value ? "production.noNamespacesAvailable" : "production.noDatabasesAvailable"));
 const productionDatabaseSummary = computed(() => {
   const selected = form.value.production_databases?.length || 0;
   if (!selected) return t("production.noDatabasesSelected");
@@ -4175,6 +4256,15 @@ async function loadVisibleDatabaseNames(connectionId: string, config: Connection
 }
 
 function normalizeProductionDatabaseSelection(selectedNames: Iterable<string>, databaseNames: string[]): string[] {
+  if (form.value.db_type === "nacos") {
+    const available = new Map(databaseNames.map((name) => [nacosNamespaceIdentity(name), name]));
+    const selected = new Set<string>();
+    for (const name of selectedNames) {
+      const canonicalName = available.get(nacosNamespaceIdentity(name));
+      if (canonicalName !== undefined) selected.add(canonicalName);
+    }
+    return [...selected];
+  }
   const available = new Map(databaseNames.map((name) => [name.toLowerCase(), name]));
   const selected = new Set<string>();
   for (const name of selectedNames) {
@@ -4191,6 +4281,9 @@ function initialProductionDatabaseSelection(databaseNames: string[]): string[] {
 }
 
 async function loadProductionDatabaseNames(connectionId: string, config: ConnectionConfig): Promise<string[]> {
+  if (config.db_type === "nacos") {
+    return normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId)).map((namespace) => namespace.namespace);
+  }
   if (config.db_type === "redis") {
     return (await api.redisListDatabases(connectionId)).map((database) => String(database.db));
   }
@@ -5149,8 +5242,8 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
-      <DialogHeader>
+    <DialogContent :style="dialogContentStyle" class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
+      <DialogHeader class="cursor-move select-none" @pointerdown="onDialogHeaderPointerDown" @pointermove="onDialogHeaderPointerMove" @pointerup="onDialogHeaderPointerEnd" @pointercancel="onDialogHeaderPointerEnd">
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
 
@@ -7360,25 +7453,25 @@ function openExternalUrl(url: string) {
                       <Label class="text-sm font-medium">{{ t("production.enable") }}</Label>
                       <Switch :model-value="productionProtectionEnabled" @update:model-value="setProductionProtectionEnabled" />
                     </div>
-                    <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t("production.disabledDescription") }}</p>
+                    <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t(productionDisabledDescriptionKey) }}</p>
                     <template v-else>
                       <Label class="text-xs font-medium">{{ t("production.scope") }}</Label>
                       <Tabs v-model="productionScope" class="w-full">
                         <TabsList class="grid h-8 w-full grid-cols-2">
-                          <TabsTrigger value="connection" class="text-xs">{{ t("production.allDatabases") }}</TabsTrigger>
-                          <TabsTrigger value="databases" class="text-xs" :disabled="!canSelectProductionDatabases" :title="canSelectProductionDatabases ? undefined : t('production.singleDatabaseScopeHint')">{{ t("production.selectedDatabases") }}</TabsTrigger>
+                          <TabsTrigger value="connection" class="text-xs">{{ t(productionScopeAllLabelKey) }}</TabsTrigger>
+                          <TabsTrigger value="databases" class="text-xs" :disabled="!canSelectProductionDatabases" :title="canSelectProductionDatabases ? undefined : t('production.singleDatabaseScopeHint')">{{ t(productionScopeSelectedLabelKey) }}</TabsTrigger>
                         </TabsList>
                       </Tabs>
-                      <p class="text-xs leading-5 text-muted-foreground">{{ productionScope === "connection" ? t("production.connectionDescription") : t("production.databaseDescription") }}</p>
+                      <p class="text-xs leading-5 text-muted-foreground">{{ productionScope === "connection" ? t(productionConnectionDescriptionKey) : t(productionScopeDescriptionKey) }}</p>
                       <div v-if="productionScope === 'databases'" class="grid gap-1.5">
                         <div class="flex items-center justify-between gap-3">
-                          <Label class="text-xs font-medium">{{ t("production.databases") }}</Label>
+                          <Label class="text-xs font-medium">{{ t(productionScopeResourceLabelKey) }}</Label>
                           <span class="text-xs text-muted-foreground">{{ productionDatabaseSummary }}</span>
                         </div>
                         <Button type="button" variant="outline" size="sm" class="justify-start" :disabled="isTesting || isSaving || isLoadingProductionDatabases || !hasRequiredConnectionTarget" @click="openProductionDatabasesPicker">
                           <Loader2 v-if="isLoadingProductionDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
                           <ListFilter v-else class="mr-1.5 h-4 w-4" />
-                          {{ t("production.selectDatabases") }}
+                          {{ t(productionScopePickerLabelKey) }}
                         </Button>
                       </div>
                     </template>
@@ -7891,15 +7984,15 @@ function openExternalUrl(url: string) {
   <Dialog v-model:open="showProductionDatabasesDialog">
     <DialogContent class="sm:max-w-[460px]">
       <DialogHeader>
-        <DialogTitle>{{ t("production.databasePickerTitle") }}</DialogTitle>
+        <DialogTitle>{{ t(productionPickerTitleKey) }}</DialogTitle>
         <p class="text-sm text-muted-foreground">
-          {{ t("production.databasePickerDescription", { connection: form.name || selectedProfile().label }) }}
+          {{ t(productionPickerDescriptionKey, { connection: form.name || selectedProfile().label }) }}
         </p>
       </DialogHeader>
 
       <div class="flex items-center gap-2 rounded-md border bg-background px-2">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input v-model="productionDatabaseSearchText" :placeholder="t('production.databaseSearchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingProductionDatabases || !!productionDatabaseError" />
+        <Input v-model="productionDatabaseSearchText" :placeholder="t(productionPickerSearchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingProductionDatabases || !!productionDatabaseError" />
       </div>
 
       <div class="flex items-center justify-between text-xs text-muted-foreground">
@@ -7914,7 +8007,7 @@ function openExternalUrl(url: string) {
         </div>
       </div>
       <p v-if="!isLoadingProductionDatabases && !productionDatabaseError && !productionDatabaseCanSave" class="text-xs text-destructive">
-        {{ t("production.databaseSelectionRequired") }}
+        {{ t(productionPickerSelectionRequiredKey) }}
       </p>
 
       <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
@@ -7923,14 +8016,14 @@ function openExternalUrl(url: string) {
           {{ t("common.loading") }}
         </div>
         <div v-else-if="productionDatabaseError" class="flex h-full flex-col items-start justify-center gap-3 p-3 text-sm text-destructive">
-          <p>{{ t("production.databaseLoadFailed", { message: productionDatabaseError }) }}</p>
+          <p>{{ t(productionPickerLoadFailedKey, { message: productionDatabaseError }) }}</p>
           <Button type="button" variant="outline" size="sm" @click="reloadProductionDatabases">
             <RefreshCw class="mr-1.5 h-3.5 w-3.5" />
             {{ t("production.retry") }}
           </Button>
         </div>
         <div v-else-if="!filteredProductionDatabaseNames.length" class="p-3 text-sm text-muted-foreground">
-          {{ productionDatabaseNames.length ? t("grid.noSearchResults") : t("production.noDatabasesAvailable") }}
+          {{ productionDatabaseNames.length ? t("grid.noSearchResults") : t(productionPickerEmptyKey) }}
         </div>
         <template v-else>
           <button

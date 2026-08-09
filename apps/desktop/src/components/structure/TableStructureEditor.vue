@@ -1437,7 +1437,7 @@ async function addColumn() {
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
   columns.value.splice(insertAt, 0, column);
   selectedColumnId.value = column.id;
-  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
   await focusColumnNameInput(column.id);
 }
 
@@ -1455,7 +1455,7 @@ function applyColumnTemplate(templateId: string) {
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
   columns.value.splice(insertAt, 0, ...templateColumns);
   selectedColumnId.value = templateColumns[templateColumns.length - 1]?.id ?? selectedColumnId.value;
-  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
 }
 
 function removeNewColumn(column: EditableStructureColumn) {

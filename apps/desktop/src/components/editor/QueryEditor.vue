@@ -45,6 +45,7 @@ import {
   shouldChainSqlCompletionAfterAccept,
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
+import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
@@ -404,6 +405,7 @@ let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snipp
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
+let codeMirrorCloseCompletion: typeof import("@codemirror/autocomplete").closeCompletion | null = null;
 let codeMirrorInsertCompletionText: typeof import("@codemirror/autocomplete").insertCompletionText | null = null;
 let codeMirrorNextSnippetField: typeof import("@codemirror/autocomplete").nextSnippetField | null = null;
 let codeMirrorIndentMore: typeof import("@codemirror/commands").indentMore | null = null;
@@ -1915,7 +1917,10 @@ async function findExactSemanticDiagnosticTable(table: SqlTableReference): Promi
   if (!target) return null;
   const localMatches = connectionStore.lookupLocalCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema, target.catalog);
   const localExact = localMatches.find((item) => completionTablesMatch(item, table));
-  if (localExact) return localExact;
+  if (localExact) {
+    cachedTables = mergeCompletionTables(cachedTables, [localExact]);
+    return localExact;
+  }
 
   const remoteMatches = await connectionStore.listCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema, false, props.schema, target.catalog);
   cachedTables = mergeCompletionTables(cachedTables, remoteMatches);
@@ -2747,6 +2752,7 @@ let completionEpoch = 0;
 let completionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let typedCompletionActivationUntil = 0;
 let suppressNextSqlCompletionAutoStartUntil = 0;
+let activeCompletionOrigin: SqlCompletionTriggerOrigin | null = null;
 
 type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
 
@@ -3021,13 +3027,56 @@ async function provideSqlCompletions(context: CompletionContext) {
   const epoch = ++completionEpoch;
 
   try {
+    // 1. Suppressed context (comment / string literal) rejects everything, including explicit.
     if (isSqlCompletionSuppressedContext(fullDoc, position)) return null;
+
+    // 2. Determine completion origin (session-level marker).
+    activeCompletionOrigin = originForSqlCompletionProvider(activeCompletionOrigin, context.explicit);
+    const origin = activeCompletionOrigin;
+
+    // 3. Explicit (manual shortcut) -> always proceed. No mode gating.
+    // 4. For typing sessions, apply mode gating with lazy fact computation.
     const useDatabaseCompletion = resolveSqlServerUseDatabaseCompletion({
       sql: fullDoc,
       cursor: position,
       databaseType: props.databaseType,
     });
-    if (!explicit && !useDatabaseCompletion && !shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions())) return null;
+    const useDatabasePrefix = useDatabaseCompletion?.prefix ?? null;
+
+    if (origin !== "explicit") {
+      const mode = settingsStore.editorSettings.completionTriggerMode;
+
+      // manual: never auto-open. Return before computing any context.
+      if (mode === "manual") return null;
+
+      // require-prefix: only compute local facts (no positionalEligible).
+      if (mode === "require-prefix") {
+        const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+        const prevChar = fullDoc[position - 1] ?? "";
+        const facts: SqlCompletionTriggerFacts = {
+          origin,
+          hasIdentifierPrefix: ctx.prefix.length > 0,
+          qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+          useDatabasePrefix,
+        };
+        if (!shouldAllowSqlCompletionTrigger(mode, facts)) return null;
+      }
+
+      // positional: compute positionalEligible (lazy).
+      if (mode === "positional") {
+        const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+        const prevChar = fullDoc[position - 1] ?? "";
+        const positionalEligible = shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+        const facts: SqlCompletionTriggerFacts = {
+          origin,
+          hasIdentifierPrefix: ctx.prefix.length > 0,
+          qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+          useDatabasePrefix,
+          positionalEligible,
+        };
+        if (!shouldAllowSqlCompletionTrigger(mode, facts)) return null;
+      }
+    }
 
     if (useDatabaseCompletion) {
       const currentDatabase = props.database ?? "";
@@ -3193,6 +3242,7 @@ function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
   window.setTimeout(() => {
     if (!codeMirrorStartCompletion || isEditorComposing(currentView)) return;
     markTypedCompletionActivation();
+    activeCompletionOrigin = originForTypedSqlCompletionStart(activeCompletionOrigin);
     codeMirrorStartCompletion(currentView);
   }, delayMs);
 }
@@ -3211,34 +3261,83 @@ function flushImeComposition() {
   if (editorIsActive) emitEditorSelection(latestSelection);
   const fullDoc = currentView.state.doc.toString();
   const position = currentView.state.selection.main.head;
-  if (resolveSqlServerUseDatabaseCompletion({ sql: fullDoc, cursor: position, databaseType: props.databaseType }) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions())) {
+  if (shouldTriggerSqlCompletionForPosition(fullDoc, position)) {
     scheduleSqlCompletionStart(currentView);
   }
+}
+
+/**
+ * Returns true when the current SQL position should trigger completion under the active trigger mode.
+ * Used by flushImeComposition and shouldStartSqlCompletionAfterInput.
+ */
+function shouldTriggerSqlCompletionForPosition(fullDoc: string, position: number): boolean {
+  if (isSqlCompletionSuppressedContext(fullDoc, position)) return false;
+  const mode = settingsStore.editorSettings.completionTriggerMode;
+  if (mode === "manual") return false;
+
+  const useDatabaseCompletion = resolveSqlServerUseDatabaseCompletion({
+    sql: fullDoc,
+    cursor: position,
+    databaseType: props.databaseType,
+  });
+  const useDatabasePrefix = useDatabaseCompletion?.prefix ?? null;
+
+  if (mode === "require-prefix") {
+    const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+    const prevChar = fullDoc[position - 1] ?? "";
+    const facts: SqlCompletionTriggerFacts = {
+      origin: "typing",
+      hasIdentifierPrefix: ctx.prefix.length > 0,
+      qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+      useDatabasePrefix,
+    };
+    return shouldAllowSqlCompletionTrigger(mode, facts);
+  }
+
+  // positional
+  const ctx = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+  const prevChar = fullDoc[position - 1] ?? "";
+  const positionalEligible = shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+  const facts: SqlCompletionTriggerFacts = {
+    origin: "typing",
+    hasIdentifierPrefix: ctx.prefix.length > 0,
+    qualifierTriggered: prevChar === "." && ctx.qualifier != null,
+    useDatabasePrefix,
+    positionalEligible,
+  };
+  return shouldAllowSqlCompletionTrigger(mode, facts);
 }
 
 function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: string, currentView: EditorViewType): boolean {
   const position = currentView.state.selection.main.head;
   const fullDoc = currentView.state.doc.toString();
-  if (resolveSqlServerUseDatabaseCompletion({ sql: fullDoc, cursor: position, databaseType: props.databaseType })) return true;
+
+  // Non-SQL providers: keep existing behavior (trigger mode policy does not apply).
   if (props.databaseType === "mongodb") {
     return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
   }
   if (props.databaseType === "victoriametrics") return false;
-  if (!insertedText && removedText) {
+  if (props.databaseType === "redis" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
+    // Preserve old character-based checks for non-SQL providers.
+    if (!insertedText && removedText) {
+      const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+      return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+    }
+    if (insertedText.endsWith(".")) return true;
+    if (/[,(]$/.test(insertedText)) {
+      const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+      return !!completionContext.insertTable;
+    }
+    if (/\s$/.test(insertedText)) {
+      return shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+    }
+    if (!/[\w$@]$/.test(insertedText)) return false;
     const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
-    return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+    return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
   }
-  if (insertedText.endsWith(".")) return true;
-  if (/[,(]$/.test(insertedText)) {
-    const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
-    return !!completionContext.insertTable;
-  }
-  if (/\s$/.test(insertedText)) {
-    return shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
-  }
-  if (!/[\w$@]$/.test(insertedText)) return false;
-  const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
-  return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
+
+  // SQL providers: use unified trigger mode policy.
+  return shouldTriggerSqlCompletionForPosition(fullDoc, position);
 }
 
 function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
@@ -3913,7 +4012,7 @@ onMounted(async () => {
     { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, closeHoverTooltips, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, scrollPastEnd, ViewPlugin },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
-    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
+    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree },
     { searchKeymap },
@@ -3947,6 +4046,7 @@ onMounted(async () => {
   setSqlDiagnosticsEffect = StateEffect.define<SqlSemanticDiagnostic[]>();
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
+  codeMirrorCloseCompletion = closeCompletion;
   codeMirrorStartCompletion = startCompletion;
   codeMirrorInsertCompletionText = insertCompletionText;
   codeMirrorNextSnippetField = nextSnippetField;
@@ -4480,6 +4580,13 @@ onMounted(async () => {
           latestSelection = readEditorSelection(update.view);
           if (editorIsActive) emitEditorSelection(latestSelection);
         }
+        // Clear activeCompletionOrigin when the completion session ends.
+        if (codeMirrorCompletionStatus) {
+          const status = codeMirrorCompletionStatus(update.state) ?? null;
+          if (status === null) {
+            activeCompletionOrigin = null;
+          }
+        }
       }),
       fontThemeComp.of(
         editorFontTheme(EditorView, liveFontSize.value, initialSettings.fontFamily, {
@@ -4830,6 +4937,29 @@ onMounted(async () => {
     });
   });
 });
+
+// When completionTriggerMode changes, close any open typing session
+// that would no longer be allowed under the new mode.
+watch(
+  () => settingsStore.editorSettings.completionTriggerMode,
+  (newMode) => {
+    if (!view.value || !codeMirrorCompletionStatus || !codeMirrorCloseCompletion) return;
+    const status = codeMirrorCompletionStatus(view.value.state);
+    if (!status || activeCompletionOrigin !== "typing") return;
+    // If switching to manual, close all typing sessions.
+    if (newMode === "manual") {
+      codeMirrorCloseCompletion(view.value);
+      return;
+    }
+    // For other mode changes, re-evaluate the policy.
+    // If the current position would not trigger under the new mode, close.
+    const fullDoc = view.value.state.doc.toString();
+    const position = view.value.state.selection.main.head;
+    if (!shouldTriggerSqlCompletionForPosition(fullDoc, position)) {
+      codeMirrorCloseCompletion(view.value);
+    }
+  },
+);
 
 watch(
   () => props.modelValue,

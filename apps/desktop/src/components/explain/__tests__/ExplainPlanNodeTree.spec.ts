@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { readCascadeCss } from "../../../styles/__tests__/cascadeCss";
 
 const nodeTreeSource = readFileSync(new URL("../ExplainPlanNodeTree.vue", import.meta.url), "utf8");
-const globalStyles = readFileSync(new URL("../../../styles/globals.css", import.meta.url), "utf8");
+const globalStyles = readCascadeCss();
 
 type Rgb = [number, number, number];
 

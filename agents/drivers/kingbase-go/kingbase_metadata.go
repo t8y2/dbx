@@ -21,9 +21,9 @@ const (
 	kingbaseListDatabasesPostgresSQL = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
 )
 
-// Escape '_' so only Kingbase internal SYS_/XLOG_ prefixes are hidden; names
-// such as SYSTEMS and SYSLOG may be user-created schemas in MySQL mode.
-const kingbaseMySQLCompatListSchemasSQL = `SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS\_%' ESCAPE '\' AND UPPER(schema_name) NOT LIKE 'XLOG\_%' ESCAPE '\' ORDER BY schema_name`
+// Escape '_' so only Kingbase internal SYS_/XLOG_ prefixes are hidden; use a
+// non-backslash escape because MySQL mode treats backslash as a string escape.
+const kingbaseMySQLCompatListSchemasSQL = `SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS#_%' ESCAPE '#' AND UPPER(schema_name) NOT LIKE 'XLOG#_%' ESCAPE '#' ORDER BY schema_name`
 
 var kingbaseDataTypes = []string{
 	"bigint", "bigserial", "bit", "bit varying", "boolean", "bytea", "char", "character",
@@ -741,17 +741,35 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 			catalog, prefix, function := "sys_catalog", "sys", "sys_get_viewdef"
 			if s.mode.postgresCatalog {
 				catalog, prefix, function = "pg_catalog", "pg", "pg_get_viewdef"
+			} else if s.usePgViewDefinition {
+				function = "pg_get_viewdef"
 			}
-			query := fmt.Sprintf("SELECT %s(c.oid) FROM %s.%s_class c JOIN %s.%s_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s LIMIT 1", function, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
-			err = s.requireDBQueryRow(query, &source)
+			querySource := func(definitionFunction string) error {
+				query := fmt.Sprintf("SELECT %s(c.oid) FROM %s.%s_class c JOIN %s.%s_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
+				return s.requireDBQueryRow(query, &source)
+			}
+			err = querySource(function)
+			if err != nil && function == "sys_get_viewdef" && isUndefinedFunction(err, function) {
+				s.usePgViewDefinition = true
+				err = querySource("pg_get_viewdef")
+			}
 		}
 	} else if kind == "FUNCTION" || kind == "PROCEDURE" {
 		catalog, prefix, function := "sys_catalog", "sys", "sys_get_functiondef"
 		if s.mode.postgresCatalog {
 			catalog, prefix, function = "pg_catalog", "pg", "pg_get_functiondef"
+		} else if s.usePgFunctionDefinition {
+			function = "pg_get_functiondef"
 		}
-		query := fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s ORDER BY CASE WHEN p.prorettype=2278 THEN 0 ELSE 1 END LIMIT 1", function, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
-		err = s.requireDBQueryRow(query, &source)
+		querySource := func(definitionFunction string) error {
+			query := fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s ORDER BY CASE WHEN p.prorettype=2278 THEN 0 ELSE 1 END LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
+			return s.requireDBQueryRow(query, &source)
+		}
+		err = querySource(function)
+		if err != nil && function == "sys_get_functiondef" && isUndefinedFunction(err, function) {
+			s.usePgFunctionDefinition = true
+			err = querySource("pg_get_functiondef")
+		}
 	}
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err

@@ -96,6 +96,18 @@ function dorisConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function tdengineConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "tdengine-1",
+    name: "TDengine",
+    db_type: "tdengine",
+    port: 6041,
+    username: "root",
+    database: "issue_5685",
+  } as ConnectionConfig;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -139,6 +151,31 @@ describe("connectionStore completion assistant", () => {
     expect(store.connectedIds.has("pg-1")).toBe(true);
     expect(store.activeConnectionId).toBe("already-active");
     expect(tables).toEqual([{ name: "users", schema: "public", type: "table" }]);
+  });
+
+  it("preserves TDengine stable type in completion metadata", async () => {
+    const listTables = vi.fn().mockResolvedValue([
+      { name: "test_tb", table_type: "STABLE", comment: null },
+      { name: "ordinary_table", table_type: "TABLE", comment: null },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listTables,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [tdengineConnection()];
+    store.connectedIds.add("tdengine-1");
+
+    const tables = await store.listCompletionTables("tdengine-1", "issue_5685");
+
+    expect(tables).toEqual([
+      { name: "test_tb", type: "table", tableType: "STABLE" },
+      { name: "ordinary_table", type: "table" },
+    ]);
   });
 
   it("deduplicates in-flight assistant table requests", async () => {

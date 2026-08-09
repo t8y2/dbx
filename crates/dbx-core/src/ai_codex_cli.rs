@@ -970,6 +970,7 @@ pub async fn run_codex_agent(
         CliAgentProcessSpec {
             command,
             env,
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -1037,6 +1038,10 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
         }
     }
 

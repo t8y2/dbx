@@ -1179,7 +1179,7 @@ function showDropInside(targetId: string) {
               <div v-for="item in itemsByDate" :key="item.type + '-' + item.item.id">
                 <div
                   v-if="item.type === 'folder'"
-                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
                   :class="[folderRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'folder')"
                   @click="handleFolderClick(item.item, $event)"
@@ -1223,7 +1223,7 @@ function showDropInside(targetId: string) {
 
                 <div
                   v-else
-                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
                   :class="[fileRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'file')"
                   @click="handleFileClick(item.item, $event)"
@@ -1259,7 +1259,7 @@ function showDropInside(targetId: string) {
               <div v-for="row in visibleFolderRows" :key="row.type === 'folder' ? row.folder.id : row.file.id">
                 <div
                   v-if="row.type === 'folder'"
-                  class="relative flex items-center gap-1 py-1.5 pr-2 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                   :class="[showDropInside(row.folder.id) ? 'ring-1 ring-primary/50 bg-primary/5' : folderRowClass(row.folder.id), isDraggingItem(row.folder.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.folder.id, 'folder')"
@@ -1308,7 +1308,7 @@ function showDropInside(targetId: string) {
 
                 <div
                   v-else
-                  class="relative flex items-center gap-1 py-1.5 pr-2 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                   :class="[fileRowClass(row.file.id), isDraggingItem(row.file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.file.id, 'file')"
@@ -1356,7 +1356,7 @@ function showDropInside(targetId: string) {
                 <div
                   v-for="file in visibleFiles"
                   :key="file.id"
-                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
                   :class="[fileRowClass(file.id), isDraggingItem(file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, file.id, 'file')"
                   @mousemove="updateDropTarget($event, file.id, 'file')"

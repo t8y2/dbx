@@ -34,11 +34,14 @@ pub struct CliAgentCommandSpec {
 pub enum CliAgentJsonlDialect {
     CodexExec,
     ClaudeCodePrint,
+    OpenCodeRun,
+    CursorPrint,
 }
 
 pub struct CliAgentProcessSpec {
     pub command: CliAgentCommandSpec,
     pub env: Vec<(String, String)>,
+    pub env_remove: Vec<String>,
     pub current_dir: Option<PathBuf>,
     pub stdin: Option<String>,
     pub dialect: CliAgentJsonlDialect,
@@ -217,6 +220,7 @@ struct ParsedCliAgentEvent {
     events: Vec<AgentEvent>,
     final_text: Option<String>,
     error: Option<String>,
+    usage_delta: Option<TokenUsage>,
 }
 
 pub fn parse_cli_jsonl_event(line: &str, dialect: CliAgentJsonlDialect) -> Option<Vec<AgentEvent>> {
@@ -232,6 +236,8 @@ fn parse_cli_jsonl_line(line: &str, dialect: CliAgentJsonlDialect) -> ParsedCliA
     match dialect {
         CliAgentJsonlDialect::CodexExec => parse_codex_jsonl_line(line),
         CliAgentJsonlDialect::ClaudeCodePrint => parse_claude_code_jsonl_line(line),
+        CliAgentJsonlDialect::OpenCodeRun => parse_open_code_jsonl_line(line),
+        CliAgentJsonlDialect::CursorPrint => parse_cursor_jsonl_line(line),
     }
 }
 
@@ -530,13 +536,273 @@ fn claude_code_error_message(value: &Value) -> String {
         .to_string()
 }
 
+fn parse_open_code_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return ParsedCliAgentEvent::default();
+    };
+
+    match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "text" => {
+            let Some(text) = value.pointer("/part/text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::TextDelta { delta: text.to_string() }],
+                final_text: Some(text.to_string()),
+                ..Default::default()
+            }
+        }
+        "reasoning" => {
+            let Some(text) = value.pointer("/part/text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "tool_use" => parse_open_code_tool(&value),
+        "step_finish" => {
+            let input = value.pointer("/part/tokens/input").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let output = value.pointer("/part/tokens/output").and_then(Value::as_u64).unwrap_or(0) as u32;
+            ParsedCliAgentEvent {
+                usage_delta: (input > 0 || output > 0)
+                    .then_some(TokenUsage { input_tokens: input, output_tokens: output }),
+                ..Default::default()
+            }
+        }
+        "error" => {
+            let message = open_code_error_message(&value);
+            ParsedCliAgentEvent {
+                error: Some(message.clone()),
+                events: vec![AgentEvent::Error { message }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn parse_open_code_tool(value: &Value) -> ParsedCliAgentEvent {
+    let part = &value["part"];
+    let state = &part["state"];
+    let status = state.get("status").and_then(Value::as_str).unwrap_or_default();
+    if status != "completed" && status != "error" {
+        return ParsedCliAgentEvent::default();
+    }
+
+    let tool_call_id = part
+        .get("callID")
+        .and_then(Value::as_str)
+        .or_else(|| part.get("call_id").and_then(Value::as_str))
+        .or_else(|| part.get("id").and_then(Value::as_str))
+        .unwrap_or("opencode-tool-call")
+        .to_string();
+    let tool_name = part.get("tool").and_then(Value::as_str).unwrap_or("opencode_tool").to_string();
+    let args = state.get("input").cloned().unwrap_or_else(|| Value::Object(Default::default()));
+    let result = state
+        .get("output")
+        .filter(|value| !value.is_null())
+        .or_else(|| state.get("error").filter(|value| !value.is_null()))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    ParsedCliAgentEvent {
+        events: vec![
+            AgentEvent::ToolCallStart { tool_call_id: tool_call_id.clone(), tool_name: tool_name.clone(), args },
+            AgentEvent::ToolCallEnd { tool_call_id, tool_name, result, is_error: status == "error" },
+        ],
+        ..Default::default()
+    }
+}
+
+fn open_code_error_message(value: &Value) -> String {
+    value
+        .pointer("/error/data/message")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/error/message").and_then(Value::as_str))
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .or_else(|| value.get("error").and_then(Value::as_str))
+        .unwrap_or("OpenCode CLI failed")
+        .to_string()
+}
+
+fn parse_cursor_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return ParsedCliAgentEvent::default();
+    };
+
+    match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "assistant" => parse_cursor_assistant(&value),
+        "thinking" => parse_cursor_thinking(&value),
+        "tool_call" => parse_cursor_tool_call(&value),
+        "result" => parse_cursor_result(&value),
+        "error" => {
+            let message = cursor_error_message(&value);
+            ParsedCliAgentEvent {
+                error: Some(message.clone()),
+                events: vec![AgentEvent::Error { message }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn parse_cursor_assistant(value: &Value) -> ParsedCliAgentEvent {
+    // Cursor emits timestamped partial assistant messages followed by one
+    // un-timestamped buffered message. Only partials are deltas; consuming the
+    // buffered copy would duplicate the entire response.
+    if value.get("timestamp_ms").or_else(|| value.get("timestampMs")).is_none() {
+        return ParsedCliAgentEvent::default();
+    }
+    let Some(content) = value.pointer("/message/content").or_else(|| value.get("content")) else {
+        return ParsedCliAgentEvent::default();
+    };
+    let mut text = String::new();
+    for block in claude_content_blocks(content) {
+        if block.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(delta) = block.get("text").and_then(Value::as_str).filter(|delta| !delta.is_empty()) {
+                text.push_str(delta);
+            }
+        }
+    }
+    if text.is_empty() {
+        return ParsedCliAgentEvent::default();
+    }
+    ParsedCliAgentEvent {
+        events: vec![AgentEvent::TextDelta { delta: text.clone() }],
+        final_text: Some(text),
+        ..Default::default()
+    }
+}
+
+fn parse_cursor_thinking(value: &Value) -> ParsedCliAgentEvent {
+    if value.get("subtype").and_then(Value::as_str) != Some("delta") {
+        return ParsedCliAgentEvent::default();
+    }
+    let Some(text) = value.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+        return ParsedCliAgentEvent::default();
+    };
+    ParsedCliAgentEvent { events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }], ..Default::default() }
+}
+
+fn parse_cursor_tool_call(value: &Value) -> ParsedCliAgentEvent {
+    let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or_default();
+    let call = value.get("tool_call").or_else(|| value.get("toolCall")).unwrap_or(&Value::Null);
+    let payload = call.as_object().and_then(|object| object.values().next()).unwrap_or(call);
+    let call_kind = call.as_object().and_then(|object| object.keys().next()).map(String::as_str);
+    let tool_call_id = value
+        .get("call_id")
+        .or_else(|| value.get("callId"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("call_id").and_then(Value::as_str))
+        .or_else(|| payload.get("callId").and_then(Value::as_str))
+        .unwrap_or("cursor-tool-call")
+        .to_string();
+    let tool_name = payload
+        .get("tool_name")
+        .or_else(|| payload.get("toolName"))
+        .or_else(|| payload.get("name"))
+        .or_else(|| payload.get("tool"))
+        .or_else(|| payload.pointer("/args/toolName"))
+        .or_else(|| payload.pointer("/args/tool_name"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| call_kind.map(cursor_tool_name_from_kind))
+        .unwrap_or_else(|| "cursor_tool".to_string());
+    let args = payload
+        .get("args")
+        .or_else(|| payload.get("arguments"))
+        .or_else(|| payload.get("input"))
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+
+    match subtype {
+        "started" => ParsedCliAgentEvent {
+            events: vec![AgentEvent::ToolCallStart { tool_call_id, tool_name, args }],
+            ..Default::default()
+        },
+        "completed" => {
+            let result = payload
+                .get("result")
+                .or_else(|| payload.get("output"))
+                .or_else(|| payload.get("error"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let is_error = payload
+                .get("is_error")
+                .or_else(|| payload.get("isError"))
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| payload.get("error").is_some_and(|error| !error.is_null()));
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ToolCallEnd { tool_call_id, tool_name, result, is_error }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn cursor_tool_name_from_kind(kind: &str) -> String {
+    let stem = kind.strip_suffix("ToolCall").unwrap_or(kind);
+    let mut name = String::new();
+    for (index, ch) in stem.chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            name.push('_');
+        }
+        name.push(ch.to_ascii_lowercase());
+    }
+    name
+}
+
+fn parse_cursor_result(value: &Value) -> ParsedCliAgentEvent {
+    let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("success");
+    let is_error = value.get("is_error").or_else(|| value.get("isError")).and_then(Value::as_bool).unwrap_or(false);
+    if subtype != "success" || is_error {
+        let message = cursor_error_message(value);
+        return ParsedCliAgentEvent {
+            error: Some(message.clone()),
+            events: vec![AgentEvent::Error { message }],
+            ..Default::default()
+        };
+    }
+    let usage = value.get("usage");
+    let input_tokens = usage
+        .and_then(|usage| usage.get("inputTokens").or_else(|| usage.get("input_tokens")))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .map(|value| value as u32);
+    let output_tokens = usage
+        .and_then(|usage| usage.get("outputTokens").or_else(|| usage.get("output_tokens")))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .map(|value| value as u32);
+    ParsedCliAgentEvent { events: vec![AgentEvent::AgentEnd { input_tokens, output_tokens }], ..Default::default() }
+}
+
+fn cursor_error_message(value: &Value) -> String {
+    value
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .or_else(|| value.get("result").and_then(Value::as_str))
+        .or_else(|| value.pointer("/error/message").and_then(Value::as_str))
+        .unwrap_or("Cursor CLI failed")
+        .to_string()
+}
+
 pub async fn run_cli_jsonl_agent(
     spec: CliAgentProcessSpec,
     cancelled: &Notify,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
     let mut command = cli_command(&spec.command.program);
-    command.args(&spec.command.args).envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    command.args(&spec.command.args);
+    for key in &spec.env_remove {
+        command.env_remove(key);
+    }
+    command.envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
     if let Some(current_dir) = &spec.current_dir {
         command.current_dir(current_dir);
     }
@@ -544,6 +810,7 @@ pub async fn run_cli_jsonl_agent(
         .stdin(if spec.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| (spec.classify_spawn_error)(&e.to_string()))?;
 
@@ -565,6 +832,7 @@ pub async fn run_cli_jsonl_agent(
 
     let mut final_text = String::new();
     let mut saw_agent_end = false;
+    let mut total_usage = TokenUsage::default();
     let mut terminal_error: Option<String> = None;
 
     loop {
@@ -583,6 +851,9 @@ pub async fn run_cli_jsonl_agent(
                 if let Some(text) = parsed.final_text {
                     final_text.push_str(&text);
                 }
+                if let Some(usage) = parsed.usage_delta {
+                    total_usage.add(&usage);
+                }
                 for event in parsed.events {
                     if matches!(event, AgentEvent::AgentEnd { .. }) {
                         saw_agent_end = true;
@@ -590,7 +861,7 @@ pub async fn run_cli_jsonl_agent(
                     on_event(event);
                 }
                 if let Some(error) = parsed.error {
-                    terminal_error = Some(error);
+                    terminal_error = Some((spec.classify_run_error)(&error));
                     let _ = child.kill().await;
                     break;
                 }
@@ -615,7 +886,10 @@ pub async fn run_cli_jsonl_agent(
     }
 
     if !saw_agent_end {
-        on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        on_event(AgentEvent::AgentEnd {
+            input_tokens: (total_usage.input_tokens > 0).then_some(total_usage.input_tokens),
+            output_tokens: (total_usage.output_tokens > 0).then_some(total_usage.output_tokens),
+        });
     }
 
     Ok(final_text)
@@ -625,6 +899,7 @@ pub async fn run_cli_jsonl_agent(
 mod tests {
     use super::*;
     use std::process::Command as StdCommand;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::time::{sleep, timeout, Duration};
 
@@ -657,6 +932,7 @@ mod tests {
                 ],
             },
             env: vec![("DBX_TEST_ENV".to_string(), "from-env".to_string())],
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -680,6 +956,7 @@ mod tests {
                 ],
             },
             env: Vec::new(),
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: Some("prompt from stdin".to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -690,6 +967,47 @@ mod tests {
         let result = run_cli_jsonl_agent(spec, &Notify::new(), |_| {}).await.unwrap();
 
         assert_eq!(result, "prompt from stdin");
+    }
+
+    #[tokio::test]
+    async fn opencode_agent_aggregates_step_usage_and_emits_one_agent_end() {
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    concat!(
+                        "printf '%s\\n' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":2}}}' ",
+                        "'{\"type\":\"text\",\"part\":{\"text\":\"hello\"}}' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":3,\"output\":4}}}'",
+                    )
+                    .to_string(),
+                ],
+            },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::OpenCodeRun,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+
+        let result = run_cli_jsonl_agent(spec, &Notify::new(), move |event| {
+            captured.lock().unwrap().push(event);
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, "hello");
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(), 1);
+        assert!(events
+            .iter()
+            .any(|event| { matches!(event, AgentEvent::AgentEnd { input_tokens: Some(13), output_tokens: Some(6) }) }));
     }
 
     #[tokio::test]
@@ -707,6 +1025,7 @@ mod tests {
         let spec = CliAgentProcessSpec {
             command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
             env: Vec::new(),
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -719,6 +1038,49 @@ mod tests {
             .expect("runner should return after JSONL error");
 
         assert_eq!(result.unwrap_err(), "boom");
+        sleep(Duration::from_millis(100)).await;
+        let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
+        assert!(!process_is_alive(pid.trim()));
+        let _ = std::fs::remove_file(pid_file);
+    }
+
+    #[tokio::test]
+    async fn jsonl_cancellation_kills_and_waits_for_child() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "dbx-cli-agent-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
+
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::CodexExec,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let cancelled = Arc::new(Notify::new());
+        let runner_cancelled = Arc::clone(&cancelled);
+        let runner = tokio::spawn(async move { run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), |_| {}).await });
+
+        timeout(Duration::from_secs(3), async {
+            while !pid_file.exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child should start before cancellation");
+        cancelled.notify_waiters();
+
+        let result = timeout(Duration::from_secs(3), runner)
+            .await
+            .expect("runner should return after cancellation")
+            .expect("runner task should not panic");
+        assert_eq!(result.unwrap_err(), "Agent loop cancelled");
         sleep(Duration::from_millis(100)).await;
         let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
         assert!(!process_is_alive(pid.trim()));

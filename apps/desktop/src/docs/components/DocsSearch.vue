@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { searchDocs, type SearchHit } from "../docsSearch";
+import type { Translate } from "../docsWarnings";
 import type { SchemaSnapshot } from "../types";
 
 const props = defineProps<{
   snapshot: SchemaSnapshot;
+  translate: Translate;
 }>();
 
 const emit = defineEmits<{
@@ -71,13 +73,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 <template>
   <div>
     <button type="button" class="flex items-center gap-2 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/40" @click="show()">
-      <span>Search</span>
+      <span>{{ translate("docs.searchLabel") }}</span>
       <span class="rounded bg-muted/50 px-1 py-0.5 text-[10px]">⌘K</span>
     </button>
 
     <div v-if="open" class="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-24" @click.self="open = false">
       <div class="w-full max-w-lg overflow-hidden rounded-md border border-border bg-background shadow-lg">
-        <input ref="input" v-model="query" type="text" placeholder="Search tables, columns, groups, enums…" class="w-full border-b border-border bg-transparent px-3 py-2 text-sm text-foreground outline-none" />
+        <input ref="input" v-model="query" type="text" :placeholder="translate('docs.search')" class="w-full border-b border-border bg-transparent px-3 py-2 text-sm text-foreground outline-none" />
         <ul class="max-h-80 overflow-y-auto">
           <li v-if="query.trim() !== '' && hits.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">Nothing matches “{{ query }}”.</li>
           <li v-for="(hit, position) in hits" :key="`${hit.kind}-${hit.context}-${hit.label}-${position}`">

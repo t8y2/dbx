@@ -1,4 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 import { classifySqlRisk, isSqlRiskMutation } from "@/lib/sql/sqlRisk";
 
 export type ProductionContextReason = "connection" | "database" | "sql_target";
@@ -93,6 +94,9 @@ export function normalizeProductionDatabase(value: string | undefined | null): s
 
 export function productionDatabases(connection: ConnectionConfig | undefined): string[] {
   if (!connection?.production_databases?.length) return [];
+  if (connection.db_type === "nacos") {
+    return [...new Set(connection.production_databases.map(nacosNamespaceIdentity))];
+  }
   return [...new Set(connection.production_databases.map(normalizeProductionDatabase).filter(Boolean))];
 }
 
@@ -100,10 +104,10 @@ export function productionContextForDatabase(connection: ConnectionConfig | unde
   if (!connection) return { active: false, databases: [] };
   if (connection.is_production) return { active: true, reason: "connection", databases: [] };
 
-  const normalizedDatabase = normalizeProductionDatabase(database);
+  const normalizedDatabase = connection.db_type === "nacos" ? nacosNamespaceIdentity(String(database ?? "")) : normalizeProductionDatabase(database);
   const marked = productionDatabases(connection);
   if (normalizedDatabase && marked.includes(normalizedDatabase)) {
-    return { active: true, reason: "database", databases: [String(database)] };
+    return { active: true, reason: "database", databases: [connection.db_type === "nacos" ? normalizedDatabase : String(database)] };
   }
   return { active: false, databases: [] };
 }

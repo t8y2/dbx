@@ -25,6 +25,7 @@
     "build:knowledge-base": "node scripts/build-knowledge-base.mjs",
     "typecheck": "vue-tsc --noEmit --project apps/desktop/tsconfig.json",
     "build": "vite build --config apps/desktop/vite.config.ts",
+    "build:docs-export": "vite build --config apps/desktop/vite.docs-export.config.ts",
     "build:checked": "pnpm typecheck && pnpm build",
     "check": "node scripts/run-check.mjs",
     "db:env": "node scripts/database-env.mjs",

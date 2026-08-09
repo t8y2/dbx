@@ -14,6 +14,7 @@ import {
   generateUniqueIndexName,
   getColumnEditorControls,
   getDataTypeOptions,
+  isDataTypeLengthDisabled,
   isProtectedManticoreIdColumn,
   isDamengIdentityCompatibleDataType,
   isMysqlEnumDataType,
@@ -483,6 +484,21 @@ test("returns data type options for compatible table structure editors", () => {
   assert.deepEqual(getDataTypeOptions("doris"), getDataTypeOptions("mysql"));
   assert.equal(getDataTypeOptions("dameng").includes("varchar2"), true);
   assert.equal(getDataTypeOptions("sqlserver").includes("nvarchar"), true);
+});
+
+test("returns PostgreSQL array type options without serial pseudo-types", () => {
+  const options = getDataTypeOptions("postgres");
+  assert.equal(options.includes("integer[]"), true);
+  assert.equal(options.includes("character varying[]"), true);
+  assert.equal(options.includes("jsonb[]"), true);
+  assert.equal(options.includes("serial[]"), false);
+  assert.equal(options.includes("smallserial[]"), false);
+  assert.equal(options.includes("bigserial[]"), false);
+});
+
+test("does not append length parameters after PostgreSQL array brackets", () => {
+  assert.equal(isDataTypeLengthDisabled("postgres", "varchar[]"), true);
+  assert.equal(combineDataTypeForDatabase("postgres", "varchar[]", "20"), "varchar[]");
 });
 
 test("returns Xugu data type options", () => {

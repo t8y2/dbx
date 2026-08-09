@@ -56,7 +56,7 @@ const shadowedTitle = computed(() => (props.table.shadowedNote ? `Database comme
            one shadows that comment, which is what noteSource and shadowedNote
            below exist to disclose. -->
       <div class="flex items-start gap-2">
-        <span v-if="table.noteSource === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium text-muted-foreground" :title="shadowedTitle">⬤ LOCAL</span>
+        <span v-if="table.noteSource === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium text-muted-foreground" :title="shadowedTitle">⬤ {{ translate("docs.localNote") }}</span>
         <NoteEditor class="min-w-0 flex-1" :model-value="table.note ?? ''" :readonly="readonly" :translate="translate" @update:model-value="emit('edit', { kind: 'tableNote', tableKey: qualified, note: $event })" />
       </div>
 
@@ -64,19 +64,19 @@ const shadowedTitle = computed(() => (props.table.shadowedNote ? `Database comme
     </header>
 
     <section>
-      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Columns</h3>
+      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ translate("docs.columns") }}</h3>
       <ColumnTable :columns="table.columns" :column-notes="table.columnNotes" :table-key="qualified" :readonly="readonly" :translate="translate" @edit="emit('edit', $event)" />
     </section>
 
     <section v-if="table.indexes.length > 0">
-      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Indexes</h3>
+      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ translate("docs.indexes") }}</h3>
       <div class="overflow-hidden rounded-md border border-border">
         <table class="w-full text-xs">
           <thead>
             <tr class="bg-muted/30">
-              <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">Name</th>
-              <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">Columns</th>
-              <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">Settings</th>
+              <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">{{ translate("docs.nameHeader") }}</th>
+              <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">{{ translate("docs.columns") }}</th>
+              <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">{{ translate("docs.settingsHeader") }}</th>
             </tr>
           </thead>
           <tbody>
@@ -100,12 +100,12 @@ const shadowedTitle = computed(() => (props.table.shadowedNote ? `Database comme
     </section>
 
     <section>
-      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Relationships</h3>
-      <RelationshipList :relationships="relationships" :schema="table.schema" :table="table.name" @select="emit('select', $event)" />
+      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ translate("docs.relationships") }}</h3>
+      <RelationshipList :relationships="relationships" :schema="table.schema" :table="table.name" :translate="translate" @select="emit('select', $event)" />
     </section>
 
     <section v-if="table.viewDefinition">
-      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Definition</h3>
+      <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ translate("docs.definitionHeader") }}</h3>
       <pre class="overflow-x-auto rounded-md border border-border bg-muted/20 p-2 font-mono text-xs">{{ table.viewDefinition }}</pre>
     </section>
   </article>

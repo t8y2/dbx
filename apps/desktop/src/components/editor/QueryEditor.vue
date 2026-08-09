@@ -114,7 +114,7 @@ import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, suppor
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
-import { analyzeIntentionActions, prepareExpandWildcardContext, buildExpandWildcardReplacement } from "@/lib/editor/sqlIntentionActions";
+import { analyzeIntentionActions, prepareExpandWildcardContext, buildExpandWildcardReplacement, type IntentionAction } from "@/lib/editor/sqlIntentionActions";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, queryTableNavigationTargetAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
@@ -371,7 +371,8 @@ function applyDelimitedListResult(result: string) {
 
 interface IntentionPopupState {
   visible: boolean;
-  actions: Array<{ kind: string; span: { start: number; end: number }; replacement: string; label?: string }>;
+  // 直接复用 IntentionAction 类型，避免手动重声明导致 replacements 等字段丢失（TS2551）
+  actions: IntentionAction[];
   position: { x: number; y: number };
   selectedIndex: number;
 }
@@ -434,7 +435,7 @@ function executeIntentionAction(action: IntentionPopupState["actions"][number]) 
       const cursor = currentView.state.selection.main.head;
       void (async () => {
         try {
-          const ctx = prepareExpandWildcardContext(sql, cursor, props.databaseType, props.syntaxDialect ?? props.dialect);
+          const ctx = prepareExpandWildcardContext(sql, cursor, props.databaseType, sqlBehaviorDialect());
           if (!ctx) return;
 
           const replacement = await buildExpandWildcardReplacement(props.databaseType, ctx.rowSources, async (source) => {
@@ -1650,7 +1651,7 @@ function handleSqlIntentionActions(currentView: EditorViewType): boolean {
       sql,
       cursor: sel.head,
       databaseType: props.databaseType,
-      dialect: props.syntaxDialect ?? props.dialect,
+      dialect: sqlBehaviorDialect(),
       selection: sel.from !== sel.to ? { from: sel.from, to: sel.to } : undefined,
     });
 
@@ -1757,7 +1758,7 @@ function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean
   const language = databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "victoriametrics" ? "text" : "sql";
   return extendQueryEditorSelection(currentView, {
     databaseType,
-    dialect: props.syntaxDialect ?? props.dialect,
+    dialect: sqlBehaviorDialect(),
     language,
   });
 }

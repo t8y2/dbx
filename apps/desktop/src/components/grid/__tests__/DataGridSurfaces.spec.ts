@@ -916,7 +916,7 @@ describe("cell detail surfaces", () => {
     expect(updateOpen).toHaveBeenCalledWith(false);
   });
 
-  it("forwards panel edit/copy/cancel actions and exposes search", () => {
+  it("forwards panel actions and only starts JSON editing from preview whitespace", async () => {
     const startEdit = vi.fn();
     const copyValue = vi.fn();
     const cancel = vi.fn();
@@ -959,6 +959,26 @@ describe("cell detail surfaces", () => {
     expect(cancel).toHaveBeenCalledOnce();
     mounted.exposed.value.openSearch();
     expect(mocks.panelOpenSearch).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ detail: detail() });
+    const jsonPreview = findOne(mounted.root, (node) => node.props["data-cell-detail-json-preview"] === "");
+    const doubleClickCapture = jsonPreview.props.onDblclickCapture;
+    const textLine = {
+      ownerDocument: {
+        createRange: () => ({
+          selectNodeContents: vi.fn(),
+          getClientRects: () => [{ left: 10, right: 110, top: 20, bottom: 40 }],
+        }),
+      },
+    };
+    const lineTarget = { closest: (selector: string) => (selector === ".cm-line" ? textLine : null) };
+
+    doubleClickCapture({ target: lineTarget, clientX: 60, clientY: 30 });
+    expect(startEdit).toHaveBeenCalledTimes(2);
+
+    doubleClickCapture({ target: lineTarget, clientX: 160, clientY: 30 });
+    doubleClickCapture({ target: { closest: () => null }, clientX: 60, clientY: 80 });
+    expect(startEdit).toHaveBeenCalledTimes(4);
   });
 });
 

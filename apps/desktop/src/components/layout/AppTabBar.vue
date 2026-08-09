@@ -525,7 +525,8 @@ function tabMenuIcon(tab: QueryTab) {
   if (tab.externalSqlFileMissing) return AlertTriangle;
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
-  if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
+  if (tab.mode === "etcd" || tab.mode === "zookeeper" || tab.mode === "consul") return KeyRound;
+  if (tab.mode === "consul-overview") return Gauge;
   if (tab.mode === "etcd-dashboard") return Gauge;
   if (tab.mode === "etcd-access-control") return ShieldCheck;
   if (tab.mode === "nacos") return Network;
@@ -671,7 +672,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
@@ -867,7 +869,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />

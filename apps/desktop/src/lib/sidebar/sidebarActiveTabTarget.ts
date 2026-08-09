@@ -49,6 +49,14 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "consul-root";
+      connectionId: string;
+    }
+  | {
+      type: "consul-overview";
+      connectionId: string;
+    }
+  | {
       type: "mq-tenant";
       connectionId: string;
       tenant: string;
@@ -147,6 +155,12 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
   if (tab.mode === "zookeeper") {
     return { type: "zookeeper-root", connectionId: tab.connectionId };
   }
+  if (tab.mode === "consul") {
+    return { type: "consul-root", connectionId: tab.connectionId };
+  }
+  if (tab.mode === "consul-overview") {
+    return { type: "consul-overview", connectionId: tab.connectionId };
+  }
 
   if (tab.mode === "mq" && tab.mqTenant) {
     return { type: "mq-tenant", connectionId: tab.connectionId, tenant: tab.mqTenant };
@@ -225,6 +239,12 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "zookeeper-root") {
     return node.type === "zookeeper-root" && node.connectionId === target.connectionId;
+  }
+  if (target.type === "consul-root") {
+    return node.type === "consul-root" && node.connectionId === target.connectionId;
+  }
+  if (target.type === "consul-overview") {
+    return node.type === "consul-overview" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "mq-tenant") {

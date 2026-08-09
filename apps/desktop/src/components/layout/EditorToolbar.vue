@@ -107,6 +107,7 @@ const supportsExplain = computed(() => {
     dbType !== "chromadb" &&
     dbType !== "etcd" &&
     dbType !== "zookeeper" &&
+    dbType !== "consul" &&
     dbType !== "mq" &&
     dbType !== "nacos" &&
     dbType !== "victoriametrics"
@@ -474,6 +475,7 @@ async function changeCatalog(selectedCatalog: string) {
           activeConnection?.db_type !== 'weaviate' &&
           activeConnection?.db_type !== 'chromadb' &&
           activeConnection?.db_type !== 'zookeeper' &&
+          activeConnection?.db_type !== 'consul' &&
           !isSingleDb
         "
         class="flex items-center gap-1"

@@ -1468,7 +1468,7 @@ async function openConnectionQuery(connectionId: string) {
     }
     return;
   }
-  if (initialTarget.kind === "etcd" || initialTarget.kind === "zookeeper") {
+  if (initialTarget.kind === "etcd" || initialTarget.kind === "zookeeper" || initialTarget.kind === "consul") {
     try {
       await connectionStore.ensureConnected(connectionId);
       queryStore.createTab(connectionId, "", `${connection.name}:keys`, initialTarget.kind);
@@ -1889,6 +1889,8 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadEtcdRoot(item.connectionId);
       } else if (config?.db_type === "zookeeper") {
         await connectionStore.loadZooKeeperRoot(item.connectionId);
+      } else if (config?.db_type === "consul") {
+        await connectionStore.loadConsulRoot(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
@@ -1914,6 +1916,8 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadEtcdRoot(item.connectionId);
       } else if (config?.db_type === "zookeeper") {
         await connectionStore.loadZooKeeperRoot(item.connectionId);
+      } else if (config?.db_type === "consul") {
+        await connectionStore.loadConsulRoot(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {

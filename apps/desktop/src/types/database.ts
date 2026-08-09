@@ -70,7 +70,8 @@ export type DatabaseType =
   | "jdbc"
   | "mq"
   | "mqtt"
-  | "nacos";
+  | "nacos"
+  | "consul";
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
@@ -835,6 +836,8 @@ export type TreeNodeType =
   | "etcd-dashboard"
   | "etcd-access-control"
   | "zookeeper-root"
+  | "consul-root"
+  | "consul-overview"
   | "mongo-db"
   | "mongo-gridfs"
   | "mongo-buckets"
@@ -1038,6 +1041,8 @@ export interface QueryTab {
     | "etcd-dashboard"
     | "etcd-access-control"
     | "zookeeper"
+    | "consul"
+    | "consul-overview"
     | "mq"
     | "mqtt"
     | "nacos"

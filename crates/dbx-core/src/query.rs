@@ -1669,6 +1669,7 @@ async fn do_execute_typed(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
+        PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
         .map(normalize_query_result_for_js)
@@ -2852,6 +2853,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Agent(_) => true,
         PoolKind::MessageQueue
         | PoolKind::Nacos
+        | PoolKind::Consul(_)
         | PoolKind::HBase(_)
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
@@ -3095,7 +3097,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
                 TxPath::Explicit
             }
             PoolKind::Agent(client) => TxPath::Agent(client.clone()),
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
+            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => TxPath::None,
             #[cfg(feature = "mq-admin")]
             PoolKind::Mqtt(_) => TxPath::None,
             PoolKind::DuckDbWorker(_)

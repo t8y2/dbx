@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const LOCALES_DIR = "apps/desktop/src/i18n/locales";
 const SOURCE_LOCALE = "zh-CN";
@@ -351,17 +351,24 @@ function applyEdits(text, edits) {
 
 function flattenLeaves(root) {
   const result = new Map();
-  flattenNode(root, [], result);
+  flattenNode(root, [], result, root.externalObjects || new Map());
   return result;
 }
 
-function flattenNode(node, path, result) {
+function flattenNode(node, path, result, externalObjects) {
   for (const property of node.properties) {
     const nextPath = [...path, property.key];
     if (property.value.type === "object") {
-      flattenNode(property.value, nextPath, result);
+      flattenNode(property.value, nextPath, result, externalObjects);
     } else if (property.value.type === "string") {
       result.set(nextPath.join("."), property.value.value);
+    } else if (property.value.type === "spread") {
+      const [binding, ...members] = property.value.expression.split(".");
+      let spreadObject = externalObjects.get(binding);
+      for (const member of members) {
+        spreadObject = spreadObject?.properties.find((candidate) => candidate.key === member && candidate.value.type === "object")?.value;
+      }
+      if (spreadObject) flattenNode(spreadObject, path, result, externalObjects);
     }
   }
 }
@@ -369,7 +376,38 @@ function flattenNode(node, path, result) {
 function parseLocaleFile(text, file) {
   const parser = new Parser(text, file);
   const root = parser.parseLocaleRoot();
+  root.externalObjects = parseImportedObjects(text, file);
   return { root };
+}
+
+function parseImportedObjects(text, file) {
+  const result = new Map();
+  const actualFile = existsSync(file) ? file : file.slice(file.indexOf(":") + 1);
+  const importPattern = /import\s*\{([^}]+)\}\s*from\s*["'](\.\.?\/[^"']+)["'];?/g;
+
+  for (const match of text.matchAll(importPattern)) {
+    const modulePath = resolve(dirname(actualFile), `${match[2]}.ts`);
+    if (!existsSync(modulePath)) continue;
+    const moduleText = readFileSync(modulePath, "utf8");
+    for (const specifier of match[1].split(",")) {
+      const [exportedName, localName = exportedName] = specifier.trim().split(/\s+as\s+/);
+      if (!exportedName) continue;
+      const object = parseExportedObject(moduleText, modulePath, exportedName);
+      if (object) result.set(localName, object);
+    }
+  }
+
+  return result;
+}
+
+function parseExportedObject(text, file, name) {
+  const match = new RegExp(`export\\s+const\\s+${name.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\s*=`).exec(text);
+  if (!match) return null;
+  const parser = new Parser(text, file);
+  parser.index = match.index + match[0].length;
+  parser.skipSpace();
+  if (parser.peek() !== "{") return null;
+  return parser.parseObject();
 }
 
 class Parser {
@@ -412,6 +450,26 @@ class Parser {
       }
 
       const start = this.index;
+      if (this.text.startsWith("...", this.index)) {
+        this.index += 3;
+        this.skipSpace();
+        const root = this.parseIdentifier();
+        if (!root) this.fail("Expected spread identifier");
+        let expression = root;
+        while (this.peek() === ".") {
+          this.index += 1;
+          const member = this.parseIdentifier();
+          if (!member) this.fail("Expected spread member");
+          expression += `.${member}`;
+        }
+        this.skipSpace();
+        const hasComma = this.peek() === ",";
+        if (hasComma) this.index += 1;
+        else if (this.peek() !== "}") this.fail("Expected comma after spread property");
+        properties.push({ key: `...${expression}`, start, end: this.index, hasComma, value: { type: "spread", expression } });
+        continue;
+      }
+
       const key = this.parseKey();
       this.skipSpace();
       if (this.peek() === "," || this.peek() === "}") {

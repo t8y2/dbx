@@ -7,5 +7,5 @@ test("i18n autofill parses locale roots with imported shorthand sections", () =>
     encoding: "utf8",
   });
 
-  assert.match(output, /No new zh-CN i18n keys compared with HEAD/);
+  assert.match(output, /No new zh-CN i18n keys compared with HEAD|No locale files needed changes/);
 });

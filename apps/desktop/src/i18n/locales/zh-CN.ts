@@ -1547,6 +1547,7 @@ export default withEnglishFallback({
     importBinaryValue: "从文件导入",
     binaryImportApplied: "已导入 {count} 字节，保存更改后写入数据库。",
     binaryImportFailed: "导入文件失败：{message}",
+    binaryImportTooLarge: "文件过大（{size}，上限 {limit}）。不支持将大文件导入到单个单元格。",
     downloadBinaryValue: "下载值",
     downloadSaved: "已保存到 {path}",
     downloadStarted: "已交给浏览器下载：{fileName}",

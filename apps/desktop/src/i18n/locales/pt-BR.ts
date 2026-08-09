@@ -1573,6 +1573,7 @@ export default withEnglishFallback({
     importBinaryValue: "Importar do arquivo",
     binaryImportApplied: "{count} bytes importados, gravados no banco de dados após salvar as alterações.",
     binaryImportFailed: "Falha ao importar o arquivo: {message}",
+    binaryImportTooLarge: "O arquivo é muito grande ({size}, limite {limit}). Não há suporte para importar arquivos grandes em uma única célula.",
   },
   exportProgress: {
     streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",

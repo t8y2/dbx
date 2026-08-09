@@ -1422,6 +1422,7 @@ export default withEnglishFallback({
     importBinaryValue: "從檔案匯入",
     binaryImportApplied: "已匯入 {count} 位元組，儲存變更後寫入資料庫。",
     binaryImportFailed: "匯入檔案失敗：{message}",
+    binaryImportTooLarge: "檔案過大（{size}，上限 {limit}）。不支援將大檔案匯入到單一儲存格。",
     downloadBinaryValue: "下載值",
     downloadSaved: "已儲存到 {path}",
     downloadStarted: "已交給瀏覽器下載：{fileName}",

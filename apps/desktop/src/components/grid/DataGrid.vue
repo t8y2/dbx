@@ -121,6 +121,7 @@ import { getApplicablePreviewActions } from "@/lib/dataGrid/resultPreviewRegistr
 import "@/lib/dataGrid/geometryMapPreview";
 import {
   BINARY_CELL_DOWNLOAD_MODES,
+  BinaryCellImportTooLargeError,
   binaryCellBytesToHexValue,
   binaryCellDisplayText,
   binaryCellDownloadFileName,
@@ -128,6 +129,7 @@ import {
   canImportBinaryCellFile,
   canDownloadBinaryCellValue,
   downloadBinaryCellPayload,
+  formatBinaryCellByteSize,
   isBinaryCellColumnType,
   openBinaryCellFile,
   parseBinaryCellBytes,
@@ -7007,6 +7009,16 @@ async function importDetailBinaryValue(detail: DataGridCellDetail | null) {
     }
     toast(t("grid.binaryImportApplied", { count: bytes.length }));
   } catch (e: any) {
+    if (e instanceof BinaryCellImportTooLargeError) {
+      toast(
+        t("grid.binaryImportTooLarge", {
+          size: formatBinaryCellByteSize(e.bytes),
+          limit: formatBinaryCellByteSize(e.limit),
+        }),
+        5000,
+      );
+      return;
+    }
     toast(t("grid.binaryImportFailed", { message: e?.message || String(e) }), 5000);
   }
 }

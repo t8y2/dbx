@@ -23,6 +23,34 @@ export interface BinaryCellDownloadResult {
 
 export const BINARY_CELL_DOWNLOAD_MODES: BinaryCellDownloadMode[] = ["binary", "utf8", "gbk"];
 
+/**
+ * 单个 BLOB/BYTEA 单元格从文件导入的最大字节数。
+ *
+ * 设立此上限的原因：导入路径会用 `@tauri-apps/plugin-fs` 的 `readFile(path)` 把整个文件
+ * 一次性读进 `Uint8Array` 经 IPC 返回前端，再经 `binaryCellBytesToHexValue` 转成
+ * `0x<hex>` 字符串（长度约为文件字节的 2 倍）作为脏值常驻内存，直到保存或放弃编辑。
+ * 几百 MB 的 BLOB 即可造成 OOM/卡死，故在进入 readFile + hex 转换路径之前先按文件大小拦截。
+ * 16 MB 对单个单元格导入已相当宽裕，分块流式 + 后端参数绑定属后续更大改造，不在此处处理。
+ */
+export const MAX_BINARY_CELL_IMPORT_BYTES = 16 * 1024 * 1024;
+
+/**
+ * 文件超过 {@link MAX_BINARY_CELL_IMPORT_BYTES} 时抛出的错误。
+ * 调用方据 `code === "binary-import-too-large"` 选择专门的提示文案，
+ * 其余失败仍走通用错误提示。
+ */
+export class BinaryCellImportTooLargeError extends Error {
+  readonly code = "binary-import-too-large" as const;
+  readonly bytes: number;
+  readonly limit: number;
+  constructor(bytes: number, limit: number) {
+    super(`File is ${bytes} bytes, exceeds the ${limit}-byte import limit.`);
+    this.name = "BinaryCellImportTooLargeError";
+    this.bytes = bytes;
+    this.limit = limit;
+  }
+}
+
 export function binaryCellBytesToHexValue(bytes: Uint8Array): string {
   let hex = "0x";
   for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
@@ -36,7 +64,16 @@ function openBinaryCellFileInBrowser(): Promise<Uint8Array | undefined> {
     input.onchange = async () => {
       try {
         const file = input.files?.[0];
-        resolve(file ? new Uint8Array(await file.arrayBuffer()) : undefined);
+        if (!file) {
+          resolve(undefined);
+          return;
+        }
+        // 尺寸闸门：File.size 在读取前即可用，避免大文件进入 arrayBuffer + hex 路径。
+        if (file.size > MAX_BINARY_CELL_IMPORT_BYTES) {
+          reject(new BinaryCellImportTooLargeError(file.size, MAX_BINARY_CELL_IMPORT_BYTES));
+          return;
+        }
+        resolve(new Uint8Array(await file.arrayBuffer()));
       } catch (error) {
         reject(error);
       }
@@ -48,10 +85,21 @@ function openBinaryCellFileInBrowser(): Promise<Uint8Array | undefined> {
 export async function openBinaryCellFile(): Promise<Uint8Array | undefined> {
   if (!isTauriRuntime()) return openBinaryCellFileInBrowser();
 
-  const [{ open }, { readFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+  const [{ open }, { readFile, stat }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
   const selected = await open({ multiple: false });
   const path = Array.isArray(selected) ? selected[0] : selected;
   if (!path) return undefined;
+  // 尺寸闸门：在 readFile 之前用 stat 取文件大小，避免大文件被全量读入内存。
+  // stat 不可用（权限/平台差异等）时降级为不阻断，保留原 readFile 行为，避免功能完全不可用。
+  try {
+    const info = await stat(path);
+    if (info.size > MAX_BINARY_CELL_IMPORT_BYTES) {
+      throw new BinaryCellImportTooLargeError(info.size, MAX_BINARY_CELL_IMPORT_BYTES);
+    }
+  } catch (error) {
+    if (error instanceof BinaryCellImportTooLargeError) throw error;
+    console.warn("[binaryCellDownload] stat failed, skipping size gate:", error);
+  }
   return readFile(path);
 }
 
@@ -157,7 +205,7 @@ function binaryCellDisplayLabel(columnType?: string): string {
   return base;
 }
 
-function formatBinaryCellByteSize(bytes: number): string {
+export function formatBinaryCellByteSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} bytes`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;

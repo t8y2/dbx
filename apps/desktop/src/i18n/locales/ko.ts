@@ -1434,6 +1434,7 @@ export default withEnglishFallback({
     largeValuePreviewHint: "처음 {count}자 미리보는 중. 복사에는 여전히 전체 값이 사용됩니다.",
     copyValue: "값 복사",
     downloadBinaryValue: "값 다운로드",
+    binaryImportTooLarge: "파일이 너무 큽니다({size}, 상한 {limit}). 큰 파일을 단일 셀에 가져오는 것은 지원되지 않습니다.",
     downloadSaved: "{path}에 저장됨",
     downloadStarted: "다운로드 시작됨: {fileName}",
     binaryDownload: {

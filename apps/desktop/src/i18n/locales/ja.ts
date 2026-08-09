@@ -1598,6 +1598,7 @@ export default withEnglishFallback({
     importBinaryValue: "ファイルからインポート",
     binaryImportApplied: "{count} バイトをインポートしました。変更を保存するとデータベースに書き込まれます。",
     binaryImportFailed: "ファイルのインポートに失敗しました：{message}",
+    binaryImportTooLarge: "ファイルが大きすぎます（{size}、上限 {limit}）。大きなファイルの単一セルへのインポートはサポートされていません。",
   },
   exportProgress: {
     streamingUnsupported: "このクエリはストリーミングエクスポートに対応していません。クエリを簡略化するか、対応しているドライバーを使用してください。",

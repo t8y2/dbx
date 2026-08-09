@@ -166,6 +166,16 @@ export interface TransposeScrollLeftOptions {
   recordWidth: number;
   recordOffsets?: readonly number[];
   currentScrollLeft?: number;
+  alignment?: TransposeScrollAlignment;
+  endSpacerWidth?: number;
+}
+
+export type TransposeScrollAlignment = "start" | "nearest";
+
+export interface TransposeEndAlignmentSpacerOptions {
+  viewportWidth: number;
+  pinnedWidth: number;
+  lastRecordWidth: number;
 }
 
 export interface TransposeRecordIndexesForModeOptions {
@@ -339,6 +349,11 @@ export function transposeFieldWidth(columns: string[], options: TransposeFieldWi
   return Math.min(maxWidth, Math.max(minWidth, Math.ceil(longest * charWidth + padding)));
 }
 
+export function transposeEndAlignmentSpacerWidth(options: TransposeEndAlignmentSpacerOptions): number {
+  const recordViewportWidth = Math.max(0, options.viewportWidth - options.pinnedWidth);
+  return Math.max(0, recordViewportWidth - Math.max(0, options.lastRecordWidth));
+}
+
 export function transposeScrollLeftForRecord(options: TransposeScrollLeftOptions): number {
   if (options.recordWidth <= 0 || options.totalRecords <= 0) return 0;
   const recordIndex = Math.max(0, Math.min(options.totalRecords - 1, options.recordIndex));
@@ -348,8 +363,8 @@ export function transposeScrollLeftForRecord(options: TransposeScrollLeftOptions
   const recordsWidth = offsets ? offsets[options.totalRecords] : options.totalRecords * options.recordWidth;
   const recordViewportWidth = Math.max(0, options.viewportWidth - options.pinnedWidth);
   const currentScrollLeft = Math.max(0, options.currentScrollLeft ?? recordStart);
-  const desired = recordStart < currentScrollLeft ? recordStart : recordEnd > currentScrollLeft + recordViewportWidth ? recordEnd - recordViewportWidth : currentScrollLeft;
-  const totalWidth = options.pinnedWidth + recordsWidth;
+  const desired = options.alignment === "start" ? recordStart : recordStart < currentScrollLeft ? recordStart : recordEnd > currentScrollLeft + recordViewportWidth ? recordEnd - recordViewportWidth : currentScrollLeft;
+  const totalWidth = options.pinnedWidth + recordsWidth + Math.max(0, options.endSpacerWidth ?? 0);
   const maxScrollLeft = Math.max(0, totalWidth - options.viewportWidth);
   return Math.max(0, Math.min(desired, maxScrollLeft));
 }

@@ -110,9 +110,11 @@ import {
   shouldAutoTransposeSingleRow,
   transposeRecordIndexesForMode,
   transposeRecordWidthsForDensity,
+  transposeEndAlignmentSpacerWidth,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   visibleTransposeRecordWindow,
+  type TransposeScrollAlignment,
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import { displayCellValue, firstLineCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -454,7 +456,7 @@ watch(
     if (!shouldAutoTransposeSingleRow({ enabled: !!props.autoTransposeSingleRow, preserveTranspose: preserveTransposeOnNextResult.value, rowCount: result.rows.length, columnCount: result.columns.length })) return;
     nextTick(() => {
       if (props.result !== result || !props.autoTransposeSingleRow || result.rows.length !== 1 || result.columns.length <= 1) return;
-      applyTransposeState({ showTranspose: true, transposeRowIndex: 0 });
+      applyTransposeState({ showTranspose: true, transposeRowIndex: 0 }, "start");
     });
   },
   { immediate: true },
@@ -6613,7 +6615,7 @@ function toggleKeyboardTranspose(): boolean {
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, "start");
   } else if (!restoreGridScrollTopAfterTranspose) {
     scrollGridRowIntoView(requestedRowIndex);
   }
@@ -7131,6 +7133,14 @@ watch(columnWidthDensity, () => {
 });
 const transposePinnedWidthOverride = ref<number | null>(null);
 const transposePinnedWidth = computed(() => transposePinnedWidthOverride.value ?? transposeFieldWidth(visibleColumns.value, { density: columnWidthDensity.value }));
+const transposeEndSpacerWidth = computed(() => {
+  if (!multiRowTranspose.value || displayRowCount.value <= 0) return 0;
+  return transposeEndAlignmentSpacerWidth({
+    viewportWidth: transposeViewportWidth.value,
+    pinnedWidth: transposePinnedWidth.value,
+    lastRecordWidth: getTransposeRecordWidth(displayRowCount.value - 1),
+  });
+});
 
 const transposeRecordWindow = computed(() =>
   visibleTransposeRecordWindow({
@@ -7156,7 +7166,7 @@ const activeTransposeRecordIndexes = computed(() =>
   }),
 );
 const transposeBeforeSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.beforeWidth : 0));
-const transposeAfterSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.afterWidth : 0));
+const transposeAfterSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.afterWidth + transposeEndSpacerWidth.value : 0));
 const transposeRows = computed(() => {
   return buildVisibleTransposeRows({
     columns: visibleColumns.value,
@@ -7171,7 +7181,7 @@ const transposeRows = computed(() => {
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
 const transposeTotalWidth = computed(() => {
   const recordIndexes = multiRowTranspose.value ? Array.from({ length: displayRowCount.value }, (_, i) => i) : activeTransposeRecordIndexes.value;
-  return transposePinnedWidth.value + recordIndexes.reduce((sum, i) => sum + getTransposeRecordWidth(i), 0);
+  return transposePinnedWidth.value + recordIndexes.reduce((sum, i) => sum + getTransposeRecordWidth(i), 0) + (multiRowTranspose.value ? transposeEndSpacerWidth.value : 0);
 });
 
 function transposeScrollElement(): HTMLElement | undefined {
@@ -7201,20 +7211,38 @@ function onTransposeScroll() {
   markGridScrolling();
 }
 
-function scrollTransposeRecordIntoView(rowIndex: number) {
+function scrollTransposeRecordIntoView(rowIndex: number, alignment: TransposeScrollAlignment = "nearest") {
   nextTick(() => {
     const el = transposeScrollElement();
     if (!el) return;
-    el.scrollLeft = transposeScrollLeftForRecord({
-      recordIndex: rowIndex,
-      totalRecords: displayRowCount.value,
-      viewportWidth: el.clientWidth,
-      pinnedWidth: transposePinnedWidth.value,
-      recordWidth: estimatedTransposeRecordWidth(),
-      recordOffsets: transposeRecordOffsets.value,
-      currentScrollLeft: el.scrollLeft,
-    });
     updateTransposeViewport();
+    // The measured viewport determines the end spacer. Wait for that width to
+    // render before assigning scrollLeft, otherwise the browser clamps against
+    // the pre-spacer scrollWidth and the final record cannot align at the start.
+    nextTick(() => {
+      const measuredEl = transposeScrollElement();
+      if (!measuredEl || displayRowCount.value <= 0) return;
+      if (alignment === "start" && !multiRowTranspose.value) {
+        measuredEl.scrollLeft = 0;
+        updateTransposeViewport();
+        return;
+      }
+      const activeRecordIndex = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
+      const multiRow = multiRowTranspose.value;
+      const recordOffsets = multiRow ? transposeRecordOffsets.value : [0, getTransposeRecordWidth(activeRecordIndex)];
+      measuredEl.scrollLeft = transposeScrollLeftForRecord({
+        recordIndex: multiRow ? activeRecordIndex : 0,
+        totalRecords: multiRow ? displayRowCount.value : 1,
+        viewportWidth: measuredEl.clientWidth,
+        pinnedWidth: transposePinnedWidth.value,
+        recordWidth: multiRow ? estimatedTransposeRecordWidth() : getTransposeRecordWidth(activeRecordIndex),
+        recordOffsets,
+        currentScrollLeft: measuredEl.scrollLeft,
+        alignment,
+        endSpacerWidth: multiRow ? transposeEndSpacerWidth.value : 0,
+      });
+      updateTransposeViewport();
+    });
   });
 }
 
@@ -7224,7 +7252,7 @@ function setMultiRowTranspose(value: boolean) {
   if (!showTranspose.value) return;
   nextTick(updateTransposeViewport);
   if (value && transposeRowIndex.value !== null) {
-    scrollTransposeRecordIntoView(transposeRowIndex.value);
+    scrollTransposeRecordIntoView(transposeRowIndex.value, "start");
   } else {
     nextTick(() => {
       const el = transposeScrollElement();
@@ -7239,12 +7267,12 @@ function toggleMultiRowTranspose() {
   setMultiRowTranspose(!multiRowTranspose.value);
 }
 
-function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: number | null }) {
+function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: number | null }, alignment: TransposeScrollAlignment = "nearest") {
   showTranspose.value = next.showTranspose;
   transposeRowIndex.value = next.transposeRowIndex;
   if (next.showTranspose) {
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, alignment);
   }
 }
 
@@ -7338,18 +7366,19 @@ function openContextTranspose() {
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, "start");
   }
 }
 
 function toggleTranspose(rowIndex: number) {
+  const wasTransposeOpen = showTranspose.value;
   const next = nextTransposeState(showTranspose.value, transposeRowIndex.value, rowIndex);
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
-    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex, wasTransposeOpen ? "nearest" : "start");
   } else {
     scrollGridRowIntoView(rowIndex);
   }
@@ -9074,6 +9103,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 :buffer="400"
                 key-field="id"
                 @scroll="onTransposeScroll"
+                @resize="updateTransposeViewport"
               >
                 <template #before>
                   <div class="data-grid-transpose-header data-grid-header-shell sticky top-0 z-20 flex h-7 border-b border-border font-semibold text-muted-foreground" :style="{ width: `${transposeTotalWidth}px` }">

@@ -26,6 +26,7 @@ vi.mock("@lucide/vue", async () => {
     ChevronsLeft: icon,
     ChevronsRight: icon,
     Download: icon,
+    ChevronsDown: icon,
     Filter: icon,
     Loader2: icon,
     FileUp: icon,
@@ -287,6 +288,36 @@ describe("DataGridPagination", () => {
     });
 
     expect(findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0")).toHaveLength(0);
+  });
+
+  it("loads all infinite-scroll rows and moves to the last row", async () => {
+    const loadAllRows = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      loading: false,
+      infiniteScrollEnabled: true,
+      infiniteScrollAllLoaded: false,
+      canLoadAllRows: true,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: true,
+      canJumpLastPage: true,
+      onLoadAllRows: loadAllRows,
+    });
+    const loadAllButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow");
+
+    expect(loadAllButton.props.disabled).toBe(false);
+    dispatch(loadAllButton, "click");
+    expect(loadAllRows).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ loading: true });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
+    await mounted.setProps({ loading: false, canLoadAllRows: false });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
   });
 });
 

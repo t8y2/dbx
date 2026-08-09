@@ -1349,6 +1349,7 @@ export default withEnglishFallback({
     totalRowCountLoading: "(집계 중...)",
     loadingMore: "데이터를 더 불러오는 중...",
     allLoaded: "모두 로드됨",
+    loadAllAndGoToLastRow: "모두 불러오고 마지막 행으로 이동",
     calculateTotalRows: "전체 행 수 집계",
     calculateTotalRowsInline: "(전체 행 수 집계)",
     calculateTotalRowsFailed: "집계 실패: {message}",

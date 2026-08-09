@@ -1401,6 +1401,7 @@ export default withEnglishFallback({
     totalRowCountLoading: "(conteggio...)",
     loadingMore: "Caricamento altri dati...",
     allLoaded: "tutto caricato",
+    loadAllAndGoToLastRow: "Carica tutto e vai all'ultima riga",
     calculateTotalRows: "Conta righe totali",
     calculateTotalRowsInline: "(conta righe totali)",
     calculateTotalRowsFailed: "Conteggio non riuscito: {message}",

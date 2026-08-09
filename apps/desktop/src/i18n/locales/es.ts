@@ -1403,6 +1403,7 @@ export default withEnglishFallback({
     totalRowCountLoading: "(contando...)",
     loadingMore: "Cargando más datos...",
     allLoaded: "todo cargado",
+    loadAllAndGoToLastRow: "Cargar todo e ir a la última fila",
     calculateTotalRows: "Contar filas totales",
     calculateTotalRowsInline: "(contar filas totales)",
     calculateTotalRowsFailed: "Error al contar: {message}",

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("estimated display totals do not become pagination bounds", () => {
   assert.equal(
@@ -130,6 +130,16 @@ test("infinite scroll stops on a short unknown segment and probes a full unknown
 test("infinite scroll preserves authoritative has-more and complete-local-result signals", () => {
   assert.equal(canFetchNextDataGridSegment({ hasMore: true, loadedRowCount: 673, pageSize: 1_000, totalRowCount: 673 }), true);
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, allRowsLoaded: true }), false);
+});
+
+test("load-all requests every remaining row up to the configured cap", () => {
+  assert.deepEqual(dataGridLoadAllSegment(100, 5_000, true), { offset: 100, limit: 4_900 });
+  assert.deepEqual(dataGridLoadAllSegment(2_500, 5_000, true), { offset: 2_500, limit: 2_500 });
+});
+
+test("load-all does not request past the cap or after the result is complete", () => {
+  assert.equal(dataGridLoadAllSegment(5_000, 5_000, true), null);
+  assert.equal(dataGridLoadAllSegment(100, 5_000, false), null);
 });
 
 // --- auto-redirect page calculation after refresh ---
